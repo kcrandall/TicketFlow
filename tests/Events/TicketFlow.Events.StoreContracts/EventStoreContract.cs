@@ -128,20 +128,21 @@ public static class EventStoreContract
         Assert.AreEqual(id, claim.Subscription.Subscription.Id);
         Assert.AreEqual(0, claim.State.Cursor);
         Assert.AreEqual(0, (await competing.ClaimAsync(Now, 100, TimeSpan.FromMinutes(1))).Count(item => item.Subscription.Scope == scope), "Live leases are exclusive.");
-        Assert.IsFalse(await competing.CompleteAsync(scope, id, claim.Fence + 1, 2, Now));
-        Assert.IsTrue(await competing.CompleteAsync(scope, id, claim.Fence, 2, Now));
-        Assert.IsFalse(await primary.CompleteAsync(scope, id, claim.Fence, 3, Now), "Completion releases the lease.");
-        Assert.AreEqual(new EventDeliveryState(2, 0, Now, null, Now), await primary.GetStateAsync(scope, id));
+        Assert.IsFalse(await competing.CompleteAsync(scope, id, claim.Fence + 1, 2, Now, Now));
+        Assert.IsTrue(await competing.CompleteAsync(scope, id, claim.Fence, 2, Now, Now, "events-pruned-1-1"));
+        Assert.IsFalse(await primary.CompleteAsync(scope, id, claim.Fence, 3, Now, Now), "Completion releases the lease.");
+        Assert.AreEqual(new EventDeliveryState(2, 0, Now, "events-pruned-1-1", Now), await primary.GetStateAsync(scope, id));
 
         claim = (await competing.ClaimAsync(Now, 100, TimeSpan.FromMinutes(1))).Single(item => item.Subscription.Scope == scope);
         Assert.IsTrue(await primary.FailAsync(scope, id, claim.Fence, 1, Now.AddSeconds(30), "http-500"));
         Assert.AreEqual(new EventDeliveryState(2, 1, Now.AddSeconds(30), "http-500", Now), await primary.GetStateAsync(scope, id));
+        Assert.IsFalse(await competing.CompleteAsync(scope, id, claim.Fence, 2, null, Now.AddSeconds(30)), "Failure released the lease.");
         Assert.AreEqual(0, (await primary.ClaimAsync(Now, 100, TimeSpan.FromMinutes(1))).Count(item => item.Subscription.Scope == scope), "Not before the retry time.");
         claim = (await primary.ClaimAsync(Now.AddSeconds(30), 100, TimeSpan.FromMinutes(1))).Single(item => item.Subscription.Scope == scope);
         Assert.AreEqual(1, claim.State.Attempts);
 
         var letter = new EventDeadLetter(id, 3, Guid.NewGuid(), IntegrationEventTypes.ConversationAssigned, 2, "http-410", Now);
-        Assert.IsTrue(await competing.DeadLetterAsync(scope, id, claim.Fence, 3, [letter]));
+        Assert.IsTrue(await competing.DeadLetterAsync(scope, id, claim.Fence, 3, [letter], Now.AddSeconds(30)));
         Assert.AreEqual(3, (await primary.GetStateAsync(scope, id))!.Cursor);
         Assert.AreEqual(0, (await primary.GetStateAsync(scope, id))!.Attempts);
         Assert.AreEqual(letter, (await competing.ListDeadLettersAsync(scope, id, 0, 10)).Single());
@@ -151,19 +152,29 @@ public static class EventStoreContract
         // Replay rewinds, clears later dead letters and fences out in-flight leases.
         await log.AppendAsync(scope, [Draft()], Now);
         claim = (await primary.ClaimAsync(Now.AddMinutes(1), 100, TimeSpan.FromMinutes(1))).Single(item => item.Subscription.Scope == scope);
+        Assert.AreEqual(0, claim.State.Generation);
         Assert.IsTrue(await competing.ReplayAsync(scope, id, 1, Now));
-        Assert.IsFalse(await primary.CompleteAsync(scope, id, claim.Fence, 4, Now));
+        Assert.IsFalse(await primary.CompleteAsync(scope, id, claim.Fence, 4, Now, Now));
         Assert.AreEqual(1, (await primary.GetStateAsync(scope, id))!.Cursor);
+        Assert.AreEqual(1, (await primary.GetStateAsync(scope, id))!.Generation, "Replay bumps the generation (part of delivery ids).");
         Assert.AreEqual(0, (await primary.ListDeadLettersAsync(scope, id, 0, 10)).Count);
         Assert.IsFalse(await competing.ReplayAsync(scope, new EventSubscriptionId("missing"), 0, Now));
         claim = (await primary.ClaimAsync(Now.AddMinutes(1), 100, TimeSpan.FromMinutes(1))).Single(item => item.Subscription.Scope == scope);
         Assert.AreEqual(1, claim.State.Cursor);
-        Assert.IsTrue(await primary.CompleteAsync(scope, id, claim.Fence, 0, Now));
+        Assert.IsTrue(await primary.CompleteAsync(scope, id, claim.Fence, 0, Now, Now.AddMinutes(1)));
         Assert.AreEqual(1, (await primary.GetStateAsync(scope, id))!.Cursor, "Cursors never move backwards on completion.");
+
+        // Suspension: not claimable until updated or replayed.
+        claim = (await primary.ClaimAsync(Now.AddMinutes(1), 100, TimeSpan.FromMinutes(1))).Single(item => item.Subscription.Scope == scope);
+        Assert.IsTrue(await competing.SuspendAsync(scope, id, claim.Fence, "principal-forbidden"));
+        Assert.AreEqual((true, "principal-forbidden"), ((await primary.GetStateAsync(scope, id))!.Suspended, (await primary.GetStateAsync(scope, id))!.LastError));
+        Assert.AreEqual(0, (await primary.ClaimAsync(Now.AddHours(1), 100, TimeSpan.FromMinutes(1))).Count(item => item.Subscription.Scope == scope), "Suspended.");
+        Assert.AreEqual(2, Applied(await competing.UpdateAsync(scope, Subscription(), 1)).Revision);
+        Assert.IsFalse((await primary.GetStateAsync(scope, id))!.Suspended, "Updating lifts the suspension.");
 
         // Dead-letter retention.
         var released = (await primary.ClaimAsync(Now.AddMinutes(1), 100, TimeSpan.FromMinutes(1))).Single(item => item.Subscription.Scope == scope);
-        Assert.IsTrue(await primary.DeadLetterAsync(scope, id, released.Fence, 4, [letter with { Sequence = 2, DeadLetteredAt = Now.AddDays(-40) }]));
+        Assert.IsTrue(await primary.DeadLetterAsync(scope, id, released.Fence, 4, [letter with { Sequence = 2, DeadLetteredAt = Now.AddDays(-40) }], Now));
         Assert.IsTrue(await competing.PruneDeadLettersAsync(Now.AddDays(-30), 10_000) >= 1);
         Assert.AreEqual(0, (await primary.ListDeadLettersAsync(scope, id, 0, 10)).Count);
     }
@@ -180,6 +191,29 @@ public static class EventStoreContract
         Assert.AreEqual(mine.Count, mine.Distinct().Count(), "No subscription is leased twice.");
         var rest = (await primary.ClaimAsync(Now, 100, TimeSpan.FromMinutes(1))).Where(claim => claim.Subscription.Scope == scope).Select(claim => claim.Subscription.Subscription.Id.Value);
         CollectionAssert.AreEquivalent(Enumerable.Range(0, 20).Select(index => "s" + index.ToString("D2")).ToArray(), mine.Concat(rest).ToArray());
+    }
+
+    /// <summary>More busy subscriptions than the claim limit: completion moves a subscription behind the others (round-robin).</summary>
+    public static async Task VerifyClaimFairnessAsync(IEventLog log, IEventSubscriptionStore primary, IEventSubscriptionStore competing)
+    {
+        var scope = NewScope();
+        for (var index = 0; index < 6; index++)
+            Applied(await primary.CreateAsync(scope, Subscription("f" + index), 0, Now));
+        await log.AppendAsync(scope, [Draft(), Draft(), Draft()], Now);
+        var seen = new List<string>();
+        for (var round = 1; round <= 3; round++)
+        {
+            var at = Now.AddSeconds(round);
+            var claims = (await (round % 2 == 0 ? competing : primary).ClaimAsync(at, 2, TimeSpan.FromMinutes(1))).Where(item => item.Subscription.Scope == scope).ToList();
+            Assert.AreEqual(2, claims.Count);
+            foreach (var claim in claims)
+            {
+                seen.Add(claim.Subscription.Subscription.Id.Value);
+                // One event delivered, more pending: claimable again now, but behind subscriptions that waited longer.
+                Assert.IsTrue(await primary.CompleteAsync(scope, claim.Subscription.Subscription.Id, claim.Fence, 1, at, at));
+            }
+        }
+        CollectionAssert.AreEquivalent(Enumerable.Range(0, 6).Select(index => "f" + index).ToArray(), seen.ToArray(), "Every busy subscription is served before any repeats.");
     }
 
     public static StoredEventSubscription Applied(EventWriteResult<StoredEventSubscription> result) => result switch

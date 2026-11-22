@@ -19,14 +19,14 @@ internal static class PublicEndpoints
     {
         group.MapGet("/portals/{portal}", async (TicketFlowPublicScope scope, string portal, [FromServices] IHelpCenterPublicReader reader, HttpContext http) =>
             await reader.GetPortalAsync(scope.Scope, new HelpCenterSlug(portal), http.RequestAborted) is { } found
-                ? TicketFlowHttp.Ok(http, new PublicPortalDto(found.Id.Value, found.Slug.Value, found.Name, found.DefaultLocale.Value, [.. found.SupportedLocales.Select(locale => locale.Value)]))
+                ? TicketFlowHttp.Ok(http, new PublicPortalResponse(found.Id.Value, found.Slug.Value, found.Name, found.DefaultLocale.Value, [.. found.SupportedLocales.Select(locale => locale.Value)]))
                 : TicketFlowHttp.NotFound())
-            .WithName("GetPublicPortal").Produces<PublicPortalDto>();
+            .WithName("GetPublicPortal").Produces<PublicPortalResponse>();
         group.MapGet("/portals/{portal}/{locale}/collections", async (TicketFlowPublicScope scope, string portal, string locale, [FromServices] IHelpCenterPublicReader reader, HttpContext http) =>
             TicketFlowHttp.Ok(http, (await reader.ListCollectionsAsync(scope.Scope, new HelpCenterSlug(portal), new HelpCenterLocale(locale), http.RequestAborted))
-                .Select(collection => new PublicCollectionDto(collection.Id.Value, collection.Parent?.Value, collection.Position, collection.Locale.Value, collection.Name, collection.Slug.Value,
+                .Select(collection => new PublicCollectionResponse(collection.Id.Value, collection.Parent?.Value, collection.Position, collection.Locale.Value, collection.Name, collection.Slug.Value,
                     collection.Description)).ToList()))
-            .WithName("ListPublicCollections").Produces<List<PublicCollectionDto>>();
+            .WithName("ListPublicCollections").Produces<List<PublicCollectionResponse>>();
         group.MapGet("/portals/{portal}/{locale}/articles", async (TicketFlowPublicScope scope, string portal, string locale, string? collection, int? limit, string? cursor,
             IHelpCenterPublicReader reader, HttpContext http) =>
         {
@@ -38,20 +38,20 @@ internal static class PublicEndpoints
             }
             var page = await reader.ListArticlesAsync(scope.Scope, new HelpCenterSlug(portal), new HelpCenterLocale(locale), collection is null ? null : new CollectionId(collection),
                 limit ?? 50, after, http.RequestAborted);
-            return TicketFlowHttp.Ok(http, new PageDto<PublicArticleSummaryDto>(
-                [.. page.Items.Select(item => new PublicArticleSummaryDto(item.Id.Value, item.Collection?.Value, item.Position, item.Title, item.Slug.Value, item.Excerpt, item.PublishedAt))],
+            return TicketFlowHttp.Ok(http, new PageResponse<PublicArticleSummaryResponse>(
+                [.. page.Items.Select(item => new PublicArticleSummaryResponse(item.Id.Value, item.Collection?.Value, item.Position, item.Title, item.Slug.Value, item.Excerpt, item.PublishedAt))],
                 page.Next is { } next ? TicketFlowHttp.EncodeCursor(next.Position.ToString(CultureInfo.InvariantCulture), next.Article.Value) : null));
-        }).WithName("ListPublicArticles").Produces<PageDto<PublicArticleSummaryDto>>();
+        }).WithName("ListPublicArticles").Produces<PageResponse<PublicArticleSummaryResponse>>();
         group.MapGet("/portals/{portal}/{locale}/articles/{slug}", async (TicketFlowPublicScope scope, string portal, string locale, string slug, [FromServices] IHelpCenterPublicReader reader, HttpContext http) =>
             await reader.GetArticleAsync(scope.Scope, new HelpCenterSlug(portal), new HelpCenterLocale(locale), new HelpCenterSlug(slug), http.RequestAborted) is { } article
-                ? TicketFlowHttp.Ok(http, new PublicArticleDto(article.Id.Value, article.Portal.Value, article.Collection?.Value, article.Locale.Value, article.Title, article.Slug.Value,
+                ? TicketFlowHttp.Ok(http, new PublicArticleResponse(article.Id.Value, article.Portal.Value, article.Collection?.Value, article.Locale.Value, article.Title, article.Slug.Value,
                     article.Excerpt, article.Tags, article.Html, article.RevisionNumber, article.PublishedAt))
                 : TicketFlowHttp.NotFound())
-            .WithName("GetPublicArticle").Produces<PublicArticleDto>();
+            .WithName("GetPublicArticle").Produces<PublicArticleResponse>();
         group.MapGet("/portals/{portal}/{locale}/search", async (TicketFlowPublicScope scope, string portal, string locale, string q, int? limit, [FromServices] IHelpCenterPublicReader reader, HttpContext http) =>
             TicketFlowHttp.Ok(http, (await reader.SearchAsync(scope.Scope, new HelpCenterSlug(portal), new HelpCenterLocale(locale), q, limit ?? 10, http.RequestAborted))
                 .Select(HelpCenterEndpoints.Dto).ToList()))
-            .WithName("SearchPublicArticles").Produces<List<ArticleSnippetDto>>();
+            .WithName("SearchPublicArticles").Produces<List<ArticleSnippetResponse>>();
         group.MapPost("/portals/{portal}/articles/{articleId}/views", async (TicketFlowPublicScope scope, string portal, string articleId, ArticleVisitRequest request,
             IHelpCenterPublicReader reader, HttpContext http) =>
             Feedback(await reader.RecordViewAsync(scope.Scope, new HelpCenterSlug(portal), new ArticleId(articleId), request.VisitorKey, http.RequestAborted)))
@@ -70,17 +70,17 @@ internal static class PublicEndpoints
         {
             http.Response.Headers.CacheControl = "no-store";
             return await responder.GetInvitationAsync(scope.Scope, request.Token ?? string.Empty, http.RequestAborted) is { } view
-                ? TicketFlowHttp.Ok(http, new SurveyInvitationDto(TicketFlowHttp.Token(view.Kind), view.MinimumScore, view.MaximumScore, view.Locale.Value, view.Question, view.CommentPrompt,
+                ? TicketFlowHttp.Ok(http, new SurveyInvitationResponse(TicketFlowHttp.Token(view.Kind), view.MinimumScore, view.MaximumScore, view.Locale.Value, view.Question, view.CommentPrompt,
                     view.ExpiresAt, view.Responded))
                 : TicketFlowHttp.NotFound();
-        }).WithName("GetSurveyInvitation").Produces<SurveyInvitationDto>();
+        }).WithName("GetSurveyInvitation").Produces<SurveyInvitationResponse>();
         group.MapPost("/surveys/respond", async (TicketFlowPublicScope scope, SurveyRespondRequest request, [FromServices] ISurveyResponder responder, HttpContext http) =>
         {
             http.Response.Headers.CacheControl = "no-store";
             return await responder.RespondAsync(scope.Scope, request.Token ?? string.Empty, request.Score, request.Comment, http.RequestAborted) switch
             {
-                SurveyResponseAccepted accepted => TicketFlowHttp.Ok(http, new SurveyRespondResultDto("accepted", accepted.Response.Score, accepted.Response.RespondedAt)),
-                SurveyResponseDuplicate duplicate => TicketFlowHttp.Ok(http, new SurveyRespondResultDto("duplicate", duplicate.Response.Score, duplicate.Response.RespondedAt)),
+                SurveyResponseAccepted accepted => TicketFlowHttp.Ok(http, new SurveyRespondResponse("accepted", accepted.Response.Score, accepted.Response.RespondedAt)),
+                SurveyResponseDuplicate duplicate => TicketFlowHttp.Ok(http, new SurveyRespondResponse("duplicate", duplicate.Response.Score, duplicate.Response.RespondedAt)),
                 SurveyResponseRejected rejected => rejected.Reason switch
                 {
                     SurveyResponseRejection.InvalidToken => TicketFlowHttp.NotFound(),
@@ -93,7 +93,7 @@ internal static class PublicEndpoints
                     }),
                 },
             };
-        }).WithName("RespondToSurvey").Produces<SurveyRespondResultDto>();
+        }).WithName("RespondToSurvey").Produces<SurveyRespondResponse>();
         return group;
     }
 

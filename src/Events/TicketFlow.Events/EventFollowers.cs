@@ -51,6 +51,7 @@ public sealed class EventContactFollower(IContactStore contacts, IEventLog log, 
         ContactChangeKind.Deleted => new ContactDeletedData(change.Contact),
         ContactChangeKind.Merged when change.Related is { } target && change.Merge is { } merge => new ContactMergedData(change.Contact, target, merge),
         ContactChangeKind.Unmerged when change.Related is { } target && change.Merge is { } merge => new ContactUnmergedData(change.Contact, target, merge),
+        ContactChangeKind.IdentityLinked => new ContactIdentityLinkedData(change.Contact, "external-user", true),   // E16: verified account links
         _ => null,   // kinds added later by the contacts feature are skipped until mapped
     };
 }

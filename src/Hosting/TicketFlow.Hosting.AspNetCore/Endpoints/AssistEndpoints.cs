@@ -16,60 +16,60 @@ internal static class AssistEndpoints
     {
         group.MapPost("/conversations/{conversationId}/assist/summary", async (TicketFlowActor actor, string conversationId, [FromServices] IAssistService service, HttpContext http) =>
             Map(http, await service.SummarizeAsync(actor.Principal, new AssistSummaryRequest(new ConversationId(conversationId)), http.RequestAborted),
-                summary => new AssistSummaryDto(summary.Summary, summary.KeyPoints, summary.NextStep)))
-            .WithName("AssistSummary").Produces<AssistResultDto<AssistSummaryDto>>();
-        group.MapPost("/conversations/{conversationId}/assist/draft", async (TicketFlowActor actor, string conversationId, AssistDraftRequestDto? request, [FromServices] IAssistService service, HttpContext http) =>
+                summary => new AssistSummaryResponse(summary.Summary, summary.KeyPoints, summary.NextStep)))
+            .WithName("AssistSummary").Produces<AssistResponse<AssistSummaryResponse>>();
+        group.MapPost("/conversations/{conversationId}/assist/draft", async (TicketFlowActor actor, string conversationId, AssistDraftReplyRequest? request, [FromServices] IAssistService service, HttpContext http) =>
         {
             var grounding = request?.Grounding is { } value ? new AssistGrounding(new PortalId(value.PortalId), new HelpCenterLocale(value.Locale), value.Query) : null;
             return Map(http, await service.DraftReplyAsync(actor.Principal, new AssistDraftRequest(new ConversationId(conversationId), grounding, request?.Instructions), http.RequestAborted),
-                draft => new AssistDraftDto(draft.Body, [.. draft.Citations.Select(citation => new AssistCitationDto(citation.Article.Value, citation.Portal.Value, citation.Locale.Value,
+                draft => new AssistDraftResponse(draft.Body, [.. draft.Citations.Select(citation => new AssistCitationResponse(citation.Article.Value, citation.Portal.Value, citation.Locale.Value,
                     citation.Title, citation.Slug.Value, citation.RevisionNumber))], draft.Grounded));
-        }).WithName("AssistDraft").Produces<AssistResultDto<AssistDraftDto>>();
-        group.MapPost("/conversations/{conversationId}/assist/triage", async (TicketFlowActor actor, string conversationId, AssistTriageRequestDto? request, [FromServices] IAssistService service, HttpContext http) =>
+        }).WithName("AssistDraft").Produces<AssistResponse<AssistDraftResponse>>();
+        group.MapPost("/conversations/{conversationId}/assist/triage", async (TicketFlowActor actor, string conversationId, AssistTriageSuggestionRequest? request, [FromServices] IAssistService service, HttpContext http) =>
         {
             var triage = new AssistTriageRequest(new ConversationId(conversationId),
                 request?.Labels?.Select(option => new AssistLabelOption(new LabelId(option.Id), option.Description)),
                 request?.Teams?.Select(option => new AssistTeamOption(new TeamId(option.Id), option.Description)), request?.SuggestPriority ?? true);
-            return Map(http, await service.TriageAsync(actor.Principal, triage, http.RequestAborted), result => new AssistTriageDto(
-                [.. result.Labels.Select(label => new AssistSuggestionDto(label.Label.Value, label.Confidence))],
-                result.Team is { } team ? new AssistSuggestionDto(team.Team.Value, team.Confidence) : null,
-                result.Priority is { } priority ? new AssistSuggestionDto(TicketFlowHttp.Token(priority.Priority), priority.Confidence) : null, result.Rationale));
-        }).WithName("AssistTriage").Produces<AssistResultDto<AssistTriageDto>>();
-        group.MapPost("/conversations/{conversationId}/assist/sentiment", async (TicketFlowActor actor, string conversationId, AssistSentimentRequestDto? request, [FromServices] IAssistService service, HttpContext http) =>
+            return Map(http, await service.TriageAsync(actor.Principal, triage, http.RequestAborted), result => new AssistTriageResponse(
+                [.. result.Labels.Select(label => new AssistSuggestionResponse(label.Label.Value, label.Confidence))],
+                result.Team is { } team ? new AssistSuggestionResponse(team.Team.Value, team.Confidence) : null,
+                result.Priority is { } priority ? new AssistSuggestionResponse(TicketFlowHttp.Token(priority.Priority), priority.Confidence) : null, result.Rationale));
+        }).WithName("AssistTriage").Produces<AssistResponse<AssistTriageResponse>>();
+        group.MapPost("/conversations/{conversationId}/assist/sentiment", async (TicketFlowActor actor, string conversationId, AssistSentimentAnalysisRequest? request, [FromServices] IAssistService service, HttpContext http) =>
             Map(http, await service.AnalyzeSentimentAsync(actor.Principal, new AssistSentimentRequest(new ConversationId(conversationId), request?.Intents), http.RequestAborted),
-                result => new AssistSentimentDto(TicketFlowHttp.Token(result.Sentiment), result.SentimentConfidence, result.Intent, result.IntentConfidence)))
-            .WithName("AssistSentiment").Produces<AssistResultDto<AssistSentimentDto>>();
-        group.MapPost("/conversations/{conversationId}/assist/translate", async (TicketFlowActor actor, string conversationId, AssistTranslateRequestDto request, [FromServices] IAssistService service, HttpContext http) =>
+                result => new AssistSentimentResponse(TicketFlowHttp.Token(result.Sentiment), result.SentimentConfidence, result.Intent, result.IntentConfidence)))
+            .WithName("AssistSentiment").Produces<AssistResponse<AssistSentimentResponse>>();
+        group.MapPost("/conversations/{conversationId}/assist/translate", async (TicketFlowActor actor, string conversationId, AssistTranslationRequest request, [FromServices] IAssistService service, HttpContext http) =>
             Map(http, await service.TranslateAsync(actor.Principal, new AssistTranslateRequest(new ConversationId(conversationId), new HelpCenterLocale(request.TargetLocale), request.Text,
                 request.MessageId is null ? null : new MessageId(request.MessageId)), http.RequestAborted),
-                result => new AssistTranslationDto(result.Text, result.TargetLocale.Value, result.SourceLocale?.Value)))
-            .WithName("AssistTranslate").Produces<AssistResultDto<AssistTranslationDto>>();
-        group.MapPost("/conversations/{conversationId}/assist/rewrite", async (TicketFlowActor actor, string conversationId, AssistRewriteRequestDto request, [FromServices] IAssistService service, HttpContext http) =>
+                result => new AssistTranslationResponse(result.Text, result.TargetLocale.Value, result.SourceLocale?.Value)))
+            .WithName("AssistTranslate").Produces<AssistResponse<AssistTranslationResponse>>();
+        group.MapPost("/conversations/{conversationId}/assist/rewrite", async (TicketFlowActor actor, string conversationId, AssistRewriteRequest request, [FromServices] IAssistService service, HttpContext http) =>
             Map(http, await service.RewriteToneAsync(actor.Principal, new AssistToneRewriteRequest(new ConversationId(conversationId), request.Text,
-                TicketFlowHttp.Parse<AssistTone>(request.Tone, "tone")), http.RequestAborted), result => new AssistRewriteDto(result.Text, TicketFlowHttp.Token(result.Tone))))
-            .WithName("AssistRewrite").Produces<AssistResultDto<AssistRewriteDto>>();
+                TicketFlowHttp.Parse<AssistTone>(request.Tone, "tone")), http.RequestAborted), result => new AssistRewriteResponse(result.Text, TicketFlowHttp.Token(result.Tone))))
+            .WithName("AssistRewrite").Produces<AssistResponse<AssistRewriteResponse>>();
 
         group.MapGet("/assist/settings", async (TicketFlowActor actor, [FromServices] IAssistAdministration administration, HttpContext http) =>
             Map(http, await administration.GetSettingsAsync(actor.Principal, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Settings(stored), stored.Revision)))
-            .WithName("GetAssistSettings").Produces<AssistSettingsDto>();
+            .WithName("GetAssistSettings").Produces<AssistSettingsResponse>();
         group.MapPut("/assist/settings", async (TicketFlowActor actor, AssistSettingsRequest request, [FromServices] IAssistAdministration administration, HttpContext http) =>
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
                 return failure;
             return Map(http, await administration.UpdateSettingsAsync(actor.Principal, AssistJsonCodec.DecodeSettings(Json.Raw(request.Settings, "settings")), revision, http.RequestAborted),
                 stored => TicketFlowHttp.Ok(http, Settings(stored), stored.Revision));
-        }).WithName("UpdateAssistSettings").Produces<AssistSettingsDto>();
+        }).WithName("UpdateAssistSettings").Produces<AssistSettingsResponse>();
         group.MapGet("/assist/usage", async (TicketFlowActor actor, DateTimeOffset from, DateTimeOffset to, [FromServices] IAssistAdministration administration, HttpContext http) =>
-            Map(http, await administration.GetUsageAsync(actor.Principal, from, to, http.RequestAborted), summary => TicketFlowHttp.Ok(http, new AssistUsageSummaryDto(summary.From, summary.To,
-                [.. summary.Totals.Select(total => new AssistUsageTotalDto(TicketFlowHttp.Token(total.Feature), total.Model, total.Requests, total.Failed, total.InputTokens, total.OutputTokens,
+            Map(http, await administration.GetUsageAsync(actor.Principal, from, to, http.RequestAborted), summary => TicketFlowHttp.Ok(http, new AssistUsageSummaryResponse(summary.From, summary.To,
+                [.. summary.Totals.Select(total => new AssistUsageTotalResponse(TicketFlowHttp.Token(total.Feature), total.Model, total.Requests, total.Failed, total.InputTokens, total.OutputTokens,
                     total.CacheReadInputTokens, total.CacheCreationInputTokens))]))))
-            .WithName("GetAssistUsage").Produces<AssistUsageSummaryDto>();
+            .WithName("GetAssistUsage").Produces<AssistUsageSummaryResponse>();
         return group;
     }
 
     private static IResult Map<T, TDto>(HttpContext http, AssistResult<T> result, Func<T, TDto> project) => result switch
     {
-        AssistSucceeded<T> succeeded => TicketFlowHttp.Ok(http, new AssistResultDto<TDto>(project(succeeded.Value), new AssistUsageDto(succeeded.Usage.InputTokens, succeeded.Usage.OutputTokens,
+        AssistSucceeded<T> succeeded => TicketFlowHttp.Ok(http, new AssistResponse<TDto>(project(succeeded.Value), new AssistUsageResponse(succeeded.Usage.InputTokens, succeeded.Usage.OutputTokens,
             succeeded.Usage.CacheReadInputTokens, succeeded.Usage.CacheCreationInputTokens, succeeded.Model, succeeded.UsageId, TicketFlowHttp.Token(succeeded.Recording)))),
         AssistRefused refused => Refused(http, refused),
         AssistProviderFailed failed => Failed(http, failed),
@@ -114,5 +114,5 @@ internal static class AssistEndpoints
             http.Response.Headers.RetryAfter = Math.Ceiling(delay.TotalSeconds).ToString(CultureInfo.InvariantCulture);
     }
 
-    private static AssistSettingsDto Settings(StoredAssistSettings stored) => new(Json.Parse(AssistJsonCodec.EncodeSettings(stored.Settings)), stored.Revision);
+    private static AssistSettingsResponse Settings(StoredAssistSettings stored) => new(Json.Parse(AssistJsonCodec.EncodeSettings(stored.Settings)), stored.Revision);
 }

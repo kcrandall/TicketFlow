@@ -35,3 +35,7 @@ Access filter twice with distinct parameter prefixes; untranslatable filters den
   `LinkingAuditKindsAndSuggestionIdsPersist`, `ConcurrentLinksConvergeOnPostgres` (4 services over 2 data sources, 5 rounds); version
   assertions updated to 3.
 - Against an isolated `postgres:18` container: 20 passed, 0 failed.
+
+### Review fixes (2026-11-22)
+
+See [PLAN review fixes](../PLAN.md#review-fixes-2026-11-22-after-commit-4574992).

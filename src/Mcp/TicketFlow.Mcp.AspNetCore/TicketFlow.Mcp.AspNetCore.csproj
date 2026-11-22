@@ -4,6 +4,9 @@
     <PackageTags>$(PackageTags);mcp;model-context-protocol;aspnetcore</PackageTags>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="TicketFlow.Mcp.AspNetCore.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" />
   </ItemGroup>

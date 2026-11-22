@@ -61,7 +61,12 @@ public sealed class SampleHostSmokeTests
         var anonymous = app.GetTestClient();
         var health = await anonymous.GetAsync("/health");
         Assert.AreEqual(HttpStatusCode.OK, health.StatusCode);
-        Assert.AreEqual("Healthy", (await JsonAsync(health)).GetProperty("status").GetString());
+        var report = await JsonAsync(health);
+        Assert.AreEqual("Healthy", report.GetProperty("status").GetString());
+        var loops = report.GetProperty("checks").GetProperty("ticketflow-workers").GetProperty("data");
+        foreach (var loop in new[] { "event-delivery", "event-contacts", "event-surveys", "event-retention", "reporting-retention" })
+            Assert.IsTrue(loops.GetProperty(loop).GetString()!.StartsWith("Running", StringComparison.Ordinal) || loops.GetProperty(loop).GetString()!.StartsWith("Pending", StringComparison.Ordinal),
+                $"{loop} is hosted by the sample's workers.");
         Assert.AreEqual(HttpStatusCode.Unauthorized, (await anonymous.GetAsync($"{Api}/conversations")).StatusCode);
         Assert.AreEqual(HttpStatusCode.OK, (await anonymous.GetAsync("/ticketflow/openapi/ticketflow.json")).StatusCode);
         Assert.Contains("wk_demo", await anonymous.GetStringAsync("/demo"));

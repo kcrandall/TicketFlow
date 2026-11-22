@@ -44,7 +44,8 @@ public sealed class TicketFlowSignalROptions
     public long MaximumUploadBytes { get; set; } = 100L * 1024 * 1024;
 }
 
-internal sealed class OptionsPrincipalResolver(Microsoft.Extensions.Options.IOptions<TicketFlowSignalROptions> options) : IRealtimePrincipalResolver
+/// <summary>The <see cref="TicketFlowSignalROptions.ResolvePrincipal"/> fallback registered by <c>AddTicketFlowSignalR()</c>; adapters may replace exactly this registration.</summary>
+public sealed class OptionsRealtimePrincipalResolver(Microsoft.Extensions.Options.IOptions<TicketFlowSignalROptions> options) : IRealtimePrincipalResolver
 {
     public ValueTask<PrincipalRef?> ResolveAsync(ClaimsPrincipal user, HttpContext? httpContext, CancellationToken cancellationToken = default) =>
         options.Value.ResolvePrincipal is { } resolve ? resolve(user, httpContext) : ValueTask.FromResult<PrincipalRef?>(null);

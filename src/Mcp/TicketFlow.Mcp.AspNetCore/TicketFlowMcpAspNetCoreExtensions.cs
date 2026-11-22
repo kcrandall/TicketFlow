@@ -39,24 +39,42 @@ public static class TicketFlowMcpAspNetCoreExtensions
     }
 }
 
-/// <summary>Bridges MCP caller resolution to the TicketFlow hosting resolvers.</summary>
+/// <summary>
+/// Bridges MCP caller resolution to the TicketFlow hosting resolvers. The identity is always the MCP caller's own
+/// <see cref="TicketFlowMcpCaller.User"/>: when the current request's <see cref="HttpContext.User"/> is that same principal the request
+/// is used as is; otherwise a detached context carrying the caller's user (and a read-only copy of the request line and headers for
+/// partition resolution) is built. The shared request context is never mutated.
+/// </summary>
 internal sealed class HostMcpPrincipalResolver(IHttpContextAccessor accessor, ITicketFlowPartitionResolver partitions, ITicketFlowPrincipalResolver principals)
     : ITicketFlowMcpPrincipalResolver
 {
     public async ValueTask<PrincipalRef?> ResolveAsync(TicketFlowMcpCaller caller, WorkspaceId workspace, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(caller);
-        // The SDK runs tool calls on the MCP request's HttpContext. Fall back to a context carrying only the MCP user for transports
-        // that do not flow it (resolvers that read the request itself, such as host-name partition resolvers, then return null).
-        var http = accessor.HttpContext ?? new DefaultHttpContext { RequestServices = caller.Services };
-        if (caller.User is { } user && !ReferenceEquals(http.User, user) && http.User.Identity?.IsAuthenticated != true)
-            http.User = user;
-        if (http.User.Identity?.IsAuthenticated != true)
+        if (caller.User is not { Identity.IsAuthenticated: true } user)
             return null;
+        var http = For(accessor.HttpContext, user, caller.Services);
         if (await partitions.ResolveAsync(http, cancellationToken).ConfigureAwait(false) is not { } partition)
             return null;
         var scope = partition.InWorkspace(workspace);
         var principal = await principals.ResolveAsync(http, scope, cancellationToken).ConfigureAwait(false);
         return principal is { } value && value.Value is not null && value.Scope == scope ? value : (PrincipalRef?)null;
+    }
+
+    internal static HttpContext For(HttpContext? current, System.Security.Claims.ClaimsPrincipal user, IServiceProvider services)
+    {
+        if (current is not null && ReferenceEquals(current.User, user))
+            return current;
+        var detached = new DefaultHttpContext { User = user, RequestServices = current?.RequestServices ?? services };
+        if (current is not null)
+        {
+            detached.Request.Scheme = current.Request.Scheme;
+            detached.Request.Host = current.Request.Host;
+            detached.Request.PathBase = current.Request.PathBase;
+            detached.Request.Path = current.Request.Path;
+            foreach (var header in current.Request.Headers)
+                detached.Request.Headers[header.Key] = header.Value;
+        }
+        return detached;
     }
 }

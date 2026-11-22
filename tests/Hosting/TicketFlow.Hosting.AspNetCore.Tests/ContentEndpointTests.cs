@@ -43,11 +43,11 @@ public sealed class ContentEndpointTests
     {
         await using var host = await CreateAsync();
         var owner = host.Client();
-        Assert.AreEqual(HttpStatusCode.Created, (await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/helpcenter/portals",
+        Assert.AreEqual(HttpStatusCode.Created, (await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/help-center/portals",
             new { id = "help", slug = "help", name = "Help", defaultLocale = "en", visibility = "public" }))).StatusCode);
-        Assert.AreEqual(HttpStatusCode.Created, (await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/helpcenter/portals",
+        Assert.AreEqual(HttpStatusCode.Created, (await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/help-center/portals",
             new { id = "internal", slug = "internal", name = "Internal", defaultLocale = "en" }))).StatusCode);
-        var article = await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/helpcenter/articles", new
+        var article = await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/help-center/articles", new
         {
             id = "a1",
             portalId = "help",
@@ -55,7 +55,7 @@ public sealed class ContentEndpointTests
         }));
         Assert.AreEqual(HttpStatusCode.Created, article.StatusCode);
         Assert.AreEqual("draft", (await JsonAsync(article)).GetProperty("state").GetString());
-        var published = await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/helpcenter/articles/a1/publish", ifMatch: Revision(article)));
+        var published = await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/help-center/articles/a1/publish", ifMatch: Revision(article), header: true));
         Assert.AreEqual(HttpStatusCode.OK, published.StatusCode);
         Assert.AreEqual("published", (await JsonAsync(published)).GetProperty("state").GetString());
 
@@ -71,7 +71,7 @@ public sealed class ContentEndpointTests
         Assert.DoesNotContain("<script", html);
         Assert.AreEqual(HttpStatusCode.NoContent, (await anonymous.SendAsync(Request(HttpMethod.Post, $"{Public}/portals/help/articles/a1/feedback",
             new { visitorKey = "visitor-1", helpful = true }))).StatusCode);
-        var feedback = await JsonAsync(await owner.GetAsync($"{Api}/helpcenter/articles/a1/feedback"));
+        var feedback = await JsonAsync(await owner.GetAsync($"{Api}/help-center/articles/a1/feedback"));
         Assert.AreEqual(1, feedback.GetProperty("helpful").GetInt64());
     }
 
@@ -114,7 +114,7 @@ public sealed class ContentEndpointTests
     {
         await using var host = await CreateAsync(services: services => services.AddScoped<IAssistService, FakeAssistService>());
         var agent = host.Client("agent");
-        var quota = await agent.PostAsync($"{Api}/conversations/conv-1/assist/summary", null);
+        var quota = await agent.SendAsync(Request(HttpMethod.Post, $"{Api}/conversations/conv-1/assist/summary", header: true));
         Assert.AreEqual(HttpStatusCode.TooManyRequests, quota.StatusCode);
         Assert.AreEqual("30", quota.Headers.RetryAfter?.ToString());
         var failed = await agent.SendAsync(Request(HttpMethod.Post, $"{Api}/conversations/conv-1/assist/rewrite", new { text = "fix this", tone = "formal" }));

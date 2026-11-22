@@ -102,7 +102,7 @@ Merges reuse `MergeAsync` (audited, conversations follow, undo with `UnmergeAsyn
 Audit kinds: `Merged`, `Unmerged`, `Exported`, `Deleted`, `ExportCompleted`, `Linked`, `Unlinked`, `LinkSuggested`,
 `LinkSuggestionAccepted`, `LinkSuggestionRejected`, `LinkingPolicyChanged` (`ContactAuditEvent.Suggestion` names the suggestion).
 
-Every write appends `ContactChange`s (`Created`, `Updated`, `Deleted`, `Merged`, `Unmerged`; identifiers only) in the write
+Every write appends `ContactChange`s (`Created`, `Updated`, `Deleted`, `Merged`, `Unmerged`, and from E16 `IdentityLinked`/`IdentityUnlinked` for verified account links; identifiers only) in the write
 transaction with a gapless sequence per scope. Durable consumers (for example E5 conversations following merges) poll
 `IContactStore.ReadChangesAsync(scope, afterSequence, limit)`. `IContactChangeObserver`s are notified in process after commit; an
 observer failure propagates but the change stays applied.
@@ -121,5 +121,6 @@ bounded, process-local development examples. `PostgresContactStore` uses `tf_key
 identities, `"C"`-collated `(scope_key, name_folded, contact_id)` and `(scope_key, kind, value, contact_id)` search indexes, explicit
 `format_version` columns and parameterized SQL. Migration 3 (`account-linking`) widens the audit kind check, adds
 `tf_contact_audit.suggestion_id`, `tf_contact_linking_policies` and `tf_contact_link_suggestions` (partial unique pending-pair index).
-Custom `IContactStore` implementations must also register an `IContactLinkingStore`, because `AddContacts` registers
+Migration 4 widens the change kind check (1-7) and adds the partial `tf_contact_link_suggestions_decided` index for retention
+(`PruneDecidedSuggestionsAsync`). Custom `IContactStore` implementations must also register an `IContactLinkingStore`, because `AddContacts` registers
 `IContactLinkingService`.

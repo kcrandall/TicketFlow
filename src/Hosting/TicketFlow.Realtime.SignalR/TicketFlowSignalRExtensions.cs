@@ -28,7 +28,7 @@ public static class TicketFlowSignalRExtensions
         if (configure is not null)
             services.Configure(configure);
         services.AddSignalR();
-        services.TryAddSingleton<IRealtimePrincipalResolver, OptionsPrincipalResolver>();
+        services.TryAddSingleton<IRealtimePrincipalResolver, OptionsRealtimePrincipalResolver>();
         services.TryAddSingleton<IVisitorPartitionResolver, OptionsPartitionResolver>();
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton<RealtimeTypingThrottle>();

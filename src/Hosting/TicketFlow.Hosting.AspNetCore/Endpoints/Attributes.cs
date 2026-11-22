@@ -8,16 +8,16 @@ namespace TicketFlow.Hosting.AspNetCore.Endpoints;
 /// <summary>Attribute value and masking conversions shared by contacts and conversations.</summary>
 internal static class Attributes
 {
-    public static AttributeValueDto Dto(ContactAttributeValue value) => value switch
+    public static AttributeValueModel Dto(ContactAttributeValue value) => value switch
     {
-        TextAttributeValue text => new AttributeValueDto("text", Text: text.Value),
-        NumberAttributeValue number => new AttributeValueDto("number", Number: number.Value),
-        BooleanAttributeValue boolean => new AttributeValueDto("boolean", Boolean: boolean.Value),
-        DateAttributeValue date => new AttributeValueDto("date", Date: date.Value),
-        ListAttributeValue list => new AttributeValueDto("list", Items: list.Items),
+        TextAttributeValue text => new AttributeValueModel("text", Text: text.Value),
+        NumberAttributeValue number => new AttributeValueModel("number", Number: number.Value),
+        BooleanAttributeValue boolean => new AttributeValueModel("boolean", Boolean: boolean.Value),
+        DateAttributeValue date => new AttributeValueModel("date", Date: date.Value),
+        ListAttributeValue list => new AttributeValueModel("list", Items: list.Items),
     };
 
-    public static ContactAttributeValue Contact(AttributeValueDto? dto)
+    public static ContactAttributeValue Contact(AttributeValueModel? dto)
     {
         ArgumentNullException.ThrowIfNull(dto, "value");
         return dto.Type switch
@@ -31,16 +31,16 @@ internal static class Attributes
         };
     }
 
-    public static AttributeValueDto Dto(ConversationAttributeValue value) => value switch
+    public static AttributeValueModel Dto(ConversationAttributeValue value) => value switch
     {
-        ConversationTextValue text => new AttributeValueDto("text", Text: text.Value),
-        ConversationNumberValue number => new AttributeValueDto("number", Number: number.Value),
-        ConversationBooleanValue boolean => new AttributeValueDto("boolean", Boolean: boolean.Value),
-        ConversationDateValue date => new AttributeValueDto("date", Date: date.Value),
-        ConversationListValue list => new AttributeValueDto("list", Items: list.Items),
+        ConversationTextValue text => new AttributeValueModel("text", Text: text.Value),
+        ConversationNumberValue number => new AttributeValueModel("number", Number: number.Value),
+        ConversationBooleanValue boolean => new AttributeValueModel("boolean", Boolean: boolean.Value),
+        ConversationDateValue date => new AttributeValueModel("date", Date: date.Value),
+        ConversationListValue list => new AttributeValueModel("list", Items: list.Items),
     };
 
-    public static ConversationAttributeValue Conversation(AttributeValueDto? dto)
+    public static ConversationAttributeValue Conversation(AttributeValueModel? dto)
     {
         ArgumentNullException.ThrowIfNull(dto, "value");
         return dto.Type switch
@@ -54,7 +54,7 @@ internal static class Attributes
         };
     }
 
-    public static IReadOnlyList<MaskedFieldDto> Masked(IEnumerable<MaskedField> fields) => [.. fields.Select(field => new MaskedFieldDto(field.Field.Value, field.Revealable))];
+    public static IReadOnlyList<MaskedFieldResponse> Masked(IEnumerable<MaskedField> fields) => [.. fields.Select(field => new MaskedFieldResponse(field.Field.Value, field.Revealable))];
 
     private static ArgumentException Missing(string property) => new($"The '{property}' property is required for this attribute type.", "value");
 }

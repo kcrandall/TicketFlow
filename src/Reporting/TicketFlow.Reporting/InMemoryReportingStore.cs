@@ -16,6 +16,7 @@ public sealed class InMemoryReportingStore : IReportingStore
     private readonly Dictionary<(TicketScope Scope, ConversationId Conversation), StoredReportConversation> states = [];
     private readonly Dictionary<(TicketScope Scope, Guid Source, ReportMetric Metric), ReportFact> facts = [];
     private readonly Dictionary<CellKey, CellValue> cells = [];
+    private DateTimeOffset? factHorizon;
 
     public InMemoryReportingStore(int maximumFacts = DefaultMaximumFacts)
     {
@@ -92,28 +93,54 @@ public sealed class InMemoryReportingStore : IReportingStore
         var restriction = query.Filter;
         var decisions = new Dictionary<(InboxId, TeamId?, UserId?), bool>();
         var groups = new Dictionary<(int Bucket, string? Group, ReportMetric Metric, int Bin), CellValue>();
+
+        bool Admit(InboxId inbox, TeamId? team, UserId? agent, string? channel, ConversationPriority priority)
+        {
+            if ((restriction.Inbox is { } i && inbox != i) || (restriction.Team is { } t && team != t) || (restriction.Agent is { } a && agent != a)
+                || (restriction.Channel is { } c && channel != c) || (restriction.Priority is { } p && priority != p))
+                return false;
+            var resource = (inbox, team, agent);
+            if (!decisions.TryGetValue(resource, out var allowed))
+                decisions[resource] = allowed = AccessFilterEvaluator.Matches(filter, ReportResources.Rollup(scope, inbox, team, agent));
+            return allowed;
+        }
+
+        void Accumulate(DateTimeOffset cell, string? group, ReportMetric metric, int cellBin, Action<CellValue> add)
+        {
+            var bin = query.Histograms && ReportMetrics.IsDuration(metric) ? cellBin : 0;
+            var groupKey = (ReportBuckets.IndexOf(query.Boundaries, cell), group, metric, bin);
+            if (!groups.TryGetValue(groupKey, out var total))
+                groups[groupKey] = total = new CellValue();
+            add(total);
+        }
+
         lock (gate)
         {
-            foreach (var (key, value) in cells)
+            if (labelRows)
             {
-                if (key.Scope != scope || !metrics.Contains(key.Metric) || key.Start < query.From || key.Start >= query.To || (key.Label.Length > 0) != labelRows)
-                    continue;
-                if ((restriction.Inbox is { } inbox && key.Inbox != inbox) || (restriction.Team is { } team && key.Team != team)
-                    || (restriction.Agent is { } agent && key.Agent != agent) || (restriction.Channel is { } channel && key.Channel != channel)
-                    || (restriction.Priority is { } priority && key.Priority != priority) || (restriction.Label is { } label && key.Label != label.Value))
-                    continue;
-                var resource = (key.Inbox, key.Team, key.Agent);
-                if (!decisions.TryGetValue(resource, out var allowed))
-                    decisions[resource] = allowed = AccessFilterEvaluator.Matches(filter, ReportResources.Rollup(scope, key.Inbox, key.Team, key.Agent));
-                if (!allowed)
-                    continue;
-                var group = ReportGroups.Key(query.GroupBy, key.Inbox, key.Team, key.Agent, key.Channel, key.Priority, labelRows ? new LabelId(key.Label) : null);
-                var bin = query.Histograms && ReportMetrics.IsDuration(key.Metric) ? key.Bin : 0;
-                var groupKey = (ReportBuckets.IndexOf(query.Boundaries, key.Start), group, key.Metric, bin);
-                if (!groups.TryGetValue(groupKey, out var total))
-                    groups[groupKey] = total = new CellValue();
-                total.Add(value);
+                // Labels are not rolled up: label groupings and filters are answered from the facts, once per carried label, over the
+                // same rollup Access resource (labels unknown).
+                foreach (var ((factScope, _, _), fact) in facts)
+                {
+                    var cell = fact.CellStart;
+                    var d = fact.Dimensions;
+                    if (factScope != scope || !metrics.Contains(fact.Metric) || cell < query.From || cell >= query.To || !Admit(d.Inbox, d.Team, d.Agent, d.Channel, d.Priority))
+                        continue;
+                    foreach (var label in d.Labels)
+                        if (restriction.Label is not { } only || label == only)
+                            Accumulate(cell, ReportGroups.Key(query.GroupBy, d.Inbox, d.Team, d.Agent, d.Channel, d.Priority, label), fact.Metric, fact.Bin,
+                                total => total.Add(fact.Value));
+                }
             }
+            else
+                foreach (var (key, value) in cells)
+                {
+                    if (key.Scope != scope || !metrics.Contains(key.Metric) || key.Start < query.From || key.Start >= query.To
+                        || !Admit(key.Inbox, key.Team, key.Agent, key.Channel, key.Priority))
+                        continue;
+                    Accumulate(key.Start, ReportGroups.Key(query.GroupBy, key.Inbox, key.Team, key.Agent, key.Channel, key.Priority, null), key.Metric, key.Bin,
+                        total => total.Add(value));
+                }
         }
         var rows = groups
             .OrderBy(pair => pair.Key.Bucket).ThenBy(pair => pair.Key.Group is not null).ThenBy(pair => pair.Key.Group, StringComparer.Ordinal)
@@ -167,6 +194,8 @@ public sealed class InMemoryReportingStore : IReportingStore
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
+            if (factHorizon is null || olderThan > factHorizon)
+                factHorizon = ReportText.Instant(olderThan);
             var doomed = facts.Where(pair => pair.Value.OccurredAt < olderThan).OrderBy(pair => pair.Value.OccurredAt).Take(limit).Select(pair => pair.Key).ToList();
             foreach (var key in doomed)
                 facts.Remove(key);
@@ -187,13 +216,15 @@ public sealed class InMemoryReportingStore : IReportingStore
         }
     }
 
-    public Task<long> RebuildRollupsAsync(TicketScope scope, DateTimeOffset from, DateTimeOffset to, CancellationToken cancellationToken = default)
+    public Task<ReportRebuildResult> RebuildRollupsAsync(TicketScope scope, DateTimeOffset from, DateTimeOffset to, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ReportStoreLimits.RequireRebuildRange(from, to);
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
+            if (factHorizon is { } horizon && from < horizon)
+                return Task.FromResult<ReportRebuildResult>(new ReportRebuildRefused(horizon));
             foreach (var key in cells.Keys.Where(key => key.Scope == scope && key.Start >= from && key.Start < to).ToList())
                 cells.Remove(key);
             long counted = 0;
@@ -203,24 +234,24 @@ public sealed class InMemoryReportingStore : IReportingStore
                     AddCells(scope, fact);
                     counted++;
                 }
-            return Task.FromResult(counted);
+            return Task.FromResult<ReportRebuildResult>(new ReportRebuilt(counted));
         }
+    }
+
+    public Task<DateTimeOffset?> GetFactHorizonAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+            return Task.FromResult(factHorizon);
     }
 
     private void AddCells(TicketScope scope, ReportFact fact)
     {
         var dimensions = fact.Dimensions;
-        Add(string.Empty);
-        foreach (var label in dimensions.Labels)
-            Add(label.Value);
-
-        void Add(string label)
-        {
-            var key = new CellKey(scope, fact.Metric, fact.CellStart, dimensions.Inbox, dimensions.Team, dimensions.Agent, dimensions.Channel, dimensions.Priority, label, fact.Bin);
-            if (!cells.TryGetValue(key, out var value))
-                cells[key] = value = new CellValue();
-            value.Add(fact.Value);
-        }
+        var key = new CellKey(scope, fact.Metric, fact.CellStart, dimensions.Inbox, dimensions.Team, dimensions.Agent, dimensions.Channel, dimensions.Priority, fact.Bin);
+        if (!cells.TryGetValue(key, out var value))
+            cells[key] = value = new CellValue();
+        value.Add(fact.Value);
     }
 
     private static void Require(ConversationId conversation)
@@ -236,7 +267,7 @@ public sealed class InMemoryReportingStore : IReportingStore
     }
 
     private readonly record struct CellKey(TicketScope Scope, ReportMetric Metric, DateTimeOffset Start, InboxId Inbox, TeamId? Team, UserId? Agent, string? Channel,
-        ConversationPriority Priority, string Label, int Bin);
+        ConversationPriority Priority, int Bin);
 
     private sealed class CellValue
     {

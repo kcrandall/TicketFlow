@@ -45,4 +45,18 @@ T01–T05 (2026-11-22): `dotnet build TicketFlow.slnx -c Release` (0 warnings, 0
 `InMemoryHostBootsSeedsAndServesAgentsAndVisitors` smoke test currently fails on the concurrent Blazor UI's static-assets manifest,
 unrelated to E17). Package validation (`scripts/release.py validate-projects`, run with the not-yet-listed `TicketFlow.UI.Blazor`
 excluded) — "Validated 65 package projects and central versions". No PostgreSQL store: the epic persists nothing. 70 tools in 12
-groups. Parallel post-ticket reviews are still outstanding before commit.
+groups. Committed in 4574992.
+
+Review fixes (2026-11-22, uncommitted): (1) the permission probe uses `IAccessQueryPlanner.HeldAnywhereAsync`, so team/inbox-scoped grants
+count for `HideUnpermitted`, `describe_tools` and `whoami.heldPermissions` (`workspacePermissions` stays workspace-wide); (2) customer-authored
+text is wrapped as `{"untrusted":{source,text,truncated}}` and the rule is stated in the guide and in the affected tool descriptions; (3)
+`HostMcpPrincipalResolver` resolves from the caller's own `ClaimsPrincipal` and never mutates `HttpContext.User`; (4) typed output records
+with the source-generated `TicketFlowMcpJsonContext`, an `outputSchema` per tool (output type plus the `error` envelope), the size bound
+applies to structured content plus text, the list filter deep-clones tools and changes only `_meta`, and `[TicketFlowTool]` uses
+`TicketFlowMcpPermissions` constants; (5) every one of the 70 tools is called by name, and every declared permission is checked against
+the service for a denied principal. Access tools now call `IAccessAdministrator.ListRolesAsync`/`ListGrantsAsync`/`ListFieldPoliciesAsync`;
+`contacts_accept_link_suggestion` passes the new `confirmClaimedEvidence` flag.
+
+- `dotnet test tests/Mcp/TicketFlow.Mcp.Tests -c Release` — 21 passed
+- `dotnet test tests/Mcp/TicketFlow.Mcp.AspNetCore.Tests -c Release` — 4 passed
+- `dotnet test tests/Hosting/TicketFlow.SampleHost.Tests -c Release --filter FullyQualifiedName~Mcp` — 1 passed

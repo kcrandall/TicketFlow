@@ -28,13 +28,13 @@ internal static class ContactEndpoints
                 : ContactSearch.ByIdentity(TicketFlowHttp.Parse<ContactIdentityKind>(kind, "kind"), q ?? string.Empty, @namespace, size);
             return await service.SearchAsync(actor.Principal, search, cursor, http.RequestAborted) switch
             {
-                ContactSearchPage page => TicketFlowHttp.Ok(http, new PageDto<ContactDto>([.. page.Contacts.Select(Dto)], page.NextCursor)),
+                ContactSearchPage page => TicketFlowHttp.Ok(http, new PageResponse<ContactResponse>([.. page.Contacts.Select(Dto)], page.NextCursor)),
                 ContactRefused refused => Refused(http, refused),
             };
-        }).WithName("SearchContacts").Produces<PageDto<ContactDto>>();
+        }).WithName("SearchContacts").Produces<PageResponse<ContactResponse>>();
         group.MapGet("/contacts/{contactId}", async (TicketFlowActor actor, string contactId, [FromServices] IContactService service, HttpContext http) =>
             Map(http, await service.GetAsync(actor.Principal, new ContactId(contactId), http.RequestAborted), view => TicketFlowHttp.Ok(http, Dto(view), view.Revision)))
-            .WithName("GetContact").Produces<ContactDto>();
+            .WithName("GetContact").Produces<ContactResponse>();
         group.MapPost("/contacts", async (TicketFlowActor actor, ContactCreateRequest request, [FromServices] IContactService service, [FromServices] TimeProvider time, HttpContext http) =>
         {
             var draft = new ContactDraft(Profile(request.Profile), request.Identities?.Select(identity => Identity(identity, time)).ToList(),
@@ -42,14 +42,14 @@ internal static class ContactEndpoints
                 request.Labels?.Select(label => new LabelId(label)).ToList(), request.Blocked, request.Id is null ? null : new ContactId(request.Id));
             return Map(http, await service.CreateAsync(actor.Principal, draft, http.RequestAborted),
                 view => TicketFlowHttp.Created(http, $"contacts/{view.Id.Value}", Dto(view), view.Revision));
-        }).WithName("CreateContact").Produces<ContactDto>(StatusCodes.Status201Created);
+        }).WithName("CreateContact").Produces<ContactResponse>(StatusCodes.Status201Created);
         group.MapPatch("/contacts/{contactId}", async (TicketFlowActor actor, string contactId, ContactUpdateRequest request, [FromServices] IContactService service, [FromServices] TimeProvider time, HttpContext http) =>
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
                 return failure;
             var edits = (request.Edits ?? throw new ArgumentException("Edits are required.", nameof(request.Edits))).Select(edit => Edit(edit, time)).ToList();
             return Map(http, await service.UpdateAsync(actor.Principal, new ContactId(contactId), revision, edits, http.RequestAborted), view => TicketFlowHttp.Ok(http, Dto(view), view.Revision));
-        }).WithName("UpdateContact").Produces<ContactDto>();
+        }).WithName("UpdateContact").Produces<ContactResponse>();
         group.MapDelete("/contacts/{contactId}", async (TicketFlowActor actor, string contactId, string? justification, [FromServices] IContactService service, HttpContext http) =>
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
@@ -61,27 +61,27 @@ internal static class ContactEndpoints
             http.Response.Headers.CacheControl = "no-store";
             return await service.RevealAsync(actor.Principal, new ContactId(contactId), new FieldPath(request.Field), request.Justification, http.RequestAborted) switch
             {
-                ContactFieldRevealed revealed => TicketFlowHttp.Ok(http, new ContactRevealedDto(revealed.Field.Value,
-                    [.. revealed.Identities.Select(identity => new ContactIdentityValueDto(TicketFlowHttp.Token(identity.Kind), identity.Namespace, identity.Value))],
+                ContactFieldRevealed revealed => TicketFlowHttp.Ok(http, new ContactRevealResponse(revealed.Field.Value,
+                    [.. revealed.Identities.Select(identity => new ContactIdentityValueResponse(TicketFlowHttp.Token(identity.Kind), identity.Namespace, identity.Value))],
                     revealed.Attribute is { } attribute ? Attributes.Dto(attribute) : null, revealed.AuditEventId)),
                 ContactRevealRefused refused => TicketFlowHttp.Problem(StatusCodes.Status403Forbidden, "reveal-refused", [TicketFlowHttp.Token(refused.Reason)],
                     extensions: new Dictionary<string, object?> { ["auditEventId"] = refused.AuditEventId }),
                 ContactRefused refused => Refused(http, refused),
             };
-        }).WithName("RevealContactField").Produces<ContactRevealedDto>();
-        group.MapPost("/contacts/merge", async (TicketFlowActor actor, ContactMergeRequestDto request, [FromServices] IContactService service, HttpContext http) =>
+        }).WithName("RevealContactField").Produces<ContactRevealResponse>();
+        group.MapPost("/contacts/merge", async (TicketFlowActor actor, ContactsMergeRequest request, [FromServices] IContactService service, HttpContext http) =>
         {
             var merge = new ContactMergeRequest(new ContactId(request.Target), request.TargetRevision, new ContactId(request.Source), request.SourceRevision,
                 request.AttributeConflict is null ? ContactAttributeConflict.PreferTarget : TicketFlowHttp.Parse<ContactAttributeConflict>(request.AttributeConflict, "attributeConflict"),
                 request.Justification);
             return Map(http, await service.MergeAsync(actor.Principal, merge, http.RequestAborted),
-                outcome => TicketFlowHttp.Ok(http, new ContactMergeResultDto(Dto(outcome.Target), outcome.MergeId, outcome.AuditEventId), outcome.Target.Revision));
-        }).WithName("MergeContacts").Produces<ContactMergeResultDto>();
+                outcome => TicketFlowHttp.Ok(http, new ContactMergeResponse(Dto(outcome.Target), outcome.MergeId, outcome.AuditEventId), outcome.Target.Revision));
+        }).WithName("MergeContacts").Produces<ContactMergeResponse>();
         group.MapPost("/contacts/merges/{mergeId:guid}/unmerge", async (TicketFlowActor actor, Guid mergeId, [FromServices] IContactService service, HttpContext http) =>
             Map(http, await service.UnmergeAsync(actor.Principal, mergeId, http.RequestAborted),
-                outcome => TicketFlowHttp.Ok(http, new ContactUnmergeResultDto(Dto(outcome.Target), Dto(outcome.Source), outcome.AuditEventId))))
-            .WithName("UnmergeContacts").Produces<ContactUnmergeResultDto>();
-        group.MapPost("/contacts/export", async (TicketFlowActor actor, ContactExportRequestDto request, [FromServices] IContactService service, [FromServices] IOptions<TicketFlowEndpointOptions> options, HttpContext http) =>
+                outcome => TicketFlowHttp.Ok(http, new ContactUnmergeResponse(Dto(outcome.Target), Dto(outcome.Source), outcome.AuditEventId))))
+            .WithName("UnmergeContacts").Produces<ContactUnmergeResponse>();
+        group.MapPost("/contacts/export", async (TicketFlowActor actor, ContactExportStartRequest request, [FromServices] IContactService service, [FromServices] IOptions<TicketFlowEndpointOptions> options, HttpContext http) =>
         {
             if (request.MaximumContacts > options.Value.MaximumExportContacts)
                 throw new ArgumentException($"Exports are limited to {options.Value.MaximumExportContacts} contacts.", nameof(request.MaximumContacts));
@@ -90,15 +90,15 @@ internal static class ContactEndpoints
                 ContactExportStarted started => Stream(http, started),
                 ContactRefused refused => Refused(http, refused),
             };
-        }).WithName("ExportContacts").Produces<ContactDto>(StatusCodes.Status200OK, "application/x-ndjson");
+        }).WithName("ExportContacts").Produces<ContactResponse>(StatusCodes.Status200OK, "application/x-ndjson");
 
-        group.MapGet("/contact-attributes", async (TicketFlowActor actor, [FromServices] IContactAttributeDefinitionService service, HttpContext http) =>
-            Map(http, await service.ListAsync(actor.Principal, http.RequestAborted), list => TicketFlowHttp.Ok(http, list.Select(Definition).ToList())))
-            .WithName("ListContactAttributes").Produces<List<AttributeDefinitionDto>>();
+        group.MapGet("/contact-attributes", async (TicketFlowActor actor, int? limit, string? cursor, [FromServices] IContactAttributeDefinitionService service, HttpContext http) =>
+            Map(http, await service.ListAsync(actor.Principal, http.RequestAborted), list => TicketFlowHttp.Ok(http, TicketFlowHttp.Page(list, stored => stored.Definition.Key, Definition, limit, cursor))))
+            .WithName("ListContactAttributes").Produces<PageResponse<AttributeDefinitionResponse>>();
         group.MapPost("/contact-attributes", async (TicketFlowActor actor, AttributeDefinitionRequest request, [FromServices] IContactAttributeDefinitionService service, HttpContext http) =>
             Map(http, await service.CreateAsync(actor.Principal, Definition(request), http.RequestAborted),
                 stored => TicketFlowHttp.Created(http, $"contact-attributes/{stored.Definition.Key}", Definition(stored), stored.Revision)))
-            .WithName("CreateContactAttribute").Produces<AttributeDefinitionDto>(StatusCodes.Status201Created);
+            .WithName("CreateContactAttribute").Produces<AttributeDefinitionResponse>(StatusCodes.Status201Created);
         group.MapPut("/contact-attributes/{key}", async (TicketFlowActor actor, string key, AttributeDefinitionRequest request, [FromServices] IContactAttributeDefinitionService service, HttpContext http) =>
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
@@ -106,7 +106,7 @@ internal static class ContactEndpoints
             if (request.Key != key)
                 throw new ArgumentException("The body key must match the route.", nameof(key));
             return Map(http, await service.UpdateAsync(actor.Principal, Definition(request), revision, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Definition(stored), stored.Revision));
-        }).WithName("UpdateContactAttribute").Produces<AttributeDefinitionDto>();
+        }).WithName("UpdateContactAttribute").Produces<AttributeDefinitionResponse>();
         group.MapDelete("/contact-attributes/{key}", async (TicketFlowActor actor, string key, [FromServices] IContactAttributeDefinitionService service, HttpContext http) =>
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
@@ -150,13 +150,13 @@ internal static class ContactEndpoints
         _ => TicketFlowHttp.Refused(http, RefusalKind.Rejected, refused.Errors),
     };
 
-    internal static ContactDto Dto(ContactView view) => new(
+    internal static ContactResponse Dto(ContactView view) => new(
         view.Id.Value,
         view.Revision,
-        new ContactProfileDto(view.Profile.DisplayName, view.Profile.AvatarRef, view.Profile.Locale, view.Profile.TimeZone, view.Profile.Company),
-        [.. view.Identities.Select(identity => new ContactIdentityDto(TicketFlowHttp.Token(identity.Kind), identity.Namespace, identity.Value, identity.Verification.IsVerified,
+        new ContactProfileModel(view.Profile.DisplayName, view.Profile.AvatarRef, view.Profile.Locale, view.Profile.TimeZone, view.Profile.Company),
+        [.. view.Identities.Select(identity => new ContactIdentityResponse(TicketFlowHttp.Token(identity.Kind), identity.Namespace, identity.Value, identity.Verification.IsVerified,
             identity.Verification.Source, identity.Verification.At, identity.Masked, identity.Revealable))],
-        [.. view.Attributes.Select(attribute => new ContactAttributeDto(attribute.Key, TicketFlowHttp.Token(attribute.Type), attribute.Sensitive,
+        [.. view.Attributes.Select(attribute => new ContactAttributeResponse(attribute.Key, TicketFlowHttp.Token(attribute.Type), attribute.Sensitive,
             attribute.Value is { } value ? Attributes.Dto(value) : null, attribute.Masked, attribute.Revealable))],
         [.. view.Labels.Select(label => label.Value)],
         view.Blocked,
@@ -164,7 +164,7 @@ internal static class ContactEndpoints
         view.UpdatedAt,
         Attributes.Masked(view.MaskedFields));
 
-    private static ContactProfile Profile(ContactProfileDto? profile) =>
+    private static ContactProfile Profile(ContactProfileModel? profile) =>
         profile is null ? ContactProfile.Empty : new ContactProfile(profile.DisplayName, profile.AvatarRef, profile.Locale, profile.TimeZone, profile.Company);
 
     private static ContactIdentity Identity(ContactIdentityInput? input, [FromServices] TimeProvider time)
@@ -176,7 +176,7 @@ internal static class ContactEndpoints
         return new ContactIdentity(address, verification);
     }
 
-    private static ContactEdit Edit(ContactEditDto edit, [FromServices] TimeProvider time)
+    private static ContactEdit Edit(ContactEditInput edit, [FromServices] TimeProvider time)
     {
         ArgumentNullException.ThrowIfNull(edit, "edits");
         return edit.Kind switch
@@ -198,6 +198,6 @@ internal static class ContactEndpoints
     private static ContactAttributeDefinition Definition(AttributeDefinitionRequest request) =>
         new(request.Key, TicketFlowHttp.Parse<ContactAttributeType>(request.Type, "type"), request.Sensitive, request.DisplayName);
 
-    private static AttributeDefinitionDto Definition(StoredContactAttributeDefinition stored) =>
+    private static AttributeDefinitionResponse Definition(StoredContactAttributeDefinition stored) =>
         new(stored.Definition.Key, TicketFlowHttp.Token(stored.Definition.Type), stored.Definition.Sensitive, stored.Definition.DisplayName, stored.Revision);
 }

@@ -10,9 +10,11 @@ namespace TicketFlow.Events.Stores.Postgres;
 /// Durable PostgreSQL implementation of <see cref="IEventLog"/> and <see cref="IEventSubscriptionStore"/> over an application-owned
 /// <see cref="NpgsqlDataSource"/>. Tables live in the data source's current schema and are created only by <see cref="InitializeAsync"/>.
 /// Appends lock the scope's head row (<c>FOR UPDATE</c>), skip event ids that already exist and insert the rest with gapless sequences in
-/// one transaction, so concurrent appenders serialize per workspace. Delivery claims lock due subscriptions with <c>FOR UPDATE SKIP
+/// one transaction, so concurrent appenders serialize per workspace (head rows have fillfactor 50 so their updates stay HOT). Delivery claims lock due subscriptions with <c>FOR UPDATE SKIP
 /// LOCKED</c> over a partial due index and bump their fence; completion, failure and dead-lettering are fenced on the fence and the lease,
-/// which uses the store's <see cref="TimeProvider"/> (clients need synchronized clocks). Subscription limits are checked under a scope
+/// which uses the store's <see cref="TimeProvider"/> (clients need synchronized clocks). Claims skip suspended subscriptions and are ordered by
+/// claim time, which completion resets (round-robin). Retention prunes rows recorded before the cutoff through a BRIN index (not strictly
+/// oldest first; delivery records any gap it meets). Subscription limits are checked under a scope
 /// advisory lock. Every statement is parameterized; rows that fail to decode throw.
 /// </summary>
 public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
@@ -24,7 +26,7 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
     private const string SubscriptionWhere = "subscription_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@subscription) AND subscription_id=@subscription AND " + ScopeWhere;
     private const string EventColumns = "sequence, event_id, type, occurred_at, recorded_at, actor_kind, actor_id, conversation_id, inbox_id, team_id, assignee_id, contact_id, data, format_version";
     private const string SubscriptionColumns = "tenant_id, project_id, environment_id, app_id, workspace_id, subscription_id, format_version, name, sink_kind, sink_target, filter, principal_id, "
-        + "privacy, enabled, batch_size, revision, created_at, delivery_cursor, attempts, available_at, last_error, last_delivered_at, fence, lease_until";
+        + "privacy, enabled, batch_size, revision, created_at, delivery_cursor, attempts, available_at, last_error, last_delivered_at, fence, lease_until, generation, suspended";
     private const string LetterColumns = "subscription_id, sequence, event_id, type, attempts, error, dead_lettered_at, format_version";
 
     private readonly NpgsqlDataSource source;
@@ -145,7 +147,7 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IEventLog.MaximumPrune);
         await using var command = source.CreateCommand("""
-            DELETE FROM tf_events WHERE ctid IN (SELECT ctid FROM tf_events WHERE recorded_at < @before ORDER BY recorded_at LIMIT @limit FOR UPDATE SKIP LOCKED)
+            DELETE FROM tf_events WHERE ctid IN (SELECT ctid FROM tf_events WHERE recorded_at < @before LIMIT @limit FOR UPDATE SKIP LOCKED)
             """);
         AddTime(command, "before", olderThan);
         command.Parameters.AddWithValue("limit", limit);
@@ -236,7 +238,7 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         ArgumentNullException.ThrowIfNull(subscription);
         await using var command = source.CreateCommand($"""
             UPDATE tf_event_subscriptions SET name=@name, sink_kind=@sink_kind, sink_target=@sink_target, filter=@filter, principal_id=@principal, privacy=@privacy,
-                enabled=@enabled, batch_size=@batch, revision=revision+1
+                enabled=@enabled, batch_size=@batch, revision=revision+1, attempts=0, suspended=false
             WHERE {SubscriptionWhere} AND revision=@expected RETURNING created_at
             """);
         BindSubscription(command, scope, subscription);
@@ -293,7 +295,7 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
             WITH due AS (
                 SELECT s.subscription_key FROM tf_event_subscriptions s
                 JOIN tf_event_heads h ON h.scope_key = s.scope_key
-                WHERE s.enabled AND s.available_at <= @now AND (s.lease_until IS NULL OR s.lease_until <= @now) AND h.last_sequence > s.delivery_cursor
+                WHERE s.enabled AND NOT s.suspended AND s.available_at <= @now AND (s.lease_until IS NULL OR s.lease_until <= @now) AND h.last_sequence > s.delivery_cursor
                 ORDER BY s.available_at
                 LIMIT @limit
                 FOR UPDATE OF s SKIP LOCKED)
@@ -313,15 +315,23 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         return [.. claims.OrderBy(claim => claim.State.AvailableAt)];
     }
 
-    public Task<bool> CompleteAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, DateTimeOffset? deliveredAt, CancellationToken cancellationToken = default) =>
+    public Task<bool> CompleteAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, DateTimeOffset? deliveredAt, DateTimeOffset availableAt, string? note = null,
+        CancellationToken cancellationToken = default) =>
         FencedAsync(scope, id, fence, """
-            delivery_cursor=GREATEST(delivery_cursor, @cursor), attempts=0, last_error=NULL, last_delivered_at=COALESCE(@delivered, last_delivered_at), lease_until=NULL
+            delivery_cursor=GREATEST(delivery_cursor, @cursor), attempts=0, last_error=@note, last_delivered_at=COALESCE(@delivered, last_delivered_at), available_at=@available,
+                lease_until=NULL
             """, command =>
         {
             ArgumentOutOfRangeException.ThrowIfNegative(cursor);
             command.Parameters.AddWithValue("cursor", cursor);
             AddTime(command, "delivered", EventText.Instant(deliveredAt));
+            AddTime(command, "available", EventText.Instant(availableAt));
+            AddText(command, "note", note is null ? null : IEventSubscriptionStore.RequireError(note));
         }, cancellationToken);
+
+    public Task<bool> SuspendAsync(TicketScope scope, EventSubscriptionId id, long fence, string error, CancellationToken cancellationToken = default) =>
+        FencedAsync(scope, id, fence, "attempts=0, last_error=@error, suspended=true, lease_until=NULL",
+            command => AddText(command, "error", IEventSubscriptionStore.RequireError(error)), cancellationToken);
 
     public Task<bool> FailAsync(TicketScope scope, EventSubscriptionId id, long fence, int attempts, DateTimeOffset retryAt, string error, CancellationToken cancellationToken = default) =>
         FencedAsync(scope, id, fence, "attempts=@attempts, available_at=@retry, last_error=@error, lease_until=NULL", command =>
@@ -332,7 +342,8 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
             AddText(command, "error", IEventSubscriptionStore.RequireError(error));
         }, cancellationToken);
 
-    public async Task<bool> DeadLetterAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, IReadOnlyList<EventDeadLetter> letters, CancellationToken cancellationToken = default)
+    public async Task<bool> DeadLetterAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, IReadOnlyList<EventDeadLetter> letters, DateTimeOffset availableAt,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         Require(id);
@@ -343,7 +354,7 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var command = new NpgsqlCommand($"""
-            UPDATE tf_event_subscriptions SET delivery_cursor=GREATEST(delivery_cursor, @cursor), attempts=0, last_error=@error, lease_until=NULL
+            UPDATE tf_event_subscriptions SET delivery_cursor=GREATEST(delivery_cursor, @cursor), attempts=0, last_error=@error, available_at=@available, lease_until=NULL
             WHERE {SubscriptionWhere} AND fence=@fence AND lease_until > @now
             """, connection, transaction))
         {
@@ -353,6 +364,7 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
             command.Parameters.AddWithValue("fence", fence);
             AddText(command, "error", letters.Count > 0 ? letters[0].Error : null);
             AddTime(command, "now", time.GetUtcNow());
+            AddTime(command, "available", EventText.Instant(availableAt));
             if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 0)
                 return false;
         }
@@ -388,7 +400,8 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var command = new NpgsqlCommand($"""
-            UPDATE tf_event_subscriptions SET delivery_cursor=@after, attempts=0, available_at=@now, last_error=NULL, fence=fence+1, lease_until=NULL WHERE {SubscriptionWhere}
+            UPDATE tf_event_subscriptions SET delivery_cursor=@after, attempts=0, available_at=@now, last_error=NULL, fence=fence+1, lease_until=NULL, generation=generation+1,
+                suspended=false WHERE {SubscriptionWhere}
             """, connection, transaction))
         {
             AddScope(command, scope);
@@ -488,7 +501,7 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
                 DecodeFilter(reader.GetString(10)), new ApiClientId(reader.GetString(11)), (EventPrivacy)reader.GetInt16(12), reader.GetBoolean(13), reader.GetInt32(14));
             var stored = new StoredEventSubscription(scope, subscription, reader.GetInt64(15), Instant(reader.GetDateTime(16)));
             var state = new EventDeliveryState(reader.GetInt64(17), reader.GetInt32(18), Instant(reader.GetDateTime(19)), reader.IsDBNull(20) ? null : reader.GetString(20),
-                reader.IsDBNull(21) ? null : Instant(reader.GetDateTime(21)));
+                reader.IsDBNull(21) ? null : Instant(reader.GetDateTime(21)), reader.GetInt64(24), reader.GetBoolean(25));
             return new SubscriptionRow(stored, state, reader.GetInt64(22), reader.IsDBNull(23) ? null : Instant(reader.GetDateTime(23)));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or JsonException)

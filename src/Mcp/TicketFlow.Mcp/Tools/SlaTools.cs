@@ -1,9 +1,10 @@
 using System.ComponentModel;
-using System.Text.Json;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using TicketFlow.Core;
 using TicketFlow.Sla;
+
+using P = TicketFlow.Mcp.TicketFlowMcpPermissions;
 
 namespace TicketFlow.Mcp.Tools;
 
@@ -13,9 +14,9 @@ public sealed class SlaTools(TicketFlowToolContext context)
 {
     private const string WorkspaceHelp = ConversationTools.WorkspaceHelp;
 
-    [McpServerTool(Name = "sla_get_status", Title = "Get SLA status", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "sla_get_status", Title = "Get SLA status", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(SlaStatusOutput))]
     [Description("Returns a conversation's SLA clocks (first response, next response, resolution): elapsed and remaining seconds, predicted breach time, at-risk and breached flags.")]
-    [TicketFlowTool("sla:read")]
+    [TicketFlowTool(P.SlaRead)]
     public Task<CallToolResult> GetStatus(
         [Description("Conversation id.")] string conversationId,
         [Description(WorkspaceHelp)] string? workspace = null,
@@ -23,9 +24,9 @@ public sealed class SlaTools(TicketFlowToolContext context)
         context.RunAsync(workspace, async principal => Map(await context.Service<ISlaService>().GetStatusAsync(principal, new ConversationId(conversationId), cancellationToken), Status),
             cancellationToken);
 
-    [McpServerTool(Name = "sla_risk_list", Title = "List SLA risks", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "sla_risk_list", Title = "List SLA risks", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ToolPage<SlaStatusOutput>))]
     [Description("Lists conversations whose SLA is at risk and/or breached, soonest due first.")]
-    [TicketFlowTool("sla:read")]
+    [TicketFlowTool(P.SlaRead)]
     public Task<CallToolResult> RiskList(
         [Description("atRiskOrBreached (default), atRisk or breached.")] string? filter = null,
         [Description("Only this inbox.")] string? inboxId = null,
@@ -38,48 +39,26 @@ public sealed class SlaTools(TicketFlowToolContext context)
             var query = new SlaRiskQuery(filter is null ? SlaRiskFilter.AtRiskOrBreached : TicketFlowToolJson.Parse<SlaRiskFilter>(filter, nameof(filter)),
                 inboxId is null ? null : new InboxId(inboxId), limit);
             return Map(await context.Service<ISlaService>().ListAsync(principal, query, cursor, cancellationToken),
-                page => new { items = page.Items.Select(Status).ToList(), next = page.NextCursor });
+                page => new ToolPage<SlaStatusOutput>([.. page.Items.Select(Status)], page.NextCursor));
         }, cancellationToken);
 
-    [McpServerTool(Name = "sla_list_policies", Title = "List SLA policies", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "sla_list_policies", Title = "List SLA policies", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ToolList<DefinitionOutput>))]
     [Description("Lists SLA policies as their versioned definition JSON.")]
-    [TicketFlowTool("sla:read", Service = typeof(ISlaPolicyService))]
+    [TicketFlowTool(P.SlaRead, Service = typeof(ISlaPolicyService))]
     public Task<CallToolResult> ListPolicies(
         [Description(WorkspaceHelp)] string? workspace = null,
         CancellationToken cancellationToken = default) =>
-        context.RunAsync(workspace, async principal => Map(await context.Service<ISlaPolicyService>().ListAsync(principal, cancellationToken), list => new
-        {
-            items = list.Select(stored => new { id = stored.Policy.Id.Value, revision = stored.Revision, definition = JsonDocument.Parse(SlaPolicyCodec.Serialize(stored.Policy)).RootElement.Clone() }).ToList(),
-        }), cancellationToken);
+        context.RunAsync(workspace, async principal => Map(await context.Service<ISlaPolicyService>().ListAsync(principal, cancellationToken), list => new ToolList<DefinitionOutput>(
+            [.. list.Select(stored => new DefinitionOutput(stored.Policy.Id.Value, stored.Revision, TicketFlowToolJson.Parse(SlaPolicyCodec.Serialize(stored.Policy))))])),
+            cancellationToken);
 
-    private static object Status(SlaStatusView view) => new
-    {
-        conversationId = view.Conversation.Value,
-        inboxId = view.Inbox.Value,
-        policyId = view.Policy?.Value,
-        ruleName = view.RuleName,
-        basis = TicketFlowToolJson.Token(view.Basis),
-        paused = view.Paused,
-        atRisk = view.AtRisk,
-        breached = view.Breached,
-        dueAt = view.DueAt,
-        evaluatedAt = view.EvaluatedAt,
-        clocks = view.Clocks.Select(clock => new
-        {
-            metric = TicketFlowToolJson.Token(clock.Metric),
-            cycle = clock.Cycle,
-            state = TicketFlowToolJson.Token(clock.State),
-            outcome = TicketFlowToolJson.Token(clock.Outcome),
-            targetSeconds = (long)Math.Floor(clock.Target.TotalSeconds),
-            elapsedSeconds = (long)Math.Floor(clock.Elapsed.TotalSeconds),
-            remainingSeconds = (long)Math.Floor(clock.Remaining.TotalSeconds),
-            dueAt = clock.DueAt,
-            breachedAt = clock.BreachedAt,
-            completedAt = clock.CompletedAt,
-            atRisk = clock.AtRisk,
-            breached = clock.Breached,
-        }).ToList(),
-    };
+    private static SlaStatusOutput Status(SlaStatusView view) => new(view.Conversation.Value, view.Inbox.Value, view.Policy?.Value, view.RuleName,
+        TicketFlowToolJson.Token(view.Basis), view.Paused, view.AtRisk, view.Breached, view.DueAt, view.EvaluatedAt,
+        [.. view.Clocks.Select(clock => new SlaClockOutput(TicketFlowToolJson.Token(clock.Metric), clock.Cycle, TicketFlowToolJson.Token(clock.State),
+            TicketFlowToolJson.Token(clock.Outcome), Seconds(clock.Target), Seconds(clock.Elapsed), Seconds(clock.Remaining), clock.DueAt, clock.BreachedAt, clock.CompletedAt,
+            clock.AtRisk, clock.Breached))]);
+
+    private static long Seconds(TimeSpan value) => (long)Math.Floor(value.TotalSeconds);
 
     private static object Map<T>(SlaResult<T> result, Func<T, object> success) => result switch
     {

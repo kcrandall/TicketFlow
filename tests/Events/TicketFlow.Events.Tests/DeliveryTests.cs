@@ -63,7 +63,11 @@ public sealed class DeliveryTests
         Assert.AreEqual("message", content.GetProperty("kind").GetString());
         StringAssert.Contains(content.GetProperty("body").GetString(), "Help please");
         Assert.IsFalse(content.TryGetProperty("externalId", out _), "The masked channel identifier is removed.");
-        Assert.AreEqual("conversation.channel", content.GetProperty("maskedFields")[0].GetString());
+        var maskedFields = content.GetProperty("maskedFields").EnumerateArray().Select(field => field.GetString()).ToList();
+        CollectionAssert.Contains(maskedFields, "conversation.channel");
+        CollectionAssert.Contains(maskedFields, "contact.email", "The conversation's contact is attached masked.");
+        Assert.AreEqual("ada", content.GetProperty("contact").GetProperty("displayName").GetString());
+        Assert.AreEqual(0, content.GetProperty("contact").GetProperty("identities").GetArrayLength());
         var sent = events.Single(item => item.Event.Event.Type == IntegrationEventTypes.ConversationMessageSent);
         Assert.AreEqual("Refund issued", Data(sent).GetProperty("content").GetProperty("body").GetString());
         var note = events.Single(item => item.Event.Event.Type == IntegrationEventTypes.ConversationNoteAdded);
@@ -184,8 +188,11 @@ public sealed class DeliveryTests
         CollectionAssert.AreEqual(new long[] { 3, 4 }, fixture.Subscriber.Events.Select(item => item.Event.Sequence).ToArray());
         Assert.AreEqual(2, EventsFixture.Value(await fixture.InScopeAsync(provider => provider.GetRequiredService<IEventSubscriptionService>()
             .ListDeadLettersAsync(fixture.Owner, id))).Count, "Replay clears dead letters after its position only.");
-        Assert.AreEqual(fixture.Subscriber.Deliveries[0].DeliveryId, new EventDelivery(fixture.Subscriber.Deliveries[0].Subscription, fixture.Subscriber.Deliveries[0].Events, 9).DeliveryId,
-            "Delivery ids are stable across attempts.");
+        var replayed = fixture.Subscriber.Deliveries[0];
+        Assert.AreEqual(1, replayed.Generation, "Replayed deliveries carry the new replay generation.");
+        Assert.AreEqual(replayed.DeliveryId, new EventDelivery(replayed.Subscription, replayed.Events, 9, replayed.Generation).DeliveryId, "Delivery ids are stable across attempts.");
+        Assert.AreNotEqual(replayed.DeliveryId, new EventDelivery(replayed.Subscription, replayed.Events, 1, 0).DeliveryId,
+            "A replay never reuses the delivery ids receivers already deduplicated.");
     }
 
     [TestMethod]

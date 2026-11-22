@@ -19,8 +19,8 @@ public sealed class SelfTools(TicketFlowToolContext context)
 {
     private const string WorkspaceHelp = "Workspace identifier; defaults to the server's default workspace.";
 
-    [McpServerTool(Name = "whoami", Title = "Who am I", ReadOnly = true, Idempotent = true)]
-    [Description("Returns the calling TicketFlow principal (kind, id, teams), its scope, a summary of its own access grants and the catalog permissions it holds at workspace level. Sensitive permissions are only probed when includeSensitive is true because every sensitive decision is audited.")]
+    [McpServerTool(Name = "whoami", Title = "Who am I", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(WhoAmIOutput))]
+    [Description("Returns the calling TicketFlow principal (kind, id, teams), its scope, a summary of its own access grants, the catalog permissions it holds on some resource (heldPermissions, including team/inbox grants) and workspace-wide (workspacePermissions). Sensitive permissions are only probed when includeSensitive is true because every sensitive decision is audited.")]
     [TicketFlowTool]
     public Task<CallToolResult> WhoAmI(
         [Description(WorkspaceHelp)] string? workspace = null,
@@ -29,49 +29,44 @@ public sealed class SelfTools(TicketFlowToolContext context)
         context.RunAsync(workspace, async principal =>
         {
             var catalog = context.Services.GetService<IPermissionCatalog>();
-            var definitions = catalog?.Definitions ?? [];
-            var decisions = await TicketFlowPermissionProbe.ProbeAsync(context.Services, principal, definitions.Select(definition => definition.Permission.Value), includeSensitive,
-                cancellationToken);
+            var names = (catalog?.Definitions ?? []).Select(definition => definition.Permission.Value).ToList();
+            var held = await TicketFlowPermissionProbe.ProbeAsync(context.Services, principal, names, includeSensitive, cancellationToken);
+            var workspaceLevel = await TicketFlowPermissionProbe.WorkspaceAsync(context.Services, principal, names, includeSensitive, cancellationToken);
             var grants = await OwnGrantsAsync(principal, cancellationToken);
-            return new
-            {
-                principal = Principal(principal),
-                scope = Scope(principal.Scope),
+            return new WhoAmIOutput(
+                Principal(principal),
+                Scope(principal.Scope),
                 grants,
-                roles = grants.Select(grant => grant.Role).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList(),
-                workspacePermissions = decisions.Where(pair => pair.Value == true).Select(pair => pair.Key).Order(StringComparer.Ordinal).ToList(),
-                sensitivePermissionsProbed = includeSensitive,
-                notProbed = decisions.Where(pair => pair.Value is null).Select(pair => pair.Key).Order(StringComparer.Ordinal).ToList(),
-                note = "Workspace-level decisions; narrower team or inbox grants, conditions and deny rules are evaluated per resource on every call (use explain_access).",
-            };
+                [.. grants.Select(grant => grant.Role).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)],
+                [.. held.Where(pair => pair.Value == true).Select(pair => pair.Key).Order(StringComparer.Ordinal)],
+                [.. workspaceLevel.Where(pair => pair.Value == true).Select(pair => pair.Key).Order(StringComparer.Ordinal)],
+                includeSensitive,
+                [.. held.Where(pair => pair.Value is null).Select(pair => pair.Key).Order(StringComparer.Ordinal)],
+                "heldPermissions: held on some resource (workspace, team or inbox grants); workspacePermissions: held workspace-wide. Conditions, deny rules and scopes are evaluated per resource on every call (use explain_access).");
         }, cancellationToken);
 
-    [McpServerTool(Name = "list_toolsets", Title = "List toolsets", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "list_toolsets", Title = "List toolsets", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ToolsetsOutput))]
     [Description("Lists every TicketFlow toolset with its description, whether this server registered it, whether its feature services are installed, whether it is enabled, and its tool names.")]
     [TicketFlowTool]
     public Task<CallToolResult> ListToolsets(CancellationToken cancellationToken = default)
     {
         _ = cancellationToken;
         var registry = context.Services.GetService<TicketFlowMcpRegistry>();
-        var toolsets = TicketFlowToolsetCatalog.All.Select(info => new
-        {
-            name = info.Name,
-            description = info.Description,
-            registered = registry?.IsRegistered(info.Toolset) ?? false,
-            servicesAvailable = registry?.ServicesAvailable(info.Toolset) ?? false,
-            enabled = registry is not null && registry.IsRegistered(info.Toolset) && registry.ServicesAvailable(info.Toolset),
-            sensitive = info.Toolset == TicketFlowToolsets.Access,
-            tools = TicketFlowToolCatalog.Tools.Where(tool => tool.Toolset == info.Toolset).Select(tool => tool.Name).ToList(),
-        }).ToList();
-        return Task.FromResult(TicketFlowToolResults.Success(new
-        {
-            self = new { name = TicketFlowToolsetCatalog.SelfName, enabled = true, tools = TicketFlowToolCatalog.Tools.Where(tool => tool.Toolset == TicketFlowToolsets.None).Select(tool => tool.Name).ToList() },
-            toolsets,
-        }));
+        var toolsets = TicketFlowToolsetCatalog.All.Select(info => new ToolsetOutput(
+            info.Name,
+            info.Description,
+            registry?.IsRegistered(info.Toolset) ?? false,
+            registry?.ServicesAvailable(info.Toolset) ?? false,
+            registry is not null && registry.IsRegistered(info.Toolset) && registry.ServicesAvailable(info.Toolset),
+            info.Toolset == TicketFlowToolsets.Access,
+            [.. TicketFlowToolCatalog.Tools.Where(tool => tool.Toolset == info.Toolset).Select(tool => tool.Name)])).ToList();
+        return Task.FromResult(TicketFlowToolResults.Success(new ToolsetsOutput(
+            new SelfToolsetOutput(TicketFlowToolsetCatalog.SelfName, true, [.. TicketFlowToolCatalog.Tools.Where(tool => tool.Toolset == TicketFlowToolsets.None).Select(tool => tool.Name)]),
+            toolsets)));
     }
 
-    [McpServerTool(Name = "describe_tools", Title = "Describe tools", ReadOnly = true, Idempotent = true)]
-    [Description("Describes EVERY TicketFlow tool across all toolsets — including ones not enabled on this server — with its description, annotations, required permissions, the built-in roles that grant them, whether the caller currently holds them (workspace level) and whether its toolset is enabled here. Use it to explain why something cannot be done and which role would be needed.")]
+    [McpServerTool(Name = "describe_tools", Title = "Describe tools", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(DescribeToolsOutput))]
+    [Description("Describes EVERY TicketFlow tool across all toolsets — including ones not enabled on this server — with its description, annotations, required permissions, the built-in roles that grant them, whether the caller currently holds them (on some resource, including team/inbox grants) and whether its toolset is enabled here. Use it to explain why something cannot be done and which role would be needed.")]
     [TicketFlowTool]
     public async Task<CallToolResult> DescribeTools(
         [Description("Only this toolset (for example 'conversations').")] string? toolset = null,
@@ -91,27 +86,13 @@ public sealed class SelfTools(TicketFlowToolContext context)
             IReadOnlyDictionary<string, bool?>? decisions = principal is { } caller
                 ? await TicketFlowPermissionProbe.ProbeAsync(context.Services, caller, tools.SelectMany(item => item.Permissions.Concat(item.OptionalPermissions)), includeSensitive, cancellationToken)
                 : null;
-            return TicketFlowToolResults.Success(new
-            {
-                caller = principal is { } known ? Principal(known) : null,
-                callerResolved = principal is not null,
-                tools = tools.Select(item => new
-                {
-                    name = item.Name,
-                    title = item.Title,
-                    toolset = item.ToolsetName,
-                    description = item.Description,
-                    readOnly = item.ReadOnly,
-                    destructive = item.Destructive,
-                    idempotent = item.Idempotent,
-                    requiredPermissions = item.Permissions.Select(permission => Permission(permission, decisions)).ToList(),
-                    anyOf = item.AnyOf,
-                    optionalPermissions = item.OptionalPermissions.Select(permission => Permission(permission, decisions)).ToList(),
-                    grantedByBuiltInRoles = item.GrantedByBuiltInRoles,
-                    callerHasPermissions = decisions is null ? null : TicketFlowPermissionProbe.Satisfies(item, decisions),
-                    enabledOnServer = registry?.IsEnabled(item) ?? false,
-                }).ToList(),
-            }, context.Options.MaximumResultBytes);
+            return TicketFlowToolResults.Success(new DescribeToolsOutput(
+                principal is { } known ? Principal(known) : null,
+                principal is not null,
+                [.. tools.Select(item => new ToolDescriptionOutput(item.Name, item.Title, item.ToolsetName, item.Description, item.ReadOnly, item.Destructive, item.Idempotent,
+                    [.. item.Permissions.Select(permission => Permission(permission, decisions))], item.AnyOf,
+                    [.. item.OptionalPermissions.Select(permission => Permission(permission, decisions))], item.GrantedByBuiltInRoles,
+                    decisions is null ? null : TicketFlowPermissionProbe.Satisfies(item, decisions), registry?.IsEnabled(item) ?? false))]), context.Options.MaximumResultBytes);
         }
         catch (ArgumentException error)
         {
@@ -119,7 +100,7 @@ public sealed class SelfTools(TicketFlowToolContext context)
         }
     }
 
-    [McpServerTool(Name = "explain_access", Title = "Explain access", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "explain_access", Title = "Explain access", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ExplainAccessOutput))]
     [Description("Explains whether the caller may use a permission or a tool, optionally on one resource (conversation, contact, inbox or team): allowed, masked (allowed with redacted fields) or denied, with the reason and the built-in roles that would grant it. Never returns resource data; a resource the caller cannot read is reported as not found. Sensitive permissions are audited by Access.")]
     [TicketFlowTool]
     public Task<CallToolResult> ExplainAccess(
@@ -154,7 +135,7 @@ public sealed class SelfTools(TicketFlowToolContext context)
                 return TicketFlowToolError.NotFound(described);
             var evaluator = context.Service<IAccessEvaluator>();
             var catalog = context.Services.GetService<IPermissionCatalog>();
-            var results = new List<object>();
+            var results = new List<PermissionDecisionOutput>();
             var verdicts = new List<bool>();
             foreach (var value in permissions)
             {
@@ -162,47 +143,29 @@ public sealed class SelfTools(TicketFlowToolContext context)
                 var definition = catalog?.Find(parsed);
                 var decision = await evaluator.AuthorizeAsync(new AccessRequest(principal, parsed, resource), cancellationToken);
                 verdicts.Add(decision.IsPermitted);
+                var known = definition is not null;
+                var sensitive = definition?.IsSensitive ?? false;
+                var roles = TicketFlowToolCatalog.RolesGranting([value]);
                 results.Add(decision switch
                 {
-                    AccessAllowed allowed => new
-                    {
-                        permission = value, known = definition is not null, sensitive = definition?.IsSensitive ?? false, decision = "allowed",
-                        reason = (string?)null, explanation = allowed.UsedBreakGlass ? "Allowed through an active break-glass grant." : "An allow grant applies.",
-                        maskedFields = (IReadOnlyList<object>?)null, grantedByBuiltInRoles = TicketFlowToolCatalog.RolesGranting([value]),
-                    },
-                    AccessMasked masked => new
-                    {
-                        permission = value, known = definition is not null, sensitive = definition?.IsSensitive ?? false, decision = "masked",
-                        reason = (string?)null, explanation = "Allowed, but the listed fields are redacted for you (field policies); revealable fields can be revealed through an audited reveal.",
-                        maskedFields = (IReadOnlyList<object>?)[.. masked.Fields.Select(field => (object)new { field = field.Field.Value, revealable = field.Revealable })],
-                        grantedByBuiltInRoles = TicketFlowToolCatalog.RolesGranting([value]),
-                    },
-                    AccessDenied denied => new
-                    {
-                        permission = value, known = definition is not null, sensitive = definition?.IsSensitive ?? false, decision = "denied",
-                        reason = (string?)TicketFlowToolJson.Token(denied.Reason), explanation = Explain(denied.Reason, value),
-                        maskedFields = (IReadOnlyList<object>?)null, grantedByBuiltInRoles = TicketFlowToolCatalog.RolesGranting([value]),
-                    },
+                    AccessAllowed allowed => new PermissionDecisionOutput(value, known, sensitive, "allowed", null,
+                        allowed.UsedBreakGlass ? "Allowed through an active break-glass grant." : "An allow grant applies.", null, roles),
+                    AccessMasked masked => new PermissionDecisionOutput(value, known, sensitive, "masked", null,
+                        "Allowed, but the listed fields are redacted for you (field policies); revealable fields can be revealed through an audited reveal.",
+                        [.. masked.Fields.Select(field => new MaskedFieldOutput(field.Field.Value, field.Revealable))], roles),
+                    AccessDenied denied => new PermissionDecisionOutput(value, known, sensitive, "denied", TicketFlowToolJson.Token(denied.Reason), Explain(denied.Reason, value), null, roles),
                 });
             }
             var registry = context.Services.GetService<TicketFlowMcpRegistry>();
             bool allowedOverall = verdicts.Count == 0 || (descriptor?.AnyOf == true ? verdicts.Any(item => item) : verdicts.All(item => item));
-            return new
-            {
-                principal = Principal(principal),
-                resource = described,
-                tool = descriptor is null ? null : new
-                {
-                    name = descriptor.Name,
-                    toolset = descriptor.ToolsetName,
-                    anyOf = descriptor.AnyOf,
-                    enabledOnServer = registry?.IsEnabled(descriptor) ?? false,
-                    grantedByBuiltInRoles = descriptor.GrantedByBuiltInRoles,
-                },
-                allowed = allowedOverall,
-                permissions = results,
-                note = "Feature services may apply further rules (for example closed conversations, ownership of personal macros or escalation limits); the call itself remains authoritative.",
-            };
+            return new ExplainAccessOutput(
+                Principal(principal),
+                described,
+                descriptor is null ? null : new ExplainedToolOutput(descriptor.Name, descriptor.ToolsetName, descriptor.AnyOf, registry?.IsEnabled(descriptor) ?? false,
+                    descriptor.GrantedByBuiltInRoles),
+                allowedOverall,
+                results,
+                "Feature services may apply further rules (for example closed conversations, ownership of personal macros or escalation limits); the call itself remains authoritative.");
         }, cancellationToken);
 
     private async Task<(AccessResource? Resource, string Described)> ResourceAsync(PrincipalRef principal, string? conversationId, string? contactId, string? inboxId, string? teamId,
@@ -244,7 +207,7 @@ public sealed class SelfTools(TicketFlowToolContext context)
         _ => "Denied.",
     };
 
-    private async Task<List<GrantSummary>> OwnGrantsAsync(PrincipalRef principal, CancellationToken cancellationToken)
+    private async Task<List<GrantSummaryOutput>> OwnGrantsAsync(PrincipalRef principal, CancellationToken cancellationToken)
     {
         if (context.Services.GetService<IAccessGrantStore>() is not { } store)
             return [];
@@ -260,7 +223,7 @@ public sealed class SelfTools(TicketFlowToolContext context)
         var grants = await store.ListForSubjectsAsync(AccessPartition.From(principal.Scope), principal.Scope.WorkspaceId, subjects, cancellationToken);
         return
         [
-            .. grants.Select(stored => stored.Grant).OrderBy(grant => grant.Id.Value, StringComparer.Ordinal).Select(grant => new GrantSummary(
+            .. grants.Select(stored => stored.Grant).OrderBy(grant => grant.Id.Value, StringComparer.Ordinal).Select(grant => new GrantSummaryOutput(
                 grant.Role.Value,
                 BuiltInRoles.IsBuiltIn(grant.Role),
                 TicketFlowToolJson.Token(grant.Effect),
@@ -286,35 +249,21 @@ public sealed class SelfTools(TicketFlowToolContext context)
         ApiClientId client => "apiClient:" + client.Value,
     };
 
-    private static object Permission(string permission, IReadOnlyDictionary<string, bool?>? decisions)
+    private static PermissionInfoOutput Permission(string permission, IReadOnlyDictionary<string, bool?>? decisions)
     {
         var definition = TicketFlowToolCatalog.FindPermission(permission);
-        return new
-        {
-            permission,
-            sensitive = definition?.IsSensitive ?? false,
-            description = definition?.Description,
-            callerHas = decisions?.GetValueOrDefault(permission),
-            grantedByBuiltInRoles = TicketFlowToolCatalog.RolesGranting([permission]),
-        };
+        return new PermissionInfoOutput(permission, definition?.IsSensitive ?? false, definition?.Description, decisions?.GetValueOrDefault(permission),
+            TicketFlowToolCatalog.RolesGranting([permission]));
     }
 
-    internal static object Principal(PrincipalRef principal) => principal switch
+    internal static PrincipalOutput Principal(PrincipalRef principal) => principal switch
     {
-        UserPrincipal user => new { kind = "user", id = user.UserId.Value, teams = user.Teams.Select(team => team.Value).Order(StringComparer.Ordinal).ToList() },
-        ApiClientPrincipal client => new { kind = "apiClient", id = client.ClientId.Value, teams = new List<string>() },
-        AutomationPrincipal automation => new { kind = "automation", id = automation.AutomationId, teams = new List<string>() },
-        SystemPrincipal system => new { kind = "system", id = system.Component, teams = new List<string>() },
+        UserPrincipal user => new("user", user.UserId.Value, [.. user.Teams.Select(team => team.Value).Order(StringComparer.Ordinal)]),
+        ApiClientPrincipal client => new("apiClient", client.ClientId.Value, []),
+        AutomationPrincipal automation => new("automation", automation.AutomationId, []),
+        SystemPrincipal system => new("system", system.Component, []),
     };
 
-    private static object Scope(TicketScope scope) => new
-    {
-        tenant = scope.TenantId,
-        project = scope.ProjectId,
-        environment = scope.EnvironmentId,
-        app = scope.AppId,
-        workspace = scope.WorkspaceId.Value,
-    };
+    private static ScopeOutput Scope(TicketScope scope) => new(scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value);
 
-    private sealed record GrantSummary(string Role, bool BuiltIn, string Effect, string Kind, string Subject, string Scope, bool Conditional, DateTimeOffset? ValidFrom, DateTimeOffset? ValidUntil);
 }

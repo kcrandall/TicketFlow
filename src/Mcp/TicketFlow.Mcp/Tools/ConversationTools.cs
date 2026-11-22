@@ -4,6 +4,8 @@ using ModelContextProtocol.Server;
 using TicketFlow.Conversations;
 using TicketFlow.Core;
 
+using P = TicketFlow.Mcp.TicketFlowMcpPermissions;
+
 namespace TicketFlow.Mcp.Tools;
 
 /// <summary>Conversation tools over <see cref="IConversationService"/>; every call runs as the caller and is decided by Access.</summary>
@@ -15,9 +17,9 @@ public sealed class ConversationTools(TicketFlowToolContext context)
 
     private IConversationService Service => context.Service<IConversationService>();
 
-    [McpServerTool(Name = "conversations_list", Title = "List conversations", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "conversations_list", Title = "List conversations", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ToolPage<ConversationSummaryOutput>))]
     [Description("Lists conversations the caller may read (Access-filtered inside the store query), newest activity first, with optional filters. Returns summaries and an opaque 'next' cursor.")]
-    [TicketFlowTool("conversation:read")]
+    [TicketFlowTool(P.ConversationRead)]
     public Task<CallToolResult> List(
         [Description("Only this inbox.")] string? inboxId = null,
         [Description("Only this status: open, pending, snoozed, resolved or closed.")] string? status = null,
@@ -42,28 +44,28 @@ public sealed class ConversationTools(TicketFlowToolContext context)
                 assigneeId, unassigned, teamId is null ? null : new TeamId(teamId), label is null ? null : new LabelId(label), contactId is null ? null : new ContactId(contactId), limit);
             return await Service.ListAsync(principal, query, cursor, cancellationToken) switch
             {
-                ConversationListPage page => new { items = page.Conversations.Select(ToolViews.ConversationSummary).ToList(), next = page.NextCursor },
+                ConversationListPage page => new ToolPage<ConversationSummaryOutput>([.. page.Conversations.Select(ToolViews.ConversationSummary)], page.NextCursor),
                 ConversationRefused refused => ToolViews.Refused(refused),
             };
         }, cancellationToken);
 
-    [McpServerTool(Name = "conversations_get", Title = "Get conversation", ReadOnly = true, Idempotent = true)]
-    [Description("Reads one conversation (masked server-side: masked attribute values and channel identifiers are absent and listed in maskedFields). The revision fences later writes.")]
-    [TicketFlowTool("conversation:read")]
+    [McpServerTool(Name = "conversations_get", Title = "Get conversation", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ConversationOutput))]
+    [Description("Reads one conversation (masked server-side: masked attribute values and channel identifiers are absent and listed in maskedFields). The revision fences later writes." + ToolViews.UntrustedNote)]
+    [TicketFlowTool(P.ConversationRead)]
     public Task<CallToolResult> Get(
         [Description("Conversation id.")] string conversationId,
         [Description(WorkspaceHelp)] string? workspace = null,
         CancellationToken cancellationToken = default) =>
         context.RunAsync(workspace, async principal => await Service.GetAsync(principal, new ConversationId(conversationId), cancellationToken) switch
         {
-            ConversationView view => ToolViews.Conversation(view),
+            ConversationView view => ToolViews.Conversation(view, context),
             ConversationNotFound => TicketFlowToolError.NotFound("The conversation"),
             ConversationRefused refused => ToolViews.Refused(refused),
         }, cancellationToken);
 
-    [McpServerTool(Name = "conversations_timeline", Title = "Read timeline", ReadOnly = true, Idempotent = true)]
-    [Description("Reads a page of a conversation's timeline (messages, private notes, assignment/status/label changes) in sequence order. Private notes appear only when the caller holds note:read (notesIncluded). Long bodies are truncated (truncated: true).")]
-    [TicketFlowTool("conversation:read", Optional = ["note:read"])]
+    [McpServerTool(Name = "conversations_timeline", Title = "Read timeline", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(TimelineOutput))]
+    [Description("Reads a page of a conversation's timeline (messages, private notes, assignment/status/label changes) in sequence order. Private notes appear only when the caller holds note:read (notesIncluded). Long bodies are truncated (truncated: true)." + ToolViews.UntrustedNote)]
+    [TicketFlowTool(P.ConversationRead, Optional = [P.NoteRead])]
     public Task<CallToolResult> Timeline(
         [Description("Conversation id.")] string conversationId,
         [Description("Return events after this sequence (default 0 = from the start); use nextAfterSequence to continue.")] long afterSequence = 0,
@@ -72,20 +74,15 @@ public sealed class ConversationTools(TicketFlowToolContext context)
         CancellationToken cancellationToken = default) =>
         context.RunAsync(workspace, async principal => await Service.ReadTimelineAsync(principal, new ConversationId(conversationId), afterSequence, limit, cancellationToken) switch
         {
-            TimelinePage page => new
-            {
-                conversationId = page.Conversation.Value,
-                events = page.Events.Select(item => ToolViews.TimelineEvent(item, context)).ToList(),
-                nextAfterSequence = page.NextAfterSequence,
-                notesIncluded = page.NotesIncluded,
-            },
+            TimelinePage page => new TimelineOutput(page.Conversation.Value, [.. page.Events.Select(item => ToolViews.TimelineEvent(item, context))], page.NextAfterSequence,
+                page.NotesIncluded),
             ConversationNotFound => TicketFlowToolError.NotFound("The conversation"),
             ConversationRefused refused => ToolViews.Refused(refused),
         }, cancellationToken);
 
-    [McpServerTool(Name = "conversations_start", Title = "Start conversation", Destructive = false, Idempotent = false)]
+    [McpServerTool(Name = "conversations_start", Title = "Start conversation", Destructive = false, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(ConversationCommandOutput))]
     [Description("Starts a conversation for an existing contact in an enabled inbox (no initial message; send one with conversations_reply).")]
-    [TicketFlowTool("conversation:create")]
+    [TicketFlowTool(P.ConversationCreate)]
     public Task<CallToolResult> Start(
         [Description("Inbox id.")] string inboxId,
         [Description("Contact id.")] string contactId,
@@ -103,9 +100,9 @@ public sealed class ConversationTools(TicketFlowToolContext context)
             return ToolViews.Map(await Service.StartAsync(principal, request, cancellationToken));
         }, cancellationToken);
 
-    [McpServerTool(Name = "conversations_reply", Title = "Reply", Destructive = false, Idempotent = false, OpenWorld = true)]
+    [McpServerTool(Name = "conversations_reply", Title = "Reply", Destructive = false, Idempotent = false, OpenWorld = true, UseStructuredContent = true, OutputSchemaType = typeof(ConversationCommandOutput))]
     [Description("Sends an outgoing reply to the contact (recorded as pending and delivered by the inbox's channel). This message is visible to the customer.")]
-    [TicketFlowTool("conversation:reply")]
+    [TicketFlowTool(P.ConversationReply)]
     public Task<CallToolResult> Reply(
         [Description("Conversation id.")] string conversationId,
         [Description("Reply body.")] string body,
@@ -117,9 +114,9 @@ public sealed class ConversationTools(TicketFlowToolContext context)
             new OutgoingMessageDraft(body, contentType is null ? MessageContentType.PlainText : TicketFlowToolJson.Parse<MessageContentType>(contentType, nameof(contentType))),
             expectedRevision, cancellationToken)), cancellationToken);
 
-    [McpServerTool(Name = "conversations_add_note", Title = "Add private note", Destructive = false, Idempotent = false)]
+    [McpServerTool(Name = "conversations_add_note", Title = "Add private note", Destructive = false, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(ConversationCommandOutput))]
     [Description("Adds a private note (visible to agents with note:read, never to the contact).")]
-    [TicketFlowTool("note:write")]
+    [TicketFlowTool(P.NoteWrite)]
     public Task<CallToolResult> AddNote(
         [Description("Conversation id.")] string conversationId,
         [Description("Note body.")] string body,
@@ -129,9 +126,9 @@ public sealed class ConversationTools(TicketFlowToolContext context)
         context.RunAsync(workspace, async principal => ToolViews.Map(await Service.AddNoteAsync(principal, new ConversationId(conversationId), new NoteDraft(body),
             expectedRevision, cancellationToken)), cancellationToken);
 
-    [McpServerTool(Name = "conversations_assign", Title = "Assign", Destructive = false, Idempotent = true)]
+    [McpServerTool(Name = "conversations_assign", Title = "Assign", Destructive = false, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ConversationCommandOutput))]
     [Description("Assigns the conversation to a user ('me' for the calling user) or unassigns it (omit assigneeId).")]
-    [TicketFlowTool("conversation:assign")]
+    [TicketFlowTool(P.ConversationAssign)]
     public Task<CallToolResult> Assign(
         [Description("Conversation id.")] string conversationId,
         [Description("Assignee user id, 'me', or omit to unassign.")] string? assigneeId = null,
@@ -149,9 +146,9 @@ public sealed class ConversationTools(TicketFlowToolContext context)
             return ToolViews.Map(await Service.AssignAsync(principal, new ConversationId(conversationId), assignee, expectedRevision, cancellationToken));
         }, cancellationToken);
 
-    [McpServerTool(Name = "conversations_set_team", Title = "Set team", Destructive = false, Idempotent = true)]
+    [McpServerTool(Name = "conversations_set_team", Title = "Set team", Destructive = false, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ConversationCommandOutput))]
     [Description("Moves the conversation to a team, or clears the team (omit teamId).")]
-    [TicketFlowTool("conversation:assign")]
+    [TicketFlowTool(P.ConversationAssign)]
     public Task<CallToolResult> SetTeam(
         [Description("Conversation id.")] string conversationId,
         [Description("Team id, or omit to clear.")] string? teamId = null,
@@ -161,9 +158,9 @@ public sealed class ConversationTools(TicketFlowToolContext context)
         context.RunAsync(workspace, async principal => ToolViews.Map(await Service.SetTeamAsync(principal, new ConversationId(conversationId),
             teamId is null ? null : new TeamId(teamId), expectedRevision, cancellationToken)), cancellationToken);
 
-    [McpServerTool(Name = "conversations_set_status", Title = "Set status", Destructive = false, Idempotent = true)]
+    [McpServerTool(Name = "conversations_set_status", Title = "Set status", Destructive = false, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ConversationCommandOutput))]
     [Description("Changes the status: open, pending, snoozed (requires snoozedUntil in the future), resolved or closed (terminal: a closed conversation accepts no further changes).")]
-    [TicketFlowTool("conversation:resolve")]
+    [TicketFlowTool(P.ConversationResolve)]
     public Task<CallToolResult> SetStatus(
         [Description("Conversation id.")] string conversationId,
         [Description("open, pending, snoozed, resolved or closed.")] string status,
@@ -180,9 +177,9 @@ public sealed class ConversationTools(TicketFlowToolContext context)
                 expectedRevision, cancellationToken));
         }, cancellationToken);
 
-    [McpServerTool(Name = "conversations_set_priority", Title = "Set priority", Destructive = false, Idempotent = true)]
+    [McpServerTool(Name = "conversations_set_priority", Title = "Set priority", Destructive = false, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ConversationCommandOutput))]
     [Description("Sets the priority: none, low, medium, high or urgent.")]
-    [TicketFlowTool("conversation:manage")]
+    [TicketFlowTool(P.ConversationManage)]
     public Task<CallToolResult> SetPriority(
         [Description("Conversation id.")] string conversationId,
         [Description("none, low, medium, high or urgent.")] string priority,
@@ -192,9 +189,9 @@ public sealed class ConversationTools(TicketFlowToolContext context)
         context.RunAsync(workspace, async principal => ToolViews.Map(await Service.SetPriorityAsync(principal, new ConversationId(conversationId),
             TicketFlowToolJson.Parse<ConversationPriority>(priority, nameof(priority)), expectedRevision, cancellationToken)), cancellationToken);
 
-    [McpServerTool(Name = "conversations_update_labels", Title = "Update labels", Destructive = false, Idempotent = true)]
+    [McpServerTool(Name = "conversations_update_labels", Title = "Update labels", Destructive = false, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ConversationCommandOutput))]
     [Description("Adds and/or removes labels.")]
-    [TicketFlowTool("conversation:manage")]
+    [TicketFlowTool(P.ConversationManage)]
     public Task<CallToolResult> UpdateLabels(
         [Description("Conversation id.")] string conversationId,
         [Description("Labels to add.")] string[]? add = null,
@@ -205,9 +202,9 @@ public sealed class ConversationTools(TicketFlowToolContext context)
         context.RunAsync(workspace, async principal => ToolViews.Map(await Service.UpdateLabelsAsync(principal, new ConversationId(conversationId),
             (add ?? []).Select(label => new LabelId(label)), (remove ?? []).Select(label => new LabelId(label)), expectedRevision, cancellationToken)), cancellationToken);
 
-    [McpServerTool(Name = "conversations_delete", Title = "Delete conversation", Destructive = true, Idempotent = false)]
+    [McpServerTool(Name = "conversations_delete", Title = "Delete conversation", Destructive = true, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(ConversationCommandOutput))]
     [Description("Permanently deletes a conversation and its timeline (sensitive; audited by Access). Requires the current revision.")]
-    [TicketFlowTool("conversation:delete")]
+    [TicketFlowTool(P.ConversationDelete)]
     public Task<CallToolResult> Delete(
         [Description("Conversation id.")] string conversationId,
         [Description("The current conversation revision (required).")] long expectedRevision,

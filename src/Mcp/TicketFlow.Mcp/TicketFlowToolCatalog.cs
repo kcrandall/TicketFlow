@@ -28,7 +28,8 @@ public sealed record TicketFlowToolDescriptor(
     bool Idempotent,
     IReadOnlyList<Type> Services,
     Type DeclaringType,
-    MethodInfo Method)
+    MethodInfo Method,
+    Type OutputType)
 {
     /// <summary>The toolset name (<c>self</c> for the self-awareness tools).</summary>
     public string ToolsetName => TicketFlowToolsetCatalog.NameOf(Toolset);
@@ -123,7 +124,8 @@ public static class TicketFlowToolCatalog
                     tool.Idempotent,
                     services,
                     type,
-                    method));
+                    method,
+                    tool.OutputSchemaType ?? throw new InvalidOperationException($"Tool method {type.Name}.{method.Name} needs an OutputSchemaType.")));
             }
         }
         return

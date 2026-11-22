@@ -48,3 +48,5 @@ mapping, TicketFlow-only validation messages, size bound, tool-name/outcome Debu
 `toolset-unavailable`, `ticketflow://guide` resource). Tests: `CatalogTests` (6).
 
 - `dotnet test tests/Mcp/TicketFlow.Mcp.Tests -c Release` — 17 passed, 0 failed (2026-11-22).
+
+Review fixes: typed outputs (`TicketFlowToolOutputs.cs`, source-generated `TicketFlowMcpJsonContext`), `outputSchema` per tool including the error envelope, the size bound on the whole payload (structured content plus text), typed `TicketFlowToolError` fields, `TicketFlowMcpPermissions` constants, and `UntrustedContent` wrapping. Tests: `CatalogTests` (6), `ToolTests.EveryToolPublishesAnOutputSchemaThatAlsoDescribesErrors`, `ResultsAreBoundedAndLongBodiesTruncated`.

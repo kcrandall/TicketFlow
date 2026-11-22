@@ -40,7 +40,8 @@ public static partial class UiActions
     {
         if (context.Session.Service<IConversationService>() is not { } service)
             return UiOutcome.NotFound();
-        return UiOutcomes.From(await command(service, ConversationFromPath(context), context.Revision), success);
+        // Every state-changing command is fenced on the revision the agent saw.
+        return UiOutcomes.From(await command(service, ConversationFromPath(context), context.RequireRevision()), success);
     }
 
     private static ConversationStatus Status(string value) => value switch
@@ -62,12 +63,14 @@ public static partial class UiActions
         var body = context.Raw("body") is { } raw && raw.Trim().Length > 0 ? raw.Trim() : throw new UiInputException("Write a message before sending.");
         var id = ConversationFromPath(context);
         var note = context.Text("kind") == "note";
+        var revision = context.RequireRevision();
         var result = note
-            ? await service.AddNoteAsync(context.Actor, id, new NoteDraft(body), context.Revision, context.Aborted)
-            : await service.ReplyAsync(context.Actor, id, new OutgoingMessageDraft(body), context.Revision, context.Aborted);
+            ? await service.AddNoteAsync(context.Actor, id, new NoteDraft(body), revision, context.Aborted)
+            : await service.ReplyAsync(context.Actor, id, new OutgoingMessageDraft(body), revision, context.Aborted);
         var outcome = UiOutcomes.From(result, note ? "Note added" : "Reply sent");
-        if (outcome.Succeeded && context.Flag("resolve"))
-            outcome = UiOutcomes.From(await service.ChangeStatusAsync(context.Actor, id, ConversationStatus.Resolved, null, context.Aborted), note ? "Note added and conversation resolved" : "Reply sent and conversation resolved");
+        if (result.Value is ConversationApplied applied && context.Flag("resolve"))
+            outcome = UiOutcomes.From(await service.ChangeStatusAsync(context.Actor, id, ConversationStatus.Resolved, applied.Revision, context.Aborted),
+                note ? "Note added and conversation resolved" : "Reply sent and conversation resolved");
         return outcome;
     }
 

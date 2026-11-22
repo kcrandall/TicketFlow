@@ -3,6 +3,8 @@ using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using TicketFlow.HelpCenter;
 
+using P = TicketFlow.Mcp.TicketFlowMcpPermissions;
+
 namespace TicketFlow.Mcp.Tools;
 
 /// <summary>Help center tools: search, portals, articles, drafts and publishing.</summary>
@@ -13,9 +15,9 @@ public sealed class HelpCenterTools(TicketFlowToolContext context)
 
     private IHelpCenterService Service => context.Service<IHelpCenterService>();
 
-    [McpServerTool(Name = "helpcenter_search", Title = "Search help center", ReadOnly = true, Idempotent = true)]
-    [Description("Full-text search over published help center articles of one portal and locale; returns ranked snippets.")]
-    [TicketFlowTool("helpcenter:read", Service = typeof(IHelpCenterSearch))]
+    [McpServerTool(Name = "helpcenter_search", Title = "Search help center", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ToolList<ArticleSnippetOutput>))]
+    [Description("Full-text search over published help center articles of one portal and locale; returns ranked snippets." + ToolViews.UntrustedNote)]
+    [TicketFlowTool(P.HelpCenterRead, Service = typeof(IHelpCenterSearch))]
     public Task<CallToolResult> Search(
         [Description("Portal id.")] string portalId,
         [Description("Locale, for example 'en'.")] string locale,
@@ -25,45 +27,24 @@ public sealed class HelpCenterTools(TicketFlowToolContext context)
         [Description(WorkspaceHelp)] string? workspace = null,
         CancellationToken cancellationToken = default) =>
         context.RunAsync(workspace, async principal => Map(await context.Service<IHelpCenterSearch>().SearchAsync(principal,
-            new HelpCenterSearchQuery(new PortalId(portalId), new HelpCenterLocale(locale), query, limit, offset), cancellationToken), snippets => new
-            {
-                items = snippets.Select(snippet => new
-                {
-                    articleId = snippet.Article.Value,
-                    portalId = snippet.Portal.Value,
-                    locale = snippet.Locale.Value,
-                    title = snippet.Title,
-                    slug = snippet.Slug.Value,
-                    excerpt = snippet.Excerpt,
-                    snippet = snippet.Snippet,
-                    rank = snippet.Rank,
-                    revisionNumber = snippet.RevisionNumber,
-                }).ToList(),
-            }), cancellationToken);
+            new HelpCenterSearchQuery(new PortalId(portalId), new HelpCenterLocale(locale), query, limit, offset), cancellationToken), snippets => new ToolList<ArticleSnippetOutput>(
+            [.. snippets.Select(snippet => new ArticleSnippetOutput(snippet.Article.Value, snippet.Portal.Value, snippet.Locale.Value, context.Untrusted(ToolViews.Article, snippet.Title),
+                snippet.Slug.Value, context.UntrustedOrNull(ToolViews.Article, snippet.Excerpt), context.Untrusted(ToolViews.Article, snippet.Snippet), snippet.Rank,
+                snippet.RevisionNumber))])), cancellationToken);
 
-    [McpServerTool(Name = "helpcenter_list_portals", Title = "List portals", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "helpcenter_list_portals", Title = "List portals", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ToolList<PortalOutput>))]
     [Description("Lists help center portals (slug, name, locales, visibility).")]
-    [TicketFlowTool("helpcenter:read")]
+    [TicketFlowTool(P.HelpCenterRead)]
     public Task<CallToolResult> ListPortals(
         [Description(WorkspaceHelp)] string? workspace = null,
         CancellationToken cancellationToken = default) =>
-        context.RunAsync(workspace, async principal => Map(await Service.ListPortalsAsync(principal, cancellationToken), list => new
-        {
-            items = list.Select(stored => new
-            {
-                id = stored.Portal.Id.Value,
-                slug = stored.Portal.Slug.Value,
-                name = stored.Portal.Name,
-                defaultLocale = stored.Portal.DefaultLocale.Value,
-                supportedLocales = stored.Portal.SupportedLocales.Select(locale => locale.Value).ToList(),
-                visibility = TicketFlowToolJson.Token(stored.Portal.Visibility),
-                revision = stored.Revision,
-            }).ToList(),
-        }), cancellationToken);
+        context.RunAsync(workspace, async principal => Map(await Service.ListPortalsAsync(principal, cancellationToken), list => new ToolList<PortalOutput>(
+            [.. list.Select(stored => new PortalOutput(stored.Portal.Id.Value, stored.Portal.Slug.Value, stored.Portal.Name, stored.Portal.DefaultLocale.Value,
+                [.. stored.Portal.SupportedLocales.Select(locale => locale.Value)], TicketFlowToolJson.Token(stored.Portal.Visibility), stored.Revision))])), cancellationToken);
 
-    [McpServerTool(Name = "helpcenter_list_articles", Title = "List articles", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "helpcenter_list_articles", Title = "List articles", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ToolPage<ArticleSummaryOutput>))]
     [Description("Lists articles of a portal (drafts included), optionally by collection and state (draft, published, archived). Titles only; read one with helpcenter_get_article.")]
-    [TicketFlowTool("helpcenter:read")]
+    [TicketFlowTool(P.HelpCenterRead)]
     public Task<CallToolResult> ListArticles(
         [Description("Portal id.")] string portalId,
         [Description("Only this collection.")] string? collectionId = null,
@@ -76,34 +57,26 @@ public sealed class HelpCenterTools(TicketFlowToolContext context)
         {
             var query = new ArticleListQuery(new PortalId(portalId), collectionId is null ? null : new CollectionId(collectionId),
                 TicketFlowToolJson.ParseOptional<ArticleState>(state, nameof(state)), limit, cursor is null ? null : new ArticleId(TicketFlowToolJson.DecodeCursor(cursor, 1)[0]));
-            return Map(await Service.ListArticlesAsync(principal, query, cancellationToken), page => new
-            {
-                items = page.Items.Select(stored => new
-                {
-                    id = stored.Id.Value,
-                    state = TicketFlowToolJson.Token(stored.Record.State),
-                    collectionId = stored.Record.Article.Collection?.Value,
-                    publishedRevision = stored.Record.PublishedRevision,
-                    titles = stored.Record.Article.Translations.Select(translation => new { locale = translation.Locale.Value, title = translation.Title }).ToList(),
-                    updatedAt = stored.Record.UpdatedAt,
-                    revision = stored.Revision,
-                }).ToList(),
-                next = page.HasMore && page.Items.Count > 0 ? TicketFlowToolJson.EncodeCursor(page.Items[^1].Id.Value) : null,
-            });
+            return Map(await Service.ListArticlesAsync(principal, query, cancellationToken), page => new ToolPage<ArticleSummaryOutput>(
+                [.. page.Items.Select(stored => new ArticleSummaryOutput(stored.Id.Value, TicketFlowToolJson.Token(stored.Record.State), stored.Record.Article.Collection?.Value,
+                    stored.Record.PublishedRevision,
+                    [.. stored.Record.Article.Translations.Select(translation => new ArticleTitleOutput(translation.Locale.Value, context.Untrusted(ToolViews.Article, translation.Title)))],
+                    stored.Record.UpdatedAt, stored.Revision))],
+                page.HasMore && page.Items.Count > 0 ? TicketFlowToolJson.EncodeCursor(page.Items[^1].Id.Value) : null));
         }, cancellationToken);
 
-    [McpServerTool(Name = "helpcenter_get_article", Title = "Get article", ReadOnly = true, Idempotent = true)]
-    [Description("Reads an article's current draft content (all translations, Markdown bodies) and state. Long bodies are truncated (truncated: true).")]
-    [TicketFlowTool("helpcenter:read")]
+    [McpServerTool(Name = "helpcenter_get_article", Title = "Get article", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ArticleOutput))]
+    [Description("Reads an article's current draft content (all translations, Markdown bodies) and state. Long bodies are truncated (truncated: true)." + ToolViews.UntrustedNote)]
+    [TicketFlowTool(P.HelpCenterRead)]
     public Task<CallToolResult> GetArticle(
         [Description("Article id.")] string articleId,
         [Description(WorkspaceHelp)] string? workspace = null,
         CancellationToken cancellationToken = default) =>
         context.RunAsync(workspace, async principal => Map(await Service.GetArticleAsync(principal, new ArticleId(articleId), cancellationToken), Article), cancellationToken);
 
-    [McpServerTool(Name = "helpcenter_create_draft", Title = "Create article draft", Destructive = false, Idempotent = false)]
+    [McpServerTool(Name = "helpcenter_create_draft", Title = "Create article draft", Destructive = false, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(ArticleOutput))]
     [Description("Creates a draft article with one translation (Markdown body). Drafts are not visible to visitors until published.")]
-    [TicketFlowTool("helpcenter:write")]
+    [TicketFlowTool(P.HelpCenterWrite)]
     public Task<CallToolResult> CreateDraft(
         [Description("Portal id.")] string portalId,
         [Description("Locale (must be supported by the portal).")] string locale,
@@ -122,9 +95,9 @@ public sealed class HelpCenterTools(TicketFlowToolContext context)
             return Map(await Service.CreateArticleAsync(principal, article, cancellationToken), Article);
         }, cancellationToken);
 
-    [McpServerTool(Name = "helpcenter_update_draft", Title = "Update article draft", Destructive = false, Idempotent = true)]
+    [McpServerTool(Name = "helpcenter_update_draft", Title = "Update article draft", Destructive = false, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ArticleOutput))]
     [Description("Adds or replaces one translation of an article's draft (omitted fields keep the current translation's values). The live published revision is unchanged until helpcenter_publish.")]
-    [TicketFlowTool("helpcenter:write")]
+    [TicketFlowTool(P.HelpCenterWrite)]
     public Task<CallToolResult> UpdateDraft(
         [Description("Article id.")] string articleId,
         [Description("Current article revision.")] long expectedRevision,
@@ -153,9 +126,9 @@ public sealed class HelpCenterTools(TicketFlowToolContext context)
             return Map(await Service.UpdateArticleAsync(principal, updated, expectedRevision, cancellationToken), Article);
         }, cancellationToken);
 
-    [McpServerTool(Name = "helpcenter_publish", Title = "Publish article", Destructive = false, Idempotent = false, OpenWorld = true)]
+    [McpServerTool(Name = "helpcenter_publish", Title = "Publish article", Destructive = false, Idempotent = false, OpenWorld = true, UseStructuredContent = true, OutputSchemaType = typeof(ArticleOutput))]
     [Description("Publishes the article's draft as a new immutable revision and serves it to visitors (public portals are visible to anyone).")]
-    [TicketFlowTool("helpcenter:publish")]
+    [TicketFlowTool(P.HelpCenterPublish)]
     public Task<CallToolResult> Publish(
         [Description("Article id.")] string articleId,
         [Description("Current article revision.")] long expectedRevision,
@@ -164,9 +137,9 @@ public sealed class HelpCenterTools(TicketFlowToolContext context)
         context.RunAsync(workspace, async principal => Map(await Service.PublishArticleAsync(principal, new ArticleId(articleId), expectedRevision, cancellationToken), Article),
             cancellationToken);
 
-    [McpServerTool(Name = "helpcenter_unpublish", Title = "Unpublish article", Destructive = true, Idempotent = true)]
+    [McpServerTool(Name = "helpcenter_unpublish", Title = "Unpublish article", Destructive = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ArticleOutput))]
     [Description("Stops serving the article to visitors (it returns to draft; revisions are kept).")]
-    [TicketFlowTool("helpcenter:publish")]
+    [TicketFlowTool(P.HelpCenterPublish)]
     public Task<CallToolResult> Unpublish(
         [Description("Article id.")] string articleId,
         [Description("Current article revision.")] long expectedRevision,
@@ -175,28 +148,18 @@ public sealed class HelpCenterTools(TicketFlowToolContext context)
         context.RunAsync(workspace, async principal => Map(await Service.UnpublishArticleAsync(principal, new ArticleId(articleId), expectedRevision, cancellationToken), Article),
             cancellationToken);
 
-    private object Article(StoredArticle stored) => new
-    {
-        id = stored.Id.Value,
-        portalId = stored.Record.Article.Portal.Value,
-        collectionId = stored.Record.Article.Collection?.Value,
-        state = TicketFlowToolJson.Token(stored.Record.State),
-        publishedRevision = stored.Record.PublishedRevision,
-        translations = stored.Record.Article.Translations.Select(translation => new
-        {
-            locale = translation.Locale.Value,
-            title = translation.Title,
-            slug = translation.Slug.Value,
-            excerpt = translation.Excerpt,
-            tags = translation.Tags,
-            body = context.Text(translation.Body, out var truncated),
-            truncated,
-        }).ToList(),
-        createdBy = ToolViews.Actor(stored.Record.CreatedBy),
-        updatedBy = ToolViews.Actor(stored.Record.UpdatedBy),
-        updatedAt = stored.Record.UpdatedAt,
-        revision = stored.Revision,
-    };
+    private ArticleOutput Article(StoredArticle stored) => new(
+        stored.Id.Value,
+        stored.Record.Article.Portal.Value,
+        stored.Record.Article.Collection?.Value,
+        TicketFlowToolJson.Token(stored.Record.State),
+        stored.Record.PublishedRevision,
+        [.. stored.Record.Article.Translations.Select(translation => new ArticleTranslationOutput(translation.Locale.Value, context.Untrusted(ToolViews.Article, translation.Title),
+            translation.Slug.Value, context.UntrustedOrNull(ToolViews.Article, translation.Excerpt), translation.Tags, context.Untrusted(ToolViews.Article, translation.Body)))],
+        ToolViews.Actor(stored.Record.CreatedBy),
+        ToolViews.Actor(stored.Record.UpdatedBy),
+        stored.Record.UpdatedAt,
+        stored.Revision);
 
     private static object Map<T>(HelpCenterResult<T> result, Func<T, object> success) => result switch
     {

@@ -31,7 +31,10 @@
                     <span class="tf-small tf-muted">No members yet</span>
                 }
             </div>
-            <div class="tf-card__footer"><LucideIcon Name="messages-square" Size="14" />@open.GetValueOrDefault(team.Team.Id.Value) open conversations</div>
+            @if (open.TryGetValue(team.Team.Id.Value, out var count))
+            {
+                <div class="tf-card__footer"><LucideIcon Name="messages-square" Size="14" />@count open conversations</div>
+            }
         </a>
     }
 </div>
@@ -59,7 +62,7 @@
 
 @code {
     private readonly List<StoredTeam> details = [];
-    private readonly Dictionary<string, int> open = [];
+    private readonly Dictionary<string, long> open = [];
 
     protected override async Task OnInitializedAsync()
     {
@@ -69,11 +72,9 @@
         foreach (var team in Teams)
             if (await service.GetAsync(Actor, team.Id, Aborted) is WorkspaceSucceeded<StoredTeam> stored)
                 details.Add(stored.Value);
-        if (Service<TicketFlow.Conversations.IConversationService>() is { } conversations)
-            foreach (var team in Teams)
-                if (await conversations.ListAsync(Actor, new TicketFlow.Conversations.ConversationListQuery(status: TicketFlow.Conversations.ConversationStatusKind.Open, team: team.Id, limit: 100), null, Aborted)
-                    is TicketFlow.Conversations.ConversationListPage page)
-                    open[team.Id.Value] = page.Conversations.Count;
+        foreach (var team in Teams)
+            if (await OpenBacklogAsync(new TicketFlow.Reporting.ReportFilter(team: team.Id)) is { } count)
+                open[team.Id.Value] = count;
         await Session.LoadUsersAsync(details.SelectMany(team => team.Team.Members).Select(member => (UserId?)member));
     }
 }

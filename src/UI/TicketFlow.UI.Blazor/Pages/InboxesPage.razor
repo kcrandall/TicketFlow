@@ -33,7 +33,7 @@
                             <td>@(inbox.SlaPolicy is { } sla ? slaNames.GetValueOrDefault(sla.Value, sla.Value) : "—")</td>
                             <td>@(inbox.RoutingPolicy is { } routing ? routingNames.GetValueOrDefault(routing.Value, routing.Value) : "Manual")</td>
                             <td>@if (inbox.Enabled) { <span class="tf-badge tf-badge--success">Enabled</span> } else { <span class="tf-badge tf-badge--muted">Disabled</span> }</td>
-                            <td class="tf-num">@open.GetValueOrDefault(inbox.Id.Value)</td>
+                            <td class="tf-num">@(open.TryGetValue(inbox.Id.Value, out var count) ? count.ToString(CultureInfo.InvariantCulture) : "—")</td>
                         </tr>
                     }
                 </tbody>
@@ -59,16 +59,15 @@
     private Dictionary<string, string> calendars = [];
     private Dictionary<string, string> slaNames = [];
     private Dictionary<string, string> routingNames = [];
-    private readonly Dictionary<string, int> open = [];
+    private readonly Dictionary<string, long> open = [];
 
     protected override async Task OnInitializedAsync()
     {
         await LoadWorkspaceAsync();
         (calendars, slaNames, routingNames) = await InboxFields.LoadOptionsAsync(Session);
-        if (Service<TicketFlow.Conversations.IConversationService>() is { } conversations)
-            foreach (var inbox in Inboxes)
-                if (await conversations.ListAsync(Actor, new TicketFlow.Conversations.ConversationListQuery(inbox.Inbox.Id, TicketFlow.Conversations.ConversationStatusKind.Open, limit: 100), null, Aborted)
-                    is TicketFlow.Conversations.ConversationListPage page)
-                    open[inbox.Inbox.Id.Value] = page.Conversations.Count;
+        // Open counts come from reporting's store-side backlog (hidden without reporting), never from loading rows.
+        foreach (var inbox in Inboxes)
+            if (await OpenBacklogAsync(new TicketFlow.Reporting.ReportFilter(inbox: inbox.Inbox.Id)) is { } count)
+                open[inbox.Inbox.Id.Value] = count;
     }
 }

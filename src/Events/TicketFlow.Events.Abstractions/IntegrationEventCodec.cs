@@ -137,6 +137,9 @@ public static class IntegrationEventCodec
         writer.WriteStartObject("content");
         switch (content.Value)
         {
+            case null:
+                writer.WriteString("kind", "none");
+                break;
             case MessageEventContent message:
                 writer.WriteString("kind", "message");
                 writer.WriteString("body", message.Body);
@@ -161,27 +164,38 @@ public static class IntegrationEventCodec
                 break;
             case ContactEventContent contact:
                 writer.WriteString("kind", "contact");
-                if (contact.DisplayName is not null)
-                    writer.WriteString("displayName", contact.DisplayName);
-                writer.WriteStartArray("identities");
-                foreach (var identity in contact.Identities)
-                {
-                    writer.WriteStartObject();
-                    writer.WriteString("kind", identity.Kind);
-                    if (identity.Namespace.Length > 0)
-                        writer.WriteString("namespace", identity.Namespace);
-                    writer.WriteString("value", identity.Value);
-                    writer.WriteBoolean("verified", identity.Verified);
-                    writer.WriteEndObject();
-                }
-                writer.WriteEndArray();
+                WriteContact(writer, contact);
                 break;
+        }
+        if (content.Contact is { } related)
+        {
+            writer.WriteStartObject("contact");
+            WriteContact(writer, related);
+            writer.WriteEndObject();
         }
         writer.WriteStartArray("maskedFields");
         foreach (var field in content.MaskedFields)
             writer.WriteStringValue(field);
         writer.WriteEndArray();
         writer.WriteEndObject();
+    }
+
+    private static void WriteContact(Utf8JsonWriter writer, ContactEventContent contact)
+    {
+        if (contact.DisplayName is not null)
+            writer.WriteString("displayName", contact.DisplayName);
+        writer.WriteStartArray("identities");
+        foreach (var identity in contact.Identities)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("kind", identity.Kind);
+            if (identity.Namespace.Length > 0)
+                writer.WriteString("namespace", identity.Namespace);
+            writer.WriteString("value", identity.Value);
+            writer.WriteBoolean("verified", identity.Verified);
+            writer.WriteEndObject();
+        }
+        writer.WriteEndArray();
     }
 
     private static void WriteData(EventDataWriter w, IntegrationEventData data)

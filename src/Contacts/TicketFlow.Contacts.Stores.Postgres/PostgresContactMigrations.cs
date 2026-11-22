@@ -125,5 +125,10 @@ public static class PostgresContactMigrations
         CREATE INDEX tf_contact_link_suggestions_list ON tf_contact_link_suggestions (scope_key, status, suggestion_id);
         CREATE INDEX tf_contact_link_suggestions_candidate ON tf_contact_link_suggestions (candidate_key, status, suggestion_id);
         CREATE INDEX tf_contact_link_suggestions_account ON tf_contact_link_suggestions (account_key, status, suggestion_id);
+        """),
+        new(4, "identity-change-kinds-and-suggestion-retention", """
+        ALTER TABLE tf_contact_changes DROP CONSTRAINT tf_contact_changes_kind_check;
+        ALTER TABLE tf_contact_changes ADD CONSTRAINT tf_contact_changes_kind_check CHECK (kind BETWEEN 1 AND 7);
+        CREATE INDEX tf_contact_link_suggestions_decided ON tf_contact_link_suggestions (updated_at) WHERE status <> 1;
         """)]);
 }

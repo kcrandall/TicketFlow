@@ -81,3 +81,26 @@ Completed 2026-11-22.
 - Browser checks (Playwright, Chromium headless): enhanced navigation, enhanced form post with flash, live typing indicator and timeline
   refresh between two signed-in agents.
 - Screenshots: `docs/ui/screenshots/*.png` (17 full-page captures at 1440×900).
+
+Review fixes (2026-11-22):
+
+- P1 authorization: GET and POST share one gate (`UiNavigation.Allows`) decided from the section alone; a POST to a section the viewer
+  cannot open renders "Access denied" (403) without running the action, and actions run only on their own section (400 otherwise).
+  Access pages list through `IAccessAdministrator.ListRolesAsync/ListGrantsAsync/ListFieldPoliciesAsync` (fresh `access:manage`).
+- P2 scoped agents: new additive Access API `IAccessQueryPlanner.HeldAnywhereAsync(principal, scope, permissions)` (default interface
+  method planning each permission; `AccessQueryPlanner` overrides it with one grant load) — shared with the MCP fixer. The navigation
+  snapshot uses it, so team- and inbox-scoped grants count.
+- P1 N+1: additive `IContactService.GetManyAsync` (default loop; `ContactService` uses one decision context and one masking load),
+  `ITicketFlowUserDirectory.FindManyAsync`, SLA badges from one risk-list read, row summaries from the list projection (no timeline
+  reads), dashboard/inbox/team counts from reporting's open backlog, no per-team member reads on the conversation page.
+- P3: conversation commands require `_revision`; contact merge is a two-step review/confirm fenced on both revisions; return URLs with
+  control characters are rejected; reveal, AI draft and dry-run responses are verified `no-store`.
+- Per-request grant caching was not added: grants are loaded inside the scoped Access evaluator used by every host, and a UI-only
+  decorator would change store lifetimes; services remain the per-call authority.
+- `dotnet test tests/UI/TicketFlow.UI.Blazor.Tests -c Release` — 60 passed (adds: POST route sweep for a viewer over 17 section pages,
+  cross-section action 400, team-scoped agent conversations/dashboard, `HeldAnywhereAsync` with team grant and workspace deny, query
+  count for the conversations page (grant loads constant per page), missing revision 422, merge source fencing 409, no-store on reveal /
+  AI draft / dry run, control characters in return URLs).
+- `TicketFlow.SampleHost.Tests` against an isolated `postgres:18` container (`tf-pg-e11ui`): 4 passed; `dotnet build TicketFlow.slnx -c Release`
+  — 0 warnings, 0 errors. Screenshots re-captured from the PostgreSQL-backed sample host (same 17 names).
+

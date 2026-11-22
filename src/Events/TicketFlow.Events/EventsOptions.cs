@@ -25,6 +25,12 @@ public sealed class EventsOptions
     /// <summary>A claim whose lease ends within this margin is skipped (default 5 seconds; shorter than the lease).</summary>
     public TimeSpan LeaseSafetyMargin { get; set; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// How long a caught-up subscription waits before it is claimable again (0 to 1 minute, default 2 seconds). Bounds idle claim scans at
+    /// the cost of up to this much extra latency for the next event.
+    /// </summary>
+    public TimeSpan IdlePollInterval { get; set; } = TimeSpan.FromSeconds(2);
+
     /// <summary>Log events examined per delivery batch while looking for matching events (1-500, default 500).</summary>
     public int MaximumScan { get; set; } = 500;
 
@@ -70,7 +76,7 @@ public sealed class EventsOptions
     {
         if (string.IsNullOrWhiteSpace(Source) || SlaWorkerClientId == default || DeliveryClaimLimit is < 1 or > IEventSubscriptionStore.MaximumClaim
             || DeliveryLease <= TimeSpan.Zero || DeliveryLease > IEventSubscriptionStore.MaximumLease || LeaseSafetyMargin < TimeSpan.Zero || LeaseSafetyMargin >= DeliveryLease
-            || MaximumScan is < 1 or > IEventLog.MaximumRead || MaximumAttempts is < 1 or > 100 || InitialRetryDelay <= TimeSpan.Zero || MaximumRetryDelay < InitialRetryDelay
+            || IdlePollInterval < TimeSpan.Zero || IdlePollInterval > TimeSpan.FromMinutes(1) || MaximumScan is < 1 or > IEventLog.MaximumRead || MaximumAttempts is < 1 or > 100 || InitialRetryDelay <= TimeSpan.Zero || MaximumRetryDelay < InitialRetryDelay
             || Retention < TimeSpan.FromHours(1) || DeadLetterRetention < TimeSpan.FromHours(1) || PruneBatchSize is < 1 or > IEventLog.MaximumPrune
             || MaximumPruneBatches is < 1 or > 1000 || MaximumReplayEvents is < 1 or > 100_000 || MaximumSurveyResponsesPerRun is < 1 or > 10_000
             || SurveySlice < TimeSpan.FromMinutes(1) || SurveySlice > TimeSpan.FromDays(1) || SurveyOverlap < TimeSpan.Zero || SurveyOverlap > TimeSpan.FromHours(1))

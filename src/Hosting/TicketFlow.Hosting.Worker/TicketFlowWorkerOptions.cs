@@ -68,10 +68,28 @@ public sealed class TicketFlowWorkerOptions
     /// <summary><c>AssistMaintenance.RunOnceAsync</c> (abandoned usage reservations).</summary>
     public TicketFlowLoopOptions AssistMaintenance { get; } = TicketFlowLoopOptions.Create(TimeSpan.FromMinutes(5), 500);
 
+    /// <summary><c>EventDeliveryWorker.RunOnceAsync</c> (integration event delivery to subscribers).</summary>
+    public TicketFlowLoopOptions EventDelivery { get; } = TicketFlowLoopOptions.Create(TimeSpan.FromSeconds(2), 100);
+
+    /// <summary><c>EventRetentionWorker.RunOnceAsync</c>.</summary>
+    public TicketFlowLoopOptions EventRetention { get; } = TicketFlowLoopOptions.Create(TimeSpan.FromHours(1), 1000);
+
+    /// <summary><c>EventContactFollower.CatchUpAsync</c> per workspace (batch ≤ 500).</summary>
+    public TicketFlowLoopOptions EventContacts { get; } = TicketFlowLoopOptions.Create(TimeSpan.FromSeconds(10), 100);
+
+    /// <summary><c>EventSurveyFollower.CatchUpAsync</c> per workspace.</summary>
+    public TicketFlowLoopOptions EventSurveys { get; } = TicketFlowLoopOptions.Create(TimeSpan.FromSeconds(30), 100);
+
+    /// <summary><c>ReportingRetentionWorker.RunOnceAsync</c>.</summary>
+    public TicketFlowLoopOptions ReportingRetention { get; } = TicketFlowLoopOptions.Create(TimeSpan.FromHours(1), 1000);
+
     /// <summary>Options of loops added with <c>AddTicketFlowWorkerLoop</c>, keyed by loop name (created with defaults on first use).</summary>
     public IDictionary<string, TicketFlowLoopOptions> Custom { get; } = new Dictionary<string, TicketFlowLoopOptions>(StringComparer.Ordinal);
 
-    /// <summary>Workspaces enumerated per run of per-workspace loops (default 10 000).</summary>
+    /// <summary>
+    /// Workspaces processed per run of per-workspace loops (default 10 000). The directory position is kept between runs and wraps, so
+    /// installations with more workspaces are covered across consecutive runs.
+    /// </summary>
     public int MaximumWorkspacesPerRun { get; set; } = 10_000;
 
     /// <summary>Relative random spread applied to every delay (0-0.5, default 0.2), so nodes do not run in lockstep.</summary>
@@ -80,9 +98,12 @@ public sealed class TicketFlowWorkerOptions
     /// <summary>Consecutive failed runs after which the health check reports the loop unhealthy (default 5; fewer report degraded).</summary>
     public int UnhealthyAfterFailures { get; set; } = 5;
 
+    /// <summary>A running loop without a completed run for this many intervals (at least one minute) reports Degraded (default 5).</summary>
+    public int StaleAfterIntervals { get; set; } = 5;
+
     internal void Validate()
     {
-        if (OutboxRetention < TimeSpan.FromMinutes(1) || MaximumWorkspacesPerRun < 1 || Jitter is < 0 or > 0.5 || double.IsNaN(Jitter) || UnhealthyAfterFailures < 1)
+        if (StaleAfterIntervals is < 1 or > 1000 || OutboxRetention < TimeSpan.FromMinutes(1) || MaximumWorkspacesPerRun < 1 || Jitter is < 0 or > 0.5 || double.IsNaN(Jitter) || UnhealthyAfterFailures < 1)
             throw new InvalidOperationException("TicketFlow worker options are invalid.");
     }
 
@@ -98,6 +119,11 @@ public sealed class TicketFlowWorkerOptions
         TicketFlowLoops.SurveyDispatch => SurveyDispatch,
         TicketFlowLoops.LiveChatPruning => LiveChatPruning,
         TicketFlowLoops.AssistMaintenance => AssistMaintenance,
+        TicketFlowLoops.EventDelivery => EventDelivery,
+        TicketFlowLoops.EventRetention => EventRetention,
+        TicketFlowLoops.EventContacts => EventContacts,
+        TicketFlowLoops.EventSurveys => EventSurveys,
+        TicketFlowLoops.ReportingRetention => ReportingRetention,
         _ => Custom.TryGetValue(name, out var custom) ? custom : Custom[name] = new TicketFlowLoopOptions(),
     };
 }
@@ -115,4 +141,9 @@ public static class TicketFlowLoops
     public const string SurveyDispatch = "survey-dispatch";
     public const string LiveChatPruning = "livechat-pruning";
     public const string AssistMaintenance = "assist-maintenance";
+    public const string EventDelivery = "event-delivery";
+    public const string EventRetention = "event-retention";
+    public const string EventContacts = "event-contacts";
+    public const string EventSurveys = "event-surveys";
+    public const string ReportingRetention = "reporting-retention";
 }

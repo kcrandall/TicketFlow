@@ -55,7 +55,11 @@ public sealed class ContactLinkingTests
         foreach (var policy in policies)
             Assert.AreEqual(policy.Value, ContactLinkingCodec.DeserializePolicy(ContactLinkingCodec.SerializePolicy(policy)).Value);
         Assert.AreEqual("""{"v":1,"k":"auto-merge","kinds":[1,2],"min":2,"unverified":false}""", ContactLinkingCodec.SerializePolicy(policies[2]));
-        foreach (var bad in new[] { """{"v":2,"k":"off"}""", """{"v":1,"k":"sometimes"}""", """{"v":1,"k":"off","x":1}""", """{"v":1,"k":"off","k":"off"}""",
+        Assert.AreEqual(new LinkingSuggest(true), ContactLinkingCodec.DeserializePolicy(ContactLinkingCodec.SerializePolicy(new LinkingSuggest(true))).Value);
+        var claimedAuto = new LinkingAutoMerge(new ContactAutoMergeRules([ContactIdentityKind.Email]), IncludeClaimedEvidence: true);
+        Assert.AreEqual(claimedAuto, ContactLinkingCodec.DeserializePolicy(ContactLinkingCodec.SerializePolicy(claimedAuto)).Value);
+        Assert.AreEqual("""{"v":1,"k":"suggest","claimed":true}""", ContactLinkingCodec.SerializePolicy(new LinkingSuggest(true)));
+        foreach (var bad in new[] { """{"v":1,"k":"suggest","claimed":false}""", """{"v":1,"k":"off","claimed":true}""", """{"v":2,"k":"off"}""", """{"v":1,"k":"sometimes"}""", """{"v":1,"k":"off","x":1}""", """{"v":1,"k":"off","k":"off"}""",
             """{"v":1,"k":"auto-merge","kinds":[5],"min":1,"unverified":true}""", """{"v":1,"k":"auto-merge","kinds":[1],"min":0,"unverified":true}""", "[]", "nope" })
             Assert.ThrowsExactly<FormatException>(() => ContactLinkingCodec.DeserializePolicy(bad), bad);
     }
@@ -67,6 +71,8 @@ public sealed class ContactLinkingTests
         var store = new InMemoryContactLinkingStore(contacts);
         await ContactLinkingStoreContract.VerifyPolicyAsync(store, store);
         await ContactLinkingStoreContract.VerifySuggestionsAsync(contacts, store, store);
+        var pruneContacts = new InMemoryContactStore();
+        await ContactLinkingStoreContract.VerifyPruneAsync(pruneContacts, new InMemoryContactLinkingStore(pruneContacts));
     }
 
     [TestMethod]
@@ -83,7 +89,8 @@ public sealed class ContactLinkingTests
         var audit = fixture.Store.AuditEvents.Single(item => item.Kind == ContactAuditKind.Linked);
         Assert.AreEqual(anonymous.Id, audit.Contact);
         Assert.AreEqual(AccessActorKind.ApiClient, audit.Actor.Kind);
-        Assert.AreEqual(ContactChangeKind.Updated, fixture.Observer.Changes[^1].Event.Kind);
+        CollectionAssert.AreEqual(new[] { ContactChangeKind.Updated, ContactChangeKind.IdentityLinked },
+            fixture.Observer.Changes.TakeLast(2).Select(change => change.Event.Kind).ToArray(), "link changes feed the events contact follower");
 
         // Idempotent by evidence and by contact.
         Assert.AreEqual("already:anon", Describe(await fixture.Linking.LinkAccountAsync(fixture.Portal, ByEvidence(Visitor("v_1")))));
@@ -301,7 +308,7 @@ public sealed class ContactLinkingTests
     public async Task SuggestionsCanBeRejectedAndAreAccessFiltered()
     {
         using var fixture = await ContactFixture.CreateAsync();
-        Assert.AreEqual("applied", ContactFixture.Describe(await fixture.Linking.SetPolicyAsync(fixture.Owner, LinkingSuggest.Instance, null)));
+        Assert.AreEqual("applied", ContactFixture.Describe(await fixture.Linking.SetPolicyAsync(fixture.Owner, new LinkingSuggest(IncludeClaimedEvidence: true), null)));
         var email = ContactFixture.Email("grace@example.com");
         var phone = ContactFixture.Phone("+1 202 555 0100");
         await fixture.CreateAsync("vip-claim", identities: [fixture.Claimed(email)], labels: ["vip"]);
@@ -325,6 +332,9 @@ public sealed class ContactLinkingTests
 
         var plain = all.Suggestions.Single(item => item.Candidate == new ContactId("plain-claim"));
         Assert.IsFalse(plain.EvidenceVerified, "claimed claims only ever suggest");
+        Assert.IsTrue(plain.RequiresConfirmation);
+        Assert.AreEqual(ContactRefusal.Invalid, ((ContactRefused)(await fixture.Linking.AcceptSuggestionAsync(broad, plain.Id, plain.Revision)).Value!).Reason,
+            "claimed evidence needs explicit confirmation");
         Assert.AreEqual("refused:Forbidden", ContactFixture.Describe(await fixture.Linking.RejectSuggestionAsync(limited, plain.Id, plain.Revision)));
         Assert.AreEqual("refused:Conflict:1", ContactFixture.Describe(await fixture.Linking.RejectSuggestionAsync(broad, plain.Id, 7)));
         var rejected = ContactFixture.Applied(await fixture.Linking.RejectSuggestionAsync(broad, plain.Id, plain.Revision, "different person"));
@@ -358,7 +368,7 @@ public sealed class ContactLinkingTests
             new CustomerClaim(ContactFixture.Email("claimed-only@example.com"), false), // claimed-only evidence never auto-merges
         ])));
         Assert.AreEqual("email-claim", resolved.Merged.Single().Source.Value);
-        Assert.HasCount(3, resolved.Suggestions);
+        Assert.HasCount(2, resolved.Suggestions, "claimed-only claims do not suggest by default");
         Assert.AreEqual(resolved.Contact.Id, (await fixture.Store.GetAsync(fixture.Scope, new ContactId("email-claim")))!.Contact.MergedInto);
         foreach (var id in new[] { "phone-claim", "verified-elsewhere", "unverified-claim" })
             Assert.IsNull((await fixture.Store.GetAsync(fixture.Scope, new ContactId(id)))!.Contact.MergedInto, id);
@@ -404,6 +414,102 @@ public sealed class ContactLinkingTests
         Assert.IsEmpty(view.Identities);
         Assert.AreEqual("wrong account", fixture.Store.AuditEvents.Single(item => item.Kind == ContactAuditKind.Unlinked).Justification);
         Assert.IsEmpty(await fixture.Store.FindByIdentityAsync(fixture.Scope, Account.Address));
+    }
+}
+
+/// <summary>Counts point authorizations per permission and decision-context loads.</summary>
+internal sealed class CountingEvaluator(IAccessEvaluator inner) : IAccessEvaluator
+{
+    public static int Loads;
+    public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> Points = new();
+
+    public Task<AccessDecision> AuthorizeAsync(AccessRequest request, CancellationToken cancellationToken = default)
+    {
+        Points.AddOrUpdate(request.Permission.Value, 1, (_, count) => count + 1);
+        return inner.AuthorizeAsync(request, cancellationToken);
+    }
+
+    public Task<RevealResult> RevealAsync(RevealRequest request, CancellationToken cancellationToken = default) => inner.RevealAsync(request, cancellationToken);
+
+    public Task<IAccessDecisionContext> LoadDecisionContextAsync(PrincipalRef principal, TicketScope scope, IEnumerable<Permission> permissions, CancellationToken cancellationToken = default)
+    {
+        Interlocked.Increment(ref Loads);
+        return inner.LoadDecisionContextAsync(principal, scope, permissions, cancellationToken);
+    }
+}
+
+[TestClass]
+public sealed class ContactLinkingReviewTests
+{
+    private static readonly ExternalAccountRef Account = new("acme-portal", "user-42");
+
+    [TestMethod]
+    public async Task ExplicitLinksNeverCombineTwoAccountsOfOneNamespace()
+    {
+        using var fixture = await ContactFixture.CreateAsync();
+        var idf = (string value) => ContactIdentityAddress.Parse(ContactIdentityKind.ExternalUser, value, "idf");
+        await fixture.CreateAsync("account", identities: [fixture.Verified(Account.Address), fixture.Verified(idf("a"))]);
+        await fixture.CreateAsync("anon", identities: [fixture.Verified(idf("b")), fixture.Claimed(ContactIdentityAddress.Parse(ContactIdentityKind.WidgetVisitor, "v_1"))]);
+        var result = await fixture.Linking.LinkAccountAsync(fixture.Portal, new ContactLinkRequest(Account, "acme-login", new ContactId("anon")));
+        Assert.AreEqual("conflict:OtherAccount:anon", ContactLinkingTests.Describe(result));
+        Assert.IsNull((await fixture.Store.GetAsync(fixture.Scope, new ContactId("anon")))!.Contact.MergedInto);
+        Assert.IsFalse(fixture.Store.AuditEvents.Any(item => item.Kind == ContactAuditKind.Merged));
+    }
+
+    [TestMethod]
+    public async Task ClaimedEvidenceSuggestsOnlyWhenOptedInAndAcceptNeedsConfirmation()
+    {
+        using var fixture = await ContactFixture.CreateAsync();
+        var phone = ContactFixture.Phone("+1 202 555 0100");
+        await fixture.CreateAsync("claimer", identities: [fixture.Claimed(phone)]);
+        var request = new CustomerResolveRequest(Account, "acme-login", [new CustomerClaim(phone, false)]);
+        Assert.AreEqual("applied", ContactFixture.Describe(await fixture.Linking.SetPolicyAsync(fixture.Owner, LinkingSuggest.Instance, null)));
+        Assert.IsEmpty(((CustomerResolved)(await fixture.Linking.ResolveCustomerAsync(fixture.Portal, request)).Value!).Suggestions, "verified claims only by default");
+        Assert.AreEqual("applied", ContactFixture.Describe(await fixture.Linking.SetPolicyAsync(fixture.Owner, new LinkingAutoMerge(
+            new ContactAutoMergeRules([ContactIdentityKind.Phone]), IncludeClaimedEvidence: true), 1)));
+        var id = ((CustomerResolved)(await fixture.Linking.ResolveCustomerAsync(fixture.Portal, request)).Value!).Suggestions.Single();
+        Assert.IsNull((await fixture.Store.GetAsync(fixture.Scope, new ContactId("claimer")))!.Contact.MergedInto, "claimed evidence never auto-merges");
+        var view = ContactFixture.Applied(await fixture.Linking.ListSuggestionsAsync(fixture.Owner, new ContactLinkSuggestionQuery())).Suggestions.Single();
+        Assert.IsTrue(view.RequiresConfirmation);
+        Assert.AreEqual(ContactRefusal.Invalid, ((ContactRefused)(await fixture.Linking.AcceptSuggestionAsync(fixture.Owner, id, view.Revision)).Value!).Reason);
+        Assert.IsInstanceOfType<ContactLinkSuggestionAccepted>((await fixture.Linking.AcceptSuggestionAsync(fixture.Owner, id, view.Revision, confirmClaimedEvidence: true)).Value);
+    }
+
+    [TestMethod]
+    public async Task LinkAndUnlinkAppendIdentityChangeKinds()
+    {
+        using var fixture = await ContactFixture.CreateAsync();
+        var created = (CustomerResolved)(await fixture.Linking.ResolveCustomerAsync(fixture.Portal, new CustomerResolveRequest(Account, "acme-login"))).Value!;
+        CollectionAssert.AreEqual(new[] { ContactChangeKind.Created, ContactChangeKind.IdentityLinked }, fixture.Observer.Changes.Select(change => change.Event.Kind).ToArray());
+        ContactFixture.Applied(await fixture.Linking.UnlinkAccountAsync(fixture.Owner, created.Contact.Id, created.Contact.Revision, Account));
+        var log = await fixture.Store.ReadChangesAsync(fixture.Scope, 0, 10);
+        CollectionAssert.AreEqual(new[] { ContactChangeKind.Created, ContactChangeKind.IdentityLinked, ContactChangeKind.Updated, ContactChangeKind.IdentityUnlinked },
+            log.Select(change => change.Event.Kind).ToArray());
+        Assert.IsTrue(log.All(change => change.Event.Contact == created.Contact.Id));
+    }
+
+    [TestMethod]
+    public async Task PolicyCandidatesShareOneDecisionContext()
+    {
+        using var fixture = await ContactFixture.CreateAsync(configure: services =>
+        {
+            services.AddScoped<AccessEvaluator>();
+            services.AddScoped<IAccessEvaluator>(provider => new CountingEvaluator(provider.GetRequiredService<AccessEvaluator>()));
+        });
+        Assert.AreEqual("applied", ContactFixture.Describe(await fixture.Linking.SetPolicyAsync(fixture.Owner, LinkingSuggest.Instance, null)));
+        var claims = new List<CustomerClaim>();
+        for (var index = 0; index < 5; index++)
+        {
+            var email = ContactFixture.Email($"c{index}@example.com");
+            await fixture.CreateAsync($"claimer-{index}", identities: [fixture.Claimed(email)]);
+            claims.Add(new CustomerClaim(email, true));
+        }
+        CountingEvaluator.Points.Clear();
+        Interlocked.Exchange(ref CountingEvaluator.Loads, 0);
+        var resolved = (CustomerResolved)(await fixture.Linking.ResolveCustomerAsync(fixture.Portal, new CustomerResolveRequest(Account, "acme-login", claims))).Value!;
+        Assert.HasCount(5, resolved.Suggestions);
+        Assert.AreEqual(1, CountingEvaluator.Loads);
+        Assert.IsLessThanOrEqualTo(2, CountingEvaluator.Points.GetValueOrDefault(ContactPermissions.Link.Value), "only the workspace and creation checks are point decisions");
     }
 }
 

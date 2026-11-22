@@ -6,23 +6,37 @@ namespace TicketFlow.Events;
 
 /// <summary>
 /// Counts from one delivery run. <see cref="Delivered"/> counts accepted sink calls (<see cref="EventsDelivered"/> their events),
-/// <see cref="Advanced"/> claims that only skipped filtered or unauthorized events, <see cref="Lost"/> completions refused because the lease
-/// or fence was lost and <see cref="Skipped"/> claims left alone because their lease was about to expire.
+/// <see cref="Advanced"/> claims that only skipped filtered or unauthorized events, <see cref="Suspended"/> subscriptions suspended after
+/// repeated configuration failures, <see cref="Lost"/> completions refused because the lease or fence was lost and <see cref="Skipped"/>
+/// claims left alone because their lease was about to expire.
 /// </summary>
-public sealed record EventDeliveryRunResult(int Delivered, int EventsDelivered, int Advanced, int Retried, int DeadLettered, int Lost, int Skipped);
+public sealed record EventDeliveryRunResult(int Delivered, int EventsDelivered, int Advanced, int Retried, int DeadLettered, int Lost, int Skipped, int Suspended = 0);
 
 /// <summary>
-/// The fan-out delivery engine. Each run claims due subscriptions (leased, fenced), reads the log after each cursor (at most
-/// <see cref="EventsOptions.MaximumScan"/> events), keeps events that match the filter and that the subscription principal may read
-/// (<c>events:read</c> on the workspace, then <c>conversation:read</c>/<c>contact:read</c> on the event resource, decided from one
+/// The fan-out delivery engine. Each run claims due subscriptions (leased, fenced, ordered by claim time), reads the log after each cursor
+/// (at most <see cref="EventsOptions.MaximumScan"/> events), keeps events that match the filter and that the subscription principal may
+/// read (<c>events:read</c> on the workspace, then <c>conversation:read</c>/<c>contact:read</c> on the event resource, decided from one
 /// <see cref="IAccessDecisionContext"/>; <see cref="EventPrivacy.Content"/> also requires <c>events:content</c>, audited once per batch),
-/// renders them at the subscription's privacy level (hydrating content as the principal), calls the sink once and advances the cursor
-/// only after the sink accepted the batch — at-least-once, in workspace sequence order (so per conversation in timeline order). Failures
-/// back off exponentially; after <see cref="EventsOptions.MaximumAttempts"/> (or a permanent failure) the batch is dead-lettered and the
-/// cursor advances. Sink exception details are not recorded. No hosted service is included: hosts call <see cref="RunOnceAsync"/>.
+/// renders them at the subscription's privacy level (content hydrated once per batch as the principal), calls the sink and advances the
+/// cursor only after the sink accepted the batch — at-least-once, in workspace sequence order (so per conversation in timeline order).
+/// <list type="bullet">
+/// <item>Fairness: a completed subscription with more pending events is claimable again immediately but behind others (claims are ordered by
+/// claim time); a caught-up one is pushed out by <see cref="EventsOptions.IdlePollInterval"/>.</item>
+/// <item>Failures back off exponentially. After <see cref="EventsOptions.MaximumAttempts"/> (or a permanent failure) the failing batch is
+/// dead-lettered and the cursor advances; an event whose content cannot be hydrated or rendered fails alone (events before it are delivered
+/// first), so a poison event is dead-lettered by itself.</item>
+/// <item>Configuration failures (sink not registered or not allowed, principal without <c>events:read</c> or <c>events:content</c>) suspend
+/// the subscription after <see cref="EventsOptions.MaximumAttempts"/>; updating or replaying it resumes delivery. Infrastructure failures
+/// (store or Access errors) keep retrying with backoff.</item>
+/// <item><see cref="EventSinkSplit"/> halves the batch immediately; a single event that is still too large is dead-lettered.</item>
+/// <item>Events pruned by retention before delivery are recorded as <c>events-pruned-&lt;from&gt;-&lt;to&gt;</c> in the delivery state.</item>
+/// </list>
+/// Sink exception details are not recorded. No hosted service is included: hosts call <see cref="RunOnceAsync"/>.
 /// </summary>
 public sealed class EventDeliveryWorker
 {
+    private const string EngineError = "engine-error";
+
     private readonly IEventSubscriptionStore subscriptions;
     private readonly IEventLog log;
     private readonly IAccessEvaluator access;
@@ -49,7 +63,8 @@ public sealed class EventDeliveryWorker
 
     public async Task<EventDeliveryRunResult> RunOnceAsync(CancellationToken cancellationToken = default)
     {
-        int delivered = 0, events = 0, advanced = 0, retried = 0, deadLettered = 0, lost = 0, skipped = 0;
+        var counts = new int[Enum.GetValues<Outcome>().Length];
+        int events = 0, skipped = 0;
         var claims = await subscriptions.ClaimAsync(time.GetUtcNow(), options.DeliveryClaimLimit, options.DeliveryLease, cancellationToken).ConfigureAwait(false);
         foreach (var claim in claims)
         {
@@ -66,30 +81,14 @@ public sealed class EventDeliveryWorker
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
-                // Store, Access or hydration failures: back off this subscription and keep serving the others. Details are not recorded.
-                outcome = await FailAsync(claim, [], claim.State.Cursor, new EventSinkFailed("engine-error"), cancellationToken).ConfigureAwait(false);
+                // Store or Access failures: back off this subscription and keep serving the others. Details are not recorded.
+                outcome = await FailAsync(claim, [], claim.State.Cursor, new EventSinkFailed(EngineError), cancellationToken).ConfigureAwait(false);
             }
-            switch (outcome.Kind)
-            {
-                case Outcome.Delivered:
-                    delivered++;
-                    events += outcome.Events;
-                    break;
-                case Outcome.Advanced:
-                    advanced++;
-                    break;
-                case Outcome.Retried:
-                    retried++;
-                    break;
-                case Outcome.DeadLettered:
-                    deadLettered++;
-                    break;
-                case Outcome.Lost:
-                    lost++;
-                    break;
-            }
+            counts[(int)outcome.Kind]++;
+            events += outcome.Events;
         }
-        return new EventDeliveryRunResult(delivered, events, advanced, retried, deadLettered, lost, skipped);
+        return new EventDeliveryRunResult(counts[(int)Outcome.Delivered], events, counts[(int)Outcome.Advanced], counts[(int)Outcome.Retried], counts[(int)Outcome.DeadLettered],
+            counts[(int)Outcome.Lost], skipped, counts[(int)Outcome.Suspended]);
     }
 
     private enum Outcome
@@ -99,6 +98,7 @@ public sealed class EventDeliveryWorker
         Retried,
         DeadLettered,
         Lost,
+        Suspended,
     }
 
     private async Task<(Outcome Kind, int Events)> DeliverAsync(EventDeliveryClaim claim, CancellationToken cancellationToken)
@@ -106,7 +106,7 @@ public sealed class EventDeliveryWorker
         var stored = claim.Subscription;
         var subscription = stored.Subscription;
         var scope = stored.Scope;
-        if (!sinks.TryGetValue(subscription.Sink.Kind, out var sink))
+        if (!sinks.TryGetValue(subscription.Sink.Kind, out var sink) || !sink.IsValidTarget(scope, subscription.Sink.Target))
             return await FailAsync(claim, [], claim.State.Cursor, new EventSinkFailed("sink-missing"), cancellationToken).ConfigureAwait(false);
 
         var principal = stored.PrincipalRef;
@@ -120,15 +120,15 @@ public sealed class EventDeliveryWorker
         if (subscription.Privacy == EventPrivacy.Content && !(await context.DecideAsync(EventPermissions.Content, workspace, cancellationToken).ConfigureAwait(false)).IsPermitted)
             return await FailAsync(claim, [], claim.State.Cursor, new EventSinkFailed("content-forbidden"), cancellationToken).ConfigureAwait(false);
 
+        var head = (await log.GetHeadAsync(scope, cancellationToken).ConfigureAwait(false)).Last;
         var limit = Math.Min(subscription.BatchSize, sink.MaximumBatchSize);
-        var page = await log.ReadAsync(scope, claim.State.Cursor, options.MaximumScan, cancellationToken).ConfigureAwait(false);
-        var cursor = claim.State.Cursor;
+        var start = claim.State.Cursor;
+        var page = await log.ReadAsync(scope, start, options.MaximumScan, cancellationToken).ConfigureAwait(false);
         if (page.Count == 0)
-        {
-            // Everything after the cursor was pruned by retention: move to the head.
-            var head = await log.GetHeadAsync(scope, cancellationToken).ConfigureAwait(false);
-            return await CompleteAsync(claim, Math.Max(cursor, head.Last), null, Outcome.Advanced, 0, cancellationToken).ConfigureAwait(false);
-        }
+            // Everything after the cursor was pruned by retention: record the gap and move to the head.
+            return await CompleteAsync(claim, Math.Max(start, head), null, head, head > start ? Gap(start + 1, head) : null, Outcome.Advanced, 0, cancellationToken).ConfigureAwait(false);
+        var gap = page[0].Sequence > start + 1 ? Gap(start + 1, page[0].Sequence - 1) : null;
+        var cursor = start;
         var selected = new List<StoredIntegrationEvent>();
         foreach (var item in page)
         {
@@ -143,35 +143,94 @@ public sealed class EventDeliveryWorker
                 break;
         }
         if (selected.Count == 0)
-            return await CompleteAsync(claim, cursor, null, Outcome.Advanced, 0, cancellationToken).ConfigureAwait(false);
+            return await CompleteAsync(claim, cursor, null, head, gap, Outcome.Advanced, 0, cancellationToken).ConfigureAwait(false);
 
+        var (rendered, poison) = await RenderAsync(selected, subscription.Privacy, principal, cancellationToken).ConfigureAwait(false);
+        if (rendered.Count == 0)
+            // The first selected event cannot be rendered: it fails alone and is dead-lettered after the maximum attempts.
+            return await FailAsync(claim, [poison!], poison!.Sequence, new EventSinkFailed("render-error"), cancellationToken).ConfigureAwait(false);
+        if (poison is not null)
+            cursor = rendered[^1].Event.Sequence;   // deliver the events before the poison event first
+
+        while (true)
+        {
+            EventSinkResult result;
+            try
+            {
+                result = await sink.DeliverAsync(new EventDelivery(stored, rendered, claim.State.Attempts + 1, claim.State.Generation), cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Sink exception details may contain customer data; only a code is recorded.
+                result = new EventSinkFailed("sink-error");
+            }
+            switch (result)
+            {
+                case EventSinkDelivered:
+                    return await CompleteAsync(claim, cursor, time.GetUtcNow(), head, gap, Outcome.Delivered, rendered.Count, cancellationToken).ConfigureAwait(false);
+                case EventSinkFailed failed:
+                    return await FailAsync(claim, [.. rendered.Select(item => item.Event)], cursor, failed, cancellationToken).ConfigureAwait(false);
+                case EventSinkSplit:
+                    if (rendered.Count == 1)
+                        return await FailAsync(claim, [rendered[0].Event], rendered[0].Event.Sequence, new EventSinkFailed("payload-too-large", permanent: true), cancellationToken)
+                            .ConfigureAwait(false);
+                    rendered = [.. rendered.Take(rendered.Count / 2)];
+                    cursor = rendered[^1].Event.Sequence;
+                    break;
+            }
+        }
+    }
+
+    /// <summary>Renders the batch; when hydration or rendering fails for an event, returns the events before it and that event as poison.</summary>
+    private async Task<(List<RenderedEvent> Rendered, StoredIntegrationEvent? Poison)> RenderAsync(IReadOnlyList<StoredIntegrationEvent> selected, EventPrivacy privacy,
+        ApiClientPrincipal principal, CancellationToken cancellationToken)
+    {
+        IReadOnlyDictionary<long, EventContent>? contents = null;
+        if (privacy == EventPrivacy.Content)
+        {
+            try
+            {
+                contents = await hydrator.HydrateAsync(selected, principal, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                contents = null;   // locate the failing event below, one at a time
+            }
+        }
         var rendered = new List<RenderedEvent>(selected.Count);
         foreach (var item in selected)
         {
-            var content = subscription.Privacy == EventPrivacy.Content ? await hydrator.HydrateAsync(item, principal, cancellationToken).ConfigureAwait(false) : null;
-            rendered.Add(new RenderedEvent(item, IntegrationEventCodec.Render(item, subscription.Privacy, content, render)));
+            try
+            {
+                EventContent? content = null;
+                if (privacy == EventPrivacy.Content)
+                {
+                    var single = contents ?? await hydrator.HydrateAsync([item], principal, cancellationToken).ConfigureAwait(false);
+                    content = single.GetValueOrDefault(item.Sequence);
+                }
+                rendered.Add(new RenderedEvent(item, IntegrationEventCodec.Render(item, privacy, content, render)));
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                return (rendered, item);
+            }
         }
-        EventSinkResult result;
-        try
-        {
-            result = await sink.DeliverAsync(new EventDelivery(stored, rendered, claim.State.Attempts + 1), cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
-        {
-            // Sink exception details may contain customer data; only a code is recorded.
-            result = new EventSinkFailed("sink-error");
-        }
-        return result switch
-        {
-            EventSinkDelivered => await CompleteAsync(claim, cursor, time.GetUtcNow(), Outcome.Delivered, selected.Count, cancellationToken).ConfigureAwait(false),
-            EventSinkFailed failed => await FailAsync(claim, selected, cursor, failed, cancellationToken).ConfigureAwait(false),
-        };
+        return (rendered, null);
     }
 
-    private async Task<(Outcome, int)> CompleteAsync(EventDeliveryClaim claim, long cursor, DateTimeOffset? deliveredAt, Outcome outcome, int events, CancellationToken cancellationToken) =>
-        await subscriptions.CompleteAsync(claim.Subscription.Scope, claim.Subscription.Subscription.Id, claim.Fence, cursor, deliveredAt, cancellationToken).ConfigureAwait(false)
+    private static string Gap(long from, long to) => $"events-pruned-{from}-{to}";
+
+    private async Task<(Outcome, int)> CompleteAsync(EventDeliveryClaim claim, long cursor, DateTimeOffset? deliveredAt, long head, string? note, Outcome outcome, int events,
+        CancellationToken cancellationToken)
+    {
+        // Round-robin: claimable again now (behind subscriptions waiting longer) while events remain; caught-up subscriptions poll later.
+        var now = time.GetUtcNow();
+        var next = cursor >= head ? now + options.IdlePollInterval : now;
+        return await subscriptions.CompleteAsync(claim.Subscription.Scope, claim.Subscription.Subscription.Id, claim.Fence, cursor, deliveredAt, next, note, cancellationToken)
+            .ConfigureAwait(false)
             ? (outcome, events)
             : (Outcome.Lost, 0);
+    }
 
     private async Task<(Outcome, int)> FailAsync(EventDeliveryClaim claim, IReadOnlyList<StoredIntegrationEvent> batch, long cursor, EventSinkFailed failure, CancellationToken cancellationToken)
     {
@@ -182,8 +241,10 @@ public sealed class EventDeliveryWorker
         if (batch.Count > 0 && (failure.Permanent || attempts >= options.MaximumAttempts))
         {
             var letters = batch.Select(item => new EventDeadLetter(id, item.Sequence, item.Event.Id, item.Event.Type, attempts, failure.Code, now)).ToList();
-            return await subscriptions.DeadLetterAsync(scope, id, claim.Fence, cursor, letters, cancellationToken).ConfigureAwait(false) ? (Outcome.DeadLettered, 0) : (Outcome.Lost, 0);
+            return await subscriptions.DeadLetterAsync(scope, id, claim.Fence, cursor, letters, now, cancellationToken).ConfigureAwait(false) ? (Outcome.DeadLettered, 0) : (Outcome.Lost, 0);
         }
+        if (batch.Count == 0 && failure.Code != EngineError && attempts >= options.MaximumAttempts)
+            return await subscriptions.SuspendAsync(scope, id, claim.Fence, failure.Code, cancellationToken).ConfigureAwait(false) ? (Outcome.Suspended, 0) : (Outcome.Lost, 0);
         var delay = Backoff(attempts);
         if (failure.RetryAfter is { } requested && requested > delay)
             delay = requested;
@@ -221,7 +282,7 @@ public sealed class InProcessEventSink : IEventSink
 
     public int MaximumBatchSize => EventSubscription.MaximumBatchSize;
 
-    public bool IsValidTarget(string target) => target is not null && subscribers.ContainsKey(target);
+    public bool IsValidTarget(TicketScope scope, string target) => target is not null && subscribers.ContainsKey(target);
 
     public async Task<EventSinkResult> DeliverAsync(EventDelivery delivery, CancellationToken cancellationToken = default)
     {

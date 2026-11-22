@@ -40,7 +40,7 @@ public static class EventsTicketFlowBuilderExtensions
             provider.GetService<ISurveyStore>() ?? throw new InvalidOperationException("EventSurveyFollower requires an ISurveyStore registration.")));
         services.TryAddEnumerable(ServiceDescriptor.Scoped<IRoutingEventObserver, EventRoutingObserver>());
         services.TryAddScoped(provider => new EventContentHydrator(provider.GetService<IConversationService>(), provider.GetService<IContactService>(),
-            provider.GetService<ISurveyStore>()));
+            provider.GetService<ISurveyService>()));
         services.TryAddScoped<IEventSubscriptionService, EventSubscriptionService>();
         services.TryAddScoped<EventDeliveryWorker>();
         services.TryAddScoped<EventRetentionWorker>();

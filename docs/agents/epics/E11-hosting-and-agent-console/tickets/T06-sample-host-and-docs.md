@@ -42,3 +42,7 @@ Verification (2026-11-22):
   repeated idempotent seeding, development authentication refused outside Development).
 - `dotnet run --project samples/TicketFlow.SampleHost -c Release -- seed` then `dotnet run` against the same container: `/health`
   Healthy (workers and PostgreSQL), agent conversation list 200, widget bundle 200.
+
+Review fixes (2026-11-22): the sample composes staff identity (E16), events (E15) and reporting (E14) with PostgreSQL stores and
+migrations, hosts their loops, reserves worker identities for IdentityFlow mapping, rate-limits anonymous endpoints per client IP, and
+maps the MCP API key to `idf:mcp-assistant`. `dotnet test tests/Hosting/TicketFlow.SampleHost.Tests -c Release` with PostgreSQL — 4 passed.

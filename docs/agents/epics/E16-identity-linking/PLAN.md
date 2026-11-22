@@ -47,3 +47,25 @@ live-chat identify hook, and authorized staff identity mapping with a resolver a
   not yet in the solution); unrelated to E16.
 
 Parallel post-ticket reviews (docs/agents/prompts/post-ticket-*.md) are still outstanding before commit.
+
+## Review fixes (2026-11-22, after commit 4574992)
+
+1. Explicit links refuse combining two accounts of one namespace held by the account contact (`SharesNamespaceWithOtherAccount`
+   before `MergeAsync`, matching auto-merge/accept). Test `ExplicitLinksNeverCombineTwoAccountsOfOneNamespace`.
+2. Suggestions come from verified claims only by default; `LinkingSuggest(IncludeClaimedEvidence)` / `LinkingAutoMerge(..., IncludeClaimedEvidence)`
+   opt in (codec `"claimed":true`); claimed suggestions are marked (`RequiresConfirmation`) and need
+   `AcceptSuggestionAsync(..., confirmClaimedEvidence: true)` (new overload; the old one keeps working). Tests
+   `ClaimedEvidenceSuggestsOnlyWhenOptedInAndAcceptNeedsConfirmation`, updated policy/codec/AutoMerge/reject tests.
+3. Perf: contact-filtered suggestion listing uses `candidate_key`/`account_key` index scans (UNION ALL, keyset); retention
+   `PruneDecidedSuggestionsAsync` (both stores) with migration 4's partial `updated_at` index; policy candidate checks share one
+   `IAccessDecisionContext`. Tests `SuggestionStatementsUseIndexes` (EXPLAIN), `VerifyPruneAsync` contract (in-memory + PostgreSQL),
+   `PolicyCandidatesShareOneDecisionContext`.
+4. `ContactChangeKind.IdentityLinked` / `IdentityUnlinked` appended with account links/unlinks (migration 4 widens the check); events
+   follower maps `IdentityLinked` → `ContactIdentityLinkedData(contact, "external-user", true)` (one additive line in
+   `src/Events/TicketFlow.Events/EventFollowers.cs`). Tests `LinkAndUnlinkAppendIdentityChangeKinds`, `IdentityChangeKindsPersist`.
+5. Staff identity results renamed to one prefix: `StaffIdentityWriteApplied|Taken|NotFound|Rejected|Conflict`,
+   `StaffIdentityProfileWriteApplied`, unions `StaffIdentityWriteResult` / `StaffIdentityProfileWriteResult`.
+
+Verification (isolated `postgres:18`, `TICKETFLOW_REQUIRE_POSTGRES=1`): Contacts 100, Contacts PostgreSQL 23, Identity 5, Identity
+PostgreSQL 4, LiveChat 30, Conversations 46, Conversations PostgreSQL 18 — all passed. `src/Events` and `src/Mcp` currently fail to
+build from those fixers' in-progress changes (unrelated errors); the E16 call sites compile.

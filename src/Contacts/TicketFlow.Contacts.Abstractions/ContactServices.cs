@@ -245,6 +245,27 @@ public interface IContactService
     /// <summary>Requires <c>contact:read</c>. A merge tombstone yields <see cref="ContactRefusal.Merged"/> with the surviving contact.</summary>
     Task<ContactResult<ContactView>> GetAsync(PrincipalRef actor, ContactId id, CancellationToken cancellationToken = default);
 
+    /// <summary>Maximum identifiers accepted by <see cref="GetManyAsync"/>.</summary>
+    public const int MaximumBatch = 100;
+
+    /// <summary>
+    /// Reads up to <see cref="MaximumBatch"/> contacts for list rendering: the readable, unmerged contacts among <paramref name="ids"/>
+    /// (masked per caller), omitting missing, merged and forbidden ones. Implementations decide every contact with one decision context
+    /// and load masking policies once; the default implementation calls <see cref="GetAsync"/> per identifier.
+    /// </summary>
+    async Task<IReadOnlyList<ContactView>> GetManyAsync(PrincipalRef actor, IEnumerable<ContactId> ids, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(ids);
+        var distinct = ids.Distinct().ToList();
+        if (distinct.Count > MaximumBatch)
+            throw new ArgumentException($"At most {MaximumBatch} contacts per batch.", nameof(ids));
+        var views = new List<ContactView>();
+        foreach (var id in distinct)
+            if (await GetAsync(actor, id, cancellationToken).ConfigureAwait(false) is ContactApplied<ContactView> applied)
+                views.Add(applied.Value);
+        return views;
+    }
+
     /// <summary>Requires <c>contact:update</c>; edits apply atomically in order, fenced on <paramref name="expectedRevision"/>.</summary>
     Task<ContactResult<ContactView>> UpdateAsync(PrincipalRef actor, ContactId id, long expectedRevision, IEnumerable<ContactEdit> edits, CancellationToken cancellationToken = default);
 

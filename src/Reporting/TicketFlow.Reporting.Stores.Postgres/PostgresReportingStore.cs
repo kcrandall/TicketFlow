@@ -121,9 +121,33 @@ public sealed class PostgresReportingStore : IReportingStore
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(filter);
+        await using var command = CreateAggregateCommand(scope, query, filter);
+        if (command is null)
+            return new ReportAggregateResult([], false);
+        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        command.Connection = connection;
+        var rows = new List<ReportAggregateRow>();
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                rows.Add(Decode(() => new ReportAggregateRow(reader.GetInt32(0), reader.IsDBNull(1) ? null : reader.GetString(1), Metric(reader.GetInt16(2)), reader.GetInt32(3),
+                    reader.GetInt64(4), reader.GetInt64(5), reader.GetInt64(6), reader.GetInt64(7)), "rollup aggregate"));
+        var truncated = rows.Count > ReportAggregateQuery.MaximumRows;
+        if (truncated)
+            rows.RemoveAt(rows.Count - 1);
+        return new ReportAggregateResult(rows, truncated);
+    }
+
+    /// <summary>
+    /// The aggregate statement (without a connection), or <see langword="null"/> when the filter denies everything. Unlabelled aggregates
+    /// read rollups through the partial index <c>tf_report_rollups_query_v2</c> (<c>label = ''</c>); label groupings and filters read the
+    /// facts once per carried label through <c>tf_report_facts_labelled</c> (<c>cardinality(labels) &gt; 0</c>), with labels unknown to the
+    /// Access filter exactly as on rollups.
+    /// </summary>
+    internal static NpgsqlCommand? CreateAggregateCommand(TicketScope scope, ReportAggregateQuery query, AccessFilter filter)
+    {
         var access = PostgresAccessFilterTranslator.Translate(filter, RollupColumns).OrDenyAll();
         if (access.Sql == "FALSE")
-            return new ReportAggregateResult([], false);
+            return null;
         var group = query.GroupBy switch
         {
             ReportDimension.None => "NULL::text",
@@ -136,15 +160,32 @@ public sealed class PostgresReportingStore : IReportingStore
             _ => throw new ArgumentOutOfRangeException(nameof(query)),
         };
         var bin = query.Histograms ? "CASE WHEN r.metric = ANY(@durations) THEN r.bin ELSE 0 END" : "0";
-        var where = new StringBuilder(query.UsesLabelRows ? " AND t.label <> ''" : " AND t.label = ''");
-        await using var command = source.CreateCommand();
+        var scopeWhere = "t." + ScopeKeyWhere.Replace(" AND ", " AND t.", StringComparison.Ordinal);
+        var where = new StringBuilder();
+        var command = new NpgsqlCommand();
         AddScope(command, scope);
-        AddFilter(command, where, query.Filter, "t.agent_id", labelColumn: "t.label = @f_label");
+        string from, totals;
+        if (query.UsesLabelRows)
+        {
+            AddFilter(command, where, query.Filter, "t.agent_id", labelColumn: "l.label = @f_label");
+            from = $"""
+                SELECT t.*, l.label, NULL::text[] AS no_labels, NULL::jsonb AS no_attributes FROM tf_report_facts t CROSS JOIN LATERAL unnest(t.labels) AS l(label)
+                WHERE {scopeWhere} AND cardinality(t.labels) > 0 AND t.metric = ANY(@metrics) AND t.cell_us >= @from AND t.cell_us < @to{where}
+                """;
+            totals = "count(*)::bigint, sum(r.value)::bigint, min(r.value), max(r.value)";
+        }
+        else
+        {
+            AddFilter(command, where, query.Filter, "t.agent_id", labelColumn: "FALSE");
+            from = $"""
+                SELECT t.*, NULL::text[] AS no_labels, NULL::jsonb AS no_attributes FROM tf_report_rollups t
+                WHERE {scopeWhere} AND t.label = '' AND t.metric = ANY(@metrics) AND t.cell_us >= @from AND t.cell_us < @to{where}
+                """;
+            totals = "sum(r.count)::bigint, sum(r.total)::bigint, min(r.minimum), max(r.maximum)";
+        }
         command.CommandText = $"""
-            SELECT width_bucket(r.cell_us, @bounds) - 1 AS bucket, {group} AS grp, r.metric, {bin} AS bin,
-                sum(r.count)::bigint, sum(r.total)::bigint, min(r.minimum), max(r.maximum)
-            FROM (SELECT t.*, NULL::text[] AS no_labels, NULL::jsonb AS no_attributes FROM tf_report_rollups t
-                WHERE t.{ScopeKeyWhere.Replace(" AND ", " AND t.", StringComparison.Ordinal)} AND t.metric = ANY(@metrics) AND t.cell_us >= @from AND t.cell_us < @to{where}) r
+            SELECT width_bucket(r.cell_us, @bounds) - 1 AS bucket, {group} AS grp, r.metric, {bin} AS bin, {totals}
+            FROM ({from}) r
             WHERE {access.Sql}
             GROUP BY 1, 2, 3, 4
             ORDER BY 1, ({group}) COLLATE "C" NULLS FIRST, 3, 4
@@ -158,15 +199,7 @@ public sealed class PostgresReportingStore : IReportingStore
             { Value = ReportMetrics.All.Where(ReportMetrics.IsDuration).Select(metric => (short)metric).ToArray() });
         command.Parameters.AddWithValue("from", Micro(query.From));
         command.Parameters.AddWithValue("to", Micro(query.To));
-        var rows = new List<ReportAggregateRow>();
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                rows.Add(Decode(() => new ReportAggregateRow(reader.GetInt32(0), reader.IsDBNull(1) ? null : reader.GetString(1), Metric(reader.GetInt16(2)), reader.GetInt32(3),
-                    reader.GetInt64(4), reader.GetInt64(5), reader.GetInt64(6), reader.GetInt64(7)), "rollup aggregate"));
-        var truncated = rows.Count > ReportAggregateQuery.MaximumRows;
-        if (truncated)
-            rows.RemoveAt(rows.Count - 1);
-        return new ReportAggregateResult(rows, truncated);
+        return command;
     }
 
     public async Task<long> CountBacklogAsync(TicketScope scope, ReportFilter query, AccessFilter filter, CancellationToken cancellationToken = default)
@@ -235,13 +268,36 @@ public sealed class PostgresReportingStore : IReportingStore
     public async Task<int> PruneFactsAsync(DateTimeOffset olderThan, int limit, CancellationToken cancellationToken = default)
     {
         RequireLimit(limit);
-        await using var command = source.CreateCommand("""
+        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        // Advance the horizon first: the row lock serializes this prune with rebuilds, which read the horizon FOR SHARE.
+        await using (var horizon = new NpgsqlCommand(
+            "UPDATE tf_report_retention SET fact_horizon = GREATEST(COALESCE(fact_horizon, @cutoff), @cutoff) WHERE id = 1", connection, transaction))
+        {
+            AddTime(horizon, "cutoff", olderThan);
+            if (await horizon.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+                throw new InvalidOperationException("The reporting retention row is missing; run InitializeAsync.");
+        }
+        int deleted;
+        await using (var command = new NpgsqlCommand("""
             DELETE FROM tf_report_facts WHERE fact_key IN (
                 SELECT fact_key FROM tf_report_facts WHERE occurred_at < @cutoff ORDER BY occurred_at LIMIT @limit FOR UPDATE SKIP LOCKED)
-            """);
-        AddTime(command, "cutoff", olderThan);
-        command.Parameters.AddWithValue("limit", limit);
-        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            """, connection, transaction))
+        {
+            AddTime(command, "cutoff", olderThan);
+            command.Parameters.AddWithValue("limit", limit);
+            deleted = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return deleted;
+    }
+
+    public async Task<DateTimeOffset?> GetFactHorizonAsync(CancellationToken cancellationToken = default)
+    {
+        await using var command = source.CreateCommand("SELECT fact_horizon FROM tf_report_retention WHERE id = 1");
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is DateTime value
+            ? new DateTimeOffset(DateTime.SpecifyKind(value, DateTimeKind.Utc))
+            : null;
     }
 
     public async Task<int> PruneRollupsAsync(DateTimeOffset olderThan, int limit, CancellationToken cancellationToken = default)
@@ -256,7 +312,7 @@ public sealed class PostgresReportingStore : IReportingStore
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<long> RebuildRollupsAsync(TicketScope scope, DateTimeOffset from, DateTimeOffset to, CancellationToken cancellationToken = default)
+    public async Task<ReportRebuildResult> RebuildRollupsAsync(TicketScope scope, DateTimeOffset from, DateTimeOffset to, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ReportStoreLimits.RequireRebuildRange(from, to);
@@ -264,6 +320,11 @@ public sealed class PostgresReportingStore : IReportingStore
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         // Exclusive against projections of the scope, so no fact can commit between the delete and the recount.
         await LockScopeAsync(connection, transaction, scope, shared: false, cancellationToken).ConfigureAwait(false);
+        // FOR SHARE blocks concurrent fact prunes (they update this row first) until the rebuild commits.
+        await using (var horizon = new NpgsqlCommand("SELECT fact_horizon FROM tf_report_retention WHERE id = 1 FOR SHARE", connection, transaction))
+            if (await horizon.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is DateTime value
+                && new DateTimeOffset(DateTime.SpecifyKind(value, DateTimeKind.Utc)) is var factHorizon && from < factHorizon)
+                return new ReportRebuildRefused(factHorizon);
         await using (var delete = new NpgsqlCommand($"DELETE FROM tf_report_rollups WHERE {ScopeKeyWhere} AND cell_us >= @from AND cell_us < @to", connection, transaction))
         {
             AddScope(delete, scope);
@@ -271,29 +332,25 @@ public sealed class PostgresReportingStore : IReportingStore
             delete.Parameters.AddWithValue("to", Micro(to));
             await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
+        long counted = 0;
         await using (var insert = new NpgsqlCommand($"""
-            INSERT INTO tf_report_rollups({ScopeColumns}, metric, cell_us, inbox_id, team_id, agent_id, channel, priority, label, bin, count, total, minimum, maximum, format_version)
-            SELECT {ScopeColumns}, metric, cell_us, inbox_id, team_id, agent_id, channel, priority, l.label, bin, count(*), sum(value)::bigint, min(value), max(value), 1
-            FROM tf_report_facts f CROSS JOIN LATERAL (SELECT ''::text AS label UNION ALL SELECT unnest(f.labels)) l
-            WHERE f.{ScopeKeyWhere.Replace(" AND ", " AND f.", StringComparison.Ordinal)} AND f.cell_us >= @from AND f.cell_us < @to
-            GROUP BY {ScopeColumns}, metric, cell_us, inbox_id, team_id, agent_id, channel, priority, l.label, bin
+            WITH inserted AS (
+                INSERT INTO tf_report_rollups({ScopeColumns}, metric, cell_us, inbox_id, team_id, agent_id, channel, priority, label, bin, count, total, minimum, maximum, format_version)
+                SELECT {ScopeColumns}, metric, cell_us, inbox_id, team_id, agent_id, channel, priority, '', bin, count(*), sum(value)::bigint, min(value), max(value), 1
+                FROM tf_report_facts f
+                WHERE f.{ScopeKeyWhere.Replace(" AND ", " AND f.", StringComparison.Ordinal)} AND f.cell_us >= @from AND f.cell_us < @to
+                GROUP BY {ScopeColumns}, metric, cell_us, inbox_id, team_id, agent_id, channel, priority, bin
+                RETURNING count)
+            SELECT COALESCE(sum(count), 0)::bigint FROM inserted
             """, connection, transaction))
         {
             AddScope(insert, scope);
             insert.Parameters.AddWithValue("from", Micro(from));
             insert.Parameters.AddWithValue("to", Micro(to));
-            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-        long counted;
-        await using (var count = new NpgsqlCommand($"SELECT count(*) FROM tf_report_facts WHERE {ScopeKeyWhere} AND cell_us >= @from AND cell_us < @to", connection, transaction))
-        {
-            AddScope(count, scope);
-            count.Parameters.AddWithValue("from", Micro(from));
-            count.Parameters.AddWithValue("to", Micro(to));
-            counted = (long)(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+            counted = (long)(await insert.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return counted;
+        return new ReportRebuilt(counted);
     }
 
     // ---------------------------------------------------------------- projection writes
@@ -342,14 +399,12 @@ public sealed class PostgresReportingStore : IReportingStore
         foreach (var fact in facts)
         {
             var dimensions = fact.Dimensions;
-            foreach (var label in dimensions.Labels.Select(label => label.Value).Prepend(string.Empty))
-            {
-                var key = new CellKey(fact.Metric, Micro(fact.CellStart), dimensions.Inbox.Value, dimensions.Team?.Value, dimensions.Agent?.Value, dimensions.Channel,
-                    dimensions.Priority, label, fact.Bin);
-                cells[key] = cells.TryGetValue(key, out var current)
-                    ? (current.Count + 1, current.Total + fact.Value, Math.Min(current.Minimum, fact.Value), Math.Max(current.Maximum, fact.Value))
-                    : (1, fact.Value, fact.Value, fact.Value);
-            }
+            // Labels are not rolled up (label reports read facts), so each fact touches exactly one cell.
+            var key = new CellKey(fact.Metric, Micro(fact.CellStart), dimensions.Inbox.Value, dimensions.Team?.Value, dimensions.Agent?.Value, dimensions.Channel,
+                dimensions.Priority, string.Empty, fact.Bin);
+            cells[key] = cells.TryGetValue(key, out var current)
+                ? (current.Count + 1, current.Total + fact.Value, Math.Min(current.Minimum, fact.Value), Math.Max(current.Maximum, fact.Value))
+                : (1, fact.Value, fact.Value, fact.Value);
         }
         if (cells.Count == 0)
             return;

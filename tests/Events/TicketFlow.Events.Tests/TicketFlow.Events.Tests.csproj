@@ -4,6 +4,7 @@
     <ProjectReference Include="../../../src/Events/TicketFlow.Events/TicketFlow.Events.csproj" />
     <ProjectReference Include="../../../src/Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
     <ProjectReference Include="../../../src/Contacts/TicketFlow.Contacts/TicketFlow.Contacts.csproj" />
+    <ProjectReference Include="../../../src/Surveys/TicketFlow.Surveys/TicketFlow.Surveys.csproj" />
     <ProjectReference Include="../../../src/Workspaces/TicketFlow.Workspaces/TicketFlow.Workspaces.csproj" />
     <ProjectReference Include="../../../src/Access/TicketFlow.Access/TicketFlow.Access.csproj" />
     <ProjectReference Include="../../../src/TicketFlow/TicketFlow.csproj" />

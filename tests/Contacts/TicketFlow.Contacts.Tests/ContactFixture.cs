@@ -70,11 +70,12 @@ internal sealed class ContactFixture : IDisposable
     /// <summary>The application login client: read, create, link and merge.</summary>
     public ApiClientPrincipal Portal => TestPrincipals.ApiClient(Scope, "portal");
 
-    public static async Task<ContactFixture> CreateAsync(Action<ContactsOptions>? options = null)
+    public static async Task<ContactFixture> CreateAsync(Action<ContactsOptions>? options = null, Action<IServiceCollection>? configure = null)
     {
         var clock = TestClock.Create();
         var observer = new RecordingObserver();
         var services = new ServiceCollection();
+        configure?.Invoke(services);
         services.AddSingleton<TimeProvider>(clock);
         services.AddSingleton<IContactChangeObserver>(observer);
         services.AddTicketFlow()

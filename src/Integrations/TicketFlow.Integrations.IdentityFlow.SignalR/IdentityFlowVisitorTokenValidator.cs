@@ -6,7 +6,7 @@ using Microsoft.IdentityModel.Tokens;
 using TicketFlow.Channels.LiveChat;
 using TicketFlow.Core;
 
-namespace TicketFlow.Integrations.IdentityFlow;
+namespace TicketFlow.Integrations.IdentityFlow.SignalR;
 
 public sealed class IdentityFlowVisitorTokenOptions
 {
@@ -42,13 +42,20 @@ public sealed class IdentityFlowVisitorTokenOptions
     /// <summary>Maximum accepted token length in characters (default 8192).</summary>
     public int MaximumTokenLength { get; set; } = 8192;
 
+    /// <summary>How often discovery and JWKS are re-read even without unknown keys (default 12 hours).</summary>
+    public TimeSpan AutomaticRefreshInterval { get; set; } = TimeSpan.FromHours(12);
+
+    /// <summary>Minimum time between refreshes triggered by tokens naming unknown signing keys (default 5 minutes).</summary>
+    public TimeSpan RefreshInterval { get; set; } = TimeSpan.FromMinutes(5);
+
     /// <summary>Back-channel handler for discovery and JWKS requests (proxies, tests).</summary>
     public HttpMessageHandler? BackchannelHandler { get; set; }
 }
 
 /// <summary>
 /// <see cref="IVisitorTokenValidator"/> for IdentityFlow-issued JWTs (OpenIddict identity tokens, or access tokens issued without encryption):
-/// signature against the issuer's JWKS (discovery, cached and refreshed by <see cref="ConfigurationManager{T}"/>) or static keys, issuer,
+/// signature against the issuer's JWKS (discovery through <see cref="TokenValidationParameters.ConfigurationManager"/>: cached, refreshed
+/// periodically and on unknown key identifiers, so issuer key rotation is picked up) or static keys, issuer,
 /// audience, token type and lifetime (expiry required). The subject (<c>sub</c>, GUIDs normalized to "D") is the verified visitor identity;
 /// <c>display_name</c> or <c>name</c> is the optional display name. Tokens and validation details are never logged.
 /// </summary>
@@ -57,6 +64,8 @@ public sealed class IdentityFlowVisitorTokenValidator : IVisitorTokenValidator, 
     private readonly IdentityFlowVisitorTokenOptions options;
     private readonly ConfigurationManager<OpenIdConnectConfiguration>? configuration;
     private readonly HttpClient? backchannel;
+    private const int RotationRetries = 10;
+    private static readonly TimeSpan RotationRetryDelay = TimeSpan.FromMilliseconds(100);
     private readonly JsonWebTokenHandler handler = new() { MapInboundClaims = false };
 
     public IdentityFlowVisitorTokenValidator(IOptions<IdentityFlowVisitorTokenOptions> options)
@@ -78,7 +87,11 @@ public sealed class IdentityFlowVisitorTokenValidator : IVisitorTokenValidator, 
             ?? throw new InvalidOperationException("IdentityFlowVisitorTokenOptions requires an Authority, a MetadataAddress or static signing keys.");
         backchannel = new HttpClient(this.options.BackchannelHandler ?? new HttpClientHandler(), disposeHandler: this.options.BackchannelHandler is null) { Timeout = TimeSpan.FromSeconds(30) };
         configuration = new ConfigurationManager<OpenIdConnectConfiguration>(metadata, new OpenIdConnectConfigurationRetriever(),
-            new HttpDocumentRetriever(backchannel) { RequireHttps = this.options.RequireHttpsMetadata });
+            new HttpDocumentRetriever(backchannel) { RequireHttps = this.options.RequireHttpsMetadata })
+        {
+            AutomaticRefreshInterval = this.options.AutomaticRefreshInterval,
+            RefreshInterval = this.options.RefreshInterval,
+        };
     }
 
     public async Task<VisitorTokenValidation> ValidateAsync(TicketScope scope, string configurationId, string token, CancellationToken cancellationToken = default)
@@ -106,23 +119,25 @@ public sealed class IdentityFlowVisitorTokenValidator : IVisitorTokenValidator, 
         }
         else
         {
-            OpenIdConnectConfiguration discovery;
-            try
-            {
-                discovery = await configuration.GetConfigurationAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception error) when (error is InvalidOperationException or HttpRequestException or IOException)
-            {
-                // The issuer is unreachable: fail closed without echoing details.
-                return VisitorTokenRejected.Instance;
-            }
-            parameters.ValidIssuers = options.ValidIssuers.Count > 0 ? [.. options.ValidIssuers] : [discovery.Issuer];
-            parameters.IssuerSigningKeys = discovery.SigningKeys;
+            // The handler reads issuer and signing keys from the configuration manager and refreshes it when a token names an unknown
+            // key (key rotation), rate-limited by RefreshInterval.
+            parameters.ConfigurationManager = configuration;
+            if (options.ValidIssuers.Count > 0)
+                parameters.ValidIssuers = [.. options.ValidIssuers];
         }
         TokenValidationResult result;
         try
         {
             result = await handler.ValidateTokenAsync(token, parameters).ConfigureAwait(false);
+            // An unknown key identifier means the issuer rotated keys: ask the configuration manager to refresh (rate-limited by
+            // RefreshInterval; the refresh completes in the background) and retry briefly.
+            for (var attempt = 0; configuration is not null && !result.IsValid && result.Exception is SecurityTokenSignatureKeyNotFoundException && attempt < RotationRetries; attempt++)
+            {
+                if (attempt == 0)
+                    configuration.RequestRefresh();
+                await Task.Delay(RotationRetryDelay, cancellationToken).ConfigureAwait(false);
+                result = await handler.ValidateTokenAsync(token, parameters).ConfigureAwait(false);
+            }
         }
         catch (Exception error) when (error is ArgumentException or SecurityTokenException)
         {

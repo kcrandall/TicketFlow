@@ -5,6 +5,7 @@
 </PageHeader>
 <AccessTabs Active="roles" />
 
+<AccessGate Denied="Denied">
 <div class="tf-card">
     <div class="tf-table-wrap">
         <table class="tf-table">
@@ -47,6 +48,7 @@
         <div class="tf-alert__messages" style="list-style:none;padding:0">Every administrative change, reveal, break-glass activation and sensitive decision is recorded by the registered <span class="tf-code">IAccessAuditSink</span> — never with message bodies or masked values. Browse it in your audit store.</div>
     </div>
 </div>
+</AccessGate>
 
 @code {
     private sealed record RoleRow(AccessRole Role, bool BuiltIn, long? Revision);
@@ -56,11 +58,11 @@
 
     protected override async Task OnInitializedAsync()
     {
-        roles.AddRange(BuiltInRoles.All.Select(role => new RoleRow(role, true, null)));
-        if (Service<IAccessRoleStore>() is { } store)
-            roles.AddRange((await store.ListAsync(Session.Scope, Aborted)).Select(stored => new RoleRow(stored.Role, false, stored.Revision)));
-        if (Service<IAccessGrantStore>() is { } grants)
-            foreach (var grant in await grants.ListForTargetAsync(AccessPartition.From(Session.Scope), new WorkspaceGrantScope(Session.Scope.WorkspaceId), 1000, null, Aborted))
+        if (await AccessListAsync(administrator => administrator.ListRolesAsync(Actor, Aborted)) is not { } listed)
+            return;
+        roles.AddRange(listed.Select(item => new RoleRow(item.Role, item.Revision is null, item.Revision)));
+        if (await AccessListAsync(administrator => administrator.ListGrantsAsync(Actor, new WorkspaceGrantScope(Session.Scope.WorkspaceId), AccessLimits.MaximumTargetPage, null, Aborted)) is { } grants)
+            foreach (var grant in grants)
                 members[grant.Grant.Role.Value] = members.GetValueOrDefault(grant.Grant.Role.Value) + 1;
     }
 }

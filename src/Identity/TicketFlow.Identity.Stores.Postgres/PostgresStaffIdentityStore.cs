@@ -109,8 +109,8 @@ public sealed class PostgresStaffIdentityStore(NpgsqlDataSource dataSource) : IS
         }
         var existing = await FindAsync(connection, transaction, scope, link.Identity, cancellationToken).ConfigureAwait(false);
         if (existing is null)
-            return StaffWriteRejected.CapacityExceeded;
-        return existing.Link.User == link.User ? new StaffIdentityWriteApplied(existing, false) : new StaffIdentityTaken(existing.Link.User);
+            return StaffIdentityWriteRejected.CapacityExceeded;
+        return existing.Link.User == link.User ? new StaffIdentityWriteApplied(existing, false) : new StaffIdentityWriteTaken(existing.Link.User);
     }
 
     public async Task<StaffIdentityWriteResult> UnlinkAsync(TicketScope scope, StaffIdentityRef identity, UserId expectedUser, StaffIdentityAuditEvent audit, CancellationToken cancellationToken = default)
@@ -139,7 +139,7 @@ public sealed class PostgresStaffIdentityStore(NpgsqlDataSource dataSource) : IS
             }
         }
         var existing = await FindAsync(connection, transaction, scope, identity, cancellationToken).ConfigureAwait(false);
-        return existing is null ? StaffWriteNotFound.Instance : new StaffIdentityTaken(existing.Link.User);
+        return existing is null ? StaffIdentityWriteNotFound.Instance : new StaffIdentityWriteTaken(existing.Link.User);
     }
 
     public async Task<StoredStaffProfile?> GetProfileAsync(TicketScope scope, UserId user, CancellationToken cancellationToken = default)
@@ -159,7 +159,7 @@ public sealed class PostgresStaffIdentityStore(NpgsqlDataSource dataSource) : IS
         }, "staff profile");
     }
 
-    public async Task<StaffProfileWriteResult> PutProfileAsync(TicketScope scope, StaffProfile profile, DateTimeOffset updatedAt, long? expectedRevision, StaffIdentityAuditEvent audit,
+    public async Task<StaffIdentityProfileWriteResult> PutProfileAsync(TicketScope scope, StaffProfile profile, DateTimeOffset updatedAt, long? expectedRevision, StaffIdentityAuditEvent audit,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -192,15 +192,15 @@ public sealed class PostgresStaffIdentityStore(NpgsqlDataSource dataSource) : IS
             {
                 await InsertAuditAsync(connection, transaction, audit, cancellationToken).ConfigureAwait(false);
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new StaffProfileWriteApplied(new StoredStaffProfile(scope, profile, at, revision));
+                return new StaffIdentityProfileWriteApplied(new StoredStaffProfile(scope, profile, at, revision));
             }
         }
         await using var current = new NpgsqlCommand($"SELECT revision FROM tf_staff_profiles WHERE {UserWhere}", connection, transaction);
         AddScope(current, scope);
         AddText(current, "user", profile.User.Value);
         return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
-            ? new StaffProfileWriteConflict(existing)
-            : StaffWriteNotFound.Instance;
+            ? new StaffIdentityWriteConflict(existing)
+            : StaffIdentityWriteNotFound.Instance;
     }
 
     private static async Task<StoredStaffIdentityLink?> FindAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, TicketScope scope, StaffIdentityRef identity,

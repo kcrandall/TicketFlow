@@ -161,36 +161,36 @@ public sealed record StaffIdentityAuditEvent
 public sealed record StaffIdentityWriteApplied(StoredStaffIdentityLink Link, bool Changed = true);
 
 /// <summary>The identity is linked to <see cref="User"/> (another user). Nothing was written.</summary>
-public sealed record StaffIdentityTaken(UserId User);
+public sealed record StaffIdentityWriteTaken(UserId User);
 
-public sealed record StaffWriteNotFound
+public sealed record StaffIdentityWriteNotFound
 {
-    private StaffWriteNotFound()
+    private StaffIdentityWriteNotFound()
     {
     }
 
-    public static StaffWriteNotFound Instance { get; } = new();
+    public static StaffIdentityWriteNotFound Instance { get; } = new();
 }
 
 /// <summary>A store capacity limit refused the write. Nothing was written.</summary>
-public sealed record StaffWriteRejected
+public sealed record StaffIdentityWriteRejected
 {
-    private StaffWriteRejected()
+    private StaffIdentityWriteRejected()
     {
     }
 
-    public static StaffWriteRejected CapacityExceeded { get; } = new();
+    public static StaffIdentityWriteRejected CapacityExceeded { get; } = new();
 }
 
 /// <summary>Outcome of a link or unlink. Switch over every case without a discard arm.</summary>
-public union StaffIdentityWriteResult(StaffIdentityWriteApplied, StaffIdentityTaken, StaffWriteNotFound, StaffWriteRejected);
+public union StaffIdentityWriteResult(StaffIdentityWriteApplied, StaffIdentityWriteTaken, StaffIdentityWriteNotFound, StaffIdentityWriteRejected);
 
-public sealed record StaffProfileWriteApplied(StoredStaffProfile Profile);
+public sealed record StaffIdentityProfileWriteApplied(StoredStaffProfile Profile);
 
-public sealed record StaffProfileWriteConflict(long CurrentRevision);
+public sealed record StaffIdentityWriteConflict(long CurrentRevision);
 
 /// <summary>Outcome of a profile write. Switch over every case without a discard arm.</summary>
-public union StaffProfileWriteResult(StaffProfileWriteApplied, StaffWriteNotFound, StaffProfileWriteConflict);
+public union StaffIdentityProfileWriteResult(StaffIdentityProfileWriteApplied, StaffIdentityWriteNotFound, StaffIdentityWriteConflict);
 
 /// <summary>
 /// Durable staff identity storage. Contract:
@@ -198,7 +198,7 @@ public union StaffProfileWriteResult(StaffProfileWriteApplied, StaffWriteNotFoun
 /// <item>Every operation is confined to one <see cref="TicketScope"/>.</item>
 /// <item>(scope, provider, subject) maps to at most one user, enforced atomically; linking an identity already linked to the same
 /// user is an idempotent no-op (<see cref="StaffIdentityWriteApplied.Changed"/> false, no audit), to another user
-/// <see cref="StaffIdentityTaken"/>. A user holds at most <see cref="MaximumIdentitiesPerUser"/> identities per scope (atomic).</item>
+/// <see cref="StaffIdentityWriteTaken"/>. A user holds at most <see cref="MaximumIdentitiesPerUser"/> identities per scope (atomic).</item>
 /// <item>Unlink removes the mapping only when it still names the expected user.</item>
 /// <item>Profiles: create at revision 1 (<see langword="null"/> expected revision; conflict when present), compare-and-set afterwards.</item>
 /// <item>The supplied audit event is recorded in the same transaction as the change it describes.</item>
@@ -219,7 +219,7 @@ public interface IStaffIdentityStore
 
     Task<StoredStaffProfile?> GetProfileAsync(TicketScope scope, UserId user, CancellationToken cancellationToken = default);
 
-    Task<StaffProfileWriteResult> PutProfileAsync(TicketScope scope, StaffProfile profile, DateTimeOffset updatedAt, long? expectedRevision, StaffIdentityAuditEvent audit,
+    Task<StaffIdentityProfileWriteResult> PutProfileAsync(TicketScope scope, StaffProfile profile, DateTimeOffset updatedAt, long? expectedRevision, StaffIdentityAuditEvent audit,
         CancellationToken cancellationToken = default);
 }
 

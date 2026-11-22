@@ -4,7 +4,12 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using TicketFlow.Access;
+using TicketFlow.Assist;
+using TicketFlow.Core;
 using TicketFlow.SampleHost;
+using TicketFlow.Workspaces;
 
 namespace TicketFlow.UI.Blazor.Tests;
 
@@ -28,9 +33,27 @@ public sealed partial class SmokeTests
                 ["TicketFlow:Storage"] = "InMemory",
                 ["TicketFlow:DevelopmentAuthentication"] = "true",
             });
+            builder.Services.AddSingleton<IAssistService, TestAssist>();
         });
         await SampleHostApp.InitializeAsync(app, seed: true);
+        await ProvisionTeamScopedAgentAsync(app.Services);
         await app.StartAsync();
+    }
+
+    public const string TeamAgent = "tier1lead";
+
+    /// <summary>A user whose only grant is the Agent role on the Tier 1 team (no workspace-level grant).</summary>
+    private static async Task ProvisionTeamScopedAgentAsync(IServiceProvider root)
+    {
+        await using var scope = root.CreateAsyncScope();
+        var services = scope.ServiceProvider;
+        var settings = services.GetRequiredService<SampleSettings>();
+        var tier1 = new TeamId("tier1");
+        var teams = services.GetRequiredService<ITeamStore>();
+        var team = (await teams.GetAsync(settings.Scope, tier1))!;
+        await teams.UpdateAsync(settings.Scope, new Team(tier1, team.Team.Name, team.Team.Description, [.. team.Team.Members, new UserId(TeamAgent)]), team.Revision);
+        await services.GetRequiredService<IAccessGrantStore>().CreateAsync(new AccessGrant(new GrantId("test-team-agent"), settings.Partition, new UserId(TeamAgent),
+            BuiltInRoles.Agent.Id, new TeamGrantScope(settings.Workspace, tier1)));
     }
 
     [ClassCleanup]
@@ -169,12 +192,13 @@ public sealed partial class SmokeTests
     public async Task ForbiddenWritesShowAFriendlyMessage()
     {
         var client = Client("viewer");
-        var (token, cookie, revision) = await FormAsync(client, "/support/conversations/c-1010");
+        var (token, cookie, _) = await FormAsync(client, "/support/conversations/c-1010");
+        var (_, _, current) = await FormAsync(Client("admin"), "/support/conversations/c-1010");   // viewers see no fenced forms
         var response = await PostAsync(client, "/support/conversations/c-1010", cookie, new Dictionary<string, string>
         {
             ["__RequestVerificationToken"] = token,
             ["_action"] = "conversation.priority",
-            ["_revision"] = revision,
+            ["_revision"] = current,
             ["priority"] = "Urgent",
         });
         Assert.AreEqual(HttpStatusCode.Forbidden, response.StatusCode);
@@ -212,6 +236,169 @@ public sealed partial class SmokeTests
         Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
         Assert.AreEqual("text/csv", response.Content.Headers.ContentType?.MediaType);
         StringAssert.StartsWith(await response.Content.ReadAsStringAsync(), "source_id,metric,occurred_at");
+    }
+
+    private static readonly (string Path, string Action)[] Sections =
+    [
+        ("/support/conversations", "conversation.priority"), ("/support/contacts", "contact.create"), ("/support/reports", "report.export"),
+        ("/support/inboxes", "inbox.create"), ("/support/teams", "team.create"), ("/support/calendars", "calendar.create"),
+        ("/support/channels", "channel.endpoint.create"), ("/support/routing", "routing.policy.save"), ("/support/sla", "sla.policy.save"),
+        ("/support/automation", "automation.rule.save"), ("/support/help-center", "helpcenter.collection.create"), ("/support/surveys", "survey.toggle"),
+        ("/support/access", "access.role.save"), ("/support/access/grants", "access.grant.create"), ("/support/access/field-policies", "access.field.create"),
+        ("/support/access/break-glass", "access.breakglass"), ("/support/settings", "settings.save"),
+    ];
+
+    [TestMethod]
+    public async Task PostsCannotReachSectionsTheViewerCannotOpen()
+    {
+        var client = Client("viewer");
+        var (token, cookie, _) = await FormAsync(client, "/support");
+        var denied = 0;
+        foreach (var (path, action) in Sections)
+        {
+            var page = await client.GetAsync(path);
+            if (page.StatusCode != HttpStatusCode.Forbidden)
+                continue;
+            denied++;
+            var post = await PostAsync(client, path, cookie, new Dictionary<string, string>
+            {
+                ["__RequestVerificationToken"] = token,
+                ["_action"] = action,
+                ["_revision"] = "1",
+                ["name"] = "Sweep " + action,
+                ["newid"] = "sweep-role",
+                ["permission"] = "conversation:read",
+            });
+            Assert.AreEqual(HttpStatusCode.Forbidden, post.StatusCode, path);
+            StringAssert.Contains(await post.Content.ReadAsStringAsync(), "Access denied", path);
+        }
+        Assert.IsGreaterThanOrEqualTo(5, denied, "The viewer is denied several sections (access, automation, channels, ...).");
+        var roles = await (await Client("admin").GetAsync("/support/access")).Content.ReadAsStringAsync();
+        Assert.IsFalse(roles.Contains("sweep-role", StringComparison.Ordinal), "A denied POST never runs its action.");
+    }
+
+    [TestMethod]
+    public async Task ActionsOnlyRunOnTheirOwnSection()
+    {
+        var client = Client("admin");
+        var (token, cookie, _) = await FormAsync(client, "/support/conversations");
+        var response = await PostAsync(client, "/support/conversations", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "access.role.save",
+            ["name"] = "Smuggled",
+        });
+        Assert.AreEqual(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [TestMethod]
+    public async Task TeamScopedAgentSeesTeamConversations()
+    {
+        var client = Client(TeamAgent);
+        var dashboard = await client.GetAsync("/support");
+        var home = await dashboard.Content.ReadAsStringAsync();
+        Assert.AreEqual(HttpStatusCode.OK, dashboard.StatusCode);
+        StringAssert.Contains(home, "href=\"/support/conversations\"", "Team grants count for navigation.");
+        StringAssert.Contains(home, "Recent activity");
+        // Contacts are not team-scoped resources, so a team-only agent sees conversations but not contact names.
+        Assert.IsTrue(new[] { "c-marcus", "c-mia", "c-hannah", "c-chloe" }.Any(home.Contains), "The dashboard shows the team's conversations.");
+        Assert.IsFalse(home.Contains("c-james", StringComparison.Ordinal), "Escalations conversations stay hidden.");
+
+        var list = await client.GetAsync("/support/conversations");
+        var html = await list.Content.ReadAsStringAsync();
+        Assert.AreEqual(HttpStatusCode.OK, list.StatusCode);
+        StringAssert.Contains(html, "/support/conversations/c-1002");
+        Assert.IsFalse(html.Contains("/support/conversations/c-1004", StringComparison.Ordinal), "Billing-team conversations stay hidden.");
+        Assert.IsFalse(html.Contains("href=\"/support/access\"", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task ConversationCommandsRequireTheExpectedRevision()
+    {
+        var client = Client("admin");
+        var (token, cookie, _) = await FormAsync(client, "/support/conversations/c-1015");
+        var response = await PostAsync(client, "/support/conversations/c-1015", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "conversation.assign",
+            ["assignee"] = "agent2",
+        });
+        Assert.AreEqual(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        StringAssert.Contains(await response.Content.ReadAsStringAsync(), "missing its revision");
+    }
+
+    [TestMethod]
+    public async Task ContactMergeIsFencedOnTheConfirmedDuplicateRevision()
+    {
+        var client = Client("admin");
+        var (token, cookie, revision) = await FormAsync(client, "/support/contacts/c-leo");
+        var preview = await PostAsync(client, "/support/contacts/c-leo", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "contact.merge.preview",
+            ["_revision"] = revision,
+            ["source"] = "c-amelia",
+        });
+        var html = await preview.Content.ReadAsStringAsync();
+        Assert.AreEqual(HttpStatusCode.OK, preview.StatusCode);
+        StringAssert.Contains(html, "name=\"sourceRevision\"");
+        Assert.IsTrue(preview.Headers.CacheControl?.NoStore);
+
+        var stale = await PostAsync(client, "/support/contacts/c-leo", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "contact.merge",
+            ["_revision"] = revision,
+            ["source"] = "c-amelia",
+            ["sourceRevision"] = "999",
+        });
+        Assert.AreEqual(HttpStatusCode.Conflict, stale.StatusCode);
+    }
+
+    [TestMethod]
+    public async Task RevealedValuesAiDraftsAndDryRunsAreNeverCached()
+    {
+        var client = Client("admin");
+        var (token, cookie, revision) = await FormAsync(client, "/support/contacts/c-olivia");
+        var reveal = await PostAsync(client, "/support/contacts/c-olivia", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "contact.reveal",
+            ["field"] = "contact.phone",
+            ["justification"] = "Customer asked for a callback",
+        });
+        Assert.AreEqual(HttpStatusCode.OK, reveal.StatusCode);
+        Assert.IsTrue(reveal.Headers.CacheControl?.NoStore, "reveal");
+        var revealed = await reveal.Content.ReadAsStringAsync();
+        StringAssert.Contains(revealed, "14155550142");
+        Assert.IsFalse(reveal.Headers.TryGetValues("Set-Cookie", out var revealCookies) && revealCookies.Any(value => value.StartsWith("tf-flash", StringComparison.Ordinal)));
+
+        var (conversationToken, conversationCookie, conversationRevision) = await FormAsync(client, "/support/conversations/c-1001");
+        var draft = await PostAsync(client, "/support/conversations/c-1001", conversationCookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = conversationToken,
+            ["_action"] = "conversation.assist.draft",
+            ["_revision"] = conversationRevision,
+        });
+        Assert.AreEqual(HttpStatusCode.OK, draft.StatusCode);
+        Assert.IsTrue(draft.Headers.CacheControl?.NoStore, "AI draft");
+        StringAssert.Contains(await draft.Content.ReadAsStringAsync(), TestAssist.Draft);
+
+        var (ruleToken, ruleCookie, _) = await FormAsync(client, "/support/automation/rules/tag-refunds");
+        var rulePage = await (await client.GetAsync("/support/automation/rules/tag-refunds")).Content.ReadAsStringAsync();
+        var definition = WebUtility.HtmlDecode(Regex.Match(rulePage, "<textarea name=\"definition\"[^>]*>([^<]*)</textarea>").Groups[1].Value);
+        var dryRun = await PostAsync(client, "/support/automation/rules/tag-refunds", ruleCookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = ruleToken,
+            ["_action"] = "automation.rule.dryrun",
+            ["definition"] = definition,
+            ["conversation"] = "c-1001",
+            ["event"] = "message-received",
+            ["message"] = "I want a refund",
+        });
+        Assert.AreEqual(HttpStatusCode.OK, dryRun.StatusCode);
+        Assert.IsTrue(dryRun.Headers.CacheControl?.NoStore, "dry run");
+        StringAssert.Contains(await dryRun.Content.ReadAsStringAsync(), "Dry run complete");
     }
 
     private static async Task<(string Token, string Cookie, string Revision)> FormAsync(HttpClient client, string path)

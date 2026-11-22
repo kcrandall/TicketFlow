@@ -47,3 +47,11 @@ Verification (2026-11-22):
 - `dotnet test tests/Hosting/TicketFlow.Hosting.Worker.Tests -c Release` — 7 passed, 0 failed.
 - `dotnet test tests/Hosting/TicketFlow.Hosting.Worker.Stores.Postgres.Tests -c Release` with `TICKETFLOW_TEST_POSTGRES=Host=127.0.0.1;Port=55711;... TICKETFLOW_REQUIRE_POSTGRES=1` against an isolated `postgres:18` container (`tf-pg-e11`) — 2 passed, 0 failed.
 - `dotnet test tests/Workspaces/TicketFlow.Workspaces.Tests -c Release` — 51 passed; `dotnet test tests/Workspaces/TicketFlow.Workspaces.Stores.Postgres.Tests -c Release` (PostgreSQL) — 14 passed.
+
+Review fixes (2026-11-22): per-workspace failures no longer fail or back off the loop (per-workspace exponential backoff, item failures
+reported as Degraded); the directory position persists between runs and wraps (`MaximumWorkspacesPerRun` covers large installations
+across runs); staleness check (`StaleAfterIntervals`); new loops `event-delivery`, `event-retention`, `event-contacts`, `event-surveys`,
+`reporting-retention`; `TicketFlowServiceIdentities` (`Collect`, startup `ValidateSlaWorker`). Tests: `PerWorkspaceLoopsVisitEveryWorkspaceAndIsolateFailures`,
+`CappedRunsContinueWhereThePreviousRunStoppedAndWrap`, `LoopsWithoutACompletedRunForSeveralIntervalsDegradeHealth`,
+`MismatchedSlaWorkerIdentitiesFailStartup`. `dotnet test tests/Hosting/TicketFlow.Hosting.Worker.Tests -c Release` — 10 passed;
+PostgreSQL checkpoint tests 2 passed.

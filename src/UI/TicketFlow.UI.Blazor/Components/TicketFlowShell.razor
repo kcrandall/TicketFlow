@@ -115,7 +115,7 @@
             {
                 <StatePanel Icon="shield-alert" Title="No support workspace access" Message="You are signed in, but your account is not mapped to this support workspace. Ask an administrator to grant you a role." />
             }
-            else if (StatusCode == 403 && !Session.Form.HasValue())
+            else if (!UiNavigation.Allows(Session, Route))
             {
                 <StatePanel Icon="lock" Title="Access denied" Message="Your role does not include access to this section. Ask a workspace administrator if you need it." />
             }

@@ -15,6 +15,8 @@
     <ProjectReference Include="../../../src/HelpCenter/TicketFlow.HelpCenter/TicketFlow.HelpCenter.csproj" />
     <ProjectReference Include="../../../src/Surveys/TicketFlow.Surveys/TicketFlow.Surveys.csproj" />
     <ProjectReference Include="../../../src/Reporting/TicketFlow.Reporting/TicketFlow.Reporting.csproj" />
+    <ProjectReference Include="../../../src/Channels/TicketFlow.Channels/TicketFlow.Channels.csproj" />
+    <ProjectReference Include="../../../src/Assist/TicketFlow.Assist/TicketFlow.Assist.csproj" />
     <ProjectReference Include="../../TicketFlow.Testing/TicketFlow.Testing.csproj" />
   </ItemGroup>
 </Project>

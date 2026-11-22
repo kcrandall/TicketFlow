@@ -5,6 +5,8 @@ using Microsoft.Extensions.Options;
 using TicketFlow.Access;
 using TicketFlow.Core;
 using TicketFlow.Hosting.AspNetCore;
+using TicketFlow.Identity;
+using TicketFlow.Integrations.IdentityFlow.SignalR;
 using TicketFlow.Realtime.SignalR;
 using TicketFlow.Testing;
 using TicketFlow.Workspaces;
@@ -21,24 +23,52 @@ public sealed class PrincipalMappingTests
     {
         var options = new IdentityFlowPrincipalOptions();
         var session = Authenticated(("sub", Subject), (ClaimTypes.NameIdentifier, Subject), ("identityflow:session_id", Guid.NewGuid().ToString()));
-        Assert.AreEqual(new IdentityFlowIdentity(IdentityFlowPrincipalKind.User, Subject), IdentityFlowClaimsMapper.Map(session, options));
+        Assert.AreEqual(new IdentityFlowIdentity(IdentityFlowPrincipalKind.User, Subject, Subject), IdentityFlowClaimsMapper.Map(session, options));
         var bearer = Authenticated(("sub", Subject.ToUpperInvariant()), ("identityflow:client_id", "console"), ("scope", "openid ticketflow"));
-        Assert.AreEqual(new IdentityFlowIdentity(IdentityFlowPrincipalKind.User, Subject), IdentityFlowClaimsMapper.Map(bearer, options), "GUID subjects are normalized.");
+        Assert.AreEqual(new IdentityFlowIdentity(IdentityFlowPrincipalKind.User, Subject, Subject), IdentityFlowClaimsMapper.Map(bearer, options), "GUID subjects are normalized.");
+    }
+
+    [TestMethod]
+    public void BearerTokensCarryingASessionIdStillNeedTheRequiredScope()
+    {
+        var options = new IdentityFlowPrincipalOptions();
+        options.RequiredScopes.Add("ticketflow");
+        // OpenIddict access tokens issued from a browser session carry identityflow:session_id as well as the client id.
+        var bearer = Authenticated(("sub", Subject), ("identityflow:session_id", "s1"), ("identityflow:client_id", "spa"), ("scope", "profile"));
+        Assert.IsNull(IdentityFlowClaimsMapper.Map(bearer, options), "Session-derived bearer tokens are not browser sessions.");
+        var pat = Authenticated((ClaimTypes.NameIdentifier, Subject), ("identityflow:session_id", "s1"), ("identityflow_auth_method", "PersonalAccessToken"));
+        Assert.IsNull(IdentityFlowClaimsMapper.Map(pat, options));
+        var cookie = new ClaimsPrincipal(new ClaimsIdentity([new Claim("sub", Subject), new Claim("client_id", "x")], "IdentityFlow.Cookie"));
+        Assert.IsNotNull(IdentityFlowClaimsMapper.Map(cookie, options), "The cookie authentication type is a browser session.");
+        Assert.IsNotNull(IdentityFlowClaimsMapper.Map(Authenticated(("sub", Subject), ("identityflow:session_id", "s1")), options));
     }
 
     [TestMethod]
     public void ApiKeysPersonalAccessTokensAndClientTokensFollowTheirConventions()
     {
-        var options = new IdentityFlowPrincipalOptions { ApiClientIdPrefix = "key:", UserIdPrefix = "idf:" };
+        var options = new IdentityFlowPrincipalOptions { UserIdPrefix = "idf-user:" };
         var compact = Guid.Parse(Subject).ToString("N");
-        var apiKey = Authenticated((ClaimTypes.NameIdentifier, compact), ("identityflow_auth_method", "ApiKey"), ("scope", "ticketflow"));
-        Assert.AreEqual(new IdentityFlowIdentity(IdentityFlowPrincipalKind.ApiClient, "key:" + Subject), IdentityFlowClaimsMapper.Map(apiKey, options));
+        var apiKey = Authenticated((ClaimTypes.NameIdentifier, compact), ("identityflow_auth_method", "ApiKey"), ("identityflow_method_id", "key-1"), ("scope", "ticketflow"));
+        Assert.AreEqual(new IdentityFlowIdentity(IdentityFlowPrincipalKind.ApiClient, "idf:" + Subject, Subject), IdentityFlowClaimsMapper.Map(apiKey, options),
+            "API clients are prefixed by default.");
+        options.ApiKeyClients = IdentityFlowApiKeyClientSource.Method;
+        Assert.AreEqual("idf:key-1", IdentityFlowClaimsMapper.Map(apiKey, options)?.Id, "Each key can be its own API client.");
         options.ApiKeys = IdentityFlowApiKeyMapping.User;
-        Assert.AreEqual(new IdentityFlowIdentity(IdentityFlowPrincipalKind.User, "idf:" + Subject), IdentityFlowClaimsMapper.Map(apiKey, options));
+        Assert.AreEqual(new IdentityFlowIdentity(IdentityFlowPrincipalKind.User, "idf-user:" + Subject, Subject), IdentityFlowClaimsMapper.Map(apiKey, options));
         var pat = Authenticated((ClaimTypes.NameIdentifier, compact), ("identityflow_auth_method", "PersonalAccessToken"));
-        Assert.AreEqual(new IdentityFlowIdentity(IdentityFlowPrincipalKind.User, "idf:" + Subject), IdentityFlowClaimsMapper.Map(pat, options));
+        Assert.AreEqual(IdentityFlowPrincipalKind.User, IdentityFlowClaimsMapper.Map(pat, options)?.Kind);
         var client = Authenticated(("identityflow:client_id", "billing-sync"));
-        Assert.AreEqual(new IdentityFlowIdentity(IdentityFlowPrincipalKind.ApiClient, "key:billing-sync"), IdentityFlowClaimsMapper.Map(client, options));
+        Assert.AreEqual(new IdentityFlowIdentity(IdentityFlowPrincipalKind.ApiClient, "idf:billing-sync", "billing-sync"), IdentityFlowClaimsMapper.Map(client, options));
+    }
+
+    [TestMethod]
+    public void MappedCallersNeverReceiveReservedWorkerIdentities()
+    {
+        var options = new IdentityFlowPrincipalOptions { ApiClientIdPrefix = string.Empty };
+        Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("identityflow:client_id", "sla-worker")), options), "Built-in worker ids are reserved.");
+        options.ReservedApiClientIds.Add("custom-engine");
+        Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("identityflow:client_id", "custom-engine")), options));
+        Assert.IsNotNull(IdentityFlowClaimsMapper.Map(Authenticated(("identityflow:client_id", "integration")), options));
     }
 
     [TestMethod]
@@ -50,25 +80,20 @@ public sealed class PrincipalMappingTests
         Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("email", "someone@example.com")), options));
         Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("sub", Subject), ("sub", Guid.NewGuid().ToString())), options), "Conflicting subjects are ambiguous.");
         Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("identityflow_auth_method", "ApiKey")), options));
-
         options.RequiredScopes.Add("ticketflow");
         Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("sub", Subject), ("scope", "openid profile")), options));
         Assert.IsNotNull(IdentityFlowClaimsMapper.Map(Authenticated(("sub", Subject), ("scope", "openid ticketflow")), options));
-        Assert.IsNotNull(IdentityFlowClaimsMapper.Map(Authenticated(("sub", Subject), ("identityflow:session_id", "s")), options), "Browser sessions carry no scopes.");
     }
 
     [TestMethod]
     public async Task ResolverBuildsUsersWithTeamSnapshotsAndApiClients()
     {
         var scope = TestScopes.Create();
-        var resolver = new IdentityFlowPrincipalResolver(new FakeTeams(), new FixedPartition(AccessPartition.From(scope)), Options.Create(new IdentityFlowPrincipalOptions()));
+        var resolver = new IdentityFlowPrincipalResolver(new FakeTeams(), Options.Create(new IdentityFlowPrincipalOptions()));
         var http = new DefaultHttpContext { User = Authenticated(("sub", Subject)) };
-        var user = await resolver.ResolveAsync(http, scope);
-        Assert.IsInstanceOfType<UserPrincipal>(user?.Value);
-        var resolved = (UserPrincipal)user!.Value.Value!;
+        var resolved = Assert.IsInstanceOfType<UserPrincipal>((await resolver.ResolveAsync(http, scope))?.Value);
         Assert.AreEqual(Subject, resolved.UserId.Value);
         Assert.IsTrue(resolved.Teams.Contains(new TeamId("tier1")));
-
         http.User = Authenticated((ClaimTypes.NameIdentifier, Subject), ("identityflow_auth_method", "ApiKey"));
         Assert.IsInstanceOfType<ApiClientPrincipal>((await resolver.ResolveAsync(http, scope))?.Value);
         http.User = new ClaimsPrincipal(new ClaimsIdentity());
@@ -76,15 +101,33 @@ public sealed class PrincipalMappingTests
     }
 
     [TestMethod]
+    public async Task StaffIdentityLinksWinAndUnmappedUsersFollowTheOption()
+    {
+        var scope = TestScopes.Create();
+        var staff = new FakeStaff();
+        var options = new IdentityFlowPrincipalOptions();
+        var resolver = new IdentityFlowPrincipalResolver(new FakeTeams(), Options.Create(options), staff);
+        var http = new DefaultHttpContext { User = Authenticated(("sub", Subject)) };
+        var linked = Assert.IsInstanceOfType<UserPrincipal>((await resolver.ResolveAsync(http, scope))?.Value);
+        Assert.AreEqual("agent-ada", linked.UserId.Value);
+        Assert.AreEqual(new StaffIdentityRef("identityflow", Subject), staff.Last);
+
+        http.User = Authenticated(("sub", "unlinked"));
+        Assert.AreEqual("unlinked", Assert.IsInstanceOfType<UserPrincipal>((await resolver.ResolveAsync(http, scope))?.Value).UserId.Value);
+        options.UnmappedStaff = IdentityFlowUnmappedStaff.Refuse;
+        Assert.IsNull(await resolver.ResolveAsync(http, scope), "Unlinked identities can be refused.");
+    }
+
+    [TestMethod]
     public async Task RealtimeConnectionsTakeTheWorkspaceFromTheQueryString()
     {
         var scope = TestScopes.Create();
-        IRealtimePrincipalResolver resolver = new IdentityFlowPrincipalResolver(new FakeTeams(), new FixedPartition(AccessPartition.From(scope)), Options.Create(new IdentityFlowPrincipalOptions()));
+        IRealtimePrincipalResolver resolver = new IdentityFlowRealtimePrincipalResolver(new IdentityFlowPrincipalResolver(new FakeTeams(), Options.Create(new IdentityFlowPrincipalOptions())),
+            new FixedPartition(AccessPartition.From(scope)), Options.Create(new IdentityFlowPrincipalOptions()));
         var user = Authenticated(("sub", Subject));
         var http = new DefaultHttpContext();
         http.Request.QueryString = new QueryString("?workspace=workspace");
-        var principal = await resolver.ResolveAsync(user, http);
-        Assert.AreEqual(scope, principal?.Scope);
+        Assert.AreEqual(scope, (await resolver.ResolveAsync(user, http))?.Scope);
         http.Request.QueryString = QueryString.Empty;
         Assert.IsNull(await resolver.ResolveAsync(user, http), "Connections must name a workspace.");
         Assert.IsNull(await resolver.ResolveAsync(user, null));
@@ -94,12 +137,12 @@ public sealed class PrincipalMappingTests
     public void RegistrationReplacesOnlyTheOptionFallbacks()
     {
         var services = new ServiceCollection();
-        services.AddTicketFlow().AddTicketFlowEndpoints().AddTicketFlowSignalR().AddIdentityFlowPrincipals();
+        services.AddTicketFlow().AddTicketFlowEndpoints().AddTicketFlowSignalR().AddIdentityFlowRealtimePrincipals();
         services.AddScoped<ITeamMembershipResolver, FakeTeams>();
         using var provider = services.BuildServiceProvider();
         using var scope = provider.CreateScope();
         Assert.IsInstanceOfType<IdentityFlowPrincipalResolver>(scope.ServiceProvider.GetRequiredService<ITicketFlowPrincipalResolver>());
-        Assert.IsInstanceOfType<IdentityFlowPrincipalResolver>(scope.ServiceProvider.GetRequiredService<IRealtimePrincipalResolver>());
+        Assert.IsInstanceOfType<IdentityFlowRealtimePrincipalResolver>(scope.ServiceProvider.GetRequiredService<IRealtimePrincipalResolver>());
 
         var custom = new ServiceCollection();
         custom.AddScoped<ITicketFlowPrincipalResolver, CustomResolver>();
@@ -114,6 +157,17 @@ public sealed class PrincipalMappingTests
     {
         public Task<IReadOnlyList<TeamId>> GetTeamsAsync(TicketScope scope, UserId user, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<TeamId>>([new TeamId("tier1")]);
+    }
+
+    private sealed class FakeStaff : IStaffIdentityResolver
+    {
+        public StaffIdentityRef? Last { get; private set; }
+
+        public Task<UserId?> ResolveUserAsync(TicketScope scope, StaffIdentityRef identity, CancellationToken cancellationToken = default)
+        {
+            Last = identity;
+            return Task.FromResult<UserId?>(identity.Subject == Subject ? new UserId("agent-ada") : null);
+        }
     }
 
     private sealed class FixedPartition(AccessPartition partition) : ITicketFlowPartitionResolver

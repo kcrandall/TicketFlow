@@ -27,8 +27,8 @@ public static class TicketFlowEndpointExtensions
         if (configure is not null)
             services.Configure(configure);
         services.AddProblemDetails();
-        services.TryAddScoped<ITicketFlowPartitionResolver, OptionsPartitionResolver>();
-        services.TryAddScoped<ITicketFlowPrincipalResolver, OptionsPrincipalResolver>();
+        services.TryAddScoped<ITicketFlowPartitionResolver, OptionsTicketFlowPartitionResolver>();
+        services.TryAddScoped<ITicketFlowPrincipalResolver, OptionsTicketFlowPrincipalResolver>();
         return builder;
     }
 
@@ -137,8 +137,15 @@ public static class TicketFlowEndpointExtensions
             .WithGroupName(options.OpenApiDocumentName)
             .WithMetadata(new TicketFlowRequestSizeLimit(options.MaximumRequestBodyBytes))
             .AddEndpointFilter<TicketFlowEndpointFilter>()
+            .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
-            .ProducesProblem(StatusCodes.Status403Forbidden);
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status409Conflict)
+            .ProducesProblem(StatusCodes.Status412PreconditionFailed)
+            .ProducesProblem(StatusCodes.Status413PayloadTooLarge)
+            .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+            .ProducesProblem(StatusCodes.Status428PreconditionRequired);
         if (options.RequireAuthorization)
         {
             if (options.AuthorizationPolicy is { } policy)
@@ -158,6 +165,11 @@ public static class TicketFlowEndpointExtensions
             .WithGroupName(options.OpenApiDocumentName)
             .WithMetadata(new TicketFlowRequestSizeLimit(options.MaximumRequestBodyBytes))
             .AddEndpointFilter<TicketFlowEndpointFilter>()
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status413PayloadTooLarge)
+            .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests)
             .AllowAnonymous();
         if (options.AnonymousRateLimitingPolicy is { } rateLimit)
             group.RequireRateLimiting(rateLimit);

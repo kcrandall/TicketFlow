@@ -32,3 +32,12 @@ public enum ReportRefusal
 
 /// <summary>Outcome of a report service call. Switch over every case without a discard arm.</summary>
 public union ReportResult<T>(ReportSucceeded<T>, ReportRefused);
+
+/// <summary>The range's cells were recomputed from <see cref="Facts"/> facts.</summary>
+public sealed record ReportRebuilt(long Facts);
+
+/// <summary>The range starts before <see cref="FactHorizon"/>, where facts may have been pruned; nothing was changed.</summary>
+public sealed record ReportRebuildRefused(DateTimeOffset FactHorizon);
+
+/// <summary>Outcome of a rollup rebuild. Switch over every case without a discard arm.</summary>
+public union ReportRebuildResult(ReportRebuilt, ReportRebuildRefused);

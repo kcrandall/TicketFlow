@@ -41,3 +41,13 @@ Verification (2026-11-22):
 - `dotnet test tests/Integrations/TicketFlow.Integrations.IdentityFlow.Tests -c Release` — 11 passed, 0 failed.
 - `dotnet pack src/Integrations/TicketFlow.Integrations.IdentityFlow -c Release -p:Version=0.1.0-alpha.1` — package created (stable versions
   fail NU5104 on the prerelease dependency, as for the EnvelopeFlow adapter).
+
+Review fixes (2026-11-22): split into `TicketFlow.Integrations.IdentityFlow` (endpoints/UI/MCP resolver) and
+`TicketFlow.Integrations.IdentityFlow.SignalR` (`IdentityFlowRealtimePrincipalResolver`, visitor tokens); fallbacks are replaced by type.
+Browser sessions are recognized only by the cookie authentication type or a session id without client id/authentication method, so
+session-derived bearer tokens must satisfy `RequiredScopes`; `ApiClientIdPrefix` defaults to `idf:` and `ReservedApiClientIds` are
+refused; `ApiKeyClients = Method` maps per key; `IStaffIdentityResolver` is consulted first (`UnmappedStaff` fallback or refuse); the
+visitor validator uses `TokenValidationParameters.ConfigurationManager` and retries after a refresh on unknown keys (rotation). Tests:
+`BearerTokensCarryingASessionIdStillNeedTheRequiredScope`, `MappedCallersNeverReceiveReservedWorkerIdentities`,
+`StaffIdentityLinksWinAndUnmappedUsersFollowTheOption`, `RotatedIssuerKeysArePickedUpWithoutRestart`.
+`dotnet test tests/Integrations/TicketFlow.Integrations.IdentityFlow.Tests -c Release` — 15 passed.

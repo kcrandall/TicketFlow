@@ -38,3 +38,7 @@ E2, E3 (`ITeamMembershipResolver`).
   migration 1; solution and `scripts/nuget-projects.tsv` entries.
 - `TicketFlow.Identity.Tests` — 5 passed (model, in-memory contract, many-to-one + resolver + audit + self-list, escalation incl. team
   and tenant grants, profiles and masking). `TicketFlow.Identity.Stores.Postgres.Tests` — 4 passed against `postgres:18`.
+
+### Review fixes (2026-11-22)
+
+See [PLAN review fixes](../PLAN.md#review-fixes-2026-11-22-after-commit-4574992).

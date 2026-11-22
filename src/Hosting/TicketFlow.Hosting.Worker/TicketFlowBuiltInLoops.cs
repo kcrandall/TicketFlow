@@ -6,6 +6,8 @@ using TicketFlow.Automation;
 using TicketFlow.Channels.LiveChat;
 using TicketFlow.Conversations;
 using TicketFlow.Core;
+using TicketFlow.Events;
+using TicketFlow.Reporting;
 using TicketFlow.Routing;
 using TicketFlow.Sla;
 using TicketFlow.Surveys;
@@ -56,10 +58,10 @@ internal static class TicketFlowBuiltInLoops
         new(TicketFlowLoops.AutomationSchedules, [typeof(AutomationScheduler)], async (services, _, cancellationToken) =>
             new TicketFlowLoopRun((await services.GetRequiredService<AutomationScheduler>().RunOnceAsync(cancellationToken).ConfigureAwait(false)).Fired)),
         new(TicketFlowLoops.AutomationContacts, [typeof(AutomationContactFollower), typeof(IWorkspaceDirectory)], (services, loop, cancellationToken) =>
-            ForEachWorkspaceAsync(services, TicketFlowLoops.AutomationContacts, (scope, token) =>
+            ForEachWorkspaceAsync(services, TicketFlowLoops.AutomationContacts, loop, (scope, token) =>
                 services.GetRequiredService<AutomationContactFollower>().CatchUpAsync(scope, Math.Min(loop.BatchSize, AutomationContactFollower.MaximumBatch), token), cancellationToken)),
         new(TicketFlowLoops.ContactMerges, [typeof(ConversationContactMergeFollower), typeof(IWorkspaceDirectory), typeof(IWorkerCheckpointStore)], (services, loop, cancellationToken) =>
-            ForEachWorkspaceAsync(services, TicketFlowLoops.ContactMerges, async (scope, token) =>
+            ForEachWorkspaceAsync(services, TicketFlowLoops.ContactMerges, loop, async (scope, token) =>
             {
                 var checkpoints = services.GetRequiredService<IWorkerCheckpointStore>();
                 var checkpoint = await checkpoints.GetAsync(scope, ContactMergeCheckpoint, token).ConfigureAwait(false);
@@ -70,7 +72,7 @@ internal static class TicketFlowBuiltInLoops
                 return await checkpoints.SetAsync(scope, ContactMergeCheckpoint, position, checkpoint, token).ConfigureAwait(false) ? 1 : 0;
             }, cancellationToken)),
         new(TicketFlowLoops.SurveyDispatch, [typeof(ISurveyDispatcher), typeof(IWorkspaceDirectory)], (services, loop, cancellationToken) =>
-            ForEachWorkspaceAsync(services, TicketFlowLoops.SurveyDispatch, async (scope, token) =>
+            ForEachWorkspaceAsync(services, TicketFlowLoops.SurveyDispatch, loop, async (scope, token) =>
             {
                 var summary = await services.GetRequiredService<ISurveyDispatcher>().DispatchDueAsync(scope, Math.Min(loop.BatchSize, SurveyLimits.MaximumDuePerRead), token).ConfigureAwait(false);
                 return summary.Sent + summary.Retrying + summary.Failed + summary.Cancelled;
@@ -83,39 +85,135 @@ internal static class TicketFlowBuiltInLoops
         }),
         new(TicketFlowLoops.AssistMaintenance, [typeof(AssistMaintenance)], async (services, _, cancellationToken) =>
             new TicketFlowLoopRun(await services.GetRequiredService<AssistMaintenance>().RunOnceAsync(cancellationToken).ConfigureAwait(false))),
+        new(TicketFlowLoops.EventDelivery, [typeof(EventDeliveryWorker)], async (services, _, cancellationToken) =>
+        {
+            var result = await services.GetRequiredService<EventDeliveryWorker>().RunOnceAsync(cancellationToken).ConfigureAwait(false);
+            return new TicketFlowLoopRun(result.Delivered + result.Advanced + result.Retried + result.DeadLettered);
+        }),
+        new(TicketFlowLoops.EventRetention, [typeof(EventRetentionWorker)], async (services, _, cancellationToken) =>
+        {
+            var result = await services.GetRequiredService<EventRetentionWorker>().RunOnceAsync(cancellationToken).ConfigureAwait(false);
+            return new TicketFlowLoopRun(result.EventsPruned + result.DeadLettersPruned);
+        }),
+        new(TicketFlowLoops.EventContacts, [typeof(EventContactFollower), typeof(IWorkspaceDirectory)], (services, loop, cancellationToken) =>
+            ForEachWorkspaceAsync(services, TicketFlowLoops.EventContacts, loop, (scope, token) =>
+                services.GetRequiredService<EventContactFollower>().CatchUpAsync(scope, Math.Min(loop.BatchSize, EventContactFollower.MaximumBatch), token), cancellationToken)),
+        new(TicketFlowLoops.EventSurveys, [typeof(EventSurveyFollower), typeof(IWorkspaceDirectory)], (services, loop, cancellationToken) =>
+            ForEachWorkspaceAsync(services, TicketFlowLoops.EventSurveys, loop, (scope, token) =>
+                services.GetRequiredService<EventSurveyFollower>().CatchUpAsync(scope, token), cancellationToken)),
+        new(TicketFlowLoops.ReportingRetention, [typeof(ReportingRetentionWorker)], async (services, _, cancellationToken) =>
+        {
+            var result = await services.GetRequiredService<ReportingRetentionWorker>().RunOnceAsync(cancellationToken).ConfigureAwait(false);
+            return new TicketFlowLoopRun(result.FactsPruned + result.RollupsPruned);
+        }),
     ];
 
     /// <summary>
-    /// Runs <paramref name="run"/> for every workspace of <see cref="IWorkspaceDirectory"/> (bounded by
-    /// <see cref="TicketFlowWorkerOptions.MaximumWorkspacesPerRun"/>). A failing workspace is counted and skipped so others still progress.
+    /// Runs <paramref name="run"/> for up to <see cref="TicketFlowWorkerOptions.MaximumWorkspacesPerRun"/> workspaces of
+    /// <see cref="IWorkspaceDirectory"/>, continuing from where the previous run stopped and wrapping at the end, so every workspace is
+    /// visited across consecutive runs. A failing workspace is backed off on its own (exponentially from the loop's
+    /// <see cref="TicketFlowLoopOptions.InitialBackoff"/> to <see cref="TicketFlowLoopOptions.MaximumBackoff"/>) and skipped until then;
+    /// other workspaces keep the loop's cadence. Failures are reported as item failures (Degraded health), never as a failed run.
     /// </summary>
-    public static async Task<TicketFlowLoopRun> ForEachWorkspaceAsync(IServiceProvider services, string loop, Func<TicketScope, CancellationToken, Task<int>> run, CancellationToken cancellationToken)
+    public static async Task<TicketFlowLoopRun> ForEachWorkspaceAsync(IServiceProvider services, string loop, TicketFlowLoopOptions options,
+        Func<TicketScope, CancellationToken, Task<int>> run, CancellationToken cancellationToken)
     {
         var directory = services.GetRequiredService<IWorkspaceDirectory>();
         var maximum = services.GetRequiredService<IOptions<TicketFlowWorkerOptions>>().Value.MaximumWorkspacesPerRun;
+        var state = services.GetRequiredService<WorkspaceLoopStates>().For(loop);
+        var time = services.GetRequiredService<TimeProvider>();
         var logger = services.GetRequiredService<ILoggerFactory>().CreateLogger("TicketFlow.Hosting.Worker");
         int items = 0, failures = 0, visited = 0;
-        string? after = null;
-        do
+        var (after, skip) = state.Position;
+        var wrapped = false;
+        var seen = new HashSet<TicketScope>();
+        while (true)
         {
             var page = await directory.ListWorkspacesAsync(after, Math.Min(200, IWorkspaceDirectory.MaximumPage), cancellationToken).ConfigureAwait(false);
+            var index = 0;
             foreach (var scope in page.Scopes)
             {
-                if (visited++ >= maximum)
+                if (index++ < skip)
+                    continue;
+                if (visited >= maximum || !seen.Add(scope))
+                {
+                    state.Position = (after, index - 1);
                     return new TicketFlowLoopRun(items, failures);
+                }
+                visited++;
+                if (!state.Due(scope, time.GetUtcNow()))
+                    continue;
                 try
                 {
                     items += await run(scope, cancellationToken).ConfigureAwait(false);
+                    state.Succeeded(scope);
                 }
                 catch (Exception error) when (error is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
                 {
                     failures++;
-                    logger.LogWarning("TicketFlow worker loop {Loop} failed for one workspace with {Error}.", loop, error.GetType().Name);
+                    state.Failed(scope, time.GetUtcNow(), options);
+                    logger.LogWarning("TicketFlow worker loop {Loop} failed for one workspace with {Error}; it is retried after a backoff.", loop, error.GetType().Name);
                 }
             }
-            after = page.Next;
+            skip = 0;
+            if (page.Next is not null)
+            {
+                after = page.Next;
+                continue;
+            }
+            // End of the directory: wrap once per run so a capped run continues at the beginning next time.
+            after = null;
+            if (wrapped || page.Scopes.Count == 0)
+                break;
+            wrapped = true;
         }
-        while (after is not null);
+        state.Position = (after, 0);
         return new TicketFlowLoopRun(items, failures);
+    }
+}
+
+/// <summary>Per-loop directory position and per-workspace backoff of the per-workspace loops (process-local).</summary>
+internal sealed class WorkspaceLoopStates
+{
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, WorkspaceLoopState> loops = new(StringComparer.Ordinal);
+
+    public WorkspaceLoopState For(string loop) => loops.GetOrAdd(loop, _ => new WorkspaceLoopState());
+}
+
+internal sealed class WorkspaceLoopState
+{
+    private const int MaximumTracked = 100_000;
+    private readonly Lock gate = new();
+    private readonly Dictionary<TicketScope, (int Failures, DateTimeOffset RetryAt)> backoff = [];
+    private (string? After, int Skip) position;
+
+    public (string? After, int Skip) Position
+    {
+        get { lock (gate) return position; }
+        set { lock (gate) position = value; }
+    }
+
+    public bool Due(TicketScope scope, DateTimeOffset now)
+    {
+        lock (gate)
+            return !backoff.TryGetValue(scope, out var entry) || entry.RetryAt <= now;
+    }
+
+    public void Succeeded(TicketScope scope)
+    {
+        lock (gate)
+            backoff.Remove(scope);
+    }
+
+    public void Failed(TicketScope scope, DateTimeOffset now, TicketFlowLoopOptions options)
+    {
+        lock (gate)
+        {
+            var failures = backoff.TryGetValue(scope, out var entry) ? entry.Failures + 1 : 1;
+            if (failures == 1 && backoff.Count >= MaximumTracked)
+                return;
+            var delay = TimeSpan.FromMilliseconds(Math.Min(options.InitialBackoff.TotalMilliseconds * Math.Pow(2, Math.Min(failures - 1, 30)), options.MaximumBackoff.TotalMilliseconds));
+            backoff[scope] = (failures, now + delay);
+        }
     }
 }

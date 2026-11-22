@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Components;
+using TicketFlow.Access;
 using TicketFlow.Contacts;
 using TicketFlow.Conversations;
 using TicketFlow.Core;
@@ -46,6 +47,19 @@ public abstract class UiPageBase : ComponentBase
 
     protected string TeamName(TeamId? team) => team is not { } id ? "No team" : Teams.FirstOrDefault(item => item.Id == id)?.Name ?? id.Value;
 
+    /// <summary>
+    /// The open backlog from reporting (current open conversations matching <paramref name="filter"/>), or <see langword="null"/> when
+    /// reporting is not registered or the viewer has no report access. Counts come from the store, never from loading pages of rows.
+    /// </summary>
+    protected async Task<long?> OpenBacklogAsync(TicketFlow.Reporting.ReportFilter? filter = null)
+    {
+        if (Service<TicketFlow.Reporting.IReportingService>() is not { } reporting || !Session.CanAny(AccessPermissions.ReportView, TicketFlow.Reporting.ReportPermissions.ViewOwn))
+            return null;
+        var (_, to) = UiFormat.Range(null, null, Now);
+        return await reporting.GetOverviewAsync(Actor, new TicketFlow.Reporting.ReportQuery(to.AddDays(-1), to, filter), Aborted)
+            is TicketFlow.Reporting.ReportSucceeded<TicketFlow.Reporting.ReportOverview> overview ? overview.Value.OpenBacklog : null;
+    }
+
     protected string ContactName(ContactId contact) => contactNames.TryGetValue(contact, out var name) ? name : "Contact " + Short(contact.Value);
 
     /// <summary>Loads contact display names through the authorized contact service (masked or forbidden contacts keep a placeholder).</summary>
@@ -53,9 +67,35 @@ public abstract class UiPageBase : ComponentBase
     {
         if (Service<IContactService>() is not { } service)
             return;
-        foreach (var contact in contacts.Distinct().Where(contact => !contactNames.ContainsKey(contact)))
-            if (await service.GetAsync(Actor, contact, Aborted) is ContactApplied<ContactView> applied)
-                contactNames[contact] = UiText.ContactName(applied.Value);
+        // One batched, authorized read for every contact on the page (IContactService.GetManyAsync).
+        foreach (var chunk in contacts.Distinct().Where(contact => !contactNames.ContainsKey(contact)).Chunk(IContactService.MaximumBatch))
+            foreach (var view in await service.GetManyAsync(Actor, chunk, Aborted))
+                contactNames[view.Id] = UiText.ContactName(view);
+    }
+
+    /// <summary>Set when a page's fresh, per-request authorization (for example an Access listing) refused the viewer.</summary>
+    protected bool Denied { get; set; }
+
+    /// <summary>
+    /// Runs an authorized Access listing through <see cref="IAccessAdministrator"/> (a fresh <c>access:manage</c> decision per request, never
+    /// the cached navigation snapshot). A refusal sets <see cref="Denied"/> and returns <see langword="null"/>.
+    /// </summary>
+    protected async Task<T?> AccessListAsync<T>(Func<IAccessAdministrator, Task<AccessListResult<T>>> list) where T : class
+    {
+        if (Service<IAccessAdministrator>() is not { } administrator)
+        {
+            Denied = true;
+            return null;
+        }
+        switch (await list(administrator))
+        {
+            case AccessListed<T> listed:
+                return listed.Value;
+            case AccessChangeRefused:
+                Denied = true;
+                return null;
+        }
+        return null;
     }
 
     protected static string Short(string id) => id.Length > 8 ? id[..8] : id;

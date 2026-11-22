@@ -4,22 +4,30 @@ using TicketFlow.Core;
 namespace TicketFlow.Events;
 
 /// <summary>
-/// The default <see cref="IEventSubscriptionService"/>: authorizes on the actor's workspace through <see cref="IAccessEvaluator"/>, validates
-/// sink kinds and targets against the registered <see cref="IEventSink"/>s and writes through <see cref="IEventSubscriptionStore"/>.
+/// The default <see cref="IEventSubscriptionService"/>: authorizes on the actor's workspace through <see cref="IAccessEvaluator"/> before any
+/// existence or revision outcome is revealed, validates sink kinds and targets against the registered <see cref="IEventSink"/>s (for the
+/// actor's scope) and writes through <see cref="IEventSubscriptionStore"/>. Creating or updating a subscription also requires that the actor
+/// could confer every live allow grant of the subscription's API-client principal (<see cref="IAccessAdministrator.CheckCanConferAsync"/>),
+/// so <c>events:manage</c> cannot be used to receive data through a more privileged principal (confused deputy).
 /// </summary>
 public sealed class EventSubscriptionService : IEventSubscriptionService
 {
     private readonly IEventSubscriptionStore store;
     private readonly IEventLog log;
     private readonly IAccessEvaluator access;
+    private readonly IAccessAdministrator administrator;
+    private readonly IAccessGrantStore grants;
     private readonly IReadOnlyDictionary<string, IEventSink> sinks;
     private readonly TimeProvider time;
 
-    public EventSubscriptionService(IEventSubscriptionStore store, IEventLog log, IAccessEvaluator access, IEnumerable<IEventSink> sinks, TimeProvider time)
+    public EventSubscriptionService(IEventSubscriptionStore store, IEventLog log, IAccessEvaluator access, IAccessAdministrator administrator, IAccessGrantStore grants,
+        IEnumerable<IEventSink> sinks, TimeProvider time)
     {
         this.store = store ?? throw new ArgumentNullException(nameof(store));
         this.log = log ?? throw new ArgumentNullException(nameof(log));
         this.access = access ?? throw new ArgumentNullException(nameof(access));
+        this.administrator = administrator ?? throw new ArgumentNullException(nameof(administrator));
+        this.grants = grants ?? throw new ArgumentNullException(nameof(grants));
         this.sinks = EventSinks.Index(sinks);
         this.time = time ?? throw new ArgumentNullException(nameof(time));
     }
@@ -29,9 +37,9 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
     {
         var scope = actor.Scope;
         ArgumentNullException.ThrowIfNull(subscription);
-        if (await RefuseAsync(actor, subscription.Privacy, cancellationToken).ConfigureAwait(false) is { } refused)
+        if (await RefuseAsync(actor, subscription, cancellationToken).ConfigureAwait(false) is { } refused)
             return refused;
-        if (Invalid(subscription) is { } invalid)
+        if (Invalid(scope, subscription) is { } invalid)
             return invalid;
         var head = await log.GetHeadAsync(scope, cancellationToken).ConfigureAwait(false);
         var cursor = (start ?? EventStartAtLatest.Instance) switch
@@ -48,14 +56,14 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
     {
         var scope = actor.Scope;
         ArgumentNullException.ThrowIfNull(subscription);
+        if (await RefuseAsync(actor, subscription, cancellationToken).ConfigureAwait(false) is { } refused)
+            return refused;
         var current = await store.GetAsync(scope, subscription.Id, cancellationToken).ConfigureAwait(false);
         if (current is null)
             return EventNotFound.Instance;
         if (current.Revision != expectedRevision)
             return new EventConflict(current.Revision);
-        if (await RefuseAsync(actor, subscription.Privacy, cancellationToken).ConfigureAwait(false) is { } refused)
-            return refused;
-        if (Invalid(subscription) is { } invalid)
+        if (Invalid(scope, subscription) is { } invalid)
             return invalid;
         return await ViewAsync(await store.UpdateAsync(scope, subscription, expectedRevision, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
@@ -63,13 +71,13 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
     public async Task<EventResult<EventSubscriptionId>> DeleteAsync(PrincipalRef actor, EventSubscriptionId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = actor.Scope;
+        if (!await PermittedAsync(actor, EventPermissions.Manage, cancellationToken).ConfigureAwait(false))
+            return new EventRefused(EventRefusal.Forbidden);
         var current = await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
         if (current is null)
             return EventNotFound.Instance;
         if (current.Revision != expectedRevision)
             return new EventConflict(current.Revision);
-        if (!await PermittedAsync(actor, EventPermissions.Manage, cancellationToken).ConfigureAwait(false))
-            return new EventRefused(EventRefusal.Forbidden);
         return await store.DeleteAsync(scope, id, expectedRevision, cancellationToken).ConfigureAwait(false) switch
         {
             EventWriteApplied<StoredEventSubscription> => new EventSucceeded<EventSubscriptionId>(id),
@@ -81,11 +89,11 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
 
     public async Task<EventResult<EventSubscriptionView>> GetAsync(PrincipalRef actor, EventSubscriptionId id, CancellationToken cancellationToken = default)
     {
+        if (!await PermittedAsync(actor, EventPermissions.Read, cancellationToken).ConfigureAwait(false))
+            return new EventRefused(EventRefusal.Forbidden);
         var current = await store.GetAsync(actor.Scope, id, cancellationToken).ConfigureAwait(false);
         if (current is null)
             return EventNotFound.Instance;
-        if (!await PermittedAsync(actor, EventPermissions.Read, cancellationToken).ConfigureAwait(false))
-            return new EventRefused(EventRefusal.Forbidden);
         return new EventSucceeded<EventSubscriptionView>(await ViewAsync(current, cancellationToken).ConfigureAwait(false));
     }
 
@@ -103,11 +111,11 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
     {
         if (afterSequence < 0)
             return new EventRefused(EventRefusal.Invalid, "The replay position cannot be negative.");
+        if (!await PermittedAsync(actor, EventPermissions.Manage, cancellationToken).ConfigureAwait(false))
+            return new EventRefused(EventRefusal.Forbidden);
         var current = await store.GetAsync(actor.Scope, id, cancellationToken).ConfigureAwait(false);
         if (current is null)
             return EventNotFound.Instance;
-        if (!await PermittedAsync(actor, EventPermissions.Manage, cancellationToken).ConfigureAwait(false))
-            return new EventRefused(EventRefusal.Forbidden);
         var head = await log.GetHeadAsync(actor.Scope, cancellationToken).ConfigureAwait(false);
         if (!await store.ReplayAsync(actor.Scope, id, Math.Min(afterSequence, head.Last), time.GetUtcNow(), cancellationToken).ConfigureAwait(false))
             return EventNotFound.Instance;
@@ -119,28 +127,37 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
     {
         if (afterSequence < 0 || limit is < 1 or > IEventSubscriptionStore.MaximumDeadLetterRead)
             return new EventRefused(EventRefusal.Invalid, "Dead letters are read after a non-negative sequence, 1-200 at a time.");
-        var current = await store.GetAsync(actor.Scope, id, cancellationToken).ConfigureAwait(false);
-        if (current is null)
-            return EventNotFound.Instance;
         if (!await PermittedAsync(actor, EventPermissions.Manage, cancellationToken).ConfigureAwait(false))
             return new EventRefused(EventRefusal.Forbidden);
+        if (await store.GetAsync(actor.Scope, id, cancellationToken).ConfigureAwait(false) is null)
+            return EventNotFound.Instance;
         return new EventSucceeded<IReadOnlyList<EventDeadLetter>>(await store.ListDeadLettersAsync(actor.Scope, id, afterSequence, limit, cancellationToken).ConfigureAwait(false));
     }
 
-    private async Task<EventRefused?> RefuseAsync(PrincipalRef actor, EventPrivacy privacy, CancellationToken cancellationToken)
+    private async Task<EventRefused?> RefuseAsync(PrincipalRef actor, EventSubscription subscription, CancellationToken cancellationToken)
     {
         if (!await PermittedAsync(actor, EventPermissions.Manage, cancellationToken).ConfigureAwait(false))
             return new EventRefused(EventRefusal.Forbidden);
-        if (privacy == EventPrivacy.Content && !await PermittedAsync(actor, EventPermissions.Content, cancellationToken).ConfigureAwait(false))
+        if (subscription.Privacy == EventPrivacy.Content && !await PermittedAsync(actor, EventPermissions.Content, cancellationToken).ConfigureAwait(false))
             return new EventRefused(EventRefusal.Forbidden, "Content subscriptions require events:content.");
-        return null;
+        // Confused deputy: the actor must be able to confer every live allow grant of the principal it delegates delivery to.
+        var scope = actor.Scope;
+        GrantSubject subject = subscription.Principal;
+        var principalGrants = await grants.ListForSubjectsAsync(AccessPartition.From(scope), scope.WorkspaceId, [subject], cancellationToken).ConfigureAwait(false);
+        if (principalGrants.Count == 0)
+            return null;
+        return await administrator.CheckCanConferAsync(actor, principalGrants.Select(stored => new GrantConferral(stored.Grant)), cancellationToken).ConfigureAwait(false) switch
+        {
+            AccessCheckPassed => null,
+            AccessChangeRefused => new EventRefused(EventRefusal.Forbidden, "The actor cannot delegate the access of the subscription principal."),
+        };
     }
 
-    private EventRefused? Invalid(EventSubscription subscription)
+    private EventRefused? Invalid(TicketScope scope, EventSubscription subscription)
     {
         if (!sinks.TryGetValue(subscription.Sink.Kind, out var sink))
             return new EventRefused(EventRefusal.Invalid, "The sink kind is not registered.");
-        return sink.IsValidTarget(subscription.Sink.Target) ? null : new EventRefused(EventRefusal.Invalid, "The sink target is invalid.");
+        return sink.IsValidTarget(scope, subscription.Sink.Target) ? null : new EventRefused(EventRefusal.Invalid, "The sink target is invalid for this workspace.");
     }
 
     private async Task<bool> PermittedAsync(PrincipalRef actor, Permission permission, CancellationToken cancellationToken) =>

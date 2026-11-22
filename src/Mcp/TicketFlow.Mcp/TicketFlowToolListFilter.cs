@@ -1,4 +1,6 @@
-using System.Text.Json.Nodes;
+using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
+using ModelContextProtocol;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Protocol;
@@ -58,21 +60,15 @@ internal static class TicketFlowToolListFilter
             .ConfigureAwait(false);
     }
 
+    /// <summary>A deep clone of <paramref name="tool"/> (through the SDK's own serializer) that differs only in <see cref="Tool.Meta"/>.</summary>
     private static Tool Mark(Tool tool, bool? permitted)
     {
-        var meta = tool.Meta?.DeepClone().AsObject() ?? [];
+        var info = (JsonTypeInfo<Tool>)McpJsonUtilities.DefaultOptions.GetTypeInfo(typeof(Tool));
+        var clone = JsonSerializer.Deserialize(JsonSerializer.SerializeToUtf8Bytes(tool, info), info)!;
+        var meta = clone.Meta ?? [];
         if (permitted is { } value)
             meta["ticketflow/permitted"] = value;
-        return new Tool
-        {
-            Name = tool.Name,
-            Title = tool.Title,
-            Description = tool.Description,
-            InputSchema = tool.InputSchema,
-            OutputSchema = tool.OutputSchema,
-            Annotations = tool.Annotations,
-            Icons = tool.Icons,
-            Meta = meta,
-        };
+        clone.Meta = meta;
+        return clone;
     }
 }

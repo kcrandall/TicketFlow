@@ -95,5 +95,8 @@ public sealed class OutcomeTests
         Assert.AreEqual("/support", UiUrls.SafeReturn("/support", "//evil.test"));
         Assert.AreEqual("/support", UiUrls.SafeReturn("/support", "/supportx/../admin"));
         Assert.AreEqual("/support", UiUrls.SafeReturn("/support", "/admin"));
+        Assert.AreEqual("/support", UiUrls.SafeReturn("/support", "/support/x\r\nSet-Cookie: a=b"), "Control characters are rejected.");
+        Assert.AreEqual("/support", UiUrls.SafeReturn("/support", "/support/\tx"));
+        Assert.AreEqual("/support", UiUrls.SafeReturn("/support", "/support/\u007fx"));
     }
 }

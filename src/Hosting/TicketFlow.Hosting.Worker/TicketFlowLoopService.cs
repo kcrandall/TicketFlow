@@ -43,7 +43,7 @@ internal sealed class TicketFlowLoopService(TicketFlowLoopDefinition definition,
             logger.LogInformation("TicketFlow worker loop {Loop} is not configured (its service is not registered) and will not run.", definition.Name);
             return;
         }
-        health.Set(definition.Name, TicketFlowLoopStatus.Running);
+        health.Started(definition.Name, loop.Interval);
         // Yield so host startup is not blocked by the first run.
         await Task.Yield();
         var failures = 0;
@@ -63,26 +63,19 @@ internal sealed class TicketFlowLoopService(TicketFlowLoopDefinition definition,
                         run = await definition.Run(scope.ServiceProvider, loop, stoppingToken).ConfigureAwait(false);
                     TicketFlowWorkerTelemetry.Record(definition.Name, run.Failures > 0 ? "partial" : "success", run.Items, started);
                     activity?.SetTag("ticketflow.worker.items", run.Items);
+                    // Item failures (for example one failing workspace) are isolated by the loop itself: the loop keeps its cadence and
+                    // reports Degraded health instead of backing off every other item.
+                    failures = 0;
+                    health.Succeeded(definition.Name, run.Items, run.Failures);
                     if (run.Failures > 0)
-                    {
-                        failures++;
-                        health.Failed(definition.Name, failures);
                         logger.LogWarning("TicketFlow worker loop {Loop} completed with {Failures} item failures.", definition.Name, run.Failures);
-                        delay = Backoff(loop, failures, settings.Jitter);
-                        drained = 0;
-                    }
-                    else
+                    if (run.Items > 0 && run.Failures == 0 && drained < loop.MaximumDrainRuns)
                     {
-                        failures = 0;
-                        health.Succeeded(definition.Name, run.Items);
-                        if (run.Items > 0 && drained < loop.MaximumDrainRuns)
-                        {
-                            drained++;
-                            continue;
-                        }
-                        drained = 0;
-                        delay = Jittered(loop.Interval, settings.Jitter);
+                        drained++;
+                        continue;
                     }
+                    drained = 0;
+                    delay = Jittered(loop.Interval, settings.Jitter);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {

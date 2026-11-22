@@ -41,3 +41,6 @@ Tests: `ContactsSearchUpdateRevealAndExportStreams`, `ConversationLifecycleTimel
 Verification (2026-11-22):
 
 - `dotnet test tests/Hosting/TicketFlow.Hosting.AspNetCore.Tests -c Release` — 18 passed, 0 failed.
+
+Review fixes (2026-11-22): reply locks return their fence as `ETag` and release with `If-Match`; agent settings require `If-Match`
+(replace) or `If-None-Match: *` (create). Tests extended in `RoutingStatusPresenceAndSlaRiskEndpoints`.

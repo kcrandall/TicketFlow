@@ -109,10 +109,13 @@ public static class TicketFlowBlazorUIEndpointExtensions
                 UiTheme.Write(http, session.Options, theme);
             return TypedResults.Redirect(returnTo);
         }
-        if (session.State != UiSessionState.Ready)
+        // Authorization of the page comes first and never depends on the posted form: a section the viewer cannot open renders
+        // "Access denied" (403) and its action does not run. Services still authorize the command itself.
+        if (route is null || !UiNavigation.Allows(session, route))
             return Render(session, route, pageState: null);
-        if (UiActions.Find(form["_action"].ToString()) is not { } handler)
-            return TypedResults.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Unknown action.");
+        var action = form["_action"].ToString();
+        if (UiActions.Find(action) is not { } handler || UiNavigation.ActionSection(action) != route.Section)
+            return TypedResults.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Unknown action for this page.");
 
         var result = await UiActions.RunAsync(handler, new UiActionContext(session, form));
         if (result.Outcome.Succeeded && result.PageState is null)
@@ -133,10 +136,9 @@ public static class TicketFlowBlazorUIEndpointExtensions
         session.PageState = pageState;
         var tokens = http.RequestServices.GetRequiredService<IAntiforgery>().GetAndStoreTokens(http);
         session.Antiforgery = (tokens.FormFieldName, tokens.RequestToken ?? string.Empty);
-        var code = status ?? (route is null ? StatusCodes.Status404NotFound
-            : session.State != UiSessionState.Ready ? StatusCodes.Status403Forbidden
-            : UiNavigation.Section(route.Section) is var section && (!section.IsAvailable(session) || !section.IsPermitted(session)) ? StatusCodes.Status403Forbidden
-            : StatusCodes.Status200OK);
+        var code = route is null ? StatusCodes.Status404NotFound
+            : !UiNavigation.Allows(session, route) ? StatusCodes.Status403Forbidden
+            : status ?? StatusCodes.Status200OK;
         return new RazorComponentResult<TicketFlowDocument>(new Dictionary<string, object?>
         {
             [nameof(TicketFlowDocument.Session)] = session,

@@ -4,7 +4,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../TicketFlow.Events.Abstractions/TicketFlow.Events.Abstractions.csproj" />
-    <ProjectReference Include="../../Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
     <ProjectReference Include="../../Contacts/TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj" />
     <ProjectReference Include="../../Sla/TicketFlow.Sla.Abstractions/TicketFlow.Sla.Abstractions.csproj" />
     <ProjectReference Include="../../Routing/TicketFlow.Routing.Abstractions/TicketFlow.Routing.Abstractions.csproj" />

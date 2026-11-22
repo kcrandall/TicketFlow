@@ -83,8 +83,9 @@ else
             return;
         inbox = found.Value;
         (calendars, slaNames, routingNames) = await InboxFields.LoadOptionsAsync(Session);
-        if (Session.Can(AccessPermissions.AccessManage) && Service<IAccessGrantStore>() is { } grants)
-            foreach (var grant in await grants.ListForTargetAsync(AccessPartition.From(Session.Scope), new InboxGrantScope(Session.Scope.WorkspaceId, inbox.Inbox.Id), 50, null, Aborted))
+        if (Service<IAccessAdministrator>() is { } administrator
+            && await administrator.ListGrantsAsync(Actor, new InboxGrantScope(Session.Scope.WorkspaceId, inbox.Inbox.Id), 50, null, Aborted) is AccessListed<IReadOnlyList<StoredAccessGrant>> listed)
+            foreach (var grant in listed.Value)
                 if (grant.Grant.Subject.Value is UserId user)
                     agents.Add((user, grant.Grant.Role.Value));
         await Session.LoadUsersAsync(agents.Select(agent => (UserId?)agent.UserId));

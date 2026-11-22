@@ -14,41 +14,41 @@ internal static class LiveChatEndpoints
 {
     public static RouteGroupBuilder Map(RouteGroupBuilder group)
     {
-        group.MapGet("/livechat/widgets/{configurationId}", async (TicketFlowActor actor, string configurationId, [FromServices] ILiveChatWidgetService service, HttpContext http) =>
+        group.MapGet("/live-chat/widgets/{configurationId}", async (TicketFlowActor actor, string configurationId, [FromServices] ILiveChatWidgetService service, HttpContext http) =>
             Map(http, await service.GetAsync(actor.Principal, configurationId, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision)))
-            .WithName("GetWidget").Produces<WidgetDto>();
-        group.MapPost("/livechat/widgets", async (TicketFlowActor actor, WidgetRequest request, [FromServices] ILiveChatWidgetService service, HttpContext http) =>
+            .WithName("GetWidget").Produces<WidgetResponse>();
+        group.MapPost("/live-chat/widgets", async (TicketFlowActor actor, WidgetRequest request, [FromServices] ILiveChatWidgetService service, HttpContext http) =>
             Map(http, await service.CreateAsync(actor.Principal, Widget(request), http.RequestAborted),
-                stored => TicketFlowHttp.Created(http, $"livechat/widgets/{stored.Widget.ConfigurationId}", Dto(stored), stored.Revision)))
-            .WithName("CreateWidget").Produces<WidgetDto>(StatusCodes.Status201Created);
-        group.MapPut("/livechat/widgets/{configurationId}", async (TicketFlowActor actor, string configurationId, WidgetRequest request, [FromServices] ILiveChatWidgetService service, HttpContext http) =>
+                stored => TicketFlowHttp.Created(http, $"live-chat/widgets/{stored.Widget.ConfigurationId}", Dto(stored), stored.Revision)))
+            .WithName("CreateWidget").Produces<WidgetResponse>(StatusCodes.Status201Created);
+        group.MapPut("/live-chat/widgets/{configurationId}", async (TicketFlowActor actor, string configurationId, WidgetRequest request, [FromServices] ILiveChatWidgetService service, HttpContext http) =>
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
                 return failure;
             if (request.ConfigurationId != configurationId)
                 throw new ArgumentException("The body configuration must match the route.", nameof(configurationId));
             return Map(http, await service.UpdateAsync(actor.Principal, Widget(request), revision, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision));
-        }).WithName("UpdateWidget").Produces<WidgetDto>();
-        group.MapDelete("/livechat/widgets/{configurationId}", async (TicketFlowActor actor, string configurationId, [FromServices] ILiveChatWidgetService service, HttpContext http) =>
+        }).WithName("UpdateWidget").Produces<WidgetResponse>();
+        group.MapDelete("/live-chat/widgets/{configurationId}", async (TicketFlowActor actor, string configurationId, [FromServices] ILiveChatWidgetService service, HttpContext http) =>
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
                 return failure;
             return Map(http, await service.DeleteAsync(actor.Principal, configurationId, revision, http.RequestAborted), _ => TypedResults.NoContent());
         }).WithName("DeleteWidget").Produces(StatusCodes.Status204NoContent);
         group.MapGet("/conversations/{conversationId}/visitor", async (TicketFlowActor actor, string conversationId, [FromServices] ILiveChatAgentService service, HttpContext http) =>
-            Map(http, await service.GetVisitorAsync(actor.Principal, new ConversationId(conversationId), http.RequestAborted), visitor => TicketFlowHttp.Ok(http, new VisitorDto(
+            Map(http, await service.GetVisitorAsync(actor.Principal, new ConversationId(conversationId), http.RequestAborted), visitor => TicketFlowHttp.Ok(http, new VisitorResponse(
                 visitor.VisitorId, visitor.Verified, visitor.IdentityNamespace, visitor.IdentityValue, visitor.DisplayName,
-                [.. visitor.Prechat.Select(answer => new PrechatAnswerDto(answer.Key, answer.Label, answer.Value, answer.Masked))], visitor.SessionCreatedAt,
+                [.. visitor.Prechat.Select(answer => new PrechatAnswerResponse(answer.Key, answer.Label, answer.Value, answer.Masked))], visitor.SessionCreatedAt,
                 Attributes.Masked(visitor.MaskedFields)))))
-            .WithName("GetConversationVisitor").Produces<VisitorDto>();
+            .WithName("GetConversationVisitor").Produces<VisitorResponse>();
 
         group.MapGet("/channels/{kind}/{configurationId}", async (TicketFlowActor actor, string kind, string configurationId, [FromServices] IChannelEndpointService service, HttpContext http) =>
             Map(http, await service.GetAsync(actor.Principal, new ChannelKind(kind), configurationId, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision)))
-            .WithName("GetChannelEndpoint").Produces<ChannelEndpointDto>();
+            .WithName("GetChannelEndpoint").Produces<ChannelEndpointResponse>();
         group.MapPost("/channels", async (TicketFlowActor actor, ChannelEndpointRequest request, [FromServices] IChannelEndpointService service, HttpContext http) =>
             Map(http, await service.CreateAsync(actor.Principal, Endpoint(request), http.RequestAborted),
                 stored => TicketFlowHttp.Created(http, $"channels/{stored.Endpoint.Kind.Value}/{stored.Endpoint.ConfigurationId}", Dto(stored), stored.Revision)))
-            .WithName("CreateChannelEndpoint").Produces<ChannelEndpointDto>(StatusCodes.Status201Created);
+            .WithName("CreateChannelEndpoint").Produces<ChannelEndpointResponse>(StatusCodes.Status201Created);
         group.MapPut("/channels/{kind}/{configurationId}", async (TicketFlowActor actor, string kind, string configurationId, ChannelEndpointRequest request, [FromServices] IChannelEndpointService service, HttpContext http) =>
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
@@ -56,7 +56,7 @@ internal static class LiveChatEndpoints
             if (request.Kind != kind || request.ConfigurationId != configurationId)
                 throw new ArgumentException("The body kind and configuration must match the route.", nameof(configurationId));
             return Map(http, await service.UpdateAsync(actor.Principal, Endpoint(request), revision, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision));
-        }).WithName("UpdateChannelEndpoint").Produces<ChannelEndpointDto>();
+        }).WithName("UpdateChannelEndpoint").Produces<ChannelEndpointResponse>();
         group.MapDelete("/channels/{kind}/{configurationId}", async (TicketFlowActor actor, string kind, string configurationId, [FromServices] IChannelEndpointService service, HttpContext http) =>
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
@@ -97,12 +97,12 @@ internal static class LiveChatEndpoints
     private static LiveChatWidget Widget(WidgetRequest request) =>
         LiveChatCodec.DecodeWidget(request.ConfigurationId, new InboxId(request.InboxId), Json.Raw(request.Definition, "definition"));
 
-    private static WidgetDto Dto(StoredLiveChatWidget stored) =>
+    private static WidgetResponse Dto(StoredLiveChatWidget stored) =>
         new(stored.Widget.ConfigurationId, stored.Widget.Inbox.Value, Json.Parse(LiveChatCodec.EncodeWidget(stored.Widget)), stored.Revision);
 
     private static ChannelEndpoint Endpoint(ChannelEndpointRequest request) =>
         new(new ChannelKind(request.Kind), request.ConfigurationId, new InboxId(request.InboxId), request.Address);
 
-    private static ChannelEndpointDto Dto(StoredChannelEndpoint stored) =>
+    private static ChannelEndpointResponse Dto(StoredChannelEndpoint stored) =>
         new(stored.Endpoint.Kind.Value, stored.Endpoint.ConfigurationId, stored.Endpoint.Inbox.Value, stored.Endpoint.Address, stored.Revision);
 }

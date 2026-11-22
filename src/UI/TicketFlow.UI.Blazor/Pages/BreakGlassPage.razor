@@ -52,11 +52,14 @@
     {
         await LoadWorkspaceAsync();
         roles = [.. BuiltInRoles.All.Where(role => !role.Permissions.Contains(AccessPermissions.AccessManage) && !role.Permissions.Contains(AccessPermissions.AccessBreakGlass))];
-        if (Service<IAccessRoleStore>() is { } store)
-            roles.AddRange((await store.ListAsync(Session.Scope, Aborted)).Select(stored => stored.Role).Where(role => !role.Permissions.Contains(AccessPermissions.AccessManage)));
-        if (Service<IAccessGrantStore>() is { } grants)
-            active.AddRange((await grants.ListForTargetAsync(AccessPartition.From(Session.Scope), new WorkspaceGrantScope(Session.Scope.WorkspaceId), 1000, null, Aborted))
-                .Where(grant => grant.Grant.Kind == GrantKind.BreakGlass && grant.Grant.ValidUntil > Now));
+        // Activation is decided by the administrator (access:break-glass); listings below need access:manage and are optional here.
+        if (Service<IAccessAdministrator>() is { } administrator)
+        {
+            if (await administrator.ListRolesAsync(Actor, Aborted) is AccessListed<IReadOnlyList<AccessRoleListing>> custom)
+                roles.AddRange(custom.Value.Where(item => item.Revision is not null).Select(item => item.Role).Where(role => !role.Permissions.Contains(AccessPermissions.AccessManage)));
+            if (await administrator.ListGrantsAsync(Actor, new WorkspaceGrantScope(Session.Scope.WorkspaceId), AccessLimits.MaximumTargetPage, null, Aborted) is AccessListed<IReadOnlyList<StoredAccessGrant>> listed)
+                active.AddRange(listed.Value.Where(grant => grant.Grant.Kind == GrantKind.BreakGlass && grant.Grant.ValidUntil > Now));
+        }
         await Session.LoadUsersAsync(active.Select(grant => grant.Grant.Subject.Value is UserId user ? (UserId?)user : null));
     }
 }

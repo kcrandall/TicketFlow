@@ -36,6 +36,14 @@ public sealed class InMemoryReportingStoreTests
     public Task AccessFilteredParity(int seed) => AccessFilteredReportParity.VerifyAsync(new InMemoryReportingStore(), seed);
 
     [TestMethod]
+    public Task RebuildHorizonContract() => ReportingStoreContract.VerifyRebuildHorizonAsync(new InMemoryReportingStore());
+
+    [TestMethod]
+    [DataRow(21)]
+    [DataRow(22)]
+    public Task LabelAggregatesMatchFacts(int seed) => ReportingStoreContract.VerifyLabelAggregatesMatchFactsAsync(new InMemoryReportingStore(), seed);
+
+    [TestMethod]
     public async Task CapacityIsBounded()
     {
         var store = new InMemoryReportingStore(maximumFacts: 2);

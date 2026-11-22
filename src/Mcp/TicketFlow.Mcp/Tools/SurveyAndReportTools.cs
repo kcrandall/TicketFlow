@@ -6,6 +6,8 @@ using TicketFlow.Core;
 using TicketFlow.Reporting;
 using TicketFlow.Surveys;
 
+using P = TicketFlow.Mcp.TicketFlowMcpPermissions;
+
 namespace TicketFlow.Mcp.Tools;
 
 /// <summary>Survey tools: definitions, responses (comments masked per field policy) and CSAT/NPS aggregates.</summary>
@@ -16,29 +18,19 @@ public sealed class SurveyTools(TicketFlowToolContext context)
 
     private ISurveyService Service => context.Service<ISurveyService>();
 
-    [McpServerTool(Name = "surveys_list", Title = "List surveys", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "surveys_list", Title = "List surveys", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ToolList<SurveyOutput>))]
     [Description("Lists survey definitions (CSAT or NPS, inbox, enabled).")]
-    [TicketFlowTool("survey:read")]
+    [TicketFlowTool(P.SurveyRead)]
     public Task<CallToolResult> List(
         [Description(WorkspaceHelp)] string? workspace = null,
         CancellationToken cancellationToken = default) =>
-        context.RunAsync(workspace, async principal => Map(await Service.ListSurveysAsync(principal, cancellationToken), list => new
-        {
-            items = list.Select(stored => new
-            {
-                id = stored.Survey.Id.Value,
-                name = stored.Survey.Name,
-                kind = TicketFlowToolJson.Token(stored.Survey.Kind),
-                inboxId = stored.Survey.Inbox?.Value,
-                enabled = stored.Survey.Enabled,
-                defaultLocale = stored.Survey.DefaultLocale.Value,
-                revision = stored.Revision,
-            }).ToList(),
-        }), cancellationToken);
+        context.RunAsync(workspace, async principal => Map(await Service.ListSurveysAsync(principal, cancellationToken), list => new ToolList<SurveyOutput>(
+            [.. list.Select(stored => new SurveyOutput(stored.Survey.Id.Value, stored.Survey.Name, TicketFlowToolJson.Token(stored.Survey.Kind), stored.Survey.Inbox?.Value,
+                stored.Survey.Enabled, stored.Survey.DefaultLocale.Value, stored.Revision))])), cancellationToken);
 
-    [McpServerTool(Name = "surveys_list_responses", Title = "List survey responses", ReadOnly = true, Idempotent = true)]
-    [Description("Lists survey responses in a time range (newest first) the caller may view; comments are absent when masked for the caller.")]
-    [TicketFlowTool("survey:read")]
+    [McpServerTool(Name = "surveys_list_responses", Title = "List survey responses", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ToolPage<SurveyResponseOutput>))]
+    [Description("Lists survey responses in a time range (newest first) the caller may view; comments are absent when masked for the caller." + ToolViews.UntrustedNote)]
+    [TicketFlowTool(P.SurveyRead)]
     public Task<CallToolResult> ListResponses(
         [Description("Range start (ISO 8601, inclusive).")] DateTimeOffset from,
         [Description("Range end (ISO 8601, exclusive; at most 366 days after from).")] DateTimeOffset to,
@@ -56,30 +48,16 @@ public sealed class SurveyTools(TicketFlowToolContext context)
                 after = new SurveyResponseCursor(TicketFlowToolJson.ParseInstant(parts[0]), new SurveyInvitationId(Guid.Parse(parts[1])));
             }
             var query = new SurveyResponseQuery(from, to, surveyId is null ? null : new SurveyId(surveyId), limit, after);
-            return Map(await Service.ListResponsesAsync(principal, query, cancellationToken), page => new
-            {
-                items = page.Items.Select(view => new
-                {
-                    invitationId = view.Response.Invitation.Value,
-                    surveyId = view.Response.Survey.Value,
-                    kind = TicketFlowToolJson.Token(view.Response.Kind),
-                    score = view.Response.Score,
-                    comment = view.Comment,
-                    commentMasked = view.CommentMasked,
-                    commentRevealable = view.CommentRevealable,
-                    respondedAt = view.Response.RespondedAt,
-                    conversationId = view.Response.Conversation.Value,
-                    inboxId = view.Response.Inbox?.Value,
-                    teamId = view.Response.Team?.Value,
-                    agentId = view.Response.Agent?.Value,
-                }).ToList(),
-                next = page.Next is { } next ? TicketFlowToolJson.EncodeCursor(TicketFlowToolJson.Instant(next.RespondedAt), next.Invitation.Value.ToString("D")) : null,
-            });
+            return Map(await Service.ListResponsesAsync(principal, query, cancellationToken), page => new ToolPage<SurveyResponseOutput>(
+                [.. page.Items.Select(view => new SurveyResponseOutput(view.Response.Invitation.Value.ToString("D"), view.Response.Survey.Value, TicketFlowToolJson.Token(view.Response.Kind),
+                    view.Response.Score, context.UntrustedOrNull(ToolViews.Contact, view.Comment), view.CommentMasked, view.CommentRevealable, view.Response.RespondedAt,
+                    view.Response.Conversation.Value, view.Response.Inbox?.Value, view.Response.Team?.Value, view.Response.Agent?.Value))],
+                page.Next is { } next ? TicketFlowToolJson.EncodeCursor(TicketFlowToolJson.Instant(next.RespondedAt), next.Invitation.Value.ToString("D")) : null));
         }, cancellationToken);
 
-    [McpServerTool(Name = "surveys_aggregate", Title = "Aggregate survey scores", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "surveys_aggregate", Title = "Aggregate survey scores", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(SurveyAggregateOutput))]
     [Description("CSAT or NPS aggregates over a time range, optionally bucketed by day/week/month and grouped by inbox, team or agent; only responses the caller may view are counted.")]
-    [TicketFlowTool("report:view")]
+    [TicketFlowTool(P.ReportView)]
     public Task<CallToolResult> Aggregate(
         [Description("csat or nps.")] string kind,
         [Description("Range start (ISO 8601).")] DateTimeOffset from,
@@ -94,22 +72,9 @@ public sealed class SurveyTools(TicketFlowToolContext context)
             var query = new SurveyAggregateQuery(TicketFlowToolJson.Parse<SurveyKind>(kind, nameof(kind)), from, to,
                 bucket is null ? SurveyTimeBucket.None : TicketFlowToolJson.Parse<SurveyTimeBucket>(bucket, nameof(bucket)),
                 groupBy is null ? SurveyDimension.None : TicketFlowToolJson.Parse<SurveyDimension>(groupBy, nameof(groupBy)), surveyId is null ? null : new SurveyId(surveyId));
-            return Map(await Service.AggregateAsync(principal, query, cancellationToken), result => new
-            {
-                rows = result.Rows.Select(row => new
-                {
-                    kind = TicketFlowToolJson.Token(row.Kind),
-                    bucketStart = row.BucketStart,
-                    group = row.Group,
-                    responses = row.Responses,
-                    positive = row.Positive,
-                    neutral = row.Neutral,
-                    negative = row.Negative,
-                    npsScore = row.NpsScore,
-                    averageScore = row.AverageScore,
-                }).ToList(),
-                truncated = result.Truncated,
-            });
+            return Map(await Service.AggregateAsync(principal, query, cancellationToken), result => new SurveyAggregateOutput(
+                [.. result.Rows.Select(row => new SurveyAggregateRowOutput(TicketFlowToolJson.Token(row.Kind), row.BucketStart, row.Group, row.Responses, row.Positive, row.Neutral,
+                    row.Negative, row.NpsScore, row.AverageScore))], result.Truncated));
         }, cancellationToken);
 
     private static object Map<T>(SurveyResult<T> result, Func<T, object> success) => result switch
@@ -135,9 +100,9 @@ public sealed class ReportTools(TicketFlowToolContext context)
 
     private IReportingService Service => context.Service<IReportingService>();
 
-    [McpServerTool(Name = "reports_overview", Title = "Support overview", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "reports_overview", Title = "Support overview", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ReportOverviewOutput))]
     [Description("Support overview for a time range: created/resolved/reopened conversations, messages, assignments, open backlog, response and resolution time summaries (seconds), SLA compliance and CSAT/NPS. " + RangeHelp + " A caller without report grants gets empty numbers, not an error.")]
-    [TicketFlowTool("report:view", "report:view-own", AnyOf = true)]
+    [TicketFlowTool(P.ReportView, P.ReportViewOwn, AnyOf = true)]
     public Task<CallToolResult> Overview(
         [Description("Range start (ISO 8601).")] DateTimeOffset from,
         [Description("Range end (ISO 8601).")] DateTimeOffset to,
@@ -146,34 +111,15 @@ public sealed class ReportTools(TicketFlowToolContext context)
         [Description("Only this agent.")] string? agentId = null,
         [Description(WorkspaceHelp)] string? workspace = null,
         CancellationToken cancellationToken = default) =>
-        context.RunAsync(workspace, async principal => Map(await Service.GetOverviewAsync(principal, Query(from, to, inboxId, teamId, agentId), cancellationToken), overview => new
-        {
-            from = overview.From,
-            to = overview.To,
-            created = overview.Created,
-            resolved = overview.Resolved,
-            reopened = overview.Reopened,
-            messagesReceived = overview.MessagesReceived,
-            messagesSent = overview.MessagesSent,
-            assignments = overview.Assignments,
-            handoffs = overview.Handoffs,
-            teamTransfers = overview.TeamTransfers,
-            openBacklog = overview.OpenBacklog,
-            firstResponse = Duration(overview.FirstResponse),
-            firstResponseBusiness = Duration(overview.FirstResponseBusiness),
-            response = Duration(overview.Response),
-            resolution = Duration(overview.Resolution),
-            resolutionBusiness = Duration(overview.ResolutionBusiness),
-            slaAchieved = overview.SlaAchieved,
-            slaBreached = overview.SlaBreached,
-            slaCompliancePercent = overview.SlaCompliancePercent,
-            satisfaction = Satisfaction(overview.Satisfaction),
-            truncated = overview.Truncated,
-        }), cancellationToken);
+        context.RunAsync(workspace, async principal => Map(await Service.GetOverviewAsync(principal, Query(from, to, inboxId, teamId, agentId), cancellationToken), overview =>
+            new ReportOverviewOutput(overview.From, overview.To, overview.Created, overview.Resolved, overview.Reopened, overview.MessagesReceived, overview.MessagesSent,
+                overview.Assignments, overview.Handoffs, overview.TeamTransfers, overview.OpenBacklog, Duration(overview.FirstResponse), Duration(overview.FirstResponseBusiness),
+                Duration(overview.Response), Duration(overview.Resolution), Duration(overview.ResolutionBusiness), overview.SlaAchieved, overview.SlaBreached,
+                overview.SlaCompliancePercent, Satisfaction(overview.Satisfaction), overview.Truncated)), cancellationToken);
 
-    [McpServerTool(Name = "reports_leaderboard", Title = "Agent leaderboard", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "reports_leaderboard", Title = "Agent leaderboard", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(LeaderboardOutput))]
     [Description("Agent leaderboard for a time range, sorted by resolved (default), messagesSent, assignments, firstResponseMedian or responseMedian. " + RangeHelp)]
-    [TicketFlowTool("report:view", "report:view-own", AnyOf = true)]
+    [TicketFlowTool(P.ReportView, P.ReportViewOwn, AnyOf = true)]
     public Task<CallToolResult> Leaderboard(
         [Description("Range start (ISO 8601).")] DateTimeOffset from,
         [Description("Range end (ISO 8601).")] DateTimeOffset to,
@@ -187,29 +133,14 @@ public sealed class ReportTools(TicketFlowToolContext context)
         {
             var query = new ReportLeaderboardQuery(Query(from, to, inboxId, teamId, null),
                 sort is null ? ReportLeaderboardSort.Resolved : TicketFlowToolJson.Parse<ReportLeaderboardSort>(sort, nameof(sort)), limit);
-            return Map(await Service.GetLeaderboardAsync(principal, query, cancellationToken), board => new
-            {
-                from = board.From,
-                to = board.To,
-                rows = board.Rows.Select(row => new
-                {
-                    agentId = row.Agent.Value,
-                    resolved = row.Resolved,
-                    messagesSent = row.MessagesSent,
-                    assignments = row.Assignments,
-                    handoffs = row.Handoffs,
-                    firstResponse = Duration(row.FirstResponse),
-                    response = Duration(row.Response),
-                    resolution = Duration(row.Resolution),
-                    satisfaction = Satisfaction(row.Satisfaction),
-                }).ToList(),
-                truncated = board.Truncated,
-            });
+            return Map(await Service.GetLeaderboardAsync(principal, query, cancellationToken), board => new LeaderboardOutput(board.From, board.To,
+                [.. board.Rows.Select(row => new LeaderboardRowOutput(row.Agent.Value, row.Resolved, row.MessagesSent, row.Assignments, row.Handoffs, Duration(row.FirstResponse),
+                    Duration(row.Response), Duration(row.Resolution), Satisfaction(row.Satisfaction)))], board.Truncated));
         }, cancellationToken);
 
-    [McpServerTool(Name = "reports_trends", Title = "Report trends", ReadOnly = true, Idempotent = true)]
+    [McpServerTool(Name = "reports_trends", Title = "Report trends", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(TrendOutput))]
     [Description("Time series of 1-16 metrics (for example conversationCreated, conversationResolved, messageReceived, firstResponseTime) bucketed by hour, day, week or month in the workspace time zone, optionally grouped by inbox, team, agent, channel, priority or label. Hourly series span at most 40 days. " + RangeHelp)]
-    [TicketFlowTool("report:view", "report:view-own", AnyOf = true)]
+    [TicketFlowTool(P.ReportView, P.ReportViewOwn, AnyOf = true)]
     public Task<CallToolResult> Trends(
         [Description("Range start (ISO 8601).")] DateTimeOffset from,
         [Description("Range end (ISO 8601).")] DateTimeOffset to,
@@ -226,25 +157,10 @@ public sealed class ReportTools(TicketFlowToolContext context)
             var query = new ReportTrendQuery(Query(from, to, inboxId, teamId, null), metrics.Select(metric => TicketFlowToolJson.Parse<ReportMetric>(metric, nameof(metrics))),
                 granularity is null ? ReportGranularity.Day : TicketFlowToolJson.Parse<ReportGranularity>(granularity, nameof(granularity)),
                 groupBy is null ? ReportDimension.None : TicketFlowToolJson.Parse<ReportDimension>(groupBy, nameof(groupBy)));
-            return Map(await Service.GetTrendsAsync(principal, query, cancellationToken), trend => new
-            {
-                from = trend.From,
-                to = trend.To,
-                timeZone = trend.TimeZoneId,
-                granularity = TicketFlowToolJson.Token(trend.Granularity),
-                buckets = trend.Buckets,
-                points = trend.Points.Select(point => new
-                {
-                    bucketStart = point.BucketStart,
-                    group = point.Group,
-                    metric = TicketFlowToolJson.Token(point.Metric),
-                    count = point.Count,
-                    sum = point.Sum,
-                    medianSeconds = Seconds(point.Median),
-                    p90Seconds = Seconds(point.P90),
-                }).ToList(),
-                truncated = trend.Truncated,
-            });
+            return Map(await Service.GetTrendsAsync(principal, query, cancellationToken), trend => new TrendOutput(trend.From, trend.To, trend.TimeZoneId,
+                TicketFlowToolJson.Token(trend.Granularity), trend.Buckets,
+                [.. trend.Points.Select(point => new TrendPointOutput(point.BucketStart, point.Group, TicketFlowToolJson.Token(point.Metric), point.Count, point.Sum,
+                    Seconds(point.Median), Seconds(point.P90)))], trend.Truncated));
         }, cancellationToken);
 
     private static ReportQuery Query(DateTimeOffset from, DateTimeOffset to, string? inboxId, string? teamId, string? agentId) =>
@@ -252,21 +168,10 @@ public sealed class ReportTools(TicketFlowToolContext context)
 
     private static long? Seconds(TimeSpan? value) => value is { } some ? (long)Math.Round(some.TotalSeconds) : null;
 
-    private static object Duration(ReportDurationSummary summary) => new
-    {
-        count = summary.Count,
-        averageSeconds = Seconds(summary.Average),
-        medianSeconds = Seconds(summary.Median),
-        p90Seconds = Seconds(summary.P90),
-    };
+    private static DurationOutput Duration(ReportDurationSummary summary) => new(summary.Count, Seconds(summary.Average), Seconds(summary.Median), Seconds(summary.P90));
 
-    private static object? Satisfaction(ReportSatisfaction? satisfaction) => satisfaction is null ? null : new
-    {
-        csatResponses = satisfaction.CsatResponses,
-        csatPercent = satisfaction.CsatPercent,
-        npsResponses = satisfaction.NpsResponses,
-        npsScore = satisfaction.NpsScore,
-    };
+    private static SatisfactionOutput? Satisfaction(ReportSatisfaction? satisfaction) => satisfaction is null ? null
+        : new(satisfaction.CsatResponses, satisfaction.CsatPercent, satisfaction.NpsResponses, satisfaction.NpsScore);
 
     private static object Map<T>(ReportResult<T> result, Func<T, object> success) => result switch
     {

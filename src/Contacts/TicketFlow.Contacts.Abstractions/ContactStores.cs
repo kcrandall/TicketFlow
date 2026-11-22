@@ -64,6 +64,12 @@ public enum ContactChangeKind
 
     /// <summary><see cref="ContactChangeDraft.Contact"/> was split back out of <see cref="ContactChangeDraft.Related"/>.</summary>
     Unmerged = 5,
+
+    /// <summary>A verified external account (<see cref="ContactIdentityKind.ExternalUser"/>) was linked to <see cref="ContactChangeDraft.Contact"/>; appended next to its <see cref="Updated"/>/<see cref="Created"/> change.</summary>
+    IdentityLinked = 6,
+
+    /// <summary>A verified external account was unlinked from <see cref="ContactChangeDraft.Contact"/>; appended next to its <see cref="Updated"/> change.</summary>
+    IdentityUnlinked = 7,
 }
 
 /// <summary>A change event to append in the write transaction. Carries identifiers only.</summary>

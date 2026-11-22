@@ -1,3 +1,5 @@
+using TicketFlow.Core;
+
 namespace TicketFlow.Access;
 
 /// <summary>
@@ -33,6 +35,35 @@ public sealed class AccessQueryPlanner : IAccessQueryPlanner
         }
 
         var context = await engine.LoadAsync(query.Principal, query.Scope, cancellationToken).ConfigureAwait(false);
+        return await PlanAsync(query, context, sensitive, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Plans every permission against one grant snapshot (one store load instead of one per permission).</summary>
+    public async Task<IReadOnlySet<Permission>> HeldAnywhereAsync(PrincipalRef principal, TicketScope scope, IEnumerable<Permission> permissions, CancellationToken cancellationToken = default)
+    {
+        var loaded = AccessDecisionContexts.Validate(principal, scope, permissions);
+        var held = new HashSet<Permission>();
+        AccessContext? context = null;
+        foreach (var permission in loaded)
+        {
+            var query = new AccessQuery(principal, permission, scope);
+            var sensitive = engine.Catalog.Find(permission)?.IsSensitive == true;
+            if (engine.Precheck(principal, permission, scope) is { } reason)
+            {
+                if (sensitive)
+                    await RecordAsync(query, DenyAllFilter.Instance, false, reason, engine.Now, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+            context ??= await engine.LoadAsync(principal, scope, cancellationToken).ConfigureAwait(false);
+            if (await PlanAsync(query, context, sensitive, cancellationToken).ConfigureAwait(false) is not DenyAllFilter)
+                held.Add(permission);
+        }
+        return held;
+    }
+
+    private async Task<AccessFilter> PlanAsync(AccessQuery query, AccessContext context, bool sensitive, CancellationToken cancellationToken)
+    {
+        var permission = query.Permission;
         var allows = new List<AccessFilter>();
         var denies = new List<AccessFilter>();
         var usedBreakGlass = false;

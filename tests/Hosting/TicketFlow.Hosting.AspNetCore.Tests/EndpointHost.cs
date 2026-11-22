@@ -101,9 +101,11 @@ internal sealed class EndpointHost : IAsyncDisposable
         return client;
     }
 
-    public static HttpRequestMessage Request(HttpMethod method, string path, object? body = null, long? ifMatch = null)
+    public static HttpRequestMessage Request(HttpMethod method, string path, object? body = null, long? ifMatch = null, bool header = false)
     {
         var request = new HttpRequestMessage(method, path);
+        if (header)
+            request.Headers.Add(TicketFlowHttp.RequestHeader, "1");
         if (body is not null)
             request.Content = JsonContent.Create(body, options: JsonSerializerOptions.Web);
         if (ifMatch is { } revision)

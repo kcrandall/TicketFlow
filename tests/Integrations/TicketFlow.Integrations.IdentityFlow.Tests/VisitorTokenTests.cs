@@ -8,6 +8,8 @@ using Microsoft.IdentityModel.Tokens;
 using TicketFlow.Channels.LiveChat;
 using TicketFlow.Testing;
 
+using TicketFlow.Integrations.IdentityFlow.SignalR;
+
 namespace TicketFlow.Integrations.IdentityFlow.Tests;
 
 [TestClass]
@@ -83,6 +85,20 @@ public sealed class VisitorTokenTests
     }
 
     [TestMethod]
+    public async Task RotatedIssuerKeysArePickedUpWithoutRestart()
+    {
+        var rotated = new RsaSecurityKey(RSA.Create(2048)) { KeyId = "k2" };
+        var handler = new DiscoveryHandler();
+        var options = new IdentityFlowVisitorTokenOptions { Authority = "https://id.example.test", BackchannelHandler = handler };
+        options.Audiences.Add("widget");
+        using var validator = new IdentityFlowVisitorTokenValidator(Microsoft.Extensions.Options.Options.Create(options));
+        Assert.IsInstanceOfType<VisitorTokenAccepted>((await validator.ValidateAsync(TestScopes.Create(), "cfg", Issue("u1"))).Value);
+        handler.Key = rotated;
+        Assert.IsInstanceOfType<VisitorTokenAccepted>((await validator.ValidateAsync(TestScopes.Create(), "cfg", Issue("u1", key: rotated))).Value,
+            "A token signed with a new key triggers a JWKS refresh.");
+    }
+
+    [TestMethod]
     public void ConfigurationIsValidatedUpFront()
     {
         Assert.ThrowsExactly<InvalidOperationException>(() => new IdentityFlowVisitorTokenValidator(Microsoft.Extensions.Options.Options.Create(new IdentityFlowVisitorTokenOptions { Authority = Issuer })));
@@ -125,13 +141,15 @@ public sealed class VisitorTokenTests
     {
         public List<string> Requests { get; } = [];
 
+        public RsaSecurityKey Key { get; set; } = VisitorTokenTests.Key;
+
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Requests.Add(request.RequestUri!.AbsolutePath);
             var body = request.RequestUri.AbsolutePath switch
             {
                 "/.well-known/openid-configuration" => JsonSerializer.Serialize(new { issuer = Issuer, jwks_uri = "https://id.example.test/.well-known/jwks" }),
-                "/.well-known/jwks" => JsonSerializer.Serialize(new { keys = new[] { JsonWebKeyConverter.ConvertFromRSASecurityKey(new RsaSecurityKey(Key.Rsa.ExportParameters(false)) { KeyId = "k1" }) } },
+                "/.well-known/jwks" => JsonSerializer.Serialize(new { keys = new[] { JsonWebKeyConverter.ConvertFromRSASecurityKey(new RsaSecurityKey(Key.Rsa.ExportParameters(false)) { KeyId = Key.KeyId }) } },
                     new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull }),
                 _ => null,
             };

@@ -37,6 +37,13 @@ public sealed class InMemoryEventStoreTests
     }
 
     [TestMethod]
+    public async Task ClaimFairnessContract()
+    {
+        var store = Store();
+        await EventStoreContract.VerifyClaimFairnessAsync(store, store, store);
+    }
+
+    [TestMethod]
     public async Task ConcurrentClaimContract()
     {
         var store = Store();

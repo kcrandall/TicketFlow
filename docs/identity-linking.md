@@ -40,7 +40,7 @@ directly or through evidence (for example the `WidgetVisitor` identity of the se
 | No contact holds the account | The account is attached to the contact as verified (`ContactLinked`, audited `Linked`, `Updated` change). |
 | Another contact holds it | The named contact is merged **into** the account contact through `IContactService.MergeAsync` (`ContactMergedInto(target, source, mergeId)`); audited `Merged` + `Linked`; `Merged`/`Updated` changes so conversations follow. |
 | The contact already holds it, or it is a tombstone merged into the holder, or the evidence already moved there | `ContactAlreadyLinked` (nothing written) — retries are idempotent. |
-| The contact holds a **different** verified account of the same namespace | `ContactLinkConflict(OtherAccount)` — two accounts are never combined. |
+| The contact holds a **different** verified account of the same namespace (as the requested account or as any other account the holder has) | `ContactLinkConflict(OtherAccount)` — two accounts are never combined (same rule as auto-merge and accept). |
 | The evidence matches several contacts | `ContactLinkConflict(AmbiguousEvidence, readable candidates)`. |
 | Concurrent writers keep winning (8 attempts) | `ContactLinkConflict(Contended)`. |
 | Not permitted / nothing found | `ContactRefused` (`Forbidden`, `NotFound`, …). |
@@ -73,15 +73,20 @@ on sign-in (portal, widget identify):
 same scope only):
 
 - `LinkingOff`: nothing.
+- Only **verified** claims are considered by default. `LinkingSuggest(IncludeClaimedEvidence: true)` /
+  `LinkingAutoMerge(rules, IncludeClaimedEvidence: true)` also let claimed claims produce suggestions (never merges); those are marked
+  (`EvidenceVerified = false`, view `RequiresConfirmation`) and `AcceptSuggestionAsync(..., confirmClaimedEvidence: true, ...)` is
+  required to accept them (otherwise `Invalid`).
 - `LinkingSuggest`: a pending `ContactLinkSuggestion(candidate → account, evidence)` is stored (one pending per pair; repeat logins
   reuse it), audited `LinkSuggested`.
 - `LinkingAutoMerge(rules)`: a candidate is merged into the account contact when at least `MinimumMatchingIdentities` **verified**
   claims of `Kinds` match addresses the candidate holds as **claimed**, and (`RequireUnverifiedCandidate`, default) the candidate holds
   no verified identity; otherwise, or when the actor lacks `contact:merge`, a suggestion is stored. Claimed-only evidence and
-  verified holders never auto-merge. Auto-merge is opt-in: a visitor who typed someone else's address would have their own
+  verified holders never auto-merge. Candidate `contact:link` checks share one `IAccessDecisionContext` per call. Auto-merge is opt-in: a visitor who typed someone else's address would have their own
   conversations attached to that account, so enable it only where provider verification is trustworthy.
 
-Policies persist as `{"v":1,"k":"off"|"suggest"|"auto-merge",...}` (`ContactLinkingCodec`); unions are never serialized.
+Policies persist as `{"v":1,"k":"off"|"suggest"|"auto-merge",...}` with an optional `"claimed":true` (`ContactLinkingCodec`); unions are
+never serialized.
 
 ### Suggestions
 
@@ -90,7 +95,18 @@ Policies persist as `{"v":1,"k":"off"|"suggest"|"auto-merge",...}` (`ContactLink
 identifiers and the evidence kind only, never the address. `AcceptSuggestionAsync` (`contact:read` + `contact:link` on both,
 `contact:merge` through the merge) merges and records `Accepted` with the merge id (audited `LinkSuggestionAccepted`);
 `RejectSuggestionAsync` records `Rejected` (audited, with justification). Suggestions whose contacts were merged meanwhile become
-`Superseded` on accept.
+`Superseded` on accept. A contact-filtered listing runs two index-backed keyset scans (candidate and account keys) merged by id.
+
+**Retention**: `IContactLinkingStore.PruneDecidedSuggestionsAsync(decidedBefore, limit ≤ 10,000)` deletes decided (accepted, rejected,
+superseded) suggestions last updated before the cutoff, oldest first, store-wide (PostgreSQL: partial index on `updated_at`,
+`FOR UPDATE SKIP LOCKED`); pending suggestions are never pruned. Hosts call it from a maintenance loop.
+
+### Change log and events
+
+Account links append `ContactChangeKind.IdentityLinked` (next to `Updated`, or `Created` when `ResolveCustomerAsync` creates the
+contact); `UnlinkAccountAsync` appends `IdentityUnlinked` next to `Updated`. Merges keep `Merged`/`Updated`. The events contact
+follower maps `IdentityLinked` to `ticketflow.contact.identity-linked.v1` (`ContactIdentityLinkedData(contact, "external-user", true)`);
+`IdentityUnlinked` has no event type yet and is skipped.
 
 ### Permissions
 
@@ -146,8 +162,8 @@ subject as `ExternalAccountRef("identityflow", subject)` and the `email`/`email_
 
 | Contract | Guarantees |
 | --- | --- |
-| `IContactLinkingStore` | Scope-confined; policy create-at-1 then compare-and-set; one pending suggestion per (candidate, account), atomically (duplicates return the existing one); ≤ 100,000 pending per scope; CAS suggestion updates with immutable pair/evidence; filtered bounded listing over both contacts. |
-| `IStaffIdentityStore` | Scope-confined; atomic (provider, subject) uniqueness and per-user capacity; idempotent relink; unlink fenced on the expected user; CAS profiles; audit in the same transaction. |
+| `IContactLinkingStore` | Retention of decided suggestions; scope-confined; policy create-at-1 then compare-and-set; one pending suggestion per (candidate, account), atomically (duplicates return the existing one); ≤ 100,000 pending per scope; CAS suggestion updates with immutable pair/evidence; filtered bounded listing over both contacts. |
+| `IStaffIdentityStore` | Results `StaffIdentityWriteResult` (`StaffIdentityWriteApplied | StaffIdentityWriteTaken | StaffIdentityWriteNotFound | StaffIdentityWriteRejected`) and `StaffIdentityProfileWriteResult` (`StaffIdentityProfileWriteApplied | StaffIdentityWriteNotFound | StaffIdentityWriteConflict`). Scope-confined; atomic (provider, subject) uniqueness and per-user capacity; idempotent relink; unlink fenced on the expected user; CAS profiles; audit in the same transaction. |
 
 `tests/Contacts/TicketFlow.Contacts.StoreContracts` (`ContactLinkingStoreContract`) and `tests/Identity/TicketFlow.Identity.StoreContracts`
 verify both against the in-memory stores and PostgreSQL with independent clients.

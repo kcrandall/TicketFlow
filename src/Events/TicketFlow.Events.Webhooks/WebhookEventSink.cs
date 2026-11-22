@@ -134,7 +134,8 @@ public sealed class EventWebhookOptions
 /// signed with the E6 v1 scheme (<see cref="ApiWebhookSignature"/>; headers <see cref="ApiWebhookHeaders"/>, the delivery id stable across
 /// retries) using the primary key from <see cref="IEventWebhookKeyResolver"/>, plus <see cref="EventWebhookHeaders.PreviousSignature"/> while a
 /// rotation overlaps. 2xx is delivered; 408, 425, 429 and 5xx retry (honoring <c>Retry-After</c>); other statuses, blocked destinations and
-/// oversized bodies are permanent failures. Payloads and response bodies are never logged or read.
+/// a single oversized event are permanent failures; an oversized batch (over the 1 MiB signing bound) or a 413 response asks the engine to
+/// split it (<see cref="EventSinkSplit"/>). Payloads and response bodies are never logged or read.
 /// </summary>
 public sealed class WebhookEventSink : IEventSink, IDisposable
 {
@@ -162,7 +163,7 @@ public sealed class WebhookEventSink : IEventSink, IDisposable
 
     public int MaximumBatchSize => EventSubscription.MaximumBatchSize;
 
-    public bool IsValidTarget(string target) => Uri.TryCreate(target, UriKind.Absolute, out var uri) && policy.Allows(uri);
+    public bool IsValidTarget(TicketScope scope, string target) => Uri.TryCreate(target, UriKind.Absolute, out var uri) && policy.Allows(uri);
 
     public async Task<EventSinkResult> DeliverAsync(EventDelivery delivery, CancellationToken cancellationToken = default)
     {
@@ -177,7 +178,7 @@ public sealed class WebhookEventSink : IEventSink, IDisposable
         var single = delivery.Events.Count == 1;
         var body = Encoding.UTF8.GetBytes(single ? delivery.Events[0].Json : "[" + string.Join(",", delivery.Events.Select(item => item.Json)) + "]");
         if (body.Length > ApiWebhookSignature.MaximumBodyBytes)
-            return new EventSinkFailed("payload-too-large", permanent: true);
+            return single ? new EventSinkFailed("payload-too-large", permanent: true) : EventSinkSplit.Instance;
         var deliveryId = delivery.DeliveryId;
         var timestamp = time.GetUtcNow().ToUnixTimeSeconds();
         using var message = new HttpRequestMessage(HttpMethod.Post, endpoint) { Content = new ByteArrayContent(body) };
@@ -199,6 +200,8 @@ public sealed class WebhookEventSink : IEventSink, IDisposable
             var status = (int)response.StatusCode;
             if (status is >= 200 and < 300)
                 return EventSinkDelivered.Instance;
+            if (status == 413 && !single)
+                return EventSinkSplit.Instance;
             var code = "http-" + status.ToString(CultureInfo.InvariantCulture);
             return status is 408 or 425 or 429 or >= 500
                 ? new EventSinkFailed(code, retryAfter: RetryAfter(response))

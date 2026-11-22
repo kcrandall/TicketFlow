@@ -5,7 +5,8 @@ namespace TicketFlow.Contacts;
 
 /// <summary>
 /// Versioned persisted JSON for <see cref="ContactLinkingPolicy"/>: <c>{"v":1,"k":"off"}</c>, <c>{"v":1,"k":"suggest"}</c> or
-/// <c>{"v":1,"k":"auto-merge","kinds":[1,2],"min":1,"unverified":true}</c> (kinds are <see cref="ContactIdentityKind"/> numbers).
+/// <c>{"v":1,"k":"auto-merge","kinds":[1,2],"min":1,"unverified":true}</c> (kinds are <see cref="ContactIdentityKind"/> numbers), with an
+/// optional <c>"claimed":true</c> on suggest/auto-merge when claimed evidence may produce suggestions.
 /// The union is never serialized directly; decoding rejects unknown versions, discriminators and properties.
 /// </summary>
 public static class ContactLinkingCodec
@@ -27,8 +28,10 @@ public static class ContactLinkingCodec
                 case LinkingOff:
                     writer.WriteString("k", "off");
                     break;
-                case LinkingSuggest:
+                case LinkingSuggest suggest:
                     writer.WriteString("k", "suggest");
+                    if (suggest.IncludeClaimedEvidence)
+                        writer.WriteBoolean("claimed", true);
                     break;
                 case LinkingAutoMerge auto:
                     writer.WriteString("k", "auto-merge");
@@ -38,6 +41,8 @@ public static class ContactLinkingCodec
                     writer.WriteEndArray();
                     writer.WriteNumber("min", auto.Rules.MinimumMatchingIdentities);
                     writer.WriteBoolean("unverified", auto.Rules.RequireUnverifiedCandidate);
+                    if (auto.IncludeClaimedEvidence)
+                        writer.WriteBoolean("claimed", true);
                     break;
             }
             writer.WriteEndObject();
@@ -61,15 +66,20 @@ public static class ContactLinkingCodec
             var names = root.EnumerateObject().Select(property => property.Name).ToList();
             if (names.Distinct(StringComparer.Ordinal).Count() != names.Count)
                 throw new FormatException("Duplicate linking policy properties.");
+            // "claimed" is optional and, when present, must be true (the default false is never written).
+            var claimed = root.TryGetProperty("claimed", out var flag);
+            if (claimed && flag.ValueKind != JsonValueKind.True)
+                throw new FormatException("The claimed-evidence flag must be true when present.");
+            var extra = claimed ? 1 : 0;
             switch (kind)
             {
                 case "off" when names.Count == 2:
                     return LinkingOff.Instance;
-                case "suggest" when names.Count == 2:
-                    return LinkingSuggest.Instance;
-                case "auto-merge" when names.Count == 5:
+                case "suggest" when names.Count == 2 + extra:
+                    return claimed ? new LinkingSuggest(true) : LinkingSuggest.Instance;
+                case "auto-merge" when names.Count == 5 + extra:
                     var kinds = root.GetProperty("kinds").EnumerateArray().Select(item => (ContactIdentityKind)item.GetInt32()).ToList();
-                    return new LinkingAutoMerge(new ContactAutoMergeRules(kinds, root.GetProperty("min").GetInt32(), root.GetProperty("unverified").GetBoolean()));
+                    return new LinkingAutoMerge(new ContactAutoMergeRules(kinds, root.GetProperty("min").GetInt32(), root.GetProperty("unverified").GetBoolean()), claimed);
                 default:
                     throw new FormatException("Unknown linking policy kind or properties.");
             }

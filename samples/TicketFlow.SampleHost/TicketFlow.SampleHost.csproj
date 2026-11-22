@@ -38,7 +38,11 @@
     <ProjectReference Include="../../src/Realtime/TicketFlow.Realtime/TicketFlow.Realtime.csproj" />
     <ProjectReference Include="../../src/Integrations/TicketFlow.Integrations.Surveys/TicketFlow.Integrations.Surveys.csproj" />
     <ProjectReference Include="../../src/Hosting/TicketFlow.Hosting.Worker.Stores.Postgres/TicketFlow.Hosting.Worker.Stores.Postgres.csproj" />
-    <ProjectReference Include="../../src/Integrations/TicketFlow.Integrations.IdentityFlow/TicketFlow.Integrations.IdentityFlow.csproj" />
+    <ProjectReference Include="../../src/Integrations/TicketFlow.Integrations.IdentityFlow.SignalR/TicketFlow.Integrations.IdentityFlow.SignalR.csproj" />
+    <ProjectReference Include="../../src/Identity/TicketFlow.Identity.Stores.Postgres/TicketFlow.Identity.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/Identity/TicketFlow.Identity/TicketFlow.Identity.csproj" />
+    <ProjectReference Include="../../src/Events/TicketFlow.Events.Stores.Postgres/TicketFlow.Events.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/Events/TicketFlow.Events/TicketFlow.Events.csproj" />
     <ProjectReference Include="../../src/Mcp/TicketFlow.Mcp.AspNetCore/TicketFlow.Mcp.AspNetCore.csproj" />
     <ProjectReference Include="../../src/Reporting/TicketFlow.Reporting/TicketFlow.Reporting.csproj" />
     <ProjectReference Include="../../src/Reporting/TicketFlow.Reporting.Stores.Postgres/TicketFlow.Reporting.Stores.Postgres.csproj" />

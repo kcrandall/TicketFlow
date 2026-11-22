@@ -52,3 +52,13 @@ Verification (2026-11-22, repository root):
 
 - `dotnet test tests/Hosting/TicketFlow.Hosting.AspNetCore.Tests -c Release` — 18 passed, 0 failed.
 - `dotnet build TicketFlow.slnx -c Release` — Build succeeded, 0 Warning(s), 0 Error(s).
+
+Review fixes (2026-11-22, after 4574992): access listings go through new `IAccessAdministrator.ListRolesAsync`/`ListGrantsAsync`/
+`ListFieldPoliciesAsync`; weak `If-Match` tags naming the revision are accepted; authenticated `POST`s need a JSON body or the
+`X-TicketFlow-Request` header (CSRF); every collection takes `limit`/`cursor` (opaque) and returns `PageResponse<T>` (calendars, roles,
+field policies, attribute definitions, policies, rules, macros, portals, collections and surveys newly paged); kebab-case routes
+(`/help-center`, `/live-chat`); DTO convention `…Request`/`…Input`/`…Response`/`…Model`; shared problem responses on every group; option
+fallbacks are public typed classes (`OptionsTicketFlowPrincipalResolver`). Tests: `RouteSweepTests` (no-grant sweep over every route,
+`If-Match` sweep, OpenAPI coverage), `CollectionsPageWithOpaqueCursorsAndAccessListsGoThroughTheAdministrator`,
+`BodylessPostsNeedJsonOrTheRequestHeader`, weak-tag case in `RevisionFencingUsesETagsAndIfMatch`.
+`dotnet test tests/Hosting/TicketFlow.Hosting.AspNetCore.Tests -c Release` — 23 passed.

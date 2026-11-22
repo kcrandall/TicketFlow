@@ -199,6 +199,29 @@ public sealed partial class PostgresContactStore
         return new ContactLinkSuggestionStorePage(page, next);
     }
 
+    public async Task<int> PruneDecidedSuggestionsAsync(DateTimeOffset decidedBefore, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IContactLinkingStore.MaximumPruneBatch);
+        await using var command = PruneSuggestionsCommand(decidedBefore, limit);
+        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        command.Connection = connection;
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The retention statement (exposed internally so tests can EXPLAIN it): oldest decided rows first, skipping locked rows.</summary>
+    internal static NpgsqlCommand PruneSuggestionsCommand(DateTimeOffset decidedBefore, int limit)
+    {
+        var command = new NpgsqlCommand("""
+            DELETE FROM tf_contact_link_suggestions WHERE suggestion_key IN (
+                SELECT suggestion_key FROM tf_contact_link_suggestions WHERE status <> 1 AND updated_at < @before
+                ORDER BY updated_at LIMIT @limit FOR UPDATE SKIP LOCKED)
+            """);
+        AddInstant(command, "before", decidedBefore);
+        command.Parameters.AddWithValue("limit", limit);
+        return command;
+    }
+
     /// <summary>The suggestion listing statement (exposed internally so tests can EXPLAIN the exact SQL).</summary>
     internal static NpgsqlCommand ListSuggestionsCommand(TicketScope scope, ContactLinkSuggestionQuery query, AccessFilter filter, int maximumRowsExamined)
     {
@@ -216,19 +239,35 @@ public sealed partial class PostgresContactStore
             after = " AND s.suggestion_id > @after";
             command.Parameters.AddWithValue("after", cursor);
         }
-        var contact = string.Empty;
+        const string scopeColumns = "s.tenant_id=@tenant AND s.project_id=@project AND s.environment_id=@environment AND s.app_id=@app AND s.workspace_id=@workspace";
+        string scan;
         if (query.Contact is { } id)
         {
-            contact = " AND (s.candidate_id=@contact OR s.account_id=@contact)";
+            // Two index-backed keyset scans (candidate_key / account_key, status, id) merged in id order; a pair never repeats a contact.
             AddText(command, "contact", id.Value);
+            const string contactKey = "tf_key_v1(@tenant,@project,@environment,@app,@workspace,@contact)";
+            scan = $"""
+                SELECT u.* FROM (
+                    (SELECT s.* FROM tf_contact_link_suggestions s
+                     WHERE s.candidate_key={contactKey} AND s.candidate_id=@contact AND {scopeColumns} AND s.status=@status{after}
+                     ORDER BY s.suggestion_id LIMIT @scan)
+                    UNION ALL
+                    (SELECT s.* FROM tf_contact_link_suggestions s
+                     WHERE s.account_key={contactKey} AND s.account_id=@contact AND {scopeColumns} AND s.status=@status{after}
+                     ORDER BY s.suggestion_id LIMIT @scan)) u
+                ORDER BY u.suggestion_id LIMIT @scan
+                """;
         }
+        else
+            scan = $"""
+                SELECT s.* FROM tf_contact_link_suggestions s
+                WHERE s.scope_key={ScopeKey} AND {scopeColumns} AND s.status=@status{after}
+                ORDER BY s.suggestion_id LIMIT @scan
+                """;
         var columns = string.Join(", ", SuggestionColumns.Split(", ").Select(column => "x." + column));
         command.CommandText = $"""
             SELECT (c.contact_id IS NOT NULL AND a.contact_id IS NOT NULL AND ({candidateFilter.Sql}) IS TRUE AND ({accountFilter.Sql}) IS TRUE), {columns} FROM (
-                SELECT s.* FROM tf_contact_link_suggestions s
-                WHERE s.scope_key={ScopeKey} AND s.tenant_id=@tenant AND s.project_id=@project AND s.environment_id=@environment AND s.app_id=@app
-                  AND s.workspace_id=@workspace AND s.status=@status{after}{contact}
-                ORDER BY s.suggestion_id LIMIT @scan) x
+                {scan}) x
             LEFT JOIN tf_contacts c ON c.contact_key=x.candidate_key AND c.contact_id=x.candidate_id
             LEFT JOIN tf_contacts a ON a.contact_key=x.account_key AND a.contact_id=x.account_id
             {FilterJoin}

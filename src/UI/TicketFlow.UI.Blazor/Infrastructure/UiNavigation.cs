@@ -54,6 +54,29 @@ public static class UiNavigation
 
     public static UiSection Section(string key) => Sections.First(section => section.Key == key);
 
+    /// <summary>Whether the session may open <paramref name="route"/> (the same rule for GET pages and POST actions).</summary>
+    public static bool Allows(TicketFlowUISession session, UiRoute route) =>
+        session.State == UiSessionState.Ready && Section(route.Section).IsVisible(session);
+
+    /// <summary>The section an action belongs to; actions run only on a page of that section. Null for unknown actions.</summary>
+    public static string? ActionSection(string action) => action.Split('.')[0] switch
+    {
+        "conversation" => "conversations",
+        "contact" => "contacts",
+        "inbox" => "inboxes",
+        "team" => "teams",
+        "calendar" => "calendars",
+        "channel" => "channels",
+        "routing" => "routing",
+        "sla" => "sla",
+        "automation" => "automation",
+        "helpcenter" => "help-center",
+        "survey" => "surveys",
+        "access" => "access",
+        "settings" => "settings",
+        _ => null,
+    };
+
     public static IEnumerable<UiSection> Visible(TicketFlowUISession session) =>
         Sections.Where(section => section.IsAvailable(session) && (section.IsPermitted(session) || session.Options.ShowDisabledSections));
 }

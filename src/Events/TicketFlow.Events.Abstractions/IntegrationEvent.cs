@@ -112,8 +112,12 @@ public sealed record ContactEventContent(string? DisplayName, IReadOnlyList<Even
 /// <summary>Hydrated content kinds. Switch over every case without a discard arm.</summary>
 public union EventContentValue(MessageEventContent, SurveyCommentContent, ContactEventContent);
 
-/// <summary>Hydrated content plus the Access field paths that were masked for the subscription principal.</summary>
-public sealed record EventContent(EventContentValue Value, IReadOnlyList<string> MaskedFields)
+/// <summary>
+/// Hydrated content plus the Access field paths that were masked for the subscription principal. <see cref="Value"/> is the event's own
+/// content (message, survey comment, contact); <see cref="Contact"/> is the masked profile of the contact a conversation event concerns
+/// (rendered under <c>data.content.contact</c>), so analytics sinks can attribute message, SLA and routing events consistently.
+/// </summary>
+public sealed record EventContent(EventContentValue? Value, IReadOnlyList<string> MaskedFields, ContactEventContent? Contact = null)
 {
     public override string ToString() => "EventContent { <redacted> }";
 }

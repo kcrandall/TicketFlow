@@ -75,7 +75,7 @@ public static class ReportGroups
 }
 
 /// <summary>
-/// A store aggregate over rollup cells: cells with <c>Boundaries[0] ≤ cell start &lt; Boundaries[^1]</c> of the requested metrics,
+/// A store aggregate over rollup cells (label groupings and filters: over facts, see <see cref="UsesLabelRows"/>): cells with <c>Boundaries[0] ≤ cell start &lt; Boundaries[^1]</c> of the requested metrics,
 /// matching <see cref="Filter"/>, grouped by the bucket index (cell start between consecutive boundaries), the
 /// <see cref="GroupBy"/> key and the metric — and, when <see cref="Histograms"/> is set, by histogram bin for duration metrics.
 /// Boundaries are strictly increasing, cell aligned (2-1001 of them).
@@ -107,7 +107,7 @@ public sealed record ReportAggregateQuery
     public DateTimeOffset From => Boundaries[0];
     public DateTimeOffset To => Boundaries[^1];
 
-    /// <summary>Label rows (one per carried label) are aggregated instead of the per-fact rows.</summary>
+    /// <summary>The aggregate is computed from facts, once per carried label (labels are not rolled up).</summary>
     public bool UsesLabelRows => GroupBy == ReportDimension.Label || Filter.Label is not null;
 }
 

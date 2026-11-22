@@ -63,7 +63,7 @@ public sealed class WalFlowEventSinkTests
     public async Task EventsBecomeOrderedDebeziumRecordsKeyedByConversation()
     {
         var broker = new RecordingSink();
-        var sink = Sink(options => options.Sinks.Add(new SinkRegistration("kafka", broker)));
+        var sink = Sink(options => options.Add(new SinkRegistration("kafka", broker), new EventScopeRule(Scope.TenantId)));
         var conversation = new EventResource(new ConversationId("c1"), new InboxId("email"));
         var first = Rendered(new ConversationStatusChangedData(new ConversationId("c1"), new InboxId("email"), "open", "pending"), 7, conversation);
         var second = Rendered(new ContactUpdatedData(new ContactId("ada")), 8, new EventResource(contact: new ContactId("ada")));
@@ -92,7 +92,7 @@ public sealed class WalFlowEventSinkTests
     public async Task BrokerFailuresAndUnknownTargetsFail()
     {
         var broker = new RecordingSink { Fail = true };
-        var sink = Sink(options => options.Sinks.Add(new SinkRegistration("rabbit", broker)));
+        var sink = Sink(options => options.Add(new SinkRegistration("rabbit", broker), new EventScopeRule(Scope.TenantId)));
         var rendered = Rendered(new ContactCreatedData(new ContactId("ada")), 1, new EventResource(contact: new ContactId("ada")));
         var failed = (EventSinkFailed)(await sink.DeliverAsync(Delivery("rabbit", rendered))).Value!;
         Assert.AreEqual(("broker-error", false), (failed.Code, failed.Permanent));
@@ -106,20 +106,23 @@ public sealed class WalFlowEventSinkTests
         var sink = Sink(options =>
         {
             options.RequireDurableSinks = true;
-            options.Sinks.Add(new SinkRegistration("buffered", new RecordingSink()));
-            options.Sinks.Add(new SinkRegistration("durable", new DurableSink()));
+            options.Add(new SinkRegistration("buffered", new RecordingSink()), new EventScopeRule(Scope.TenantId));
+            options.Add(new SinkRegistration("durable", new DurableSink()), new EventScopeRule(Scope.TenantId, workspaceId: Scope.WorkspaceId));
         });
-        Assert.IsFalse(sink.IsValidTarget("buffered"));
-        Assert.IsTrue(sink.IsValidTarget("durable"));
+        Assert.IsFalse(sink.IsValidTarget(Scope, "buffered"));
+        Assert.IsTrue(sink.IsValidTarget(Scope, "durable"));
+        Assert.IsFalse(sink.IsValidTarget(TestScopes.Create(workspaceId: "other"), "durable"), "Sinks are allow-listed per workspace.");
+        Assert.IsFalse(sink.IsValidTarget(TestScopes.Create(tenantId: "other"), "durable"), "Sinks are allow-listed per tenant.");
+        Assert.ThrowsExactly<ArgumentException>(() => new WalFlowEventSinkRegistration(new SinkRegistration("x", new RecordingSink()), []));
         Assert.ThrowsExactly<InvalidOperationException>(() => Sink(options =>
         {
-            options.Sinks.Add(new SinkRegistration("a", new RecordingSink()));
-            options.Sinks.Add(new SinkRegistration("a", new RecordingSink()));
+            options.Add(new SinkRegistration("a", new RecordingSink()), new EventScopeRule("tenant"));
+            options.Add(new SinkRegistration("a", new RecordingSink()), new EventScopeRule("tenant"));
         }));
 
         var services = new ServiceCollection();
-        services.AddTicketFlow().AddWalFlowEventSinks(options => options.Sinks.Add(new SinkRegistration("kafka", new RecordingSink())));
+        services.AddTicketFlow().AddWalFlowEventSinks(options => options.Add(new SinkRegistration("kafka", new RecordingSink()), new EventScopeRule(Scope.TenantId)));
         using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true });
-        Assert.IsTrue(provider.GetServices<IEventSink>().Single().IsValidTarget("kafka"));
+        Assert.IsTrue(provider.GetServices<IEventSink>().Single().IsValidTarget(Scope, "kafka"));
     }
 }

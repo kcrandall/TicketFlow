@@ -107,7 +107,7 @@ public static class TicketFlowMcpServerBuilderExtensions
         {
             var services = request.Services ?? root;
             return ActivatorUtilities.CreateInstance(services, tool.DeclaringType, new TicketFlowToolContext(services, request.User, tool));
-        }, new McpServerToolCreateOptions { Services = root, Meta = meta });
+        }, new McpServerToolCreateOptions { Services = root, Meta = meta, OutputSchema = TicketFlowToolJson.OutputSchema(tool.OutputType) });
     }
 
     private static McpRequestHandler<CallToolRequestParams, CallToolResult> CallFilter(McpRequestHandler<CallToolRequestParams, CallToolResult> next) =>

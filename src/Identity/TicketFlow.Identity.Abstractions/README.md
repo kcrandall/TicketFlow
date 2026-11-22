@@ -9,6 +9,6 @@ Contracts for staff (agent) external identities in TicketFlow.
 - `StaffIdentityPermissions.Manage` (`staff-identity:manage`, sensitive) and `StaffFieldPaths.NotificationEmail` (`staff.email`).
 - `IStaffIdentityService` (authorized, audited management), `IStaffIdentityResolver` (trusted subject → `UserId` resolution for
   principal resolvers), `IStaffIdentityStore` (scope-confined, atomic uniqueness and capacity, audit in the same transaction).
-- Union results: `StaffIdentityResult<T>`, `StaffIdentityWriteResult`, `StaffProfileWriteResult`.
+- Union results: `StaffIdentityResult<T>`, `StaffIdentityWriteResult`, `StaffIdentityProfileWriteResult`.
 
 See `docs/identity-linking.md`.

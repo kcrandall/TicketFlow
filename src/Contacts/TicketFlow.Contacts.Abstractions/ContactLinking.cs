@@ -168,13 +168,14 @@ public sealed record LinkingOff
     public static LinkingOff Instance { get; } = new();
 }
 
-/// <summary>Store a link suggestion for an agent to accept or reject.</summary>
-public sealed record LinkingSuggest
+/// <summary>
+/// Store a link suggestion for an agent to accept or reject. Only verified claims suggest unless <see cref="IncludeClaimedEvidence"/>;
+/// suggestions from claimed evidence are marked (<see cref="ContactLinkSuggestion.EvidenceVerified"/> false) and need explicit
+/// confirmation to accept.
+/// </summary>
+public sealed record LinkingSuggest(bool IncludeClaimedEvidence = false)
 {
-    private LinkingSuggest()
-    {
-    }
-
+    /// <summary>Suggest from verified claims only.</summary>
     public static LinkingSuggest Instance { get; } = new();
 }
 
@@ -217,8 +218,11 @@ public sealed record ContactAutoMergeRules
     public override int GetHashCode() => HashCode.Combine(Kinds.Count, MinimumMatchingIdentities, RequireUnverifiedCandidate);
 }
 
-/// <summary>Merge qualifying candidates automatically (see <see cref="ContactAutoMergeRules"/>); suggest the rest.</summary>
-public sealed record LinkingAutoMerge(ContactAutoMergeRules Rules)
+/// <summary>
+/// Merge qualifying candidates automatically (see <see cref="ContactAutoMergeRules"/>); suggest the rest. Claimed claims are ignored
+/// unless <see cref="IncludeClaimedEvidence"/> (then they only ever suggest, marked as claimed).
+/// </summary>
+public sealed record LinkingAutoMerge(ContactAutoMergeRules Rules, bool IncludeClaimedEvidence = false)
 {
     public ContactAutoMergeRules Rules { get; } = Rules ?? throw new ArgumentNullException(nameof(Rules));
 }
@@ -318,6 +322,9 @@ public sealed record ContactLinkSuggestionView(
     DateTimeOffset UpdatedAt,
     Guid? Merge)
 {
+    /// <summary>The suggestion rests on claimed evidence: accepting needs <c>confirmClaimedEvidence</c>.</summary>
+    public bool RequiresConfirmation => !EvidenceVerified;
+
     public static ContactLinkSuggestionView From(StoredContactLinkSuggestion stored)
     {
         ArgumentNullException.ThrowIfNull(stored);
@@ -402,6 +409,7 @@ public union ContactLinkingWriteResult<T>(LinkingWriteApplied<T>, LinkingWriteNo
 public interface IContactLinkingStore
 {
     public const int MaximumPendingSuggestions = 100_000;
+    public const int MaximumPruneBatch = 10_000;
 
     Task<StoredContactLinkingPolicy?> GetPolicyAsync(TicketScope scope, CancellationToken cancellationToken = default);
 
@@ -415,6 +423,13 @@ public interface IContactLinkingStore
     Task<ContactLinkingWriteResult<StoredContactLinkSuggestion>> UpdateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, long expectedRevision, CancellationToken cancellationToken = default);
 
     Task<ContactLinkSuggestionStorePage> ListSuggestionsAsync(TicketScope scope, ContactLinkSuggestionQuery query, AccessFilter filter, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Retention: deletes up to <paramref name="limit"/> (1-<see cref="MaximumPruneBatch"/>) decided (non-pending) suggestions, in any
+    /// scope, last updated before <paramref name="decidedBefore"/>, oldest first, and returns how many were removed. Pending suggestions
+    /// are never pruned. Hosts call it from a maintenance loop until it returns less than the limit.
+    /// </summary>
+    Task<int> PruneDecidedSuggestionsAsync(DateTimeOffset decidedBefore, int limit, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -449,8 +464,17 @@ public interface IContactLinkingService
     /// <summary>Requires <c>contact:link</c>; rows are filtered by the planned <c>contact:read</c> filter on both contacts.</summary>
     Task<ContactResult<ContactLinkSuggestionPage>> ListSuggestionsAsync(PrincipalRef actor, ContactLinkSuggestionQuery query, CancellationToken cancellationToken = default);
 
-    /// <summary>Requires <c>contact:read</c>, <c>contact:link</c> and <c>contact:merge</c> on both contacts; merges the candidate into the account contact; audited.</summary>
-    Task<ContactLinkSuggestionAcceptResult> AcceptSuggestionAsync(PrincipalRef actor, Guid suggestion, long expectedRevision, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Requires <c>contact:read</c>, <c>contact:link</c> and <c>contact:merge</c> on both contacts; merges the candidate into the
+    /// account contact; audited. Suggestions from claimed evidence are refused (<see cref="ContactRefusal.Invalid"/>) unless
+    /// <paramref name="confirmClaimedEvidence"/>.
+    /// </summary>
+    Task<ContactLinkSuggestionAcceptResult> AcceptSuggestionAsync(PrincipalRef actor, Guid suggestion, long expectedRevision, bool confirmClaimedEvidence,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Accepts without confirming claimed evidence (suggestions from claimed evidence are refused).</summary>
+    Task<ContactLinkSuggestionAcceptResult> AcceptSuggestionAsync(PrincipalRef actor, Guid suggestion, long expectedRevision, CancellationToken cancellationToken = default) =>
+        AcceptSuggestionAsync(actor, suggestion, expectedRevision, false, cancellationToken);
 
     /// <summary>Requires <c>contact:read</c> and <c>contact:link</c> on both contacts; audited.</summary>
     Task<ContactResult<ContactLinkSuggestionView>> RejectSuggestionAsync(PrincipalRef actor, Guid suggestion, long expectedRevision, string? justification = null,

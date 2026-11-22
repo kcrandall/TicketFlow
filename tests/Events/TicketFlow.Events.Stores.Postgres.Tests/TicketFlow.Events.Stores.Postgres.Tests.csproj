@@ -5,6 +5,7 @@
     <ProjectReference Include="../../../src/Events/TicketFlow.Events/TicketFlow.Events.csproj" />
     <ProjectReference Include="../../../src/Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
     <ProjectReference Include="../../../src/Contacts/TicketFlow.Contacts/TicketFlow.Contacts.csproj" />
+    <ProjectReference Include="../../../src/Surveys/TicketFlow.Surveys/TicketFlow.Surveys.csproj" />
     <ProjectReference Include="../../../src/Workspaces/TicketFlow.Workspaces/TicketFlow.Workspaces.csproj" />
     <ProjectReference Include="../../../src/Access/TicketFlow.Access/TicketFlow.Access.csproj" />
     <ProjectReference Include="../../../src/TicketFlow/TicketFlow.csproj" />
@@ -19,5 +20,6 @@
     <Compile Include="../TicketFlow.Events.Tests/FakeSurveyStore.cs" Link="Shared/FakeSurveyStore.cs" />
     <Compile Include="../TicketFlow.Events.Tests/ProjectionTests.cs" Link="Shared/ProjectionTests.cs" />
     <Compile Include="../TicketFlow.Events.Tests/DeliveryTests.cs" Link="Shared/DeliveryTests.cs" />
+    <Compile Include="../TicketFlow.Events.Tests/ReviewFixTests.cs" Link="Shared/ReviewFixTests.cs" />
   </ItemGroup>
 </Project>

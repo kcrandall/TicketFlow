@@ -7,10 +7,36 @@ using WalFlow.Abstractions.Sinks.Transport;
 
 namespace TicketFlow.Integrations.WalFlow.Sinks;
 
+/// <summary>A named WalFlow sink and the scopes allowed to target it (at least one rule).</summary>
+public sealed record WalFlowEventSinkRegistration
+{
+    public WalFlowEventSinkRegistration(SinkRegistration sink, IEnumerable<EventScopeRule> allowedScopes)
+    {
+        Sink = sink ?? throw new ArgumentNullException(nameof(sink));
+        ArgumentNullException.ThrowIfNull(allowedScopes);
+        AllowedScopes = [.. allowedScopes];
+        if (AllowedScopes.Count == 0 || AllowedScopes.Any(rule => rule is null))
+            throw new ArgumentException("A WalFlow event sink needs at least one allowed scope rule.", nameof(allowedScopes));
+    }
+
+    public SinkRegistration Sink { get; }
+    public IReadOnlyList<EventScopeRule> AllowedScopes { get; }
+}
+
 public sealed class WalFlowEventSinkOptions
 {
-    /// <summary>Named WalFlow sinks (for example a <c>KafkaSink</c> registered as <c>kafka</c>); a subscription's sink target names one.</summary>
-    public IList<SinkRegistration> Sinks { get; } = [];
+    /// <summary>
+    /// Named WalFlow sinks (for example a <c>KafkaSink</c> registered as <c>kafka</c>) with their allowed scopes; a subscription's sink target
+    /// names one, and only subscriptions of an allowed scope may use it.
+    /// </summary>
+    public IList<WalFlowEventSinkRegistration> Sinks { get; } = [];
+
+    /// <summary>Adds <paramref name="sink"/> for the scopes matching <paramref name="allowedScopes"/>.</summary>
+    public WalFlowEventSinkOptions Add(SinkRegistration sink, params EventScopeRule[] allowedScopes)
+    {
+        Sinks.Add(new WalFlowEventSinkRegistration(sink, allowedScopes));
+        return this;
+    }
 
     /// <summary>
     /// Refuse targets whose sink does not declare a provider durability boundary (<see cref="ISinkDurability"/> other than
@@ -37,7 +63,7 @@ public sealed class WalFlowEventSink : IEventSink
 {
     public const string SinkKind = "walflow";
 
-    private readonly IReadOnlyDictionary<string, ISink> sinks;
+    private readonly IReadOnlyDictionary<string, WalFlowEventSinkRegistration> sinks;
     private readonly WalFlowEventSinkOptions options;
 
     public WalFlowEventSink(IOptions<WalFlowEventSinkOptions> options)
@@ -46,9 +72,9 @@ public sealed class WalFlowEventSink : IEventSink
         this.options = options.Value;
         if (string.IsNullOrWhiteSpace(this.options.SourceName))
             throw new InvalidOperationException("WalFlow event sink options are invalid.");
-        var index = new Dictionary<string, ISink>(StringComparer.Ordinal);
+        var index = new Dictionary<string, WalFlowEventSinkRegistration>(StringComparer.Ordinal);
         foreach (var registration in this.options.Sinks)
-            if (registration is null || !EventText.IsToken(registration.Name, 64) || !index.TryAdd(registration.Name, registration.Sink))
+            if (registration is null || !EventText.IsToken(registration.Sink.Name, 64) || !index.TryAdd(registration.Sink.Name, registration))
                 throw new InvalidOperationException("WalFlow sink registrations need unique token names (a-z, 0-9, '-', '_', '.').");
         sinks = index;
     }
@@ -57,17 +83,18 @@ public sealed class WalFlowEventSink : IEventSink
 
     public int MaximumBatchSize => EventSubscription.MaximumBatchSize;
 
-    public bool IsValidTarget(string target) =>
-        target is not null && sinks.TryGetValue(target, out var sink)
-        && (!options.RequireDurableSinks || sink is ISinkDurability { DurabilityGuarantee: SinkDurabilityGuarantee.RequestResponsePerSend or SinkDurabilityGuarantee.FlushAcknowledged });
+    public bool IsValidTarget(Core.TicketScope scope, string target) =>
+        scope is not null && target is not null && sinks.TryGetValue(target, out var registration) && EventScopeRule.Allows(registration.AllowedScopes, scope)
+        && (!options.RequireDurableSinks
+            || registration.Sink.Sink is ISinkDurability { DurabilityGuarantee: SinkDurabilityGuarantee.RequestResponsePerSend or SinkDurabilityGuarantee.FlushAcknowledged });
 
     public async Task<EventSinkResult> DeliverAsync(EventDelivery delivery, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(delivery);
         var target = delivery.Subscription.Subscription.Sink.Target;
-        if (!IsValidTarget(target))
+        if (!IsValidTarget(delivery.Scope, target))
             return new EventSinkFailed("sink-missing", permanent: true);
-        var sink = sinks[target];
+        var sink = sinks[target].Sink.Sink;
         try
         {
             foreach (var rendered in delivery.Events)

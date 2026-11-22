@@ -55,13 +55,7 @@
                             <span class="tf-inbox-row__name">@name</span>
                             <ChannelBadge Kind="@InboxChannel(conversation.Inbox)" Label="@InboxName(conversation.Inbox)" />
                         </div>
-                        <div class="tf-inbox-row__preview">
-                            @if (row.PreviewOutgoing)
-                            {
-                                <LucideIcon Name="corner-up-left" Size="12" />
-                            }
-                            @(row.Preview ?? "No messages yet")
-                        </div>
+                        <div class="tf-inbox-row__preview">@Summary(conversation)</div>
                         <div class="tf-inbox-row__meta">
                             <StatusBadge Kind="conversation.Status.Kind" />
                             <PriorityBadge Priority="conversation.Priority" />
@@ -101,7 +95,7 @@
 </div>
 
 @code {
-    private sealed record Row(ConversationView Conversation, string? Preview, bool PreviewOutgoing, SlaStatusView? Sla);
+    private sealed record Row(ConversationView Conversation, SlaStatusView? Sla);
 
     private readonly List<Row> rows = [];
     private string? next;
@@ -144,14 +138,13 @@
         {
             case ConversationListPage page:
                 next = page.NextCursor;
-                var sla = Service<ISlaService>();
+                // SLA badges come from one risk-list read (only at-risk and breached clocks are badged), not a status read per row.
+                var risk = new Dictionary<ConversationId, SlaStatusView>();
+                if (Service<ISlaService>() is { } sla && await sla.ListAsync(Actor, new SlaRiskQuery(SlaRiskFilter.AtRiskOrBreached, limit: SlaRiskQuery.MaximumLimit), null, Aborted) is SlaValue<SlaRiskPage> riskPage)
+                    foreach (var item in riskPage.Value.Items)
+                        risk[item.Conversation] = item;
                 foreach (var conversation in page.Conversations)
-                {
-                    var (preview, outgoing) = await PreviewAsync(service, conversation);
-                    SlaStatusView? status1 = sla is not null && conversation.Status.Kind is ConversationStatusKind.Open or ConversationStatusKind.Pending
-                        && await sla.GetStatusAsync(Actor, conversation.Id, Aborted) is SlaValue<SlaStatusView> value ? value.Value : null;
-                    rows.Add(new Row(conversation, preview, outgoing, status1));
-                }
+                    rows.Add(new Row(conversation, risk.GetValueOrDefault(conversation.Id)));
                 break;
             case ConversationRefused refused:
                 error = UiOutcome.Refused(refused.Reason, refused.Errors);
@@ -161,13 +154,11 @@
         await Session.LoadUsersAsync(rows.Select(row => row.Conversation.Assignee));
     }
 
-    private async Task<(string? Preview, bool Outgoing)> PreviewAsync(IConversationService service, ConversationView conversation)
-    {
-        if (await service.ReadTimelineAsync(Actor, conversation.Id, Math.Max(0, conversation.LastSequence - 30), 30, Aborted) is not TimelinePage page)
-            return (null, false);
-        foreach (var item in page.Events.Reverse())
-            if (item.Event.Event.Value is MessageEvent message)
-                return (UiText.Excerpt(message.Body), message.Direction == MessageDirection.Outgoing);
-        return (null, false);
-    }
+    /// <summary>A one-line state summary from the list projection itself (no per-row timeline reads).</summary>
+    private string Summary(ConversationView conversation) =>
+        conversation.WaitingSince is { } waiting && conversation.Status.Kind == ConversationStatusKind.Open
+            ? $"Customer waiting {UiFormat.Duration(Now - waiting)}" + (conversation.FirstReplyAt is null ? " · no reply yet" : $" · last reply {UiFormat.Relative(conversation.LastOutgoingAt, Now)}")
+            : conversation.LastOutgoingAt is { } replied && (conversation.LastIncomingAt is null || replied >= conversation.LastIncomingAt)
+                ? $"Replied {UiFormat.Relative(replied, Now)} · waiting on customer"
+                : $"Last message {UiFormat.Relative(conversation.LastIncomingAt ?? conversation.LastActivityAt, Now)}";
 }

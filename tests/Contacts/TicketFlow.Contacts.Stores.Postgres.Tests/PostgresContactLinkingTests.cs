@@ -25,6 +25,67 @@ public sealed class PostgresContactLinkingTests
     }
 
     [TestMethod]
+    public async Task DecidedSuggestionsArePrunedOnPostgres()
+    {
+        await using var database = await PostgresContactStoreTests.Database.CreateAsync();
+        await ContactLinkingStoreContract.VerifyPruneAsync(database.Store, database.Competing);
+    }
+
+    [TestMethod]
+    public async Task IdentityChangeKindsPersist()
+    {
+        await using var database = await PostgresContactStoreTests.Database.CreateAsync();
+        var scope = TestScopes.Create();
+        var contact = ContactStoreContract.NewContact("linked");
+        var result = await database.Store.WriteAsync(scope, new ContactWriteBatch(puts: [new ContactPut(contact, null)],
+            changes: [ContactStoreContract.Change(ContactChangeKind.Created, "linked"), ContactStoreContract.Change(ContactChangeKind.IdentityLinked, "linked"),
+                ContactStoreContract.Change(ContactChangeKind.IdentityUnlinked, "linked")]));
+        Assert.IsInstanceOfType<ContactWriteApplied>(result.Value);
+        CollectionAssert.AreEqual(new[] { ContactChangeKind.Created, ContactChangeKind.IdentityLinked, ContactChangeKind.IdentityUnlinked },
+            (await database.Competing.ReadChangesAsync(scope, 0, 10)).Select(change => change.Event.Kind).ToArray());
+    }
+
+    [TestMethod]
+    public async Task SuggestionStatementsUseIndexes()
+    {
+        await using var database = await PostgresContactStoreTests.Database.CreateAsync();
+        var scope = TestScopes.Create();
+        for (var index = 0; index < 120; index++)
+            Assert.IsTrue(ContactStoreContract.Describe(await ContactStoreContract.CreateAsync(database.Store, scope, ContactStoreContract.NewContact($"c{index:D3}"))).StartsWith("applied", StringComparison.Ordinal));
+        for (var index = 1; index < 120; index++)
+        {
+            var created = (LinkingWriteApplied<StoredContactLinkSuggestion>)(await database.Store.CreateSuggestionAsync(scope,
+                ContactLinkingStoreContract.Suggestion($"c{index:D3}", index % 2 == 0 ? "c000" : $"c{index - 1:D3}"))).Value!;
+            if (index % 3 == 0)
+                _ = await database.Store.UpdateSuggestionAsync(scope, created.Value.Suggestion.Decide(ContactLinkSuggestionStatus.Rejected, null, ContactStoreContract.At), 1);
+        }
+        await database.ScalarAsync("ANALYZE");
+        await using var connection = await database.Primary.OpenConnectionAsync();
+        await using (var off = new Npgsql.NpgsqlCommand("SET enable_seqscan = off", connection))
+            await off.ExecuteNonQueryAsync();
+
+        async Task<string> ExplainAsync(Npgsql.NpgsqlCommand command)
+        {
+            command.Connection = connection;
+            command.CommandText = "EXPLAIN " + command.CommandText;
+            var lines = new List<string>();
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                lines.Add(reader.GetString(0));
+            return string.Join("\n", lines);
+        }
+
+        var byContact = await ExplainAsync(PostgresContactStore.ListSuggestionsCommand(scope, new ContactLinkSuggestionQuery(contact: new ContactId("c000")), AllowAllFilter.Instance, 1000));
+        StringAssert.Contains(byContact, "tf_contact_link_suggestions_candidate", byContact);
+        StringAssert.Contains(byContact, "tf_contact_link_suggestions_account");
+        var all = await ExplainAsync(PostgresContactStore.ListSuggestionsCommand(scope, new ContactLinkSuggestionQuery(), AllowAllFilter.Instance, 1000));
+        StringAssert.Contains(all, "Index Scan on tf_contact_link_suggestions_", all);
+        var prune = await ExplainAsync(PostgresContactStore.PruneSuggestionsCommand(ContactStoreContract.At.AddDays(1), 100));
+        StringAssert.Contains(prune, "tf_contact_link_suggestions_decided", prune);
+        Assert.DoesNotContain("Seq Scan on tf_contact_link_suggestions", byContact + all + prune);
+    }
+
+    [TestMethod]
     public async Task LinkingAuditKindsAndSuggestionIdsPersist()
     {
         await using var database = await PostgresContactStoreTests.Database.CreateAsync();

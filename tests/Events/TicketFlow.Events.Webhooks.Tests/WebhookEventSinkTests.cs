@@ -123,10 +123,10 @@ public sealed class WebhookEventSinkTests
     {
         var (sink, handler, _) = Create();
         using var _ = sink;
-        Assert.IsTrue(sink.IsValidTarget("https://hooks.example.com/tf"));
+        Assert.IsTrue(sink.IsValidTarget(Scope, "https://hooks.example.com/tf"));
         foreach (var invalid in new[] { "http://hooks.example.com/tf", "https://localhost/x", "https://10.0.0.5/x", "https://169.254.169.254/latest", "https://hooks.example.com:8443/x",
                      "https://user:pw@hooks.example.com/x", "not a url" })
-            Assert.IsFalse(sink.IsValidTarget(invalid), invalid);
+            Assert.IsFalse(sink.IsValidTarget(Scope, invalid), invalid);
         var blocked = (EventSinkFailed)(await sink.DeliverAsync(Delivery(target: "https://127.0.0.1/x"))).Value!;
         Assert.AreEqual(("endpoint-blocked", true), (blocked.Code, blocked.Permanent));
 
@@ -139,6 +139,34 @@ public sealed class WebhookEventSinkTests
     }
 
     [TestMethod]
+    public async Task OversizedBatchesAskTheEngineToSplit()
+    {
+        var (sink, handler, _) = Create();
+        using var _ = sink;
+        var big = Delivery(2);
+        var padded = new EventDelivery(big.Subscription, [.. big.Events.Select(item => item with { Json = item.Json.Replace("\"specversion\"", "\"pad\":\"" + new string('x', 600_000) + "\",\"specversion\"") })], 1);
+        Assert.IsInstanceOfType<EventSinkSplit>((await sink.DeliverAsync(padded)).Value);
+        var single = new EventDelivery(big.Subscription, [padded.Events[0]], 1);
+        var tooLarge = new EventDelivery(big.Subscription, [padded.Events[0] with { Json = padded.Events[0].Json.Replace("\"pad\":\"", "\"pad\":\"" + new string('y', 600_000)) }], 1);
+        Assert.AreEqual(("payload-too-large", true), (((EventSinkFailed)(await sink.DeliverAsync(tooLarge)).Value!).Code, ((EventSinkFailed)(await sink.DeliverAsync(tooLarge)).Value!).Permanent));
+        Assert.IsInstanceOfType<EventSinkDelivered>((await sink.DeliverAsync(single)).Value);
+        Assert.AreEqual(1, handler.Requests.Count, "Oversized batches are never sent.");
+
+        var (rejecting, _, _) = Create(_ => new HttpResponseMessage(HttpStatusCode.RequestEntityTooLarge));
+        using var disposable = rejecting;
+        Assert.IsInstanceOfType<EventSinkSplit>((await rejecting.DeliverAsync(Delivery(2))).Value, "413 on a batch splits it.");
+    }
+
+    [TestMethod]
+    public void DeliveryIdsChangeWithReplayGenerationAndRevision()
+    {
+        var delivery = Delivery(2);
+        Assert.AreNotEqual(delivery.DeliveryId, (delivery with { Generation = 1 }).DeliveryId);
+        Assert.AreNotEqual(delivery.DeliveryId, new EventDelivery(delivery.Subscription with { Revision = 2 }, delivery.Events, 1).DeliveryId);
+        Assert.AreEqual(delivery.DeliveryId, (delivery with { Attempt = 5 }).DeliveryId);
+    }
+
+    [TestMethod]
     public void RegistrationAddsTheWebhookSink()
     {
         var services = new ServiceCollection();
@@ -146,6 +174,6 @@ public sealed class WebhookEventSinkTests
         using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true });
         var sink = provider.GetServices<IEventSink>().Single();
         Assert.AreEqual("webhook", sink.Kind);
-        Assert.IsFalse(sink.IsValidTarget("https://other.example.com/x"), "The host allow-list applies.");
+        Assert.IsFalse(sink.IsValidTarget(Scope, "https://other.example.com/x"), "The host allow-list applies.");
     }
 }

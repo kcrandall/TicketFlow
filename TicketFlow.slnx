@@ -136,4 +136,5 @@
   <Project Path="src/Mcp/TicketFlow.Mcp.AspNetCore/TicketFlow.Mcp.AspNetCore.csproj" />
   <Project Path="tests/Mcp/TicketFlow.Mcp.Tests/TicketFlow.Mcp.Tests.csproj" />
   <Project Path="tests/Mcp/TicketFlow.Mcp.AspNetCore.Tests/TicketFlow.Mcp.AspNetCore.Tests.csproj" />
+  <Project Path="src/Integrations/TicketFlow.Integrations.IdentityFlow.SignalR/TicketFlow.Integrations.IdentityFlow.SignalR.csproj" />
 </Solution>

@@ -458,11 +458,9 @@ else
         if (Service<IAgentAvailabilityService>() is { } availability && await availability.ListAsync(Actor, null, 100, Aborted) is RoutingValue<IReadOnlyList<StoredAgentProfile>> profiles)
             foreach (var profile in profiles.Value)
                 people.Add(profile.Agent.Value);
-        if (Service<ITeamService>() is { } teams)
-            foreach (var team in Teams.Take(20))
-                if (await teams.GetAsync(Actor, team.Id, Aborted) is WorkspaceSucceeded<StoredTeam> stored)
-                    foreach (var member in stored.Value.Team.Members)
-                        people.Add(member.Value);
+        // Assignee options: agents with routing profiles, the current assignee and participants (no per-team member reads).
+        foreach (var participant in loaded.Participants)
+            people.Add(participant.Value);
         if (loaded.Assignee is { } assignee)
             people.Add(assignee.Value);
         if (Session.UserId is { } me)

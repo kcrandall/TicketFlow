@@ -167,6 +167,7 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
             if (entry.Subscription.Revision != expectedRevision)
                 return Task.FromResult<EventWriteResult<StoredEventSubscription>>(new EventWriteConflict(entry.Subscription.Revision));
             entry.Subscription = entry.Subscription with { Subscription = subscription, Revision = expectedRevision + 1 };
+            entry.State = entry.State with { Attempts = 0, Suspended = false };
             return Task.FromResult<EventWriteResult<StoredEventSubscription>>(new EventWriteApplied<StoredEventSubscription>(entry.Subscription));
         }
     }
@@ -201,7 +202,7 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
         lock (gate)
         {
             var claims = new List<EventDeliveryClaim>();
-            foreach (var entry in subscriptions.Values.Where(entry => entry.Subscription.Subscription.Enabled && entry.State.AvailableAt <= now
+            foreach (var entry in subscriptions.Values.Where(entry => entry.Subscription.Subscription.Enabled && !entry.State.Suspended && entry.State.AvailableAt <= now
                          && (entry.LeaseUntil is null || entry.LeaseUntil <= now) && Head(entry.Subscription.Scope).Last > entry.State.Cursor)
                      .OrderBy(entry => entry.State.AvailableAt).Take(limit))
             {
@@ -213,14 +214,21 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
         }
     }
 
-    public Task<bool> CompleteAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, DateTimeOffset? deliveredAt, CancellationToken cancellationToken = default)
+    public Task<bool> CompleteAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, DateTimeOffset? deliveredAt, DateTimeOffset availableAt, string? note = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
+        if (note is not null)
+            IEventSubscriptionStore.RequireError(note);
         lock (gate)
         {
             if (!Leased(scope, id, fence, out var entry))
                 return Task.FromResult(false);
-            entry.State = new EventDeliveryState(Math.Max(cursor, entry.State.Cursor), 0, entry.State.AvailableAt, null, EventText.Instant(deliveredAt) ?? entry.State.LastDeliveredAt);
+            entry.State = entry.State with
+            {
+                Cursor = Math.Max(cursor, entry.State.Cursor), Attempts = 0, AvailableAt = EventText.Instant(availableAt), LastError = note,
+                LastDeliveredAt = EventText.Instant(deliveredAt) ?? entry.State.LastDeliveredAt,
+            };
             entry.LeaseUntil = null;
             return Task.FromResult(true);
         }
@@ -241,7 +249,8 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
         }
     }
 
-    public Task<bool> DeadLetterAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, IReadOnlyList<EventDeadLetter> letters, CancellationToken cancellationToken = default)
+    public Task<bool> DeadLetterAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, IReadOnlyList<EventDeadLetter> letters, DateTimeOffset availableAt,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(letters);
@@ -251,7 +260,24 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
                 return Task.FromResult(false);
             foreach (var letter in letters)
                 entry.DeadLetters[letter.Sequence] = letter with { DeadLetteredAt = EventText.Instant(letter.DeadLetteredAt) };
-            entry.State = new EventDeliveryState(Math.Max(cursor, entry.State.Cursor), 0, entry.State.AvailableAt, letters.Count > 0 ? letters[0].Error : null, entry.State.LastDeliveredAt);
+            entry.State = entry.State with
+            {
+                Cursor = Math.Max(cursor, entry.State.Cursor), Attempts = 0, AvailableAt = EventText.Instant(availableAt), LastError = letters.Count > 0 ? letters[0].Error : null,
+            };
+            entry.LeaseUntil = null;
+            return Task.FromResult(true);
+        }
+    }
+
+    public Task<bool> SuspendAsync(TicketScope scope, EventSubscriptionId id, long fence, string error, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        IEventSubscriptionStore.RequireError(error);
+        lock (gate)
+        {
+            if (!Leased(scope, id, fence, out var entry))
+                return Task.FromResult(false);
+            entry.State = entry.State with { Attempts = 0, LastError = error, Suspended = true };
             entry.LeaseUntil = null;
             return Task.FromResult(true);
         }
@@ -267,7 +293,7 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
                 return Task.FromResult(false);
             foreach (var sequence in entry.DeadLetters.Keys.Where(sequence => sequence > afterSequence).ToList())
                 entry.DeadLetters.Remove(sequence);
-            entry.State = new EventDeliveryState(afterSequence, 0, EventText.Instant(now), null, entry.State.LastDeliveredAt);
+            entry.State = new EventDeliveryState(afterSequence, 0, EventText.Instant(now), null, entry.State.LastDeliveredAt, entry.State.Generation + 1);
             entry.Fence++;
             entry.LeaseUntil = null;
             return Task.FromResult(true);

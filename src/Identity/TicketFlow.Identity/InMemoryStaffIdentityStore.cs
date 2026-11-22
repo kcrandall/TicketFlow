@@ -57,10 +57,10 @@ public sealed class InMemoryStaffIdentityStore : IStaffIdentityStore
             StaffIdentityWriteResult result;
             var key = (scope, link.Identity.Provider, link.Identity.Subject);
             if (links.TryGetValue(key, out var existing))
-                result = existing.Link.User == link.User ? new StaffIdentityWriteApplied(existing, false) : new StaffIdentityTaken(existing.Link.User);
+                result = existing.Link.User == link.User ? new StaffIdentityWriteApplied(existing, false) : new StaffIdentityWriteTaken(existing.Link.User);
             else if (links.Count >= MaximumEntries || this.audit.Count >= MaximumAuditEvents
                 || links.Values.Count(stored => stored.Scope == scope && stored.Link.User == link.User) >= IStaffIdentityStore.MaximumIdentitiesPerUser)
-                result = StaffWriteRejected.CapacityExceeded;
+                result = StaffIdentityWriteRejected.CapacityExceeded;
             else
             {
                 var stored = new StoredStaffIdentityLink(scope, link);
@@ -82,11 +82,11 @@ public sealed class InMemoryStaffIdentityStore : IStaffIdentityStore
             StaffIdentityWriteResult result;
             var key = (scope, identity.Provider, identity.Subject);
             if (!links.TryGetValue(key, out var existing))
-                result = StaffWriteNotFound.Instance;
+                result = StaffIdentityWriteNotFound.Instance;
             else if (existing.Link.User != expectedUser)
-                result = new StaffIdentityTaken(existing.Link.User);
+                result = new StaffIdentityWriteTaken(existing.Link.User);
             else if (this.audit.Count >= MaximumAuditEvents)
-                result = StaffWriteRejected.CapacityExceeded;
+                result = StaffIdentityWriteRejected.CapacityExceeded;
             else
             {
                 links.Remove(key);
@@ -104,7 +104,7 @@ public sealed class InMemoryStaffIdentityStore : IStaffIdentityStore
             return Task.FromResult(profiles.GetValueOrDefault((scope, user)));
     }
 
-    public Task<StaffProfileWriteResult> PutProfileAsync(TicketScope scope, StaffProfile profile, DateTimeOffset updatedAt, long? expectedRevision, StaffIdentityAuditEvent audit,
+    public Task<StaffIdentityProfileWriteResult> PutProfileAsync(TicketScope scope, StaffProfile profile, DateTimeOffset updatedAt, long? expectedRevision, StaffIdentityAuditEvent audit,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -114,21 +114,21 @@ public sealed class InMemoryStaffIdentityStore : IStaffIdentityStore
             throw new ArgumentOutOfRangeException(nameof(expectedRevision));
         lock (gate)
         {
-            StaffProfileWriteResult result;
+            StaffIdentityProfileWriteResult result;
             var existing = profiles.GetValueOrDefault((scope, profile.User));
             if (expectedRevision is null && existing is not null)
-                result = new StaffProfileWriteConflict(existing.Revision);
+                result = new StaffIdentityWriteConflict(existing.Revision);
             else if (expectedRevision is not null && existing is null)
-                result = StaffWriteNotFound.Instance;
+                result = StaffIdentityWriteNotFound.Instance;
             else if (expectedRevision is { } expected && existing!.Revision != expected)
-                result = new StaffProfileWriteConflict(existing.Revision);
+                result = new StaffIdentityWriteConflict(existing.Revision);
             else
             {
                 var at = new DateTimeOffset(updatedAt.UtcTicks - updatedAt.UtcTicks % 10, TimeSpan.Zero);
                 var stored = new StoredStaffProfile(scope, profile, at, existing is null ? 1 : checked(existing.Revision + 1));
                 profiles[(scope, profile.User)] = stored;
                 this.audit.Add(audit);
-                result = new StaffProfileWriteApplied(stored);
+                result = new StaffIdentityProfileWriteApplied(stored);
             }
             return Task.FromResult(result);
         }

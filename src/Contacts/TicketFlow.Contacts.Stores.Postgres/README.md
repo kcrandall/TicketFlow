@@ -12,7 +12,7 @@ Optional durable PostgreSQL storage for TicketFlow contacts.
   Access filter translated by `PostgresAccessFilterTranslator` in the same statement (untranslatable filters deny all).
 - `IContactLinkingStore` (migration 3, `account-linking`): `tf_contact_linking_policies` (compare-and-set policy JSON) and
   `tf_contact_link_suggestions` with a partial unique index keeping one pending suggestion per (candidate, account) pair; listing
-  scans at most 1000 rows per page and evaluates the translated access filter on both joined contacts.
+  scans at most 1000 rows per page and evaluates the translated access filter on both joined contacts. Migration 4 adds identity change kinds and the retention index used by `PruneDecidedSuggestionsAsync`.
 - Keys use fixed-size `tf_key_v1` hashes; rows carry `format_version` and numeric discriminators; attribute values and merge
   contributions use `ContactJsonCodec` versioned JSON.
 

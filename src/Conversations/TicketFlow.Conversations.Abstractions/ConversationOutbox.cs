@@ -172,3 +172,15 @@ public interface IConversationOutbox
     public static string RequireConsumer(string consumer, string parameterName = "consumer") =>
         ConversationText.RequireDottedName(consumer, MaximumConsumerLength, parameterName, "Consumer names");
 }
+
+/// <summary>
+/// A durable outbox consumer registered by a later feature (realtime, routing, SLA, automation, reporting, channel dispatch).
+/// <see cref="HandleAsync"/> must be idempotent: an entry is redelivered when the lease expires before acknowledgement.
+/// </summary>
+public interface IConversationOutboxHandler
+{
+    /// <summary>The consumer name (1-64 characters of a-z, 0-9, '-', '_' or '.', starting with a letter), unique per handler.</summary>
+    string Consumer { get; }
+
+    Task HandleAsync(ConversationOutboxEntry entry, CancellationToken cancellationToken = default);
+}

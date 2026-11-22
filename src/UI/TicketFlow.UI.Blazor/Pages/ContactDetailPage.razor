@@ -177,11 +177,25 @@ else
                 <div class="tf-card">
                     <div class="tf-card__header"><div><div class="tf-card__title">Merge a duplicate</div><div class="tf-card__description">Moves identities, labels and conversations of another contact into this one. Audited; can be undone.</div></div></div>
                     <div class="tf-card__content">
-                        <TfForm Action="contact.merge" Revision="contact.Revision" Class="tf-form">
-                            <div class="tf-field"><label class="tf-label" for="tf-m-source">Duplicate contact ID</label><input id="tf-m-source" name="source" class="tf-input" required maxlength="256" placeholder="c-…" /></div>
-                            <div class="tf-field"><label class="tf-label" for="tf-m-reason">Justification</label><input id="tf-m-reason" name="justification" class="tf-input" maxlength="512" placeholder="Same person, second email address" /></div>
-                            <div class="tf-form-actions"><BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="merge" Size="14" />Merge into @name</BbButton></div>
-                        </TfForm>
+                        @if (mergePreview is { } preview)
+                        {
+                            <TfForm Action="contact.merge" Revision="contact.Revision" Class="tf-form">
+                                <input type="hidden" name="source" value="@preview.Source.Id.Value" />
+                                <input type="hidden" name="sourceRevision" value="@preview.Source.Revision.ToString(CultureInfo.InvariantCulture)" />
+                                <div class="tf-alert tf-alert--warning"><LucideIcon Name="merge" Size="16" Class="tf-alert__icon" /><div class="tf-alert__body"><div class="tf-alert__title">Merge @UiText.ContactName(preview.Source) into @name?</div>
+                                    <div class="tf-small tf-muted">@(preview.Source.Profile.Company ?? "No company") · @preview.Source.Identities.Count identities · revision @preview.Source.Revision</div></div></div>
+                                <div class="tf-field"><label class="tf-label" for="tf-m-reason">Justification</label><input id="tf-m-reason" name="justification" class="tf-input" maxlength="512" value="@Session.FormValue("justification", null)" /></div>
+                                <div class="tf-form-actions"><BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Destructive" Size="ButtonSize.Small"><LucideIcon Name="merge" Size="14" />Confirm merge</BbButton></div>
+                            </TfForm>
+                        }
+                        else
+                        {
+                            <TfForm Action="contact.merge.preview" Revision="contact.Revision" Class="tf-form">
+                                <div class="tf-field"><label class="tf-label" for="tf-m-source">Duplicate contact ID</label><input id="tf-m-source" name="source" class="tf-input" required maxlength="256" placeholder="c-…" /></div>
+                                <div class="tf-field"><label class="tf-label" for="tf-m-reason">Justification</label><input id="tf-m-reason" name="justification" class="tf-input" maxlength="512" placeholder="Same person, second email address" /></div>
+                                <div class="tf-form-actions"><BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="search" Size="14" />Review merge</BbButton></div>
+                            </TfForm>
+                        }
                     </div>
                 </div>
             }
@@ -194,6 +208,7 @@ else
 
     private ContactView? contact;
     private ContactFieldRevealed? revealed;
+    private TicketFlow.UI.Blazor.Infrastructure.UiActions.MergePreview? mergePreview;
     private readonly List<ConversationView> conversations = [];
 
     protected override async Task OnInitializedAsync()
@@ -213,6 +228,7 @@ else
             return;
         contact = found.Value;
         revealed = Session.PageStateAs<ContactFieldRevealed>();
+        mergePreview = Session.PageStateAs<TicketFlow.UI.Blazor.Infrastructure.UiActions.MergePreview>();
         await LoadWorkspaceAsync();
         if (Service<IConversationService>() is { } conversationService && Session.Can(AccessPermissions.ConversationRead)
             && await conversationService.ListAsync(Actor, new ConversationListQuery(contact: id, limit: 10), null, Aborted) is ConversationListPage page)

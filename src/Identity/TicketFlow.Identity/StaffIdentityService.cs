@@ -40,9 +40,9 @@ public sealed class StaffIdentityService(
         return await store.LinkAsync(scope, new StaffIdentityLink(identity, user, now, AccessActor.From(actor)), auditEvent, cancellationToken).ConfigureAwait(false) switch
         {
             StaffIdentityWriteApplied applied => new StaffIdentityApplied<StoredStaffIdentityLink>(applied.Link),
-            StaffIdentityTaken => new StaffIdentityRefused(StaffIdentityRefusal.Taken, ["The identity is linked to another user; unlink it first."]),
-            StaffWriteNotFound => StaffIdentityRefused.NotFound,
-            StaffWriteRejected => new StaffIdentityRefused(StaffIdentityRefusal.Rejected, [$"A user can hold at most {IStaffIdentityStore.MaximumIdentitiesPerUser} identities."]),
+            StaffIdentityWriteTaken => new StaffIdentityRefused(StaffIdentityRefusal.Taken, ["The identity is linked to another user; unlink it first."]),
+            StaffIdentityWriteNotFound => StaffIdentityRefused.NotFound,
+            StaffIdentityWriteRejected => new StaffIdentityRefused(StaffIdentityRefusal.Rejected, [$"A user can hold at most {IStaffIdentityStore.MaximumIdentitiesPerUser} identities."]),
         };
     }
 
@@ -71,9 +71,9 @@ public sealed class StaffIdentityService(
         return await store.UnlinkAsync(scope, identity, user, auditEvent, cancellationToken).ConfigureAwait(false) switch
         {
             StaffIdentityWriteApplied => new StaffIdentityApplied<UserId>(user),
-            StaffIdentityTaken => new StaffIdentityRefused(StaffIdentityRefusal.Conflict, ["The identity was relinked concurrently; retry."]),
-            StaffWriteNotFound => StaffIdentityRefused.NotFound,
-            StaffWriteRejected => new StaffIdentityRefused(StaffIdentityRefusal.Rejected, []),
+            StaffIdentityWriteTaken => new StaffIdentityRefused(StaffIdentityRefusal.Conflict, ["The identity was relinked concurrently; retry."]),
+            StaffIdentityWriteNotFound => StaffIdentityRefused.NotFound,
+            StaffIdentityWriteRejected => new StaffIdentityRefused(StaffIdentityRefusal.Rejected, []),
         };
     }
 
@@ -119,9 +119,9 @@ public sealed class StaffIdentityService(
         var auditEvent = new StaffIdentityAuditEvent(Guid.CreateVersion7(), now, scope, StaffIdentityAuditKind.ProfileChanged, AccessActor.From(actor), profile.User);
         return await store.PutProfileAsync(scope, profile, now, expectedRevision, auditEvent, cancellationToken).ConfigureAwait(false) switch
         {
-            StaffProfileWriteApplied applied => new StaffIdentityApplied<StaffProfileView>(View(applied.Profile, masked: false)),
-            StaffWriteNotFound => StaffIdentityRefused.NotFound,
-            StaffProfileWriteConflict conflict => new StaffIdentityRefused(StaffIdentityRefusal.Conflict, [], conflict.CurrentRevision),
+            StaffIdentityProfileWriteApplied applied => new StaffIdentityApplied<StaffProfileView>(View(applied.Profile, masked: false)),
+            StaffIdentityWriteNotFound => StaffIdentityRefused.NotFound,
+            StaffIdentityWriteConflict conflict => new StaffIdentityRefused(StaffIdentityRefusal.Conflict, [], conflict.CurrentRevision),
         };
     }
 

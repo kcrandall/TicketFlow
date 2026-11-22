@@ -38,6 +38,12 @@ public static class ReportingStoreContract
         ReportWriteRejected rejected => $"rejected:{rejected.Reason}",
     };
 
+    public static string B(ReportRebuildResult result) => result switch
+    {
+        ReportRebuilt rebuilt => $"rebuilt:{rebuilt.Facts}",
+        ReportRebuildRefused refused => $"refused:{refused.FactHorizon:O}",
+    };
+
     public static ReportAggregateQuery Whole(DateTimeOffset from, DateTimeOffset to, ReportDimension groupBy = ReportDimension.None, ReportFilter? filter = null, bool histograms = false,
         params ReportMetric[] metrics) =>
         new([from, to], metrics.Length == 0 ? ReportMetrics.All : metrics, filter, groupBy, histograms);
@@ -210,7 +216,7 @@ public static class ReportingStoreContract
         var before = await store.AggregateAsync(scope, plain, AllowAllFilter.Instance);
         var beforeLabels = await store.AggregateAsync(scope, query, AllowAllFilter.Instance);
 
-        Assert.AreEqual(96, await store.RebuildRollupsAsync(scope, Day, Day.AddDays(2)));
+        Assert.AreEqual("rebuilt:96", B(await store.RebuildRollupsAsync(scope, Day, Day.AddDays(2))));
         CollectionAssert.AreEqual(before.Rows.ToArray(), (await store.AggregateAsync(scope, plain, AllowAllFilter.Instance)).Rows.ToArray());
         CollectionAssert.AreEqual(beforeLabels.Rows.ToArray(), (await store.AggregateAsync(scope, query, AllowAllFilter.Instance)).Rows.ToArray());
         Assert.ThrowsExactly<ArgumentException>(() => store.RebuildRollupsAsync(scope, Day, Day.AddDays(40)).GetAwaiter().GetResult());
@@ -265,5 +271,84 @@ public static class ReportingStoreContract
         }));
         Assert.AreEqual(conversations, replays.Count(result => result == "applied:2:0"));
         Assert.AreEqual(conversations, Total(await primary.AggregateAsync(scope, Whole(Day, Day.AddDays(1)), AllowAllFilter.Instance), ReportMetric.ConversationCreated));
+    }
+
+    /// <summary>
+    /// Fact prunes advance a monotonic, store-wide fact horizon; rebuilds of ranges starting before it are refused and change nothing,
+    /// so rollups that outlive their facts are never wiped. Rebuilds at or after the horizon still work.
+    /// </summary>
+    public static async Task VerifyRebuildHorizonAsync(IReportingStore store)
+    {
+        var scope = NewScope();
+        var facts = Enumerable.Range(0, 48).Select(hour => Count(ReportMetric.ConversationCreated, Day.AddHours(hour), dimensions: Dimensions(labels: hour % 2 == 0 ? ["vip"] : []))).ToList();
+        Assert.AreEqual("applied:1:48", W(await store.ApplyAsync(scope, new ReportProjection(State(), facts), null)));
+        var plain = Whole(Day, Day.AddDays(2), metrics: ReportMetric.ConversationCreated);
+        var cutoff = Day.AddDays(1).AddMinutes(5);   // mid-cell: the 24:00 cell may have lost facts too
+        var before = (await store.GetFactHorizonAsync()) ?? DateTimeOffset.MinValue;
+        Assert.IsTrue(before <= cutoff, "other tests share the store; their horizons precede this cutoff");
+        while (await store.PruneFactsAsync(cutoff, 1000) > 0)
+        {
+        }
+        Assert.AreEqual(cutoff, await store.GetFactHorizonAsync());
+        await store.PruneFactsAsync(Day, 10);
+        Assert.AreEqual(cutoff, await store.GetFactHorizonAsync(), "the horizon never moves backwards");
+
+        Assert.AreEqual($"refused:{cutoff:O}", B(await store.RebuildRollupsAsync(scope, Day, Day.AddDays(2))));
+        Assert.AreEqual($"refused:{cutoff:O}", B(await store.RebuildRollupsAsync(scope, Day.AddDays(1), Day.AddDays(2))));
+        Assert.AreEqual(48, Total(await store.AggregateAsync(scope, plain, AllowAllFilter.Instance), ReportMetric.ConversationCreated), "a refused rebuild changes nothing");
+        Assert.AreEqual("rebuilt:23", B(await store.RebuildRollupsAsync(scope, Day.AddDays(1).AddMinutes(15), Day.AddDays(2))));
+        Assert.AreEqual(48, Total(await store.AggregateAsync(scope, plain, AllowAllFilter.Instance), ReportMetric.ConversationCreated));
+        // Label reports read facts, so they cover only what retention kept.
+        Assert.AreEqual(11, Total(await store.AggregateAsync(scope, Whole(Day, Day.AddDays(2), ReportDimension.Label, metrics: ReportMetric.ConversationCreated), AllowAllFilter.Instance),
+            ReportMetric.ConversationCreated));
+    }
+
+    /// <summary>
+    /// Label groupings and filters (computed from facts) equal a reference computed from the facts with the rollup Access semantics
+    /// (labels unknown), for every dimension, histogram bins, sums, minimums and maximums.
+    /// </summary>
+    public static async Task VerifyLabelAggregatesMatchFactsAsync(IReportingStore store, int seed)
+    {
+        var scope = NewScope();
+        var random = new Random(seed);
+        string[] labels = ["a", "b", "c", "d"];
+        var facts = new List<ReportFact>();
+        for (var index = 0; index < 300; index++)
+        {
+            var carried = labels.Where(_ => random.Next(3) == 0).ToArray();
+            var dimensions = Dimensions($"i{random.Next(2)}", random.Next(3) == 0 ? null : $"t{random.Next(2)}", random.Next(3) == 0 ? null : $"u{random.Next(3)}",
+                random.Next(2) == 0 ? "email" : null, (ConversationPriority)random.Next(1, 6), carried);
+            var at = Day.AddMinutes(random.Next(3 * 24 * 60));
+            facts.Add(random.Next(2) == 0
+                ? Count(ReportMetric.MessageSent, at, $"bulk{index / 100}", dimensions)
+                : Duration(ReportMetric.ResponseTime, at, TimeSpan.FromSeconds(random.Next(0, 20_000)), $"bulk{index / 100}", dimensions));
+        }
+        foreach (var chunk in facts.Chunk(100).Select((items, index) => (items, index)))
+            Assert.StartsWith("applied:1:", W(await store.ApplyAsync(scope, new ReportProjection(State($"bulk{chunk.index}"), chunk.items), null)));
+        var boundaries = new[] { Day, Day.AddDays(1), Day.AddDays(2), Day.AddDays(3) };
+        AccessFilter[] filters = [AllowAllFilter.Instance, new TeamInFilter([new TeamId("t0")]), new OrFilter(new AssigneeIsFilter(new UserId("u1")), new HasLabelFilter(new LabelId("a")))];
+        foreach (var filter in filters)
+            foreach (var (groupBy, restriction) in new (ReportDimension, ReportFilter?)[]
+                { (ReportDimension.Label, null), (ReportDimension.Agent, new ReportFilter(label: new LabelId("b"))), (ReportDimension.Label, new ReportFilter(channel: "email", label: new LabelId("c"))) })
+                foreach (var histograms in new[] { false, true })
+                {
+                    var query = new ReportAggregateQuery(boundaries, [ReportMetric.MessageSent, ReportMetric.ResponseTime], restriction, groupBy, histograms);
+                    var expected = facts
+                        .Where(fact => new ReportFilter(query.Filter.Inbox, query.Filter.Team, query.Filter.Agent, query.Filter.Channel, query.Filter.Priority).Matches(fact.Dimensions)
+                            && AccessFilterEvaluator.Matches(filter, ReportResources.Rollup(scope, fact.Dimensions.Inbox, fact.Dimensions.Team, fact.Dimensions.Agent)))
+                        .SelectMany(fact => fact.Dimensions.Labels.Where(label => query.Filter.Label is not { } only || label == only).Select(label => (fact, label)))
+                        .GroupBy(item => (Bucket: ReportBuckets.IndexOf(boundaries, item.fact.CellStart),
+                            Group: ReportGroups.Key(groupBy, item.fact.Dimensions.Inbox, item.fact.Dimensions.Team, item.fact.Dimensions.Agent, item.fact.Dimensions.Channel,
+                                item.fact.Dimensions.Priority, item.label),
+                            item.fact.Metric, Bin: histograms && ReportMetrics.IsDuration(item.fact.Metric) ? item.fact.Bin : 0))
+                        .OrderBy(group => group.Key.Bucket).ThenBy(group => group.Key.Group is not null).ThenBy(group => group.Key.Group, StringComparer.Ordinal)
+                        .ThenBy(group => group.Key.Metric).ThenBy(group => group.Key.Bin)
+                        .Select(group => new ReportAggregateRow(group.Key.Bucket, group.Key.Group, group.Key.Metric, group.Key.Bin, group.Count(), group.Sum(item => item.fact.Value),
+                            group.Min(item => item.fact.Value), group.Max(item => item.fact.Value)))
+                        .ToArray();
+                    var actual = await store.AggregateAsync(scope, query, filter);
+                    Assert.IsNotEmpty(expected);
+                    CollectionAssert.AreEqual(expected, actual.Rows.ToArray(), $"seed {seed} {groupBy} histograms={histograms}");
+                }
     }
 }

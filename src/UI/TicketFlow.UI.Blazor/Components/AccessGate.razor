@@ -1,0 +1,14 @@
+@* Renders the access-denied panel instead of the page content when the page's own fresh authorization check failed. *@
+@if (Denied)
+{
+    <StatePanel Icon="lock" Title="Access denied" Message="Your role does not include access to this section. Ask a workspace administrator if you need it." />
+}
+else
+{
+    @ChildContent
+}
+
+@code {
+    [Parameter] public bool Denied { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+}

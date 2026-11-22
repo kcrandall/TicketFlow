@@ -19,6 +19,9 @@ app.MapTicketFlowOpenApi();     // /ticketflow/openapi/ticketflow.json
   `ITicketFlowPartitionResolver`.
 - Errors are problem details with a stable `code`; reads return `ETag: "{revision}"` and writes on existing records require `If-Match`
   (428 missing, 412 stale with `currentRevision`).
-- DTOs are separate from domain records (explicit `kind` discriminators, camelCase enum strings, codec JSON for feature definitions).
+- Collections take `limit`/`cursor` and return `PageResponse<T>`; routes are kebab-case; authenticated `POST`s need a JSON body or the
+  `X-TicketFlow-Request` header (CSRF).
+- DTOs are separate from domain records (`…Request`/`…Input`/`…Response`/`…Model`, explicit `kind` discriminators, camelCase enum
+  strings, codec JSON for feature definitions).
 
 See docs/hosting.md.

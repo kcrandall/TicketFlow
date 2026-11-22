@@ -3,6 +3,7 @@
 <PageHeader Title="Access" Description="Field policies mask sensitive fields (contact email, phone, attributes) unless the viewer's role unmasks them. Reveals are audited." />
 <AccessTabs Active="fields" />
 
+<AccessGate Denied="Denied">
 <div class="tf-card">
     <div class="tf-table-wrap">
         <table class="tf-table">
@@ -52,13 +53,13 @@
         </TfForm>
     </div>
 </div>
+</AccessGate>
 
 @code {
     private IReadOnlyList<StoredAccessFieldPolicy> policies = [];
 
     protected override async Task OnInitializedAsync()
     {
-        if (Service<IAccessFieldPolicyStore>() is { } store)
-            policies = await store.ListAsync(Session.Scope, Aborted);
+        policies = await AccessListAsync(administrator => administrator.ListFieldPoliciesAsync(Actor, Aborted)) ?? [];
     }
 }

@@ -110,20 +110,22 @@ public sealed class TicketFlowToolContext
     public CallToolResult Fail(TicketFlowToolError error)
     {
         ArgumentNullException.ThrowIfNull(error);
-        if (error.Code == "forbidden" && error.Details is null)
+        if (error.Code == "forbidden" && error.Tool is null)
             error = error with
             {
-                Details = new Dictionary<string, object?>(StringComparer.Ordinal)
-                {
-                    ["tool"] = Tool.Name,
-                    ["requiredPermissions"] = Tool.Permissions,
-                    ["anyOf"] = Tool.AnyOf,
-                    ["grantedByBuiltInRoles"] = Tool.GrantedByBuiltInRoles,
-                    ["hint"] = "Call explain_access with this tool (and the resource) to see which permission is missing. Access may also be limited by deny grants, conditions or team/inbox scopes.",
-                },
+                Tool = Tool.Name,
+                RequiredPermissions = Tool.Permissions,
+                AnyOf = Tool.AnyOf,
+                GrantedByBuiltInRoles = Tool.GrantedByBuiltInRoles,
+                Hint = "Call explain_access with this tool (and the resource) to see which permission is missing. Access may also be limited by deny grants, conditions or team/inbox scopes.",
             };
         return TicketFlowToolResults.Error(error);
     }
+
+    /// <summary>Wraps customer-authored or otherwise uncontrolled text (truncated to <see cref="TicketFlowMcpOptions.MaximumTextLength"/>) as <see cref="UntrustedContent"/>.</summary>
+    public UntrustedContent Untrusted(string source, string text) => new(new UntrustedText(source, Text(text, out var truncated), truncated));
+
+    public UntrustedContent? UntrustedOrNull(string source, string? text) => text is null ? null : Untrusted(source, text);
 
     private void Log(CallToolResult result, TimeSpan elapsed)
     {

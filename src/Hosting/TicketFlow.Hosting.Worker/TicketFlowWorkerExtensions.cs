@@ -27,6 +27,8 @@ public static class TicketFlowWorkerExtensions
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton<TicketFlowWorkerHealth>();
         services.TryAddSingleton<OutboxRegistration>();
+        services.TryAddSingleton<WorkspaceLoopStates>();
+        services.AddSingleton<IHostedService, TicketFlowServiceIdentityValidator>();
         services.TryAddSingleton<IWorkerCheckpointStore, InMemoryWorkerCheckpointStore>();
         foreach (var definition in TicketFlowBuiltInLoops.All())
             AddLoop(services, definition);

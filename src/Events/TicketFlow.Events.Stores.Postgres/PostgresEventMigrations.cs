@@ -4,7 +4,9 @@ namespace TicketFlow.Events.Stores.Postgres;
 
 /// <summary>
 /// Feature-owned, append-only migration history for the event stream tables. Keys are fixed-size <c>tf_key_v1</c> SHA-256 keys over the raw
-/// identifiers. Never edit an applied step; append a new one.
+/// identifiers. Never edit an applied step; append a new one. Version 2 adds the replay generation and suspension columns, restricts the due
+/// index to claimable rows, gives head rows free space for HOT updates (fillfactor 50) and replaces the recorded-at B-tree with a BRIN index
+/// (append-ordered log).
 /// </summary>
 public static class PostgresEventMigrations
 {
@@ -55,5 +57,13 @@ public static class PostgresEventMigrations
             subscription_key bytea GENERATED ALWAYS AS (tf_key_v1({ScopeColumns}, subscription_id)) STORED NOT NULL,
             PRIMARY KEY (subscription_key, sequence));
         CREATE INDEX tf_event_dead_letters_retention ON tf_event_dead_letters (dead_lettered_at);
+        """), new(2, "delivery-generation-suspension-and-append-tuning", """
+        ALTER TABLE tf_event_subscriptions ADD COLUMN generation bigint NOT NULL DEFAULT 0 CHECK (generation >= 0);
+        ALTER TABLE tf_event_subscriptions ADD COLUMN suspended boolean NOT NULL DEFAULT false;
+        DROP INDEX tf_event_subscriptions_due;
+        CREATE INDEX tf_event_subscriptions_due ON tf_event_subscriptions (available_at) WHERE enabled AND NOT suspended;
+        ALTER TABLE tf_event_heads SET (fillfactor = 50);
+        DROP INDEX tf_events_retention;
+        CREATE INDEX tf_events_recorded_brin ON tf_events USING brin (recorded_at);
         """)]);
 }

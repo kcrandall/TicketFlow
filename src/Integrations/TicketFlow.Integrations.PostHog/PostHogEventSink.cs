@@ -3,29 +3,41 @@ using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using TicketFlow.Events;
 using Microsoft.Extensions.Options;
 
 namespace TicketFlow.Integrations.PostHog;
 
-/// <summary>How the PostHog <c>distinct_id</c> is chosen for events that concern a contact. Persisted in configuration only.</summary>
+/// <summary>
+/// How the PostHog <c>distinct_id</c> is chosen. Every id is namespaced so the kinds can never collide: <c>contact:&lt;contact id&gt;</c>,
+/// <c>external:&lt;issuer&gt;:&lt;external user id&gt;</c> and, for events that concern no contact, <c>workspace:&lt;workspace id&gt;</c>. Conversation
+/// events (messages, SLA, routing, delivery status) use the conversation's contact, so all of a contact's events share one id.
+/// </summary>
 public enum PostHogDistinctIdStrategy
 {
-    /// <summary>The TicketFlow contact identifier (default). Works at every privacy level.</summary>
+    /// <summary><c>contact:&lt;id&gt;</c> (default). Works at every privacy level.</summary>
     ContactId = 1,
 
     /// <summary>
-    /// The contact's first unmasked <c>external-user</c> identity (for example the application's own user id) from hydrated content,
-    /// falling back to the contact identifier. Content is present only for <c>Content</c> subscriptions, and masked identities are never
-    /// used.
+    /// <c>external:&lt;issuer&gt;:&lt;value&gt;</c> from the contact's first unmasked <c>external-user</c> identity in hydrated content (the event's own
+    /// contact content, or <c>content.contact</c> of conversation events), else <c>contact:&lt;id&gt;</c>. Content is present only for
+    /// <c>Content</c> subscriptions, so use one privacy level per project to keep ids consistent; masked identities are never used.
     /// </summary>
     ContactExternalId = 2,
 }
 
-/// <summary>A PostHog project: the API host and its public project API key.</summary>
+/// <summary>
+/// A PostHog project: the API host, its public project API key and the scopes allowed to send to it (at least one
+/// <see cref="EventScopeRule"/>; subscriptions of other tenants or workspaces cannot target the project).
+/// </summary>
 public sealed record PostHogProject
 {
-    public PostHogProject(Uri host, string projectApiKey)
+    public PostHogProject(Uri host, string projectApiKey, IEnumerable<EventScopeRule> allowedScopes)
     {
+        ArgumentNullException.ThrowIfNull(allowedScopes);
+        AllowedScopes = [.. allowedScopes];
+        if (AllowedScopes.Count == 0 || AllowedScopes.Any(rule => rule is null))
+            throw new ArgumentException("A PostHog project needs at least one allowed scope rule.", nameof(allowedScopes));
         ArgumentNullException.ThrowIfNull(host);
         if (!host.IsAbsoluteUri || host.Scheme != Uri.UriSchemeHttps || host.UserInfo.Length != 0 || host.Query.Length != 0 || host.Fragment.Length != 0)
             throw new ArgumentException("PostHog hosts are absolute https URIs without credentials, query or fragment.", nameof(host));
@@ -37,6 +49,7 @@ public sealed record PostHogProject
 
     public Uri Host { get; }
     public string ProjectApiKey { get; }
+    public IReadOnlyList<EventScopeRule> AllowedScopes { get; }
 
     public override string ToString() => $"PostHogProject {{ Host = {Host} }}";
 }
@@ -66,8 +79,9 @@ public sealed class PostHogOptions
 /// The <c>posthog</c> sink: posts each delivery to <c>{host}/batch/</c> as <c>{"api_key","historical_migration":false,"batch":[…]}</c>. Each
 /// event is <c>{"event": CloudEvents type, "distinct_id", "timestamp", "uuid": the event id (PostHog deduplicates on it),
 /// "properties": data plus "$groups", "ticketflow_sequence", "ticketflow_subject", "ticketflow_privacy"}</c>. Properties carry only what the
-/// subscription's privacy level rendered. Events without a contact use <c>workspace:&lt;id&gt;</c> with <c>$process_person_profile: false</c>.
-/// 2xx is delivered; 408/429/5xx retry; other statuses are permanent.
+/// subscription's privacy level rendered. Distinct ids are namespaced (see <see cref="PostHogDistinctIdStrategy"/>); events without a contact
+/// use <c>workspace:&lt;id&gt;</c> with <c>$process_person_profile: false</c>. Only scopes in the project's allow-list may target it. 2xx is
+/// delivered; 413 on a batch splits it; 408/429/5xx retry; other statuses are permanent.
 /// </summary>
 public sealed class PostHogEventSink : Events.IEventSink, IDisposable
 {
@@ -88,12 +102,13 @@ public sealed class PostHogEventSink : Events.IEventSink, IDisposable
 
     public int MaximumBatchSize => Events.EventSubscription.MaximumBatchSize;
 
-    public bool IsValidTarget(string target) => target is not null && options.Projects.ContainsKey(target);
+    public bool IsValidTarget(Core.TicketScope scope, string target) =>
+        scope is not null && target is not null && options.Projects.TryGetValue(target, out var project) && EventScopeRule.Allows(project.AllowedScopes, scope);
 
     public async Task<Events.EventSinkResult> DeliverAsync(Events.EventDelivery delivery, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(delivery);
-        if (!options.Projects.TryGetValue(delivery.Subscription.Subscription.Sink.Target, out var project))
+        if (!options.Projects.TryGetValue(delivery.Subscription.Subscription.Sink.Target, out var project) || !EventScopeRule.Allows(project.AllowedScopes, delivery.Scope))
             return new Events.EventSinkFailed("project-missing", permanent: true);
         using var content = new ByteArrayContent(Body(project, delivery));
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
@@ -103,6 +118,8 @@ public sealed class PostHogEventSink : Events.IEventSink, IDisposable
             var status = (int)response.StatusCode;
             if (status is >= 200 and < 300)
                 return Events.EventSinkDelivered.Instance;
+            if (status == 413 && delivery.Events.Count > 1)
+                return Events.EventSinkSplit.Instance;
             var code = "http-" + status.ToString(CultureInfo.InvariantCulture);
             return status is 408 or 429 or >= 500 ? new Events.EventSinkFailed(code, retryAfter: response.Headers.RetryAfter?.Delta) : new Events.EventSinkFailed(code, permanent: true);
         }
@@ -165,14 +182,29 @@ public sealed class PostHogEventSink : Events.IEventSink, IDisposable
 
     private string? DistinctId(Events.RenderedEvent rendered, JsonElement data)
     {
-        if (options.DistinctId == PostHogDistinctIdStrategy.ContactExternalId && data.TryGetProperty("content", out var content)
-            && content.TryGetProperty("identities", out var identities))
-            foreach (var identity in identities.EnumerateArray())
-                if (identity.GetProperty("kind").GetString() == "external-user")
-                    return identity.GetProperty("value").GetString();
-        if (data.TryGetProperty("contact", out var contact) && contact.ValueKind == JsonValueKind.String)
-            return contact.GetString();
-        return rendered.Event.Resource.Contact?.Value;
+        if (options.DistinctId == PostHogDistinctIdStrategy.ContactExternalId && data.TryGetProperty("content", out var content))
+        {
+            var holder = content.TryGetProperty("contact", out var related) ? related : content;
+            if (holder.TryGetProperty("identities", out var identities))
+                foreach (var identity in identities.EnumerateArray())
+                    if (identity.GetProperty("kind").GetString() == "external-user")
+                        return "external:" + (identity.TryGetProperty("namespace", out var issuer) ? issuer.GetString() : "") + ":" + identity.GetProperty("value").GetString();
+        }
+        // The event's subject contact (contact events), else the conversation's contact from the resource snapshot.
+        var contact = rendered.Event.Event.Data.Value switch
+        {
+            Events.ContactCreatedData created => created.Contact.Value,
+            Events.ContactUpdatedData updated => updated.Contact.Value,
+            Events.ContactDeletedData deleted => deleted.Contact.Value,
+            Events.ContactMergedData merged => merged.Contact.Value,
+            Events.ContactUnmergedData unmerged => unmerged.Contact.Value,
+            Events.ContactIdentityLinkedData linked => linked.Contact.Value,
+            Events.ConversationCreatedData created => created.Contact.Value,
+            Events.ConversationMessageReceivedData received => received.Contact.Value,
+            Events.SurveyRespondedData responded => responded.Contact.Value,
+            _ => rendered.Event.Resource.Contact?.Value,
+        };
+        return contact is null ? null : "contact:" + contact;
     }
 
     public void Dispose() => client.Dispose();

@@ -39,3 +39,5 @@ Implemented `TicketFlow.Mcp.AspNetCore` (`WithTicketFlowHostPrincipals()` → `H
 - `dotnet test tests/Mcp/TicketFlow.Mcp.AspNetCore.Tests -c Release` — 3 passed, 0 failed (401 unauthenticated, API client acting through
   Access with forbidden delete and `permitted` marks, Access-filtered empty list for an unknown client, host policy 403).
 - `dotnet test tests/Hosting/TicketFlow.SampleHost.Tests -c Release --filter FullyQualifiedName~Mcp` — 1 passed (2026-11-22).
+
+Review fix: `HostMcpPrincipalResolver` builds the principal from the caller's own user, using a detached context when the request user differs, and never mutates `HttpContext.User`. Test: `HostPrincipalResolverTests`. `dotnet test tests/Mcp/TicketFlow.Mcp.AspNetCore.Tests -c Release` — 4 passed; the sample MCP test — 1 passed.

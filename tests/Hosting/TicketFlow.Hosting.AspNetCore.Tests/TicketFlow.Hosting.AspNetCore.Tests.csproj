@@ -17,7 +17,7 @@
     <ProjectReference Include="../../../src/Surveys/TicketFlow.Surveys/TicketFlow.Surveys.csproj" />
     <ProjectReference Include="../../../src/Realtime/TicketFlow.Realtime/TicketFlow.Realtime.csproj" />
     <ProjectReference Include="../../../src/Channels/TicketFlow.Channels.LiveChat/TicketFlow.Channels.LiveChat.csproj" />
-    <ProjectReference Include="../../../src/Assist/TicketFlow.Assist.Abstractions/TicketFlow.Assist.Abstractions.csproj" />
+    <ProjectReference Include="../../../src/Assist/TicketFlow.Assist/TicketFlow.Assist.csproj" />
     <ProjectReference Include="../../TicketFlow.Testing/TicketFlow.Testing.csproj" />
   </ItemGroup>
 </Project>

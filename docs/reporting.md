@@ -84,14 +84,19 @@ count anything twice. **Late events** (a consumer registered after conversations
 land in the cells of their own instants. Facts are immutable: changing how past events are interpreted requires recomputing.
 
 `IReportingStore.RebuildRollupsAsync(scope, from, to)` (cell-aligned, ≤ 31 days) atomically recomputes a range's cells from its
-facts — the repair path for imported facts or damaged cells. Facts already removed by retention cannot be restored, so rebuild only
-ranges inside the fact retention window.
+facts — the repair path for imported facts or damaged cells — and returns `ReportRebuildResult = ReportRebuilt(facts) |
+ReportRebuildRefused(factHorizon)`. Every fact prune durably advances a store-wide, monotonic **fact horizon**
+(`GetFactHorizonAsync`); a rebuild of a range starting before it is refused and changes nothing, so cells that outlive their facts
+are never wiped. Rebuilds serialize against prunes (PostgreSQL: the prune updates the retention row before deleting, the rebuild reads
+it `FOR SHARE`) and against projections of the scope (exclusive vs shared advisory lock).
 
 ## Rollups, buckets and percentiles
 
-Cells are keyed by (metric, 15-minute UTC cell, inbox, team, agent, channel, priority, label or none, histogram bin) and keep count,
-sum, minimum and maximum. Each fact adds to one per-fact row and one row per carried label (label rows serve label grouping and
-label filters).
+Cells are keyed by (metric, 15-minute UTC cell, inbox, team, agent, channel, priority, histogram bin) and keep count, sum, minimum
+and maximum. Each fact adds to **exactly one** cell: labels are not rolled up, so a fact's write cost does not grow with its labels
+(up to 64). Aggregates that group or filter by label are computed from the facts instead — once per carried label, with the same
+rollup Access semantics (labels unknown) — through the partial index `tf_report_facts_labelled` (`cardinality(labels) > 0`), so they
+return the same rows a label rollup would, but only for facts that retention has not pruned.
 
 - **Buckets**: every current time-zone offset and DST transition is a multiple of 15 minutes, so local hours, days, ISO weeks
   (Monday) and months are exact unions of cells in any zone. `ReportBuckets.Boundaries(zone, from, to, granularity)` computes bucket
@@ -138,7 +143,7 @@ Feature permissions are held only by Owner until custom roles grant them (for ex
 - Every report plans `report:view` with `IAccessQueryPlanner` and ORs in `report:view-own ∧ agent = self` for user principals; the
   combined filter runs **inside the store query**. A principal without applicable grants gets empty reports, not a refusal, like
   every list path. A plan exceeding the filter node limit falls back to the narrower `report:view` plan.
-- Rollup rows are filtered over `ReportResources.Rollup` — scope, inbox, team and the attributed agent as assignee, with **unknown
+- Rollup rows (and the fact rows behind label aggregates) are filtered over `ReportResources.Rollup` — scope, inbox, team and the attributed agent as assignee, with **unknown
   labels and attributes**, so label and attribute conditions fail closed on aggregates (`team ∈ A ∨ has-label(x)` still includes
   team A rows: Kleene logic). Team- and inbox-scoped `report:view` grants see their team's/inbox's rows; an agent with
   `report:view-own` sees exactly the facts attributed to them (their replies, assignments, resolutions while assigned).
@@ -152,8 +157,9 @@ Feature permissions are held only by Owner until custom roles grant them (for ex
 
 `ReportingRetentionWorker.RunOnceAsync()` deletes facts older than `FactRetention` and cells older than `RollupRetention` (each
 optional, at least one day; `null` keeps them, the default), at most `MaximumPruneBatches` × `PruneBatchSize` rows per table per run,
-store-wide (`PruneFactsAsync`, `PruneRollupsAsync`; `FOR UPDATE SKIP LOCKED` in PostgreSQL). Cells may outlive facts: reports read
-only cells (and states), export reads facts. Conversation states are removed when their conversation is deleted.
+store-wide (`PruneFactsAsync`, `PruneRollupsAsync`; `FOR UPDATE SKIP LOCKED` in PostgreSQL). Cells may outlive facts: unlabelled
+reports read only cells (and states); label reports and export read facts, so they cover the fact retention window. Fact prunes advance
+the fact horizon that guards rebuilds. Conversation states are removed when their conversation is deleted.
 
 ## Stores
 
@@ -161,13 +167,16 @@ only cells (and states), export reads facts. Conversation states are removed whe
 the inserted facts); keyed cells; Access-filtered aggregates, backlog counts and keyset fact lists (ordered by occurred-at, source id as
 lowercase hex, metric); store-wide retention deletes; bounded rebuilds. The shared fixture
 `tests/Reporting/TicketFlow.Reporting.StoreContracts` verifies the in-memory store and PostgreSQL (two independent data sources):
-exactly-once replays (also with tampered content), late facts, bucket grouping and every dimension, histograms, label rows, scope
+exactly-once replays (also with tampered content), late facts, label aggregates equal to a fact-based reference, the rebuild horizon, bucket grouping and every dimension, histograms, label rows, scope
 isolation, concurrent projections sharing cells, retention and rebuild equality, and randomized grant parity with point checks
 (`AccessFilteredReportParity`). The in-memory store is a bounded (`MaximumFacts`, default 1 000 000), process-local development example
 without durability.
 
-`PostgresReportingStore`: tables `tf_report_conversations`, `tf_report_facts` and `tf_report_rollups`, created only by `InitializeAsync`
-(append-only `ticketflow.reporting` catalog); `tf_key_v1` keys (conversation, fact = scope + source + metric, cell = scope + every cell
+`PostgresReportingStore`: tables `tf_report_conversations`, `tf_report_facts`, `tf_report_rollups` and `tf_report_retention` (the fact
+horizon), created only by `InitializeAsync` (append-only `ticketflow.reporting` catalog; migration 2 `label-rollups-from-facts` removes
+version-1 label rollup rows, constrains rollups to `label = ''`, replaces the rollup query index with the partial
+`tf_report_rollups_query_v2 (scope_key, metric, cell_us) WHERE label = ''`, adds `tf_report_facts_labelled` and backfills the fact horizon
+conservatively — at the oldest remaining fact when rollups predate every fact); `tf_key_v1` keys (conversation, fact = scope + source + metric, cell = scope + every cell
 dimension) plus raw-column comparison; cells stored as microseconds since the Unix epoch (`cell_us`) so keys are immutable expressions;
 `format_version` on every row. A projection is one transaction: fenced state upsert, one `INSERT … SELECT unnest(…) ON CONFLICT DO
 NOTHING RETURNING` for the facts, one rollup upsert for the inserted facts ordered by cell key (no deadlocks between concurrent
@@ -178,6 +187,8 @@ matches `AccessFilterEvaluator`; untranslatable filters return no rows. Undecoda
 ## Known limits
 
 - Cells are hot rows when one workspace produces many facts in the same 15-minute cell; projections serialize on them briefly.
+- Label reports scan the labelled facts of the range; they are bounded by the range and the partial index but cost more than rollup
+  reads, and they end at the fact retention horizon.
 - Business-time facts use the inbox calendar at projection time, not the calendar that was in force when the event happened.
 - Resolution time is measured once, for the first resolution; later resolutions count only as resolved.
 - Satisfaction filters are limited to what survey aggregates support (see Reports).

@@ -41,6 +41,31 @@ isolated `postgres:18` container; `TicketFlow.Events.Webhooks.Tests` (5), `Ticke
 `TicketFlow.Integrations.WalFlow.Sinks.Tests` (3) passed. `bash scripts/verify-package-metadata.sh` fails only on a concurrent E17 project
 not yet in the solution. Parallel post-ticket reviews are still outstanding before commit.
 
+
+### Review fixes (2026-11-22, after commit 4574992)
+
+- Security: subscription create/update require the actor to be able to confer every live allow grant of the API-client principal
+  (`IAccessAdministrator.CheckCanConferAsync`); service calls authorize before NotFound/Conflict; delivery ids include the subscription
+  revision and a replay generation (bumped by `ReplayAsync`); poison events fail and dead-letter alone; configuration failures (revoked
+  principal, missing content permission, unknown or disallowed sink) suspend the subscription after `MaximumAttempts` until it is updated
+  or replayed; named sinks (PostHog projects, WalFlow sinks) require `EventScopeRule` allow-lists and `IEventSink.IsValidTarget` takes the
+  scope; PostHog distinct ids are namespaced (`contact:`, `external:<issuer>:`, `workspace:`) and conversation events use the conversation's
+  contact.
+- Correctness/perf: survey comments hydrate through `ISurveyService` (`survey:read`, `survey.comment` masking); hydration is batched (one
+  timeline range read per conversation, one contact read per distinct contact; contact profile attached to conversation events);
+  round-robin claims (completion resets the claim time, caught-up subscriptions wait `IdlePollInterval`); retention gaps recorded as
+  `events-pruned-<from>-<to>`; `EventSinkSplit` halves oversized batches (webhook > 1 MiB or 413, PostHog 413); PostgreSQL migration 2
+  (generation/suspended columns, due index excludes suspended, `fillfactor = 50` on heads, BRIN on `recorded_at`).
+- `IConversationOutboxHandler` moved to `TicketFlow.Conversations.Abstractions` (same namespace, no consumer changes); `TicketFlow.Events`
+  now references only feature abstractions.
+- Not done: appending several outbox entries per transaction needs a batch handler contract in the E5 dispatcher (documented).
+
+Verification (2026-11-22): `dotnet build TicketFlow.slnx -c Release` — 0 warnings, 0 errors. `dotnet test` — `TicketFlow.Events.Tests` 36,
+`TicketFlow.Events.Webhooks.Tests` 7, `TicketFlow.Integrations.PostHog.Tests` 6, `TicketFlow.Integrations.WalFlow.Sinks.Tests` 3,
+`TICKETFLOW_REQUIRE_POSTGRES=1 … TicketFlow.Events.Stores.Postgres.Tests` 34 (own `postgres:18` container, port 55915); outbox consumers
+unchanged and passing: Conversations 46 (+18 PostgreSQL), Channels 42, Routing 48, Sla 31, Automation 42, Realtime 12, Reporting 43,
+Integrations.Surveys 3.
+
 Open follow-ups: a built-in `contact.identity-linked` source (E16 adds no contact change kind; publish through `IEventPublisher`);
 `routing.queued` (E8 raises no queued event); a Segment-compatible sink; E11 worker loops for `EventDeliveryWorker`, the followers and
 `EventRetentionWorker`.

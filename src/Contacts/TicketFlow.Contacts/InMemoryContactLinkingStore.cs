@@ -152,6 +152,20 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
         return new ContactLinkSuggestionStorePage(page, next);
     }
 
+    public Task<int> PruneDecidedSuggestionsAsync(DateTimeOffset decidedBefore, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IContactLinkingStore.MaximumPruneBatch);
+        lock (gate)
+        {
+            var expired = suggestions.Where(pair => pair.Value.Suggestion.Status != ContactLinkSuggestionStatus.Pending && pair.Value.Suggestion.UpdatedAt < decidedBefore)
+                .OrderBy(pair => pair.Value.Suggestion.UpdatedAt).Take(limit).Select(pair => pair.Key).ToList();
+            foreach (var key in expired)
+                suggestions.Remove(key);
+            return Task.FromResult(expired.Count);
+        }
+    }
+
     private static bool SameIdentity(ContactLinkSuggestion left, ContactLinkSuggestion right) =>
         left.Candidate == right.Candidate && left.Account == right.Account && left.Evidence == right.Evidence && left.EvidenceVerified == right.EvidenceVerified
         && left.CreatedAt == right.CreatedAt && left.CreatedBy == right.CreatedBy;

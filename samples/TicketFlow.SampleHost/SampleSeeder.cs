@@ -23,8 +23,11 @@ public static class SampleSeeder
     public const string PortalSlug = "help";
     public static ApiClientId ChannelWorker { get; } = new("channels");
 
-    /// <summary>The MCP agent's API client (<c>X-Dev-Api-Key: mcp-assistant</c>), granted the built-in Agent role.</summary>
-    public static ApiClientId McpAssistant { get; } = new("mcp-assistant");
+    /// <summary>
+    /// The MCP agent's API client (<c>X-Dev-Api-Key: mcp-assistant</c>, mapped with the IdentityFlow API client prefix <c>idf:</c>),
+    /// granted the built-in Agent role.
+    /// </summary>
+    public static ApiClientId McpAssistant { get; } = new("idf:mcp-assistant");
 
     private static readonly InboxId ChatInbox = new("web-chat");
 

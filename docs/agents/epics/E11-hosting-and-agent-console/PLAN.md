@@ -38,3 +38,7 @@ Part B, T07 (2026-11-22): `dotnet test tests/UI/TicketFlow.UI.Blazor.Tests -c Re
 smoke tests through the seeded sample host); `TicketFlow.SampleHost.Tests` against an isolated `postgres:18` container (`tf-pg-e11ui`,
 4 passed); `TicketFlow.Hosting.AspNetCore.Tests` (18 passed); `dotnet build TicketFlow.slnx -c Release` (0 warnings, 0 errors).
 Screenshots in `docs/ui/screenshots/`. See [docs/ui-blazor.md](../../../ui-blazor.md).
+
+Review fixes (2026-11-22, on top of 4574992): see the T01, T02, T04, T05 and T06 Results. `dotnet test` — Hosting.AspNetCore 23, Hosting.Worker
+10, Worker.Stores.Postgres 2 (PostgreSQL), IdentityFlow 15, SampleHost 4 (PostgreSQL), Access 102, UI.Blazor 60, Mcp.AspNetCore 3,
+Realtime.SignalR 6 passed. New package `TicketFlow.Integrations.IdentityFlow.SignalR`.

@@ -46,6 +46,6 @@
         var tokens = HttpContext.RequestServices.GetRequiredService<IAntiforgery>().GetAndStoreTokens(HttpContext);
         session.Antiforgery = (tokens.FormFieldName, tokens.RequestToken ?? string.Empty);
         route = UiRoutes.Match(session.Path);
-        status = route is null ? 404 : session.State != UiSessionState.Ready || UiNavigation.Section(route.Section) is var section && !section.IsVisible(session) ? 403 : 200;
+        status = route is null ? 404 : UiNavigation.Allows(session, route) ? 200 : 403;
     }
 }

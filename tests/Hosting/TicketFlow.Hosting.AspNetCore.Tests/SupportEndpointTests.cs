@@ -43,12 +43,59 @@ public sealed class SupportEndpointTests
         Assert.AreEqual("g-triage", listed.GetProperty("items")[0].GetProperty("id").GetString());
         Assert.AreEqual("allow", listed.GetProperty("items")[0].GetProperty("effect").GetString());
         var roles = await JsonAsync(await owner.GetAsync($"{Api}/access/roles"));
-        Assert.IsTrue(roles.EnumerateArray().Any(item => item.GetProperty("id").GetString() == "owner" && item.GetProperty("builtIn").GetBoolean()));
+        Assert.IsTrue(roles.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("id").GetString() == "owner" && item.GetProperty("builtIn").GetBoolean()));
 
         Assert.AreEqual(HttpStatusCode.Forbidden, (await host.Client("agent").GetAsync($"{Api}/access/roles")).StatusCode);
         Assert.AreEqual(HttpStatusCode.Forbidden, (await host.Client("agent").SendAsync(Request(HttpMethod.Post, $"{Api}/access/roles",
             new { name = "Escalate", permissions = new[] { "access:manage" } }))).StatusCode);
         Assert.AreEqual(HttpStatusCode.NoContent, (await owner.SendAsync(Request(HttpMethod.Delete, $"{Api}/access/grants/g-triage", ifMatch: 1))).StatusCode);
+    }
+
+    [TestMethod]
+    public async Task CollectionsPageWithOpaqueCursorsAndAccessListsGoThroughTheAdministrator()
+    {
+        await using var host = await CreateAsync();
+        var owner = host.Client();
+        foreach (var id in new[] { "a", "b", "c" })
+            Assert.AreEqual(HttpStatusCode.Created, (await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/calendars", new
+            {
+                id,
+                name = id,
+                timeZoneId = "UTC",
+                schedule = JsonDocument.Parse("""{"v":1,"week":[],"overrides":[]}""").RootElement,
+            }))).StatusCode);
+        var first = await JsonAsync(await owner.GetAsync($"{Api}/calendars?limit=2"));
+        Assert.AreEqual(2, first.GetProperty("items").GetArrayLength());
+        var cursor = first.GetProperty("next").GetString()!;
+        Assert.AreNotEqual("b", cursor, "Cursors are opaque.");
+        var second = await JsonAsync(await owner.GetAsync($"{Api}/calendars?limit=2&cursor={Uri.EscapeDataString(cursor)}"));
+        Assert.AreEqual("c", second.GetProperty("items")[0].GetProperty("id").GetString());
+        Assert.AreEqual(JsonValueKind.Null, second.GetProperty("next").ValueKind);
+        Assert.AreEqual(HttpStatusCode.UnprocessableEntity, (await owner.GetAsync($"{Api}/calendars?cursor=not-a-cursor")).StatusCode);
+        Assert.AreEqual(HttpStatusCode.UnprocessableEntity, (await owner.GetAsync($"{Api}/calendars?limit=500")).StatusCode);
+
+        var grants = await JsonAsync(await owner.GetAsync($"{Api}/access/grants?limit=1"));
+        Assert.AreEqual(1, grants.GetProperty("items").GetArrayLength());
+        var page2 = await JsonAsync(await owner.GetAsync($"{Api}/access/grants?limit=1&cursor={Uri.EscapeDataString(grants.GetProperty("next").GetString()!)}"));
+        Assert.AreNotEqual(grants.GetProperty("items")[0].GetProperty("id").GetString(), page2.GetProperty("items")[0].GetProperty("id").GetString());
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await host.Client("agent").GetAsync($"{Api}/access/grants")).StatusCode);
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await host.Client("agent").GetAsync($"{Api}/access/field-policies")).StatusCode);
+        Assert.AreEqual(HttpStatusCode.UnprocessableEntity, (await owner.GetAsync($"{Api}/access/grants?scope=tenant")).StatusCode);
+    }
+
+    [TestMethod]
+    public async Task BodylessPostsNeedJsonOrTheRequestHeader()
+    {
+        await using var host = await CreateAsync();
+        var owner = host.Client();
+        var forged = await owner.PostAsync($"{Api}/contacts/merges/{Guid.NewGuid()}/unmerge", null);
+        Assert.AreEqual(HttpStatusCode.BadRequest, forged.StatusCode);
+        Assert.AreEqual("json-or-header-required", (await JsonAsync(forged)).GetProperty("code").GetString());
+        var form = await owner.PostAsync($"{Api}/routing/agents/me/heartbeat", new FormUrlEncodedContent([]));
+        Assert.AreEqual(HttpStatusCode.BadRequest, form.StatusCode);
+        Assert.AreNotEqual(HttpStatusCode.BadRequest, (await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/contacts/merges/{Guid.NewGuid()}/unmerge", header: true))).StatusCode);
+        Assert.AreNotEqual(HttpStatusCode.BadRequest, (await host.Client(user: null).SendAsync(Request(HttpMethod.Post, $"{Public}/surveys/invitation", new { token = "x" }))).StatusCode,
+            "Anonymous JSON endpoints are unaffected.");
     }
 
     [TestMethod]
@@ -149,13 +196,18 @@ public sealed class SupportEndpointTests
     {
         await using var host = await CreateAsync();
         var owner = host.Client();
-        var configure = await owner.SendAsync(Request(HttpMethod.Put, $"{Api}/routing/agents/agent/settings", new { defaultCapacity = 3, skills = new[] { new { name = "billing", level = 2 } } }));
+        var unfenced = await owner.SendAsync(Request(HttpMethod.Put, $"{Api}/routing/agents/agent/settings", new { defaultCapacity = 3 }));
+        Assert.AreEqual(HttpStatusCode.PreconditionRequired, unfenced.StatusCode, "Agent settings are never overwritten unfenced.");
+        var create = Request(HttpMethod.Put, $"{Api}/routing/agents/agent/settings", new { defaultCapacity = 3, skills = new[] { new { name = "billing", level = 2 } } });
+        create.Headers.TryAddWithoutValidation("If-None-Match", "*");
+        var configure = await owner.SendAsync(create);
         Assert.AreEqual(HttpStatusCode.OK, configure.StatusCode);
         var agent = host.Client("agent");
         var online = await agent.SendAsync(Request(HttpMethod.Put, $"{Api}/routing/agents/me/status", new { status = "online" }));
         Assert.AreEqual(HttpStatusCode.OK, online.StatusCode);
         Assert.AreEqual("online", (await JsonAsync(online)).GetProperty("status").GetString());
-        Assert.AreEqual(HttpStatusCode.OK, (await agent.PostAsync($"{Api}/routing/agents/me/heartbeat", null)).StatusCode);
+        Assert.AreEqual(HttpStatusCode.BadRequest, (await agent.PostAsync($"{Api}/routing/agents/me/heartbeat", null)).StatusCode, "Body-less POSTs need the request header (CSRF).");
+        Assert.AreEqual(HttpStatusCode.OK, (await agent.SendAsync(Request(HttpMethod.Post, $"{Api}/routing/agents/me/heartbeat", header: true))).StatusCode);
         Assert.AreEqual(HttpStatusCode.OK, (await agent.GetAsync($"{Api}/routing/queue")).StatusCode);
 
         await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/contacts", new { id = "c1" }));
@@ -167,6 +219,10 @@ public sealed class SupportEndpointTests
         var held = await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/conversations/conv-1/reply-lock", new { }));
         Assert.AreEqual(HttpStatusCode.Conflict, held.StatusCode);
         Assert.AreEqual("agent", (await JsonAsync(held)).GetProperty("lock").GetProperty("holderId").GetString());
+        var fence = Revision(lockResponse);
+        Assert.AreEqual(HttpStatusCode.PreconditionRequired, (await agent.SendAsync(Request(HttpMethod.Delete, $"{Api}/conversations/conv-1/reply-lock"))).StatusCode);
+        Assert.AreEqual(HttpStatusCode.PreconditionFailed, (await agent.SendAsync(Request(HttpMethod.Delete, $"{Api}/conversations/conv-1/reply-lock", ifMatch: fence + 7))).StatusCode);
+        Assert.AreEqual(HttpStatusCode.NoContent, (await agent.SendAsync(Request(HttpMethod.Delete, $"{Api}/conversations/conv-1/reply-lock", ifMatch: fence))).StatusCode);
 
         var risk = await agent.GetAsync($"{Api}/sla/risk?filter=breached");
         Assert.AreEqual(HttpStatusCode.OK, risk.StatusCode);

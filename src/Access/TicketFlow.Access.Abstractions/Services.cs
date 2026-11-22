@@ -31,6 +31,22 @@ public interface IAccessQueryPlanner
 {
     /// <summary>Returns <see cref="DenyAllFilter"/> whenever a point check would fail before considering resources.</summary>
     Task<AccessFilter> PlanAsync(AccessQuery query, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The subset of <paramref name="permissions"/> (1-32) that <paramref name="principal"/> holds on <em>some</em> resource of
+    /// <paramref name="scope"/> — under a workspace, team or inbox grant, conditional or not: the permissions whose plan is not
+    /// <see cref="DenyAllFilter"/>. For navigation and UI gating only; services still authorize each resource. Audit semantics equal
+    /// <see cref="PlanAsync"/> (sensitive permissions and break-glass use record one plan event each). The default implementation plans
+    /// each permission; implementations may load grants once.
+    /// </summary>
+    async Task<IReadOnlySet<Permission>> HeldAnywhereAsync(PrincipalRef principal, TicketScope scope, IEnumerable<Permission> permissions, CancellationToken cancellationToken = default)
+    {
+        var held = new HashSet<Permission>();
+        foreach (var permission in AccessDecisionContexts.Validate(principal, scope, permissions))
+            if (await PlanAsync(new AccessQuery(principal, permission, scope), cancellationToken).ConfigureAwait(false) is not DenyAllFilter)
+                held.Add(permission);
+        return held;
+    }
 }
 
 /// <summary>The change was authorized, validated, stored and audited.</summary>
@@ -120,7 +136,29 @@ public interface IAccessAdministrator
     /// stop existing grants from applying, such as removing team members while the team is the subject of a deny grant.
     /// </summary>
     Task<AccessCheckResult> CheckCanRevokeAsync(PrincipalRef actor, IEnumerable<AccessGrant> grants, CancellationToken cancellationToken = default);
+
+    /// <summary>Read-only, unaudited listing of the built-in and custom roles of the actor's workspace; requires <c>access:manage</c> (standard grants).</summary>
+    Task<AccessListResult<IReadOnlyList<AccessRoleListing>>> ListRolesAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Read-only, unaudited page of the grants whose scope equals <paramref name="target"/> (workspace, team or inbox of the actor's
+    /// workspace; ordered by identifier, after <paramref name="after"/>, 1-<see cref="AccessLimits.MaximumTargetPage"/>); requires
+    /// <c>access:manage</c> on the target (standard grants).
+    /// </summary>
+    Task<AccessListResult<IReadOnlyList<StoredAccessGrant>>> ListGrantsAsync(PrincipalRef actor, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Read-only, unaudited listing of the actor's workspace field policies; requires <c>access:manage</c> (standard grants).</summary>
+    Task<AccessListResult<IReadOnlyList<StoredAccessFieldPolicy>>> ListFieldPoliciesAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 }
+
+/// <summary>A role as listed: built-in roles have no revision.</summary>
+public sealed record AccessRoleListing(AccessRole Role, long? Revision);
+
+/// <summary>The listing was authorized.</summary>
+public sealed record AccessListed<T>(T Value);
+
+/// <summary>Outcome of an administrative listing. Switch over every case without a discard arm.</summary>
+public union AccessListResult<T>(AccessListed<T>, AccessChangeRefused);
 
 /// <summary>
 /// An allow grant whose permissions a change would extend, and the resource they would apply to. <see cref="Target"/> defaults to

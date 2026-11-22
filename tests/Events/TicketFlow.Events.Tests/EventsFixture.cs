@@ -31,6 +31,32 @@ internal sealed class RecordingSubscriber : IEventSubscriber
     }
 }
 
+internal sealed class NoSurveySender : ISurveyInvitationSender
+{
+    public Task SendAsync(SurveyInvitationMessage message, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+}
+
+/// <summary>A test sink (<c>splitter</c>) that refuses batches larger than two events with <see cref="EventSinkSplit"/>, then records them.</summary>
+internal sealed class SplittingSink(RecordingSubscriber recorder) : IEventSink
+{
+    public List<int> Attempts { get; } = [];
+
+    public string Kind => "splitter";
+
+    public int MaximumBatchSize => 100;
+
+    public bool IsValidTarget(TicketScope scope, string target) => true;
+
+    public Task<EventSinkResult> DeliverAsync(EventDelivery delivery, CancellationToken cancellationToken = default)
+    {
+        Attempts.Add(delivery.Events.Count);
+        if (delivery.Events.Count > 2)
+            return Task.FromResult<EventSinkResult>(EventSinkSplit.Instance);
+        recorder.Deliveries.Add(delivery);
+        return Task.FromResult<EventSinkResult>(EventSinkDelivered.Instance);
+    }
+}
+
 /// <summary>
 /// In-memory access, workspaces, contacts, conversations and events. Seeded: inboxes <c>email</c> and <c>chat</c>, teams <c>billing</c>
 /// and <c>support</c>, contact <c>ada</c> (verified email). Principals: <c>owner</c> (Owner), <c>manager</c> (events:manage + events:read),
@@ -66,6 +92,7 @@ internal sealed class EventsFixture : IDisposable
     public TicketScope Scope { get; } = TestScopes.Create();
     public UserPrincipal Owner => TestPrincipals.User(Scope, "owner");
     public UserPrincipal Manager => TestPrincipals.User(Scope, "manager");
+    public UserPrincipal NarrowManager => TestPrincipals.User(Scope, "narrow-manager");
     public UserPrincipal Agent => TestPrincipals.User(Scope, "agent");
     public ApiClientPrincipal Channel => TestPrincipals.ApiClient(Scope, "channel");
     public ApiClientPrincipal SlaWorker => TestPrincipals.ApiClient(Scope, "sla-worker");
@@ -80,14 +107,18 @@ internal sealed class EventsFixture : IDisposable
         services.AddSingleton<TimeProvider>(clock);
         services.AddSingleton<ISurveyStore>(surveys);
         services.AddSingleton<IEventSubscriber>(subscriber);
+        services.AddSingleton<IEventSink>(new SplittingSink(subscriber));
+        services.AddSingleton<ISurveyInvitationSender, NoSurveySender>();
         var storage = StoreFactory is { } factory ? await factory(services.AddTicketFlow()) : null;
         services.AddTicketFlow()
             .AddAccessControl().AddInMemoryAccessStores()
             .AddWorkspaces().AddInMemoryWorkspaceStores()
             .AddContacts().AddInMemoryContactStores()
             .AddConversations().AddInMemoryConversationStores()
+            .AddSurveys()
             .AddEvents(value =>
             {
+                value.IdlePollInterval = TimeSpan.Zero;
                 value.InitialRetryDelay = TimeSpan.FromSeconds(10);
                 value.MaximumAttempts = 3;
                 options?.Invoke(value);
@@ -98,14 +129,16 @@ internal sealed class EventsFixture : IDisposable
         };
         await fixture.GrantAsync(new UserId("owner"), BuiltInRoles.Owner);
         await fixture.GrantAsync(new UserId("agent"), BuiltInRoles.Agent);
-        await fixture.GrantAsync(new UserId("manager"), await fixture.CustomRoleAsync("event-managers", EventPermissions.Manage, EventPermissions.Read));
+        await fixture.GrantAsync(new UserId("manager"), await fixture.CustomRoleAsync("event-managers", EventPermissions.Manage, EventPermissions.Read,
+            ConversationPermissions.Read, ContactPermissions.Read));
+        await fixture.GrantAsync(new UserId("narrow-manager"), await fixture.CustomRoleAsync("narrow-event-managers", EventPermissions.Manage, EventPermissions.Read));
         await fixture.GrantAsync(new ApiClientId("channel"), await fixture.CustomRoleAsync("channel", ConversationPermissions.Create, ConversationPermissions.Ingest));
         var manage = await fixture.CustomRoleAsync("extensions", ConversationPermissions.Manage);
         await fixture.GrantAsync(new ApiClientId("sla-worker"), manage);
         await fixture.GrantAsync(new ApiClientId("forger"), manage);
         await fixture.GrantAsync(new ApiClientId("hooks"), await fixture.CustomRoleAsync("hooks", EventPermissions.Read, ConversationPermissions.Read, ContactPermissions.Read));
         await fixture.GrantAsync(new ApiClientId("content-hooks"), await fixture.CustomRoleAsync("content-hooks", EventPermissions.Read, EventPermissions.Content,
-            ConversationPermissions.Read, ContactPermissions.Read));
+            ConversationPermissions.Read, ContactPermissions.Read, SurveyPermissions.Read));
         await fixture.GrantAsync(new ApiClientId("billing-hooks"), await fixture.CustomRoleAsync("events-only", EventPermissions.Read));
         await fixture.GrantAsync(new ApiClientId("billing-hooks"), await fixture.CustomRoleAsync("conversation-reader", ConversationPermissions.Read),
             new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("billing")));
@@ -212,9 +245,9 @@ internal sealed class EventsFixture : IDisposable
         CommandAsync(service => service.AppendExtensionAsync(actor, new ConversationId(id), SlaEventCodec.Encode(slaEvent)));
 
     public Task<EventResult<EventSubscriptionView>> SubscribeAsync(string id, string principal = "hooks", EventPrivacy privacy = EventPrivacy.IdsOnly,
-        EventSubscriptionFilter? filter = null, int batchSize = 50, EventSubscriptionStart? start = null, PrincipalRef? actor = null) =>
+        EventSubscriptionFilter? filter = null, int batchSize = 50, EventSubscriptionStart? start = null, PrincipalRef? actor = null, string sink = "in-process") =>
         InScopeAsync(provider => provider.GetRequiredService<IEventSubscriptionService>().CreateAsync(actor ?? Owner,
-            new EventSubscription(new EventSubscriptionId(id), id, new EventSinkRef("in-process", "recorder"), filter ?? EventSubscriptionFilter.Everything,
+            new EventSubscription(new EventSubscriptionId(id), id, new EventSinkRef(sink, "recorder"), filter ?? EventSubscriptionFilter.Everything,
                 new ApiClientId(principal), privacy, batchSize: batchSize), start ?? EventStartAtEarliest.Instance));
 
     public static T Value<T>(EventResult<T> result) => result switch

@@ -2,6 +2,45 @@ using TicketFlow.Core;
 
 namespace TicketFlow.Events;
 
+/// <summary>
+/// One allow-list rule for named, operator-configured sinks (PostHog projects, WalFlow sinks): the tenant is required, the other levels
+/// match any value when <see langword="null"/>. Named sinks refuse scopes no rule matches, so one tenant cannot route events into another
+/// tenant's analytics project or broker.
+/// </summary>
+public sealed record EventScopeRule
+{
+    public EventScopeRule(string tenantId, string? projectId = null, string? environmentId = null, string? appId = null, WorkspaceId? workspaceId = null)
+    {
+        TenantId = TicketScope.RequireIdentifier(tenantId, nameof(tenantId));
+        ProjectId = projectId is null ? null : TicketScope.RequireIdentifier(projectId, nameof(projectId));
+        EnvironmentId = environmentId is null ? null : TicketScope.RequireIdentifier(environmentId, nameof(environmentId));
+        AppId = appId is null ? null : TicketScope.RequireIdentifier(appId, nameof(appId));
+        if (workspaceId == default(WorkspaceId))
+            throw new ArgumentException("The workspace identifier must be initialized when supplied.", nameof(workspaceId));
+        WorkspaceId = workspaceId;
+    }
+
+    public string TenantId { get; }
+    public string? ProjectId { get; }
+    public string? EnvironmentId { get; }
+    public string? AppId { get; }
+    public WorkspaceId? WorkspaceId { get; }
+
+    public bool Matches(TicketScope scope)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        return scope.TenantId == TenantId && (ProjectId is null || scope.ProjectId == ProjectId) && (EnvironmentId is null || scope.EnvironmentId == EnvironmentId)
+            && (AppId is null || scope.AppId == AppId) && (WorkspaceId is null || scope.WorkspaceId == WorkspaceId);
+    }
+
+    /// <summary>True when any rule matches.</summary>
+    public static bool Allows(IEnumerable<EventScopeRule> rules, TicketScope scope)
+    {
+        ArgumentNullException.ThrowIfNull(rules);
+        return rules.Any(rule => rule.Matches(scope));
+    }
+}
+
 /// <summary>Validated opaque identifier of an event subscription. <c>default</c> is uninitialized.</summary>
 public readonly record struct EventSubscriptionId
 {
@@ -131,9 +170,13 @@ public sealed record StoredEventSubscription(TicketScope Scope, EventSubscriptio
 
 /// <summary>
 /// The delivery position of a subscription: every event with a sequence ≤ <see cref="Cursor"/> was delivered, skipped by its filter or
-/// Access, or dead-lettered. <see cref="Attempts"/> counts consecutive failures of the batch after the cursor.
+/// Access, or dead-lettered. <see cref="Attempts"/> counts consecutive failures of the batch after the cursor. <see cref="LastError"/> also
+/// records retention gaps (<c>events-pruned-&lt;from&gt;-&lt;to&gt;</c>). <see cref="Generation"/> increases with every replay (it is part of
+/// delivery ids). A <see cref="Suspended"/> subscription is not delivered until it is updated or replayed (set after repeated configuration
+/// failures such as a principal that lost <c>events:read</c>).
 /// </summary>
-public sealed record EventDeliveryState(long Cursor, int Attempts, DateTimeOffset AvailableAt, string? LastError, DateTimeOffset? LastDeliveredAt);
+public sealed record EventDeliveryState(long Cursor, int Attempts, DateTimeOffset AvailableAt, string? LastError, DateTimeOffset? LastDeliveredAt, long Generation = 0,
+    bool Suspended = false);
 
 /// <summary>A leased claim of one subscription's delivery. Completion, failure and dead-lettering succeed only with the current fence while the lease is held.</summary>
 public sealed record EventDeliveryClaim(StoredEventSubscription Subscription, EventDeliveryState State, long Fence, DateTimeOffset LeaseUntil);

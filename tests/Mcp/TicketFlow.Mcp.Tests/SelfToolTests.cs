@@ -47,7 +47,6 @@ public sealed class SelfToolTests
         Assert.IsTrue(conversations.GetProperty("enabled").GetBoolean());
         var assist = toolsets.GetProperty("toolsets").EnumerateArray().Single(item => item.GetProperty("name").GetString() == "assist");
         Assert.IsFalse(assist.GetProperty("registered").GetBoolean());
-        Assert.IsFalse(assist.GetProperty("servicesAvailable").GetBoolean());
         Assert.AreEqual("contacts_search", TicketFlowToolCatalog.Find("contacts_search")!.Name);
         Assert.AreEqual("toolset-unavailable", McpTestHost.Code((await host.CallAsync("contacts_search")).Content), "Unregistered toolsets are not callable.");
     }
@@ -72,8 +71,8 @@ public sealed class SelfToolTests
         Assert.IsTrue(hidden);
         Assert.AreEqual("not-found", McpTestHost.Code(notVisible), "Resources the caller cannot read are reported as not found.");
 
-        var (_, unknown) = await host.CallAsync("explain_access", new() { ["permission"] = "assist:use" }, user: "owner");
-        Assert.AreEqual("unknownPermission", unknown.GetProperty("permissions")[0].GetProperty("reason").GetString(), "assist is not installed here.");
+        var (_, unknown) = await host.CallAsync("explain_access", new() { ["permission"] = "events:read" }, user: "owner");
+        Assert.AreEqual("unknownPermission", unknown.GetProperty("permissions")[0].GetProperty("reason").GetString(), "the events feature is not installed here.");
         Assert.AreEqual("invalid", McpTestHost.Code((await host.CallAsync("explain_access", new() { ["permission"] = "a:b", ["tool"] = "whoami" })).Content));
     }
 
@@ -96,6 +95,29 @@ public sealed class SelfToolTests
         CollectionAssert.Contains(visible, "conversations_add_note");
         CollectionAssert.Contains(visible, "conversations_delete", "Unprobed sensitive tools stay listed.");
         CollectionAssert.Contains(visible, "describe_tools");
+    }
+
+    [TestMethod]
+    public async Task TeamScopedCallersSeeThePermissionsTheyHoldOnTheirTeam()
+    {
+        await using (var host = await McpTestHost.CreateAsync(options => options.ToolList = TicketFlowToolListMode.HideUnpermitted))
+        {
+            var (_, me) = await host.CallAsync("whoami", user: "teamagent");
+            CollectionAssert.Contains(Strings(me.GetProperty("heldPermissions")), "conversation:reply", "A team-scoped Agent grant holds conversation:reply on its team.");
+            CollectionAssert.DoesNotContain(Strings(me.GetProperty("workspacePermissions")), "conversation:reply", "It does not hold it workspace-wide.");
+
+            var (_, described) = await host.CallAsync("describe_tools", new() { ["tool"] = "conversations_reply" }, user: "teamagent");
+            Assert.IsTrue(described.GetProperty("tools")[0].GetProperty("callerHasPermissions").GetBoolean());
+
+            host.Caller.User = "teamagent";
+            var visible = (await host.Client.ListToolsAsync()).Select(tool => tool.Name).ToList();
+            CollectionAssert.Contains(visible, "conversations_reply", "HideUnpermitted keeps tools usable under team/inbox grants.");
+            CollectionAssert.DoesNotContain(visible, "conversations_start", "Agents do not hold conversation:create anywhere.");
+
+            Assert.IsFalse((await host.CallAsync("conversations_reply", new() { ["conversationId"] = host.TeamConversation.Value, ["body"] = "On it" }, user: "teamagent")).IsError);
+            Assert.AreEqual("forbidden", McpTestHost.Code((await host.CallAsync("conversations_reply", new() { ["conversationId"] = host.Conversation.Value, ["body"] = "x" },
+                user: "teamagent")).Content), "Outside the team the service still refuses.");
+        }
     }
 
     private static List<string> Strings(JsonElement array) => [.. array.EnumerateArray().Select(item => item.GetString()!)];

@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using TicketFlow.Hosting.AspNetCore.Contracts;
 
 namespace TicketFlow.Hosting.AspNetCore;
 
@@ -15,13 +16,26 @@ namespace TicketFlow.Hosting.AspNetCore;
 /// </summary>
 public static class TicketFlowHttp
 {
+    /// <summary>
+    /// Header that marks a body-less authenticated POST (heartbeat, unmerge, publish, assist summary, ...) as a deliberate API call. POSTs
+    /// without a JSON content type and without this header are refused (400 <c>json-or-header-required</c>) as CSRF protection.
+    /// </summary>
+    public const string RequestHeader = "X-TicketFlow-Request";
+
     /// <summary>Prefix of every problem <c>type</c>; the suffix equals the <c>code</c> extension.</summary>
     public const string ProblemTypePrefix = "urn:ticketflow:problem:";
 
     /// <summary>The strong entity tag of a revision: the decimal revision in quotes.</summary>
     public static string ETag(long revision) => "\"" + revision.ToString(CultureInfo.InvariantCulture) + "\"";
 
-    /// <summary>Parses <c>If-Match: "7"</c>. Missing → <see langword="null"/>; malformed, weak or lists → false.</summary>
+    /// <summary><c>If-None-Match: *</c>: the request may only create the record.</summary>
+    internal static bool IsCreateOnly(HttpContext httpContext) =>
+        httpContext.Request.Headers.IfNoneMatch is { Count: 1 } values && values[0]?.Trim() == "*";
+
+    /// <summary>
+    /// Parses <c>If-Match: "7"</c> (a weak <c>W/"7"</c> is accepted too: the revision is the only validator). Missing →
+    /// <see langword="null"/>; malformed values or lists → false.
+    /// </summary>
     public static bool TryParseIfMatch(HttpContext httpContext, out long? revision)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
@@ -32,6 +46,8 @@ public static class TicketFlowHttp
         if (values.Count != 1 || values[0] is not { } header)
             return false;
         header = header.Trim();
+        if (header.StartsWith("W/", StringComparison.Ordinal))
+            header = header[2..];
         if (header.Length < 3 || header[0] != '"' || header[^1] != '"')
             return false;
         if (!long.TryParse(header.AsSpan(1, header.Length - 2), NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) || parsed < 1)
@@ -49,7 +65,7 @@ public static class TicketFlowHttp
         failure = null!;
         if (!TryParseIfMatch(httpContext, out var parsed))
         {
-            failure = Problem(StatusCodes.Status400BadRequest, "invalid-if-match", ["If-Match must be one strong revision tag such as \"3\"."]);
+            failure = Problem(StatusCodes.Status400BadRequest, "invalid-if-match", ["If-Match must be one revision tag such as \"3\"."]);
             return false;
         }
         if (parsed is not { } value)
@@ -67,7 +83,7 @@ public static class TicketFlowHttp
         failure = null!;
         if (TryParseIfMatch(httpContext, out revision))
             return true;
-        failure = Problem(StatusCodes.Status400BadRequest, "invalid-if-match", ["If-Match must be one strong revision tag such as \"3\"."]);
+        failure = Problem(StatusCodes.Status400BadRequest, "invalid-if-match", ["If-Match must be one revision tag such as \"3\"."]);
         return false;
     }
 
@@ -147,6 +163,31 @@ public static class TicketFlowHttp
     }
 
     internal static T? ParseOptional<T>(string? value, string name) where T : struct, Enum => value is null ? null : Parse<T>(value, name);
+
+    /// <summary>Default and maximum page sizes of collection endpoints.</summary>
+    internal const int DefaultPageSize = 50;
+    internal const int MaximumPageSize = 200;
+
+    internal static int PageSize(int? limit) => limit switch
+    {
+        null => DefaultPageSize,
+        < 1 or > MaximumPageSize => throw new ArgumentOutOfRangeException(nameof(limit), $"'limit' must be 1-{MaximumPageSize}."),
+        { } value => value,
+    };
+
+    /// <summary>
+    /// Pages a bounded, service-returned collection by ordinal <paramref name="key"/>: items after <paramref name="cursor"/> (an opaque
+    /// token of the last key), at most <paramref name="limit"/> (default 50, 1-200).
+    /// </summary>
+    internal static PageResponse<TOut> Page<TIn, TOut>(IEnumerable<TIn> items, Func<TIn, string> key, Func<TIn, TOut> project, int? limit, string? cursor)
+    {
+        var size = PageSize(limit);
+        var after = cursor is null ? null : DecodeCursor(cursor, 1)[0];
+        var ordered = items.Select(item => (Key: key(item), Item: item)).Where(entry => after is null || string.CompareOrdinal(entry.Key, after) > 0)
+            .OrderBy(entry => entry.Key, StringComparer.Ordinal).Take(size + 1).ToList();
+        var page = ordered.Take(size).ToList();
+        return new PageResponse<TOut>([.. page.Select(entry => project(entry.Item))], ordered.Count > size ? EncodeCursor(page[^1].Key) : null);
+    }
 
     /// <summary>Encodes cursor parts as an opaque base64url token.</summary>
     internal static string EncodeCursor(params string[] parts) => Base64Url.EncodeToString(JsonSerializer.SerializeToUtf8Bytes(parts));

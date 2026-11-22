@@ -17,6 +17,7 @@ public static partial class UiActions
             new AddContactLabel(new LabelId(context.Require("label", "Label").ToLowerInvariant().Replace(' ', '-'))));
         handlers["contact.labels.remove"] = context => EditContactAsync(context, "Label removed", new RemoveContactLabel(new LabelId(context.Require("label", "Label"))));
         handlers["contact.reveal"] = RevealAsync;
+        handlers["contact.merge.preview"] = MergePreviewAsync;
         handlers["contact.merge"] = MergeAsync;
     }
 
@@ -63,6 +64,27 @@ public static partial class UiActions
         };
     }
 
+    /// <summary>The duplicate to merge, shown for confirmation together with the revision the merge will be fenced on.</summary>
+    public sealed record MergePreview(ContactView Source);
+
+    /// <summary>Step 1: look up the duplicate and render it for confirmation (its revision travels in the confirm form).</summary>
+    private static async Task<UiActionResult> MergePreviewAsync(UiActionContext context)
+    {
+        if (context.Session.Service<IContactService>() is not { } contacts)
+            return UiOutcome.NotFound();
+        var target = ContactFromPath(context);
+        var source = new ContactId(context.Require("source", "The duplicate contact"));
+        if (source == target)
+            return UiOutcome.Invalid("Choose a different contact to merge.");
+        return await contacts.GetAsync(context.Actor, source, context.Aborted) switch
+        {
+            ContactApplied<ContactView> duplicate => new UiActionResult(new UiOutcome(UiOutcomeKind.Info, "Confirm the merge", ["Review the duplicate below; the merge applies to exactly this version of both contacts."]),
+                new MergePreview(duplicate.Value)),
+            ContactRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors, refused.CurrentRevision),
+        };
+    }
+
+    /// <summary>Step 2: merge, fenced on the target revision and the duplicate revision confirmed in step 1.</summary>
     private static async Task<UiActionResult> MergeAsync(UiActionContext context)
     {
         if (context.Session.Service<IContactService>() is not { } contacts)
@@ -71,9 +93,9 @@ public static partial class UiActions
         var source = new ContactId(context.Require("source", "The duplicate contact"));
         if (source == target)
             return UiOutcome.Invalid("Choose a different contact to merge.");
-        if (await contacts.GetAsync(context.Actor, source, context.Aborted) is not ContactApplied<ContactView> duplicate)
-            return UiOutcome.Invalid("The duplicate contact was not found.");
-        var request = new ContactMergeRequest(target, context.RequireRevision(), source, duplicate.Value.Revision, ContactAttributeConflict.PreferTarget, context.Text("justification"));
+        var sourceRevision = long.TryParse(context.Text("sourceRevision"), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var value)
+            ? value : throw new UiInputException("Confirm the duplicate contact before merging.");
+        var request = new ContactMergeRequest(target, context.RequireRevision(), source, sourceRevision, ContactAttributeConflict.PreferTarget, context.Text("justification"));
         return UiOutcomes.From(await contacts.MergeAsync(context.Actor, request, context.Aborted), _ => UiOutcome.Success("Contacts merged"));
     }
 }

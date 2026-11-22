@@ -17,16 +17,16 @@ public static class StaffIdentityStoreContract
     public static string Describe(StaffIdentityWriteResult result) => result switch
     {
         StaffIdentityWriteApplied applied => applied.Changed ? "applied" : "unchanged",
-        StaffIdentityTaken taken => $"taken:{taken.User}",
-        StaffWriteNotFound => "not-found",
-        StaffWriteRejected => "rejected",
+        StaffIdentityWriteTaken taken => $"taken:{taken.User}",
+        StaffIdentityWriteNotFound => "not-found",
+        StaffIdentityWriteRejected => "rejected",
     };
 
-    public static string Describe(StaffProfileWriteResult result) => result switch
+    public static string Describe(StaffIdentityProfileWriteResult result) => result switch
     {
-        StaffProfileWriteApplied applied => $"applied:{applied.Profile.Revision}",
-        StaffWriteNotFound => "not-found",
-        StaffProfileWriteConflict conflict => $"conflict:{conflict.CurrentRevision}",
+        StaffIdentityProfileWriteApplied applied => $"applied:{applied.Profile.Revision}",
+        StaffIdentityWriteNotFound => "not-found",
+        StaffIdentityWriteConflict conflict => $"conflict:{conflict.CurrentRevision}",
     };
 
     public static StaffIdentityAuditEvent Audit(TicketScope scope, StaffIdentityAuditKind kind, string user, string? provider = "google") =>
@@ -81,7 +81,7 @@ public static class StaffIdentityStoreContract
                 LinkAsync(primary, scope, "google", $"race-{round}", "linus"));
             Assert.AreEqual(1, results.Count(result => result.Value is StaffIdentityWriteApplied), $"round {round}");
             var owner = (await primary.FindAsync(scope, new StaffIdentityRef("google", $"race-{round}")))!.Link.User;
-            Assert.IsTrue(results.Where(result => result.Value is StaffIdentityTaken).All(result => ((StaffIdentityTaken)result.Value!).User == owner), $"round {round}");
+            Assert.IsTrue(results.Where(result => result.Value is StaffIdentityWriteTaken).All(result => ((StaffIdentityWriteTaken)result.Value!).User == owner), $"round {round}");
         }
     }
 

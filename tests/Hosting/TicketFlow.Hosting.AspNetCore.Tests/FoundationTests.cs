@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Text.Json;
 using static TicketFlow.Hosting.AspNetCore.Tests.EndpointHost;
 
@@ -63,8 +64,12 @@ public sealed class FoundationTests
         Assert.AreEqual("\"2\"", stale.Headers.ETag?.Tag);
 
         var malformed = new HttpRequestMessage(HttpMethod.Delete, $"{Api}/inboxes/support");
-        malformed.Headers.TryAddWithoutValidation("If-Match", "W/\"2\"");
+        malformed.Headers.TryAddWithoutValidation("If-Match", "\"two\"");
         Assert.AreEqual(HttpStatusCode.BadRequest, (await client.SendAsync(malformed)).StatusCode);
+
+        var weak = new HttpRequestMessage(HttpMethod.Put, $"{Api}/inboxes/support") { Content = JsonContent.Create(body) };
+        weak.Headers.TryAddWithoutValidation("If-Match", "W/\"2\"");
+        Assert.AreEqual(HttpStatusCode.OK, (await client.SendAsync(weak)).StatusCode, "Weak tags naming the revision are accepted.");
     }
 
     [TestMethod]
@@ -118,7 +123,7 @@ public sealed class FoundationTests
         var paths = document.GetProperty("paths");
         Assert.IsTrue(paths.TryGetProperty("/ticketflow/api/workspaces/{workspaceId}/conversations", out _));
         Assert.IsTrue(paths.TryGetProperty("/ticketflow/public/workspaces/{workspaceId}/surveys/respond", out _));
-        Assert.IsTrue(document.GetProperty("components").GetProperty("schemas").TryGetProperty("ConversationDto", out _));
+        Assert.IsTrue(document.GetProperty("components").GetProperty("schemas").TryGetProperty("ConversationResponse", out _));
         var listConversations = paths.GetProperty("/ticketflow/api/workspaces/{workspaceId}/conversations").GetProperty("get");
         Assert.AreEqual("ListConversations", listConversations.GetProperty("operationId").GetString());
         Assert.IsFalse(listConversations.GetRawText().Contains("TicketFlowActor", StringComparison.Ordinal), "Bound actors are not API parameters.");

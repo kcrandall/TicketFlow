@@ -8,7 +8,8 @@ public static class WalFlowEventsTicketFlowBuilderExtensions
 {
     /// <summary>
     /// Registers <see cref="WalFlowEventSinkOptions"/> and the <see cref="WalFlowEventSink"/> (<c>walflow</c>) as a singleton <see cref="IEventSink"/>.
-    /// Add named WalFlow sinks (from <c>WalFlow.Sinks.Kafka</c>, <c>WalFlow.Sinks.RabbitMq</c>, …) in <paramref name="configure"/>.
+    /// Add named WalFlow sinks (from <c>WalFlow.Sinks.Kafka</c>, <c>WalFlow.Sinks.RabbitMq</c>, …) with their allowed scopes in
+    /// <paramref name="configure"/> (<see cref="WalFlowEventSinkOptions.Add"/>).
     /// </summary>
     public static TicketFlowBuilder AddWalFlowEventSinks(this TicketFlowBuilder builder, Action<WalFlowEventSinkOptions> configure)
     {

@@ -44,7 +44,7 @@ public sealed class SampleHostMcpTests
         {
             var me = (await client.CallToolAsync("whoami")).StructuredContent!.Value;
             Assert.AreEqual("apiClient", me.GetProperty("principal").GetProperty("kind").GetString());
-            Assert.AreEqual("mcp-assistant", me.GetProperty("principal").GetProperty("id").GetString());
+            Assert.AreEqual("idf:mcp-assistant", me.GetProperty("principal").GetProperty("id").GetString(), "IdentityFlow API clients are prefixed.");
             Assert.AreEqual("agent", me.GetProperty("roles")[0].GetString());
 
             var inboxes = await client.CallToolAsync("admin_list_inboxes");

@@ -2,18 +2,6 @@ using Microsoft.Extensions.Options;
 
 namespace TicketFlow.Conversations;
 
-/// <summary>
-/// A durable outbox consumer registered by a later feature (realtime, routing, SLA, automation, reporting, channel dispatch).
-/// <see cref="HandleAsync"/> must be idempotent: an entry is redelivered when the lease expires before acknowledgement.
-/// </summary>
-public interface IConversationOutboxHandler
-{
-    /// <summary>The consumer name (1-64 characters of a-z, 0-9, '-', '_' or '.', starting with a letter), unique per handler.</summary>
-    string Consumer { get; }
-
-    Task HandleAsync(ConversationOutboxEntry entry, CancellationToken cancellationToken = default);
-}
-
 public sealed class ConversationOutboxDispatcherOptions
 {
     /// <summary>Entries claimed per handler per run (1-100, default 50).</summary>

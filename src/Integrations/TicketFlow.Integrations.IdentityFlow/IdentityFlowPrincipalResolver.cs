@@ -3,54 +3,52 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Options;
 using TicketFlow.Core;
 using TicketFlow.Hosting.AspNetCore;
-using TicketFlow.Realtime.SignalR;
+using TicketFlow.Identity;
 using TicketFlow.Workspaces;
 
 namespace TicketFlow.Integrations.IdentityFlow;
 
 /// <summary>
-/// Resolves TicketFlow principals from IdentityFlow-authenticated requests (<see cref="IdentityFlowClaimsMapper"/>): users get a
-/// <see cref="UserPrincipal"/> with the workspace's current team snapshot from <see cref="ITeamMembershipResolver"/>; API clients an
-/// <see cref="ApiClientPrincipal"/>. For SignalR agent connections the workspace comes from the
-/// <see cref="IdentityFlowPrincipalOptions.RealtimeWorkspaceParameter"/> query parameter and the partition from
-/// <see cref="ITicketFlowPartitionResolver"/>. Authorization itself stays with TicketFlow Access grants.
+/// Resolves TicketFlow principals from IdentityFlow-authenticated requests (<see cref="IdentityFlowClaimsMapper"/>). Users are looked up
+/// through the optional <see cref="IStaffIdentityResolver"/> first (provider <see cref="IdentityFlowPrincipalOptions.StaffIdentityProvider"/>,
+/// the normalized subject); unmapped users fall back to the prefixed subject or are refused per
+/// <see cref="IdentityFlowPrincipalOptions.UnmappedStaff"/>. Users get a <see cref="UserPrincipal"/> with the workspace's current team
+/// snapshot from <see cref="ITeamMembershipResolver"/>; API clients an <see cref="ApiClientPrincipal"/>. Authorization stays with Access.
 /// </summary>
-public sealed class IdentityFlowPrincipalResolver(ITeamMembershipResolver teams, ITicketFlowPartitionResolver partitions, IOptions<IdentityFlowPrincipalOptions> options)
-    : ITicketFlowPrincipalResolver, IRealtimePrincipalResolver
+public sealed class IdentityFlowPrincipalResolver(ITeamMembershipResolver teams, IOptions<IdentityFlowPrincipalOptions> options, IStaffIdentityResolver? staff = null)
+    : ITicketFlowPrincipalResolver
 {
     public async ValueTask<PrincipalRef?> ResolveAsync(HttpContext httpContext, TicketScope scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
-        ArgumentNullException.ThrowIfNull(scope);
         return await ResolveAsync(httpContext.User, scope, cancellationToken).ConfigureAwait(false);
     }
 
-    public async ValueTask<PrincipalRef?> ResolveAsync(ClaimsPrincipal user, HttpContext? httpContext, CancellationToken cancellationToken = default)
-    {
-        if (httpContext is null || httpContext.Request.Query[options.Value.RealtimeWorkspaceParameter].ToString() is not { Length: > 0 } workspace)
-            return null;
-        WorkspaceId id;
-        try
-        {
-            id = new WorkspaceId(workspace);
-        }
-        catch (ArgumentException)
-        {
-            return null;
-        }
-        if (await partitions.ResolveAsync(httpContext, cancellationToken).ConfigureAwait(false) is not { } partition)
-            return null;
-        return await ResolveAsync(user, partition.InWorkspace(id), cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>Maps <paramref name="user"/> within <paramref name="scope"/>; <see langword="null"/> when IdentityFlow claims do not identify a principal.</summary>
+    /// <summary>Maps <paramref name="user"/> within <paramref name="scope"/>; <see langword="null"/> when no principal applies.</summary>
     public async ValueTask<PrincipalRef?> ResolveAsync(ClaimsPrincipal user, TicketScope scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         switch (IdentityFlowClaimsMapper.Map(user, options.Value))
         {
             case { Kind: IdentityFlowPrincipalKind.User } identity:
-                return await teams.ResolveUserPrincipalAsync(scope, new UserId(identity.Id), cancellationToken).ConfigureAwait(false);
+                var userId = new UserId(identity.Id);
+                if (staff is not null)
+                {
+                    StaffIdentityRef reference;
+                    try
+                    {
+                        reference = new StaffIdentityRef(options.Value.StaffIdentityProvider, identity.Subject);
+                    }
+                    catch (ArgumentException)
+                    {
+                        return null;
+                    }
+                    if (await staff.ResolveUserAsync(scope, reference, cancellationToken).ConfigureAwait(false) is { } linked)
+                        userId = linked;
+                    else if (options.Value.UnmappedStaff == IdentityFlowUnmappedStaff.Refuse)
+                        return null;
+                }
+                return await teams.ResolveUserPrincipalAsync(scope, userId, cancellationToken).ConfigureAwait(false);
             case { Kind: IdentityFlowPrincipalKind.ApiClient } identity:
                 return new ApiClientPrincipal(scope, new ApiClientId(identity.Id));
             default:

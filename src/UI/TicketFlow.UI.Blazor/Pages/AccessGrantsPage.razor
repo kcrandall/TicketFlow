@@ -4,6 +4,7 @@
 <PageHeader Title="Access" Description="Grants on the workspace and on each team and inbox. Revoking takes effect on the next request." />
 <AccessTabs Active="grants" />
 
+<AccessGate Denied="Denied">
 <div class="tf-card">
     <div class="tf-table-wrap">
         <table class="tf-table">
@@ -59,6 +60,7 @@
         </TfForm>
     </div>
 </div>
+</AccessGate>
 
 @code {
     private readonly List<StoredAccessGrant> grants = [];
@@ -85,19 +87,20 @@
     protected override async Task OnInitializedAsync()
     {
         await LoadWorkspaceAsync();
-        foreach (var role in BuiltInRoles.All)
-            roleNames[role.Id.Value] = role.Name;
-        if (Service<IAccessRoleStore>() is { } roles)
-            foreach (var role in await roles.ListAsync(Session.Scope, Aborted))
-                roleNames[role.Role.Id.Value] = role.Role.Name;
-        if (Service<IAccessGrantStore>() is not { } store)
+        if (await AccessListAsync(administrator => administrator.ListRolesAsync(Actor, Aborted)) is not { } roles)
             return;
-        var partition = AccessPartition.From(Session.Scope);
+        foreach (var role in roles)
+            roleNames[role.Role.Id.Value] = role.Role.Name;
         var targets = new List<GrantScope> { new WorkspaceGrantScope(Session.Scope.WorkspaceId) };
         targets.AddRange(Teams.Select(team => (GrantScope)new TeamGrantScope(Session.Scope.WorkspaceId, team.Id)));
         targets.AddRange(Inboxes.Select(inbox => (GrantScope)new InboxGrantScope(Session.Scope.WorkspaceId, inbox.Inbox.Id)));
         foreach (var target in targets)
-            grants.AddRange(await store.ListForTargetAsync(partition, target, 200, null, Aborted));
+        {
+            // Team and inbox targets are listed only where the viewer manages access (a refusal there is not a page-level denial).
+            var administrator = Service<IAccessAdministrator>()!;
+            if (await administrator.ListGrantsAsync(Actor, target, 200, null, Aborted) is AccessListed<IReadOnlyList<StoredAccessGrant>> listed)
+                grants.AddRange(listed.Value);
+        }
         await Session.LoadUsersAsync(grants.Select(grant => grant.Grant.Subject.Value is UserId user ? (UserId?)user : null));
     }
 }

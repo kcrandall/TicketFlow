@@ -81,8 +81,9 @@ The UI never signs anyone in. Each request:
 
 ## Permissions
 
-The shell loads a workspace-level snapshot of the catalog permissions the principal holds with
-`IAccessEvaluator.LoadDecisionContextAsync` (batches of 32, like `GET /me`). Sections are hidden (or shown locked with
+The shell loads a snapshot of the catalog permissions the principal holds **on any resource** of the workspace with
+`IAccessQueryPlanner.HeldAnywhereAsync` (one grant load per batch of 32): a workspace grant, or a team- or inbox-scoped grant, counts,
+so team-scoped agents see Conversations and the dashboard shows their data. Sections are hidden (or shown locked with
 `ShowDisabledSections = true`) when the feature is missing or no listed permission is held:
 
 | Section | Requires one of |
@@ -102,13 +103,20 @@ The shell loads a workspace-level snapshot of the catalog permissions the princi
 
 Decisions for sensitive permissions are audited by Access, so their part of the snapshot is cached per principal for
 `SensitivePermissionCacheDuration` (default 60 s, `0` disables the cache). The snapshot only decides what renders: every read and write
-goes through the feature services, which authorize again (team- and inbox-scoped grants included), apply masking and audit. A forbidden
-direct URL renders an "Access denied" page with status 403.
+goes through the feature services, which authorize again per resource, apply masking and audit.
+
+- **One gate for GET and POST**: a page whose section the viewer cannot open renders "Access denied" (403) for both GET and POST,
+  decided from the section's feature and permissions alone — never from the posted form — and the posted action does not run.
+- Actions run only on a page of their own section (`conversation.*` on Conversations, `access.*` on Access, ...); anything else is 400.
+- The Access pages list roles, grants and field policies through `IAccessAdministrator.ListRolesAsync` / `ListGrantsAsync` /
+  `ListFieldPoliciesAsync`, which decide `access:manage` freshly on every request (never from the cached snapshot).
 
 ## Forms, fencing and errors
 
 - Forms are plain SSR `<form method="post">` posts to the page URL with the antiforgery token (validated with `IAntiforgery`), the
-  action name (`_action`), the return path and, for revision-fenced records, the expected revision (`_revision`).
+  action name (`_action`), the return path (local, inside the UI, no control characters) and the expected revision (`_revision`).
+  Every state-changing command on an existing record requires it (a missing revision is a validation error). Contact merges are two
+  steps: "Review merge" shows the duplicate, and the confirmation is fenced on both the target and the reviewed duplicate revision.
 - Each action calls the feature service and maps its union result to a `UiOutcome` (`UiOutcomes.From(...)`, exhaustive switches):
   success, forbidden, not found, conflict (with the current revision), invalid (TicketFlow's own validation messages, never input
   values) or rejected.
@@ -208,6 +216,12 @@ the violet theme.
 
 - No access-audit browser: Access exposes only `IAccessAuditSink` (write side); the Access page explains where events go.
 - Calendars are created with one weekly span per day from the UI; split shifts and holiday overrides use the API.
-- Conversation lists load one SLA status and a short timeline window per row (25 rows by default) for previews.
+- Pages do a constant amount of work per page, not per row: contacts are read with `IContactService.GetManyAsync` (one decision
+  context and one masking load), SLA badges come from one risk-list read, user names from one `ITicketFlowUserDirectory.FindManyAsync`
+  call, and counts (dashboard, inboxes, teams) from reporting's store-side open backlog (hidden without reporting). Conversation rows
+  show a state summary ("Customer waiting 18m · last reply 1h ago") from the list projection instead of reading timelines.
+- Contacts are not team-scoped resources, so a team-only agent sees conversations with contact identifiers instead of names.
+- Feature services still load grants per call; a per-request grant cache would need an Access seam that keeps revocation immediate in
+  long-lived scopes, so it is not done in the UI.
 - The CSV export is buffered in memory (at most 100 000 rows) before it is sent.
 - Refused posts from an embedded `TicketFlowUI` re-render in the standalone document rather than the host layout.

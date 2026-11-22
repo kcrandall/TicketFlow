@@ -51,5 +51,24 @@ public static class PostgresReportingMigrations
             PRIMARY KEY (cell_key));
         CREATE INDEX tf_report_rollups_query ON tf_report_rollups (scope_key, metric, cell_us);
         CREATE INDEX tf_report_rollups_retention ON tf_report_rollups (cell_us);
+        """),
+        // Version 2: labels are no longer rolled up (one rollup row per fact instead of 1 + labels); label reports read the facts
+        // through a partial index. The retention row tracks the fact horizon (rebuilds before it are refused); it is backfilled
+        // conservatively: when rollups predate every remaining fact, facts were pruned up to the oldest remaining fact.
+        new(2, "label-rollups-from-facts", """
+        CREATE TABLE tf_report_retention (
+            id smallint NOT NULL PRIMARY KEY CHECK (id = 1), fact_horizon timestamptz NULL,
+            format_version smallint NOT NULL CHECK (format_version = 1));
+        INSERT INTO tf_report_retention (id, fact_horizon, format_version)
+        SELECT 1, CASE
+            WHEN NOT EXISTS (SELECT 1 FROM tf_report_rollups) THEN NULL
+            WHEN NOT EXISTS (SELECT 1 FROM tf_report_facts) THEN to_timestamp(((SELECT max(cell_us) FROM tf_report_rollups) + 900000000) / 1000000.0)
+            WHEN (SELECT min(cell_us) FROM tf_report_rollups) < (SELECT min(cell_us) FROM tf_report_facts) THEN (SELECT min(occurred_at) FROM tf_report_facts)
+            ELSE NULL END, 1;
+        DELETE FROM tf_report_rollups WHERE label <> '';
+        ALTER TABLE tf_report_rollups ADD CONSTRAINT tf_report_rollups_unlabelled CHECK (label = '');
+        DROP INDEX tf_report_rollups_query;
+        CREATE INDEX tf_report_rollups_query_v2 ON tf_report_rollups (scope_key, metric, cell_us) WHERE label = '';
+        CREATE INDEX tf_report_facts_labelled ON tf_report_facts (scope_key, metric, cell_us) WHERE cardinality(labels) > 0;
         """)]);
 }

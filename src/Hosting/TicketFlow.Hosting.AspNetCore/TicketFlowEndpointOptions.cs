@@ -67,13 +67,15 @@ public sealed class TicketFlowEndpointOptions
     }
 }
 
-internal sealed class OptionsPartitionResolver(IOptions<TicketFlowEndpointOptions> options) : ITicketFlowPartitionResolver
+/// <summary>The <see cref="TicketFlowEndpointOptions.Partition"/> fallback registered by <c>AddTicketFlowEndpoints()</c>.</summary>
+public sealed class OptionsTicketFlowPartitionResolver(IOptions<TicketFlowEndpointOptions> options) : ITicketFlowPartitionResolver
 {
     public ValueTask<AccessPartition?> ResolveAsync(HttpContext httpContext, CancellationToken cancellationToken = default) =>
         options.Value.ResolvePartition is { } resolve ? resolve(httpContext) : ValueTask.FromResult(options.Value.Partition);
 }
 
-internal sealed class OptionsPrincipalResolver(IOptions<TicketFlowEndpointOptions> options) : ITicketFlowPrincipalResolver
+/// <summary>The <see cref="TicketFlowEndpointOptions.ResolvePrincipal"/> fallback registered by <c>AddTicketFlowEndpoints()</c>; adapters may replace exactly this registration.</summary>
+public sealed class OptionsTicketFlowPrincipalResolver(IOptions<TicketFlowEndpointOptions> options) : ITicketFlowPrincipalResolver
 {
     public ValueTask<PrincipalRef?> ResolveAsync(HttpContext httpContext, TicketScope scope, CancellationToken cancellationToken = default) =>
         options.Value.ResolvePrincipal is { } resolve ? resolve(httpContext, scope) : ValueTask.FromResult<PrincipalRef?>(null);

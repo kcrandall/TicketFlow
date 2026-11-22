@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>IdentityFlow adapter for TicketFlow SignalR hubs: agent hub principal resolution and IdentityFlow-issued JWT validation for live-chat visitor identity.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" />
+    <PackageReference Include="Microsoft.IdentityModel.Protocols.OpenIdConnect" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Integrations.IdentityFlow/TicketFlow.Integrations.IdentityFlow.csproj" />
+    <ProjectReference Include="../../Hosting/TicketFlow.Realtime.SignalR/TicketFlow.Realtime.SignalR.csproj" />
+    <ProjectReference Include="../../Channels/TicketFlow.Channels.LiveChat/TicketFlow.Channels.LiveChat.csproj" />
+  </ItemGroup>
+</Project>

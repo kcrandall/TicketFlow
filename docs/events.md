@@ -80,11 +80,14 @@ Subscriptions choose a level; the default is `IdsOnly`.
 
 - **`IdsOnly`**: identifiers only. Consumers fetch details through Access-checked APIs.
 - **`Metadata`**: identifiers plus non-identifying state (statuses, priorities, labels, channel kinds, counts, SLA metrics, scores).
-- **`Content`**: metadata plus `data.content`, hydrated **at delivery time** as the subscription principal: message bodies and attachment
-  metadata through `IConversationService.ReadTimelineAsync`, contact display name and identities through `IContactService.GetAsync`, and
-  survey comments. The owning feature applies its Access decision and masking, so masked values (for example `conversation.channel`
-  external ids or `contact.email` identities) are removed and listed in `content.maskedFields`. Notes are never hydrated. Requires
-  `events:content` (sensitive) both for the manager configuring the subscription and for the subscription principal at delivery.
+- **`Content`**: metadata plus `data.content`, hydrated **at delivery time** as the subscription principal, once per batch: message bodies
+  and attachment metadata through `IConversationService.ReadTimelineAsync` (one timeline range read per conversation), contact display
+  name and identities through `IContactService.GetAsync` (once per distinct contact; on contact events as the content itself, on conversation
+  events as `content.contact` for the conversation's contact), and survey comments through `ISurveyService.GetResponseAsync`
+  (`survey:read` and the `survey.comment` field policy). The owning feature applies its Access decision and masking, so masked values (for
+  example `conversation.channel` external ids, `contact.email` identities or survey comments) are removed and listed in
+  `content.maskedFields`. Notes are never hydrated. Requires `events:content` (sensitive) both for the manager configuring the subscription
+  and for the subscription principal at delivery.
 
 The event log never stores bodies, comments, addresses or attribute values — only identifiers and metadata — so retention of the log does
 not retain customer content.
@@ -97,8 +100,11 @@ not retain customer content.
 | `events:manage` | yes | Create, update, delete and replay subscriptions; read dead letters. |
 | `events:content` | yes | Configure and receive `Content` subscriptions (audited once per delivery batch). |
 
-Registered by `AddEvents()`; only Owner holds them until custom roles grant them. Every subscription names an application **API client
-principal**. The delivery engine loads one `IAccessDecisionContext` per batch and decides each event for that principal:
+Registered by `AddEvents()`; only Owner holds them until custom roles grant them. Service calls authorize on the workspace **before**
+revealing whether a subscription exists or which revision it has. Every subscription names an application **API client principal**.
+Creating or updating a subscription requires that the actor could confer every live allow grant of that principal
+(`IAccessAdministrator.CheckCanConferAsync`): `events:manage` alone cannot route data through a principal that can read more than the
+actor (confused deputy). The delivery engine loads one `IAccessDecisionContext` per batch and decides each event for that principal:
 `conversation:read` on the event's conversation resource (team, inbox and assignee when projected; labels unknown, so label conditions
 fail closed), else `contact:read` on the contact, else only `events:read`. Undecidable or denied events are skipped (the cursor moves
 past them); a principal without `events:read` (or `events:content` for content) blocks the subscription with backoff until fixed.
@@ -113,12 +119,22 @@ such as contact events, are excluded). New subscriptions start at the head (`Eve
 `EventDeliveryWorker.RunOnceAsync` claims due subscriptions (leased and fenced), reads up to `MaximumScan` events after the cursor,
 keeps matching and authorized events up to the batch size, renders and hydrates them, and makes one sink call:
 
-- **At least once**: the cursor advances only after the sink accepted the batch (`EventDelivery.DeliveryId` is stable across retries).
+- **At least once**: the cursor advances only after the sink accepted the batch. `EventDelivery.DeliveryId` covers scope, subscription,
+  subscription revision, replay generation and the batch's sequence range: stable across retries, new after a replay or an update.
+- **Fairness**: claims are ordered by claim time and completion resets it to now, so busy subscriptions rotate even when more are due
+  than `DeliveryClaimLimit`; a caught-up subscription waits `IdlePollInterval` (default 2 s) before it is scanned again.
 - **Ordering**: a subscription receives events strictly in workspace sequence order, so each conversation's events arrive in timeline
   order. A failing batch blocks later events of that subscription until it succeeds or is dead-lettered.
 - **Retries**: exponential backoff from `InitialRetryDelay` to `MaximumRetryDelay` (sinks may request a later `RetryAfter`).
 - **Dead letters**: after `MaximumAttempts` (or a permanent sink failure) the batch's events are recorded as `EventDeadLetter`s
-  (sequence, event id, type, attempts, failure code — never payloads) and the cursor advances.
+  (sequence, event id, type, attempts, failure code — never payloads) and the cursor advances. An event whose content cannot be hydrated or
+  rendered fails alone (events before it are delivered first), so a poison event is dead-lettered by itself.
+- **Oversized batches**: a sink returns `EventSinkSplit` (the webhook sink for bodies over 1 MiB or a 413, PostHog for a 413) and the
+  engine retries immediately with the first half; a single event that is still too large is dead-lettered (`payload-too-large`).
+- **Suspension**: configuration failures — sink kind not registered or target not allowed for the scope, principal without `events:read`
+  (for example revoked) or without `events:content` — suspend the subscription after `MaximumAttempts` (`EventDeliveryState.Suspended`,
+  `LastError` names the cause). Updating or replaying it resumes delivery. Store or Access outages keep retrying with backoff.
+- **Retention gaps**: events pruned before a subscription delivered them are recorded as `LastError = events-pruned-<from>-<to>`.
 - **Replay**: `IEventSubscriptionService.ReplayAsync(actor, id, afterSequence)` rewinds the cursor, resets attempts, clears dead letters
   after that position and fences out an in-flight lease.
 
@@ -133,8 +149,15 @@ Sink exception details are never recorded (they may contain customer data); only
 | `posthog` | `TicketFlow.Integrations.PostHog` | A configured project name. PostHog `/batch/` capture with `uuid` = event id, `distinct_id` = contact id (or an unmasked `external-user` identity from `Content` subscriptions), `$groups` = workspace. |
 | `walflow` | `TicketFlow.Integrations.WalFlow.Sinks` | A registered WalFlow `SinkRegistration` name (Kafka, RabbitMQ, SQS, SNS, Azure Service Bus, Google Pub/Sub, Kinesis, Redis Streams packages). Debezium-compatible `op = "c"` records keyed by conversation/contact id, `after` = the CloudEvent; `CloudEventSinkPayloadTransformer` publishes the CloudEvent as the body. Delivery is only as durable as the sink declares (`RequireDurableSinks`). |
 
-Custom sinks implement `IEventSink` (`Kind`, `MaximumBatchSize`, `IsValidTarget`, `DeliverAsync` returning
-`EventSinkResult = EventSinkDelivered | EventSinkFailed(code, permanent, retryAfter)`).
+Custom sinks implement `IEventSink` (`Kind`, `MaximumBatchSize`, `IsValidTarget(scope, target)`, `DeliverAsync` returning
+`EventSinkResult = EventSinkDelivered | EventSinkFailed(code, permanent, retryAfter) | EventSinkSplit`). Operator-configured named sinks
+(PostHog projects, WalFlow sinks) require at least one `EventScopeRule` (tenant plus optional project/environment/app/workspace) and refuse
+other scopes both when a subscription is saved and at delivery.
+
+PostHog `distinct_id`s are namespaced — `contact:<id>`, `external:<issuer>:<value>` (`ContactExternalId` strategy, from unmasked
+`external-user` identities in `Content` subscriptions) and `workspace:<id>` for events without a contact. Conversation events (messages,
+SLA, routing, delivery status) use the conversation's contact, so all of a contact's events share one id within a project; use one privacy
+level per project.
 
 ## Projection sources
 
@@ -162,8 +185,10 @@ Custom sinks implement `IEventSink` (`Kind`, `MaximumBatchSize`, `IsValidTarget`
 
 `tests/Events/TicketFlow.Events.StoreContracts` verifies both against the in-memory store and PostgreSQL (two independent data sources),
 including concurrent appenders and claimers. `PostgresEventStore` locks the scope head row for appends (unique `(scope_key, event_id)`
-index), claims with `FOR UPDATE SKIP LOCKED` over a partial `(available_at) WHERE enabled` index, uses `tf_key_v1` keys, explicit
-`format_version` columns and parameterized SQL. Lease times come from the store's `TimeProvider`. The in-memory store is a bounded,
+index), claims with `FOR UPDATE SKIP LOCKED` over a partial `(available_at) WHERE enabled AND NOT suspended` index, uses `tf_key_v1` keys,
+explicit `format_version` columns and parameterized SQL. Migration 2 adds the replay generation and suspension columns, sets
+`fillfactor = 50` on head rows (HOT updates under append contention) and replaces the `recorded_at` B-tree with a BRIN index; retention
+therefore prunes rows before the cutoff in no particular order (delivery records any gap it meets). Lease times come from the store's `TimeProvider`. The in-memory store is a bounded,
 process-local development example.
 
 ## Hosting
@@ -176,6 +201,11 @@ No hosted service is included. Hosts (E11 worker hosting) run, in their loops:
 - `EventRetentionWorker.RunOnceAsync` (`Retention` and `DeadLetterRetention`, default 30 days).
 
 ## Not yet implemented
+
+- Appending several outbox entries per transaction: the E5 dispatcher hands handlers one entry at a time, so the projector appends once
+  per change (the contact and survey followers append in batches). A batch handler contract in Conversations would remove that
+  per-change head-row round trip.
+- A contact get-many API: hydration deduplicates contacts per batch but reads each through `IContactService.GetAsync`.
 
 - A built-in source for `contact.identity-linked` (the contact change log has no linking kind yet; the linking feature or host publishes
   it through `IEventPublisher`).

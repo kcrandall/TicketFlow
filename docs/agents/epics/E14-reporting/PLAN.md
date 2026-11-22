@@ -34,3 +34,7 @@ T01–T05 (2026-11-22): `dotnet build TicketFlow.slnx -c Release` (0 warnings, 0
 against an isolated `postgres:18` container; `bash scripts/verify-package-metadata.sh` (51 package projects, before a concurrent E11
 project was added to the inventory). T06 (InsightFlow export) is deferred: no stable InsightFlow HTTP ingestion contract. Parallel
 post-ticket reviews are still outstanding before commit.
+
+Review fixes (2026-11-22, after 4574992): label rollups replaced by fact-based label aggregates (one rollup row per fact), partial indexes
+with an EXPLAIN test, monotonic fact horizon refusing unsafe rebuilds, projector/rebuild concurrency tests; Reporting.Tests 43 passed,
+Reporting.Stores.Postgres.Tests 21 passed (real PostgreSQL), solution build 0 warnings/0 errors.

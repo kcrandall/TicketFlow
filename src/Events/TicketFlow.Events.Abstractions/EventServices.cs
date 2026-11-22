@@ -10,9 +10,10 @@ public sealed record RenderedEvent(StoredIntegrationEvent Event, string Json)
 
 /// <summary>
 /// One sink call: up to the subscription's batch size of events in workspace sequence order. <see cref="DeliveryId"/> is stable across
-/// retries of the same batch (subscription, first and last sequence), so receivers can deduplicate.
+/// retries of the same batch (scope, subscription, subscription revision, replay <see cref="Generation"/>, first and last sequence), so
+/// receivers can deduplicate retries while a replay or a changed subscription produces new delivery ids.
 /// </summary>
-public sealed record EventDelivery(StoredEventSubscription Subscription, IReadOnlyList<RenderedEvent> Events, int Attempt)
+public sealed record EventDelivery(StoredEventSubscription Subscription, IReadOnlyList<RenderedEvent> Events, int Attempt, long Generation = 0)
 {
     public StoredEventSubscription Subscription { get; } = Subscription ?? throw new ArgumentNullException(nameof(Subscription));
 
@@ -26,7 +27,7 @@ public sealed record EventDelivery(StoredEventSubscription Subscription, IReadOn
         {
             var scope = Subscription.Scope;
             var source = string.Join('\n', scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value, Subscription.Subscription.Id.Value,
-                Events[0].Event.Sequence, Events[^1].Event.Sequence);
+                Subscription.Revision, Generation, Events[0].Event.Sequence, Events[^1].Event.Sequence);
             return "evt_" + EventText.EventId(source, "delivery").ToString("N");
         }
     }
@@ -60,8 +61,21 @@ public sealed record EventSinkFailed
     public TimeSpan? RetryAfter { get; }
 }
 
+/// <summary>
+/// The batch is too large for the sink (for example over a request body limit). The engine retries immediately with the first half; a
+/// single event that is still too large is dead-lettered (<c>payload-too-large</c>).
+/// </summary>
+public sealed record EventSinkSplit
+{
+    private EventSinkSplit()
+    {
+    }
+
+    public static EventSinkSplit Instance { get; } = new();
+}
+
 /// <summary>Outcome of a sink call. Switch over every case without a discard arm.</summary>
-public union EventSinkResult(EventSinkDelivered, EventSinkFailed);
+public union EventSinkResult(EventSinkDelivered, EventSinkFailed, EventSinkSplit);
 
 /// <summary>
 /// A delivery destination kind. Registered sinks are selected by <see cref="Kind"/>; <see cref="IsValidTarget"/> validates subscription
@@ -75,7 +89,8 @@ public interface IEventSink
     /// <summary>Events per call this sink accepts (1-100); the engine uses the smaller of this and the subscription batch size.</summary>
     int MaximumBatchSize { get; }
 
-    bool IsValidTarget(string target);
+    /// <summary>True when <paramref name="target"/> is valid for subscriptions of <paramref name="scope"/> (named sinks apply their scope allow-lists).</summary>
+    bool IsValidTarget(TicketScope scope, string target);
 
     Task<EventSinkResult> DeliverAsync(EventDelivery delivery, CancellationToken cancellationToken = default);
 }

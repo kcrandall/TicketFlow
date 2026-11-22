@@ -41,3 +41,7 @@ is superseded on the next accept.
   resolve-customer (claims, upgrades, creation permission), concurrent resolves, session-contact linking, Off/Suggest/accept,
   reject + Access filtering, AutoMerge rules, scope isolation, unlink, in-memory store contract.
 - `dotnet test tests/Contacts/TicketFlow.Contacts.Tests -c Release` — 96 passed, 0 failed.
+
+### Review fixes (2026-11-22)
+
+See [PLAN review fixes](../PLAN.md#review-fixes-2026-11-22-after-commit-4574992).

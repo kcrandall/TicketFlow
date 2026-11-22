@@ -92,6 +92,34 @@ public sealed partial class ContactService : IContactService
         return new ContactApplied<ContactView>(masking.Project(stored, decision));
     }
 
+    /// <summary>One decision context and one masking load for the whole batch (list rendering).</summary>
+    public async Task<IReadOnlyList<ContactView>> GetManyAsync(PrincipalRef actor, IEnumerable<ContactId> ids, CancellationToken cancellationToken = default)
+    {
+        var scope = RequireActor(actor);
+        ArgumentNullException.ThrowIfNull(ids);
+        var distinct = ids.Distinct().ToList();
+        if (distinct.Count > IContactService.MaximumBatch)
+            throw new ArgumentException($"At most {IContactService.MaximumBatch} contacts per batch.", nameof(ids));
+        foreach (var id in distinct)
+            RequireId(id);
+        var views = new List<ContactView>();
+        if (distinct.Count == 0)
+            return views;
+        var decisions = await evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Read], cancellationToken).ConfigureAwait(false);
+        ContactMasking? masking = null;
+        foreach (var id in distinct)
+        {
+            if (await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is not { } stored || stored.Contact.MergedInto is not null)
+                continue;
+            var decision = await decisions.DecideAsync(ContactPermissions.Read, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false);
+            if (!decision.IsPermitted)
+                continue;
+            masking ??= await MaskingAsync(scope, ContactPermissions.Read, cancellationToken).ConfigureAwait(false);
+            views.Add(masking.Project(stored, decision));
+        }
+        return views;
+    }
+
     public async Task<ContactResult<ContactView>> UpdateAsync(PrincipalRef actor, ContactId id, long expectedRevision, IEnumerable<ContactEdit> edits, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);

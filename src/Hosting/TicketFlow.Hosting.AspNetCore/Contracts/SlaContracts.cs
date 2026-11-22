@@ -4,7 +4,7 @@ namespace TicketFlow.Hosting.AspNetCore.Contracts;
 /// One SLA clock. <see cref="Metric"/> is <c>firstResponse</c>, <c>nextResponse</c> or <c>resolution</c>; <see cref="State"/>
 /// <c>running</c>, <c>paused</c> or <c>completed</c>; durations are whole seconds (negative remaining once breached).
 /// </summary>
-public sealed record SlaClockDto(
+public sealed record SlaClockResponse(
     string Metric,
     int Cycle,
     string State,
@@ -19,14 +19,14 @@ public sealed record SlaClockDto(
     bool AtRisk,
     bool Breached);
 
-public sealed record SlaStatusDto(
+public sealed record SlaStatusResponse(
     string ConversationId,
     string InboxId,
     string? PolicyId,
     string? RuleName,
     string? Basis,
     bool Paused,
-    IReadOnlyList<SlaClockDto> Clocks,
+    IReadOnlyList<SlaClockResponse> Clocks,
     bool AtRisk,
     bool Breached,
     DateTimeOffset? DueAt,

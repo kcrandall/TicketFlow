@@ -27,11 +27,11 @@ internal static class ConversationEndpoints
                 limit ?? ConversationListQuery.DefaultLimit);
             return await service.ListAsync(actor.Principal, query, cursor, http.RequestAborted) switch
             {
-                ConversationListPage page => TicketFlowHttp.Ok(http, new PageDto<ConversationDto>([.. page.Conversations.Select(Dto)], page.NextCursor)),
+                ConversationListPage page => TicketFlowHttp.Ok(http, new PageResponse<ConversationResponse>([.. page.Conversations.Select(Dto)], page.NextCursor)),
                 ConversationRefused refused => Refused(http, refused),
             };
-        }).WithName("ListConversations").Produces<PageDto<ConversationDto>>();
-        group.MapPost("/conversations", async (TicketFlowActor actor, StartConversationRequestDto request, [FromServices] IConversationService service, HttpContext http) =>
+        }).WithName("ListConversations").Produces<PageResponse<ConversationResponse>>();
+        group.MapPost("/conversations", async (TicketFlowActor actor, ConversationStartRequest request, [FromServices] IConversationService service, HttpContext http) =>
         {
             var start = new StartConversationRequest(new InboxId(request.InboxId), new ContactId(request.ContactId), null,
                 request.Priority is null ? ConversationPriority.None : TicketFlowHttp.Parse<ConversationPriority>(request.Priority, "priority"),
@@ -47,21 +47,21 @@ internal static class ConversationEndpoints
                 ConversationConflict conflict => TicketFlowHttp.Conflict(http, conflict.CurrentRevision),
                 ConversationRefused refused => Refused(http, refused),
             };
-        }).WithName("StartConversation").Produces<ConversationCommandDto>(StatusCodes.Status201Created);
+        }).WithName("StartConversation").Produces<ConversationCommandResponse>(StatusCodes.Status201Created);
         group.MapGet("/conversations/{conversationId}", async (TicketFlowActor actor, string conversationId, [FromServices] IConversationService service, HttpContext http) =>
             await service.GetAsync(actor.Principal, new ConversationId(conversationId), http.RequestAborted) switch
             {
                 ConversationView view => TicketFlowHttp.Ok(http, Dto(view), view.Revision),
                 ConversationNotFound => TicketFlowHttp.NotFound(),
                 ConversationRefused refused => Refused(http, refused),
-            }).WithName("GetConversation").Produces<ConversationDto>();
+            }).WithName("GetConversation").Produces<ConversationResponse>();
         group.MapGet("/conversations/{conversationId}/timeline", async (TicketFlowActor actor, string conversationId, long? after, int? limit, [FromServices] IConversationService service, HttpContext http) =>
             await service.ReadTimelineAsync(actor.Principal, new ConversationId(conversationId), after ?? 0, limit ?? 50, http.RequestAborted) switch
             {
-                TimelinePage page => TicketFlowHttp.Ok(http, new TimelinePageDto(page.Conversation.Value, [.. page.Events.Select(Dto)], page.NextAfterSequence, page.NotesIncluded)),
+                TimelinePage page => TicketFlowHttp.Ok(http, new TimelinePageResponse(page.Conversation.Value, [.. page.Events.Select(Dto)], page.NextAfterSequence, page.NotesIncluded)),
                 ConversationNotFound => TicketFlowHttp.NotFound(),
                 ConversationRefused refused => Refused(http, refused),
-            }).WithName("ReadTimeline").Produces<TimelinePageDto>();
+            }).WithName("ReadTimeline").Produces<TimelinePageResponse>();
 
         Command<MessageInput>(group, "/conversations/{conversationId}/replies", "Reply", (service, actor, id, body, revision, ct) =>
             service.ReplyAsync(actor.Principal, id, new OutgoingMessageDraft(body.Body, ContentType(body.ContentType), Attachments(body.Attachments), MessageId(body.Id)), revision, ct));
@@ -91,13 +91,13 @@ internal static class ConversationEndpoints
             return Map(http, await service.DeleteAsync(actor.Principal, new ConversationId(conversationId), revision, http.RequestAborted), _ => TypedResults.NoContent());
         }).WithName("DeleteConversation").Produces(StatusCodes.Status204NoContent);
 
-        group.MapGet("/conversation-attributes", async (TicketFlowActor actor, [FromServices] IConversationAttributeDefinitionService service, HttpContext http) =>
-            Map(http, await service.ListAsync(actor.Principal, http.RequestAborted), list => TicketFlowHttp.Ok(http, list.Select(Definition).ToList())))
-            .WithName("ListConversationAttributes").Produces<List<AttributeDefinitionDto>>();
+        group.MapGet("/conversation-attributes", async (TicketFlowActor actor, int? limit, string? cursor, [FromServices] IConversationAttributeDefinitionService service, HttpContext http) =>
+            Map(http, await service.ListAsync(actor.Principal, http.RequestAborted), list => TicketFlowHttp.Ok(http, TicketFlowHttp.Page(list, stored => stored.Definition.Key, Definition, limit, cursor))))
+            .WithName("ListConversationAttributes").Produces<PageResponse<AttributeDefinitionResponse>>();
         group.MapPost("/conversation-attributes", async (TicketFlowActor actor, AttributeDefinitionRequest request, [FromServices] IConversationAttributeDefinitionService service, HttpContext http) =>
             Map(http, await service.CreateAsync(actor.Principal, Definition(request), http.RequestAborted),
                 stored => TicketFlowHttp.Created(http, $"conversation-attributes/{stored.Definition.Key}", Definition(stored), stored.Revision)))
-            .WithName("CreateConversationAttribute").Produces<AttributeDefinitionDto>(StatusCodes.Status201Created);
+            .WithName("CreateConversationAttribute").Produces<AttributeDefinitionResponse>(StatusCodes.Status201Created);
         group.MapPut("/conversation-attributes/{key}", async (TicketFlowActor actor, string key, AttributeDefinitionRequest request, [FromServices] IConversationAttributeDefinitionService service, HttpContext http) =>
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
@@ -105,7 +105,7 @@ internal static class ConversationEndpoints
             if (request.Key != key)
                 throw new ArgumentException("The body key must match the route.", nameof(key));
             return Map(http, await service.UpdateAsync(actor.Principal, Definition(request), revision, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Definition(stored), stored.Revision));
-        }).WithName("UpdateConversationAttribute").Produces<AttributeDefinitionDto>();
+        }).WithName("UpdateConversationAttribute").Produces<AttributeDefinitionResponse>();
         group.MapDelete("/conversation-attributes/{key}", async (TicketFlowActor actor, string key, [FromServices] IConversationAttributeDefinitionService service, HttpContext http) =>
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
@@ -117,7 +117,7 @@ internal static class ConversationEndpoints
 
     private delegate Task<ConversationCommandResult> CommandHandler<TBody>(IConversationService service, TicketFlowActor actor, ConversationId conversation, TBody body, long? expectedRevision, CancellationToken cancellationToken);
 
-    /// <summary>A conversation command: optional <c>If-Match</c> fencing (412 on mismatch), result as <see cref="ConversationCommandDto"/> with the new ETag.</summary>
+    /// <summary>A conversation command: optional <c>If-Match</c> fencing (412 on mismatch), result as <see cref="ConversationCommandResponse"/> with the new ETag.</summary>
     private static void Command<TBody>(RouteGroupBuilder group, string pattern, string name, CommandHandler<TBody> handler, bool put = false)
     {
         var handle = async (TicketFlowActor actor, string conversationId, TBody body, [FromServices] IConversationService service, HttpContext http) =>
@@ -127,7 +127,7 @@ internal static class ConversationEndpoints
                 return failure;
             return Map(http, await handler(service, actor, new ConversationId(conversationId), body, revision, http.RequestAborted), applied => TicketFlowHttp.Ok(http, Command(applied), applied.Revision));
         };
-        (put ? group.MapPut(pattern, handle) : group.MapPost(pattern, handle)).WithName(name).Produces<ConversationCommandDto>().ProducesProblem(StatusCodes.Status412PreconditionFailed);
+        (put ? group.MapPut(pattern, handle) : group.MapPost(pattern, handle)).WithName(name).Produces<ConversationCommandResponse>().ProducesProblem(StatusCodes.Status412PreconditionFailed);
     }
 
     internal static IResult Map(HttpContext http, ConversationCommandResult result, Func<ConversationApplied, IResult> success) => result switch
@@ -154,7 +154,7 @@ internal static class ConversationEndpoints
         _ => RefusalKind.Rejected,
     }, refused.Errors);
 
-    private static ConversationCommandDto Command(ConversationApplied applied) =>
+    private static ConversationCommandResponse Command(ConversationApplied applied) =>
         new(applied.Conversation.Value, applied.Revision, [.. applied.Events.Select(item => item.Sequence)], applied.Replayed);
 
     private static ConversationStatus Status(StatusRequest request) => TicketFlowHttp.Parse<ConversationStatusKind>(request.Status, "status") switch
@@ -170,14 +170,14 @@ internal static class ConversationEndpoints
 
     private static MessageId? MessageId(string? value) => value is null ? null : new MessageId(value);
 
-    private static IReadOnlyList<AttachmentRef>? Attachments(IReadOnlyList<AttachmentDto>? attachments) =>
+    private static IReadOnlyList<AttachmentRef>? Attachments(IReadOnlyList<AttachmentModel>? attachments) =>
         attachments?.Select(attachment => new AttachmentRef(attachment.StorageRef, attachment.FileName, attachment.MediaType, attachment.SizeBytes)).ToList();
 
-    internal static ConversationStatusDto Status(ConversationStatus status) => new(TicketFlowHttp.Token(status.Kind), status.SnoozedUntil);
+    internal static ConversationStatusResponse Status(ConversationStatus status) => new(TicketFlowHttp.Token(status.Kind), status.SnoozedUntil);
 
-    internal static ActorDto Actor(AccessActor actor) => new(TicketFlowHttp.Token(actor.Kind), actor.Id);
+    internal static ActorResponse Actor(AccessActor actor) => new(TicketFlowHttp.Token(actor.Kind), actor.Id);
 
-    internal static ConversationDto Dto(ConversationView view) => new(
+    internal static ConversationResponse Dto(ConversationView view) => new(
         view.Id.Value,
         view.Revision,
         view.Inbox.Value,
@@ -187,10 +187,10 @@ internal static class ConversationEndpoints
         view.Assignee?.Value,
         view.Team?.Value,
         [.. view.Labels.Select(label => label.Value)],
-        [.. view.Attributes.Select(attribute => new ConversationAttributeDto(attribute.Key, TicketFlowHttp.Token(attribute.Type), attribute.Sensitive,
+        [.. view.Attributes.Select(attribute => new ConversationAttributeResponse(attribute.Key, TicketFlowHttp.Token(attribute.Type), attribute.Sensitive,
             attribute.Value is { } value ? Attributes.Dto(value) : null, attribute.Masked, attribute.Revealable))],
         [.. view.Participants.Select(participant => participant.Value)],
-        view.ChannelThread is { } thread ? new ChannelThreadDto(thread.Channel, thread.ExternalThreadId, thread.Masked, thread.Revealable) : null,
+        view.ChannelThread is { } thread ? new ChannelThreadResponse(thread.Channel, thread.ExternalThreadId, thread.Masked, thread.Revealable) : null,
         view.CreatedAt,
         view.LastActivityAt,
         view.WaitingSince,
@@ -200,46 +200,46 @@ internal static class ConversationEndpoints
         view.LastSequence,
         Attributes.Masked(view.MaskedFields));
 
-    internal static TimelineEventDto Dto(TimelineEventView view)
+    internal static TimelineEventResponse Dto(TimelineEventView view)
     {
         var item = view.Event;
         var masked = Attributes.Masked(view.MaskedFields);
-        var dto = new TimelineEventDto(item.Id, item.Sequence, item.OccurredAt, Actor(item.Actor), TicketFlowHttp.Token(item.Event.Kind), masked);
+        var dto = new TimelineEventResponse(item.Id, item.Sequence, item.OccurredAt, Actor(item.Actor), TicketFlowHttp.Token(item.Event.Kind), masked);
         return item.Event switch
         {
             MessageEvent message => dto with
             {
-                Message = new TimelineMessageDto(message.Id.Value, TicketFlowHttp.Token(message.Direction), message.Sender switch
+                Message = new TimelineMessageResponse(message.Id.Value, TicketFlowHttp.Token(message.Direction), message.Sender switch
                 {
-                    ContactParty contact => new PartyDto("contact", ContactId: contact.Contact.Value),
-                    PrincipalParty principal => new PartyDto("principal", Actor: Actor(principal.Actor)),
+                    ContactParty contact => new PartyResponse("contact", ContactId: contact.Contact.Value),
+                    PrincipalParty principal => new PartyResponse("principal", Actor: Actor(principal.Actor)),
                 }, message.Body, TicketFlowHttp.Token(message.ContentType), Attachments(message.Attachments), message.ExternalId,
-                    new DeliveryDto(TicketFlowHttp.Token(message.Delivery.State), message.Delivery.UpdatedAt, message.Delivery.FailureCode)),
+                    new DeliveryResponse(TicketFlowHttp.Token(message.Delivery.State), message.Delivery.UpdatedAt, message.Delivery.FailureCode)),
             },
-            NoteEvent note => dto with { Note = new TimelineNoteDto(note.Id.Value, note.Body, Attachments(note.Attachments)) },
-            AssignmentChanged assignment => dto with { Assignment = new TimelineValueChangeDto(assignment.Previous?.Value, assignment.Current?.Value) },
-            TeamChanged team => dto with { Team = new TimelineValueChangeDto(team.Previous?.Value, team.Current?.Value) },
-            StatusChanged status => dto with { Status = new TimelineStatusChangeDto(Status(status.Previous), Status(status.Current)) },
-            PriorityChanged priority => dto with { Priority = new TimelineValueChangeDto(TicketFlowHttp.Token(priority.Previous), TicketFlowHttp.Token(priority.Current)) },
-            LabelsChanged labels => dto with { Labels = new TimelineLabelsChangeDto([.. labels.Added.Select(label => label.Value)], [.. labels.Removed.Select(label => label.Value)]) },
+            NoteEvent note => dto with { Note = new TimelineNoteResponse(note.Id.Value, note.Body, Attachments(note.Attachments)) },
+            AssignmentChanged assignment => dto with { Assignment = new TimelineValueChangeResponse(assignment.Previous?.Value, assignment.Current?.Value) },
+            TeamChanged team => dto with { Team = new TimelineValueChangeResponse(team.Previous?.Value, team.Current?.Value) },
+            StatusChanged status => dto with { Status = new TimelineStatusChangeResponse(Status(status.Previous), Status(status.Current)) },
+            PriorityChanged priority => dto with { Priority = new TimelineValueChangeResponse(TicketFlowHttp.Token(priority.Previous), TicketFlowHttp.Token(priority.Current)) },
+            LabelsChanged labels => dto with { Labels = new TimelineLabelsChangeResponse([.. labels.Added.Select(label => label.Value)], [.. labels.Removed.Select(label => label.Value)]) },
             AttributeChanged attribute => dto with
             {
-                Attribute = new TimelineAttributeChangeDto(attribute.Key, attribute.Previous is { } previous ? Attributes.Dto(previous) : null,
+                Attribute = new TimelineAttributeChangeResponse(attribute.Key, attribute.Previous is { } previous ? Attributes.Dto(previous) : null,
                     attribute.Current is { } current ? Attributes.Dto(current) : null),
             },
-            ParticipantChanged participant => dto with { Participant = new TimelineParticipantChangeDto(participant.Participant.Value, TicketFlowHttp.Token(participant.Change)) },
-            ContactChanged contact => dto with { Contact = new TimelineContactChangeDto(contact.Previous.Value, contact.Current.Value, contact.Merge) },
-            SystemEvent system => dto with { System = new TimelineSystemDto(system.Code, system.Detail) },
-            ExtensionEvent extension => dto with { Extension = new TimelineExtensionDto(extension.Kind, extension.PayloadVersion, Json.Parse(extension.Payload)) },
+            ParticipantChanged participant => dto with { Participant = new TimelineParticipantChangeResponse(participant.Participant.Value, TicketFlowHttp.Token(participant.Change)) },
+            ContactChanged contact => dto with { Contact = new TimelineContactChangeResponse(contact.Previous.Value, contact.Current.Value, contact.Merge) },
+            SystemEvent system => dto with { System = new TimelineSystemResponse(system.Code, system.Detail) },
+            ExtensionEvent extension => dto with { Extension = new TimelineExtensionResponse(extension.Kind, extension.PayloadVersion, Json.Parse(extension.Payload)) },
         };
     }
 
-    private static IReadOnlyList<AttachmentDto> Attachments(IReadOnlyList<AttachmentRef> attachments) =>
-        [.. attachments.Select(attachment => new AttachmentDto(attachment.StorageRef, attachment.FileName, attachment.MediaType, attachment.SizeBytes))];
+    private static IReadOnlyList<AttachmentModel> Attachments(IReadOnlyList<AttachmentRef> attachments) =>
+        [.. attachments.Select(attachment => new AttachmentModel(attachment.StorageRef, attachment.FileName, attachment.MediaType, attachment.SizeBytes))];
 
     private static ConversationAttributeDefinition Definition(AttributeDefinitionRequest request) =>
         new(request.Key, TicketFlowHttp.Parse<ConversationAttributeType>(request.Type, "type"), request.Sensitive, request.DisplayName);
 
-    private static AttributeDefinitionDto Definition(StoredConversationAttributeDefinition stored) =>
+    private static AttributeDefinitionResponse Definition(StoredConversationAttributeDefinition stored) =>
         new(stored.Definition.Key, TicketFlowHttp.Token(stored.Definition.Type), stored.Definition.Sensitive, stored.Definition.DisplayName, stored.Revision);
 }

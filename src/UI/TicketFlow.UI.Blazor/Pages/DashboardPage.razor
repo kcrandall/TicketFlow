@@ -31,10 +31,10 @@
 else if (stats is not null)
 {
     <div class="tf-grid tf-grid--stats">
-        <StatCard Label="Open" Value="@stats.Open.ToString(CultureInfo.InvariantCulture)" Hint="Conversations waiting on your team" />
-        <StatCard Label="Pending" Value="@stats.Pending.ToString(CultureInfo.InvariantCulture)" Hint="Waiting on the customer" />
-        <StatCard Label="Assigned to me" Value="@stats.Mine.ToString(CultureInfo.InvariantCulture)" Hint="Open conversations you own" />
-        <StatCard Label="Unassigned" Value="@stats.Unassigned.ToString(CultureInfo.InvariantCulture)" Hint="Needs an owner" />
+        <StatCard Label="Open" Value="@stats.Open.Text" Hint="Conversations waiting on your team" />
+        <StatCard Label="Assigned to me" Value="@stats.Mine.Text" Hint="Open conversations you own" />
+        <StatCard Label="Unassigned" Value="@stats.Unassigned.Text" Hint="Needs an owner" />
+        <StatCard Label="Urgent / high" Value="@stats.Urgent.Text" Hint="Open with elevated priority" />
     </div>
 }
 
@@ -64,11 +64,11 @@ else if (stats is not null)
                 </div>
             </div>
             <div class="tf-card__content tf-stack">
-                <StackedBar Segments="@([new("Open", stats.Open, "var(--success)"), new("Pending", stats.Pending, "var(--warning)"), new("Snoozed", stats.Snoozed, "var(--info)")])" />
+                <StackedBar Segments="@([new("Mine", stats.Mine.Value, "var(--chart-1)"), new("Teammates", Math.Max(0, stats.Open.Value - stats.Mine.Value - stats.Unassigned.Value), "var(--success)"), new("Unassigned", stats.Unassigned.Value, "var(--warning)")])" />
                 <div class="tf-grid tf-grid--2" style="gap:12px">
-                    <div class="tf-kv"><span class="tf-kv__label">Assigned to me</span><span class="tf-kv__value">@stats.Mine</span></div>
-                    <div class="tf-kv"><span class="tf-kv__label">Unassigned</span><span class="tf-kv__value">@stats.Unassigned</span></div>
-                    <div class="tf-kv"><span class="tf-kv__label">Urgent / high</span><span class="tf-kv__value">@stats.Urgent</span></div>
+                    <div class="tf-kv"><span class="tf-kv__label">Open backlog</span><span class="tf-kv__value">@stats.Open.Text</span></div>
+                    <div class="tf-kv"><span class="tf-kv__label">Unassigned</span><span class="tf-kv__value">@stats.Unassigned.Text</span></div>
+                    <div class="tf-kv"><span class="tf-kv__label">Urgent / high</span><span class="tf-kv__value">@stats.Urgent.Text</span></div>
                     <div class="tf-kv"><span class="tf-kv__label">SLA at risk</span><span class="tf-kv__value">@(risk?.Count ?? 0)</span></div>
                 </div>
                 @if (channels.Count > 0)
@@ -155,7 +155,13 @@ else if (stats is not null)
 </div>
 
 @code {
-    private sealed record Stats(int Open, int Pending, int Snoozed, int Mine, int Unassigned, int Urgent);
+    /// <summary>A count and its label ("25+" when only a bounded list could be counted).</summary>
+    private sealed record Count(long Value, string Text)
+    {
+        public static Count Of(long value) => new(value, value.ToString(CultureInfo.InvariantCulture));
+    }
+
+    private sealed record Stats(Count Open, Count Mine, Count Unassigned, Count Urgent);
 
     private ReportOverview? overview;
     private ReportOverview? previous;
@@ -190,21 +196,32 @@ else if (stats is not null)
 
         if (Service<IConversationService>() is { } service && Session.Can(AccessPermissions.ConversationRead))
         {
-            async Task<List<ConversationView>> ListAsync(ConversationListQuery query) =>
-                await service.ListAsync(Actor, query, null, Aborted) is ConversationListPage page ? [.. page.Conversations] : [];
-            var open = await ListAsync(new ConversationListQuery(status: ConversationStatusKind.Open, limit: ConversationListQuery.MaximumLimit));
-            var pending = await ListAsync(new ConversationListQuery(status: ConversationStatusKind.Pending, limit: ConversationListQuery.MaximumLimit));
-            var snoozed = await ListAsync(new ConversationListQuery(status: ConversationStatusKind.Snoozed, limit: ConversationListQuery.MaximumLimit));
-            stats = new Stats(open.Count, pending.Count, snoozed.Count, open.Count(item => item.Assignee == Session.UserId), open.Count(item => item.Assignee is null),
-                open.Count(item => item.Priority is ConversationPriority.Urgent or ConversationPriority.High));
-            recent = [.. open.Concat(pending).OrderByDescending(item => item.LastActivityAt).Take(6)];
-            foreach (var item in open.Concat(pending).Concat(snoozed))
+            // Counts come from reporting's open backlog (store-side); without reporting, one bounded page per count, shown as "N+".
+            async Task<Count> BoundedAsync(ConversationListQuery query) =>
+                await service.ListAsync(Actor, query, null, Aborted) is ConversationListPage page
+                    ? new Count(page.Conversations.Count, page.Conversations.Count + (page.NextCursor is null ? "" : "+")) : Count.Of(0);
+            var open = await OpenBacklogAsync() is { } backlog ? Count.Of(backlog) : await BoundedAsync(new ConversationListQuery(status: ConversationStatusKind.Open));
+            var mine = Session.UserId is not { } me ? Count.Of(0)
+                : await OpenBacklogAsync(new ReportFilter(agent: me)) is { } own ? Count.Of(own) : await BoundedAsync(new ConversationListQuery(status: ConversationStatusKind.Open, assignee: me));
+            var unassigned = await BoundedAsync(new ConversationListQuery(status: ConversationStatusKind.Open, unassigned: true));
+            var urgent = await OpenBacklogAsync(new ReportFilter(priority: ConversationPriority.Urgent)) is { } urgentCount && await OpenBacklogAsync(new ReportFilter(priority: ConversationPriority.High)) is { } highCount
+                ? Count.Of(urgentCount + highCount) : Count.Of(0);
+            stats = new Stats(open, mine, unassigned, urgent);
+            if (await service.ListAsync(Actor, new ConversationListQuery(status: ConversationStatusKind.Open, limit: 6), null, Aborted) is ConversationListPage recentPage)
+                recent = [.. recentPage.Conversations];
+            foreach (var item in recent ?? [])
                 conversations[item.Id] = item;
         }
 
         if (Service<ISlaService>() is { } sla && Session.CanAny(SlaPermissions.Read, AccessPermissions.ConversationRead))
             if (await sla.ListAsync(Actor, new SlaRiskQuery(SlaRiskFilter.AtRiskOrBreached, limit: 6), null, Aborted) is SlaValue<SlaRiskPage> page)
+            {
                 risk = [.. page.Value.Items];
+                if (Service<IConversationService>() is { } conversationService)
+                    foreach (var item in risk.Where(item => !conversations.ContainsKey(item.Conversation)))
+                        if (await conversationService.GetAsync(Actor, item.Conversation, Aborted) is ConversationView view)
+                            conversations[view.Id] = view;
+            }
 
         await LoadContactsAsync(conversations.Values.Select(item => item.Contact));
         await Session.LoadUsersAsync(conversations.Values.Select(item => item.Assignee));

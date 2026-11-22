@@ -1,5 +1,6 @@
 @inherits UiPageBase
 
+<AccessGate Denied="Denied">
 @if (role is null && Id != "new")
 {
     <StatePanel Icon="search-x" Title="Role not found" />
@@ -52,6 +53,7 @@ else
     </TfForm>
 }
 
+</AccessGate>
 @code {
     [Parameter] public string? Id { get; set; }
 
@@ -63,17 +65,13 @@ else
     protected override async Task OnInitializedAsync()
     {
         catalog = Service<IPermissionCatalog>()?.Definitions ?? [];
-        if (Id is null || Id == "new")
+        if (await AccessListAsync(administrator => administrator.ListRolesAsync(Actor, Aborted)) is not { } roles || Id is null || Id == "new")
             return;
-        if (BuiltInRoles.All.FirstOrDefault(item => item.Id.Value == Id) is { } builtInRole)
+        if (roles.FirstOrDefault(item => item.Role.Id.Value == Id) is { } found)
         {
-            role = builtInRole;
-            builtIn = true;
-        }
-        else if (Service<IAccessRoleStore>() is { } store && await store.GetAsync(Session.Scope, new RoleId(Id), Aborted) is { } stored)
-        {
-            role = stored.Role;
-            revision = stored.Revision;
+            role = found.Role;
+            revision = found.Revision;
+            builtIn = found.Revision is null;
         }
     }
 }

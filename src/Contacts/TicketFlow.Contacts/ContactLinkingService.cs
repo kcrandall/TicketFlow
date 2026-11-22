@@ -141,7 +141,8 @@ public sealed class ContactLinkingService : IContactLinkingService
             }
             var auditEvent = new ContactAuditEvent(Guid.CreateVersion7(), now, scope, ContactAuditKind.Linked, AccessActor.From(actor), subject.Id,
                 justification: request.Justification);
-            var batch = new ContactWriteBatch(puts: [new ContactPut(updated, subject.Revision)], changes: [Change(ContactChangeKind.Updated, subject.Id, now)], audit: auditEvent);
+            var batch = new ContactWriteBatch(puts: [new ContactPut(updated, subject.Revision)], changes: [Change(ContactChangeKind.Updated, subject.Id, now), Change(ContactChangeKind.IdentityLinked, subject.Id, now)],
+                audit: auditEvent);
             var result = await store.WriteAsync(scope, batch, cancellationToken).ConfigureAwait(false);
             switch (result)
             {
@@ -160,6 +161,9 @@ public sealed class ContactLinkingService : IContactLinkingService
 
         if (!await PermittedAsync(actor, ContactPermissions.Link, ContactAccess.Resource(holder), cancellationToken).ConfigureAwait(false))
             return ContactRefused.Forbidden;
+        // Like the auto-merge and accept paths: never combine two different verified accounts of one namespace.
+        if (SharesNamespaceWithOtherAccount(subject.Contact, holder.Contact))
+            return new ContactLinkConflict(ContactLinkConflictReason.OtherAccount, [subject.Id]);
         switch (await MergeAsync(actor, scope, holder, subject, request.Justification ?? LinkJustification, cancellationToken).ConfigureAwait(false))
         {
             case ContactMergedInto merged:
@@ -207,7 +211,8 @@ public sealed class ContactLinkingService : IContactLinkingService
         }
         var updated = stored.Contact.With(identities: stored.Contact.Identities.Where(identity => identity.Address != account.Address),
             updatedAt: Later(stored.Contact.UpdatedAt, now));
-        var batch = new ContactWriteBatch(puts: [new ContactPut(updated, expectedRevision)], changes: [Change(ContactChangeKind.Updated, contact, now)], audit: auditEvent);
+        var batch = new ContactWriteBatch(puts: [new ContactPut(updated, expectedRevision)], changes: [Change(ContactChangeKind.Updated, contact, now), Change(ContactChangeKind.IdentityUnlinked, contact, now)],
+            audit: auditEvent);
         switch (await store.WriteAsync(scope, batch, cancellationToken).ConfigureAwait(false))
         {
             case ContactWriteApplied applied:
@@ -287,7 +292,7 @@ public sealed class ContactLinkingService : IContactLinkingService
             if (!await PermittedAsync(actor, ContactPermissions.Create, ContactAccess.Resource(scope, contact), cancellationToken).ConfigureAwait(false)
                 || !await PermittedAsync(actor, ContactPermissions.Link, ContactAccess.Resource(scope, contact), cancellationToken).ConfigureAwait(false))
                 return ContactRefused.Forbidden;
-            var batch = new ContactWriteBatch(puts: [new ContactPut(contact, null)], changes: [Change(ContactChangeKind.Created, contact.Id, now)],
+            var batch = new ContactWriteBatch(puts: [new ContactPut(contact, null)], changes: [Change(ContactChangeKind.Created, contact.Id, now), Change(ContactChangeKind.IdentityLinked, contact.Id, now)],
                 audit: new ContactAuditEvent(Guid.CreateVersion7(), now, scope, ContactAuditKind.Linked, AccessActor.From(actor), contact.Id, count: identities.Count));
             switch (await store.WriteAsync(scope, batch, cancellationToken).ConfigureAwait(false))
             {
@@ -390,7 +395,9 @@ public sealed class ContactLinkingService : IContactLinkingService
 
     /// <summary>
     /// Applies the workspace policy to other contacts holding a claimed address: suggestions, or merges for candidates that satisfy
-    /// the auto-merge rules through verified claims. Claimed claims and verified holders only ever produce suggestions.
+    /// the auto-merge rules through verified claims. Verified holders only ever produce suggestions; claimed claims are ignored unless
+    /// the policy opts into claimed evidence (then they only suggest, and accepting needs explicit confirmation). Candidate access
+    /// checks share one <see cref="IAccessDecisionContext"/>.
     /// </summary>
     private async Task<StoredContact> ApplyPolicyAsync(PrincipalRef actor, TicketScope scope, StoredContact account, IReadOnlyList<CustomerClaim> claims,
         List<ContactMergedInto> merged, List<Guid> suggestions, CancellationToken cancellationToken)
@@ -400,9 +407,10 @@ public sealed class ContactLinkingService : IContactLinkingService
         var rules = (policy.Value as LinkingAutoMerge)?.Rules;
         if (policy.Value is LinkingOff)
             return account;
+        var includeClaimed = (policy.Value as LinkingSuggest)?.IncludeClaimedEvidence ?? (policy.Value as LinkingAutoMerge)?.IncludeClaimedEvidence ?? false;
 
         var candidates = new SortedDictionary<string, List<(ContactIdentityAddress Address, bool Qualifies)>>(StringComparer.Ordinal);
-        foreach (var claim in claims)
+        foreach (var claim in claims.Where(claim => claim.Verified || includeClaimed))
         {
             foreach (var owner in await store.FindByIdentityAsync(scope, claim.Address, cancellationToken).ConfigureAwait(false))
             {
@@ -414,6 +422,9 @@ public sealed class ContactLinkingService : IContactLinkingService
             }
         }
 
+        if (candidates.Count == 0)
+            return account;
+        var decisions = await evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Link], cancellationToken).ConfigureAwait(false);
         foreach (var (candidateId, evidence) in candidates.Take(IContactStore.MaximumIdentityOwners))
         {
             var candidate = await store.GetAsync(scope, new ContactId(candidateId), cancellationToken).ConfigureAwait(false);
@@ -428,10 +439,10 @@ public sealed class ContactLinkingService : IContactLinkingService
                 account = await store.GetAsync(scope, account.Id, cancellationToken).ConfigureAwait(false) ?? account;
                 continue;
             }
-            if (!await PermittedAsync(actor, ContactPermissions.Link, ContactAccess.Resource(candidate), cancellationToken).ConfigureAwait(false))
+            if (!(await decisions.DecideAsync(ContactPermissions.Link, ContactAccess.Resource(candidate), cancellationToken).ConfigureAwait(false)).IsPermitted)
                 continue;
             var pick = evidence.FirstOrDefault(item => item.Qualifies);
-            var address = pick.Address ?? evidence[0].Address;
+            var address = pick.Address ?? evidence.Select(item => item.Address).FirstOrDefault(item => claims.First(claim => claim.Address == item).Verified) ?? evidence[0].Address;
             var now = Now;
             var suggestion = new ContactLinkSuggestion(Guid.CreateVersion7(), candidate.Id, account.Id, address,
                 claims.First(claim => claim.Address == address).Verified, ContactLinkSuggestionStatus.Pending, now, now, AccessActor.From(actor));
@@ -497,13 +508,19 @@ public sealed class ContactLinkingService : IContactLinkingService
         return new ContactApplied<ContactLinkSuggestionPage>(new([.. page.Suggestions.Select(ContactLinkSuggestionView.From)], page.Next));
     }
 
-    public async Task<ContactLinkSuggestionAcceptResult> AcceptSuggestionAsync(PrincipalRef actor, Guid suggestion, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<ContactLinkSuggestionAcceptResult> AcceptSuggestionAsync(PrincipalRef actor, Guid suggestion, long expectedRevision, CancellationToken cancellationToken = default) =>
+        AcceptSuggestionAsync(actor, suggestion, expectedRevision, false, cancellationToken);
+
+    public async Task<ContactLinkSuggestionAcceptResult> AcceptSuggestionAsync(PrincipalRef actor, Guid suggestion, long expectedRevision, bool confirmClaimedEvidence,
+        CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         var (stored, candidate, account, refused) = await LoadPendingAsync(actor, scope, suggestion, expectedRevision, cancellationToken).ConfigureAwait(false);
         if (refused is not null)
             return refused;
+        if (!stored!.Suggestion.EvidenceVerified && !confirmClaimedEvidence)
+            return ContactRefused.Invalid("The suggestion rests on claimed (unverified) evidence; accept it with explicit confirmation.");
         if (candidate!.Contact.MergedInto is not null || account!.Contact.MergedInto is not null)
         {
             await DecideAsync(actor, scope, stored!, ContactLinkSuggestionStatus.Superseded, null, cancellationToken).ConfigureAwait(false);

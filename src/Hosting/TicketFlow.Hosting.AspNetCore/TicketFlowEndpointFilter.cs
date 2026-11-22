@@ -12,6 +12,9 @@ namespace TicketFlow.Hosting.AspNetCore;
 /// </summary>
 internal sealed class TicketFlowEndpointFilter : IEndpointFilter
 {
+    /// <summary>Header that marks a body-less POST as a deliberate API call (any value).</summary>
+    public const string RequestHeader = TicketFlowHttp.RequestHeader;
+
     public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
     {
         var http = context.HttpContext;
@@ -23,6 +26,11 @@ internal sealed class TicketFlowEndpointFilter : IEndpointFilter
             {
                 case TicketFlowActor { FailureStatus: > 0 } actor:
                     return TicketFlowHttp.Problem(actor.FailureStatus, actor.FailureCode ?? "unauthenticated");
+                case TicketFlowActor when HttpMethods.IsPost(http.Request.Method) && !IsJson(http.Request) && !http.Request.Headers.ContainsKey(RequestHeader):
+                    // A cross-site page can send a body-less or form POST without a CORS preflight; a JSON content type or a custom
+                    // header cannot be sent cross-origin without one, so cookie-authenticated hosts are not exposed to CSRF.
+                    return TicketFlowHttp.Problem(StatusCodes.Status400BadRequest, "json-or-header-required",
+                        [$"POST requests need a JSON body (Content-Type: application/json) or the {RequestHeader} header."]);
                 case TicketFlowPublicScope { FailureStatus: > 0 } scope:
                     return TicketFlowHttp.Problem(scope.FailureStatus, scope.FailureCode ?? "not-found");
             }
@@ -36,6 +44,10 @@ internal sealed class TicketFlowEndpointFilter : IEndpointFilter
             return TicketFlowHttp.Problem(StatusCodes.Status422UnprocessableEntity, "invalid", [Message(error)]);
         }
     }
+
+    private static bool IsJson(HttpRequest request) =>
+        request.ContentType is { } type && (type.StartsWith("application/json", StringComparison.OrdinalIgnoreCase)
+            || type.Contains("+json", StringComparison.OrdinalIgnoreCase));
 
     private static string Message(Exception error)
     {

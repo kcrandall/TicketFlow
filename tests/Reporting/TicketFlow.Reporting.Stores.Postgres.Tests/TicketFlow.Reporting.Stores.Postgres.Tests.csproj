@@ -18,5 +18,6 @@
   <ItemGroup>
     <!-- The in-memory feature fixture and projector scenarios, run here against the PostgreSQL reporting store. -->
     <Compile Include="../TicketFlow.Reporting.Tests/ReportingFixture.cs" Link="Shared/ReportingFixture.cs" />
+    <Compile Include="../TicketFlow.Reporting.Tests/ProjectorConcurrencyScenarios.cs" Link="Shared/ProjectorConcurrencyScenarios.cs" />
   </ItemGroup>
 </Project>

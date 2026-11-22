@@ -28,7 +28,7 @@ public sealed class PostHogEventSinkTests
     private static PostHogEventSink Sink(Recorder handler, PostHogDistinctIdStrategy strategy = PostHogDistinctIdStrategy.ContactId)
     {
         var options = new PostHogOptions { DistinctId = strategy };
-        options.Projects["default"] = new PostHogProject(new Uri("https://eu.i.posthog.com/"), "phc_test_key");
+        options.Projects["default"] = new PostHogProject(new Uri("https://eu.i.posthog.com/"), "phc_test_key", [new EventScopeRule(Scope.TenantId, workspaceId: Scope.WorkspaceId)]);
         return new PostHogEventSink(Options.Create(options), handler);
     }
 
@@ -63,7 +63,7 @@ public sealed class PostHogEventSinkTests
 
         var first = batch[0];
         Assert.AreEqual(IntegrationEventTypes.ConversationCreated, first.GetProperty("event").GetString());
-        Assert.AreEqual("ada", first.GetProperty("distinct_id").GetString());
+        Assert.AreEqual("contact:ada", first.GetProperty("distinct_id").GetString());
         Assert.AreEqual(created.Event.Event.Id.ToString("D"), first.GetProperty("uuid").GetString());
         Assert.AreEqual("2026-03-02T09:00:00.000000Z", first.GetProperty("timestamp").GetString());
         var properties = first.GetProperty("properties");
@@ -91,8 +91,37 @@ public sealed class PostHogEventSinkTests
         var masked = Rendered(contact, 2, EventPrivacy.Content, new EventContent(new ContactEventContent("Ada", []), ["contact.external-id"]));
         await sink.DeliverAsync(Delivery(withExternal, masked));
         var batch = handler.Requests.Single().Body.RootElement.GetProperty("batch");
-        Assert.AreEqual("user-42", batch[0].GetProperty("distinct_id").GetString());
-        Assert.AreEqual("ada", batch[1].GetProperty("distinct_id").GetString(), "Falls back to the contact id when the external id is masked.");
+        Assert.AreEqual("external:idp:user-42", batch[0].GetProperty("distinct_id").GetString());
+        Assert.AreEqual("contact:ada", batch[1].GetProperty("distinct_id").GetString(), "Falls back to the contact id when the external id is masked.");
+    }
+
+    [TestMethod]
+    public async Task ConversationEventsUseTheConversationContactConsistently()
+    {
+        var handler = new Recorder(HttpStatusCode.OK);
+        using var sink = Sink(handler, PostHogDistinctIdStrategy.ContactExternalId);
+        var sla = Rendered(new SlaBreachedData(new ConversationId("c1"), new InboxId("email"), "gold", "gold:1", "first-response", 1, TimeSpan.FromMinutes(30), Now), 1,
+            contact: new ContactId("ada"));
+        var related = new EventContent(null, [], new ContactEventContent("Ada", [new EventIdentity("external-user", "idp", "user-42", true)]));
+        var message = Rendered(new ConversationMessageSentData(new ConversationId("c1"), new InboxId("email"), new MessageId("m1"), new EventActor("user", "ann"), 2, "plain-text", 0),
+            2, EventPrivacy.Content, related, new ContactId("ada"));
+        var other = Rendered(new ContactCreatedData(new ContactId("user-42")), 3);
+        await sink.DeliverAsync(Delivery(sla, message, other));
+        var batch = handler.Requests.Single().Body.RootElement.GetProperty("batch");
+        Assert.AreEqual("contact:ada", batch[0].GetProperty("distinct_id").GetString(), "Metadata SLA events use the conversation's contact.");
+        Assert.AreEqual("external:idp:user-42", batch[1].GetProperty("distinct_id").GetString(), "Content events use the related contact's external id.");
+        Assert.AreEqual("contact:user-42", batch[2].GetProperty("distinct_id").GetString(), "Namespaces keep contact ids and external ids apart.");
+    }
+
+    [TestMethod]
+    public async Task OtherScopesCannotDeliverToAProject()
+    {
+        var handler = new Recorder(HttpStatusCode.OK);
+        using var sink = Sink(handler);
+        var rendered = Rendered(new ContactCreatedData(new ContactId("ada")), 1);
+        var foreign = new EventDelivery(Delivery(rendered).Subscription with { Scope = TestScopes.Create(tenantId: "other-tenant", workspaceId: "acme") }, [rendered], 1);
+        Assert.AreEqual("project-missing", ((EventSinkFailed)(await sink.DeliverAsync(foreign)).Value!).Code);
+        Assert.AreEqual(0, handler.Requests.Count);
     }
 
     [TestMethod]
@@ -112,12 +141,15 @@ public sealed class PostHogEventSinkTests
     public void TargetsNameConfiguredProjectsAndRegistrationWorks()
     {
         using var sink = Sink(new Recorder(HttpStatusCode.OK));
-        Assert.IsTrue(sink.IsValidTarget("default"));
-        Assert.IsFalse(sink.IsValidTarget("other"));
-        Assert.ThrowsExactly<ArgumentException>(() => new PostHogProject(new Uri("http://insecure.example.com/"), "phc"));
+        Assert.IsTrue(sink.IsValidTarget(Scope, "default"));
+        Assert.IsFalse(sink.IsValidTarget(Scope, "other"));
+        Assert.IsFalse(sink.IsValidTarget(TestScopes.Create(workspaceId: "other-workspace"), "default"), "Projects are allow-listed per workspace.");
+        Assert.IsFalse(sink.IsValidTarget(TestScopes.Create(tenantId: "other-tenant", workspaceId: "acme"), "default"), "Projects are allow-listed per tenant.");
+        Assert.ThrowsExactly<ArgumentException>(() => new PostHogProject(new Uri("http://insecure.example.com/"), "phc", [new EventScopeRule("tenant")]));
+        Assert.ThrowsExactly<ArgumentException>(() => new PostHogProject(new Uri("https://us.i.posthog.com/"), "phc", []));
 
         var services = new ServiceCollection();
-        services.AddTicketFlow().AddPostHogEvents(options => options.Projects["default"] = new PostHogProject(new Uri("https://us.i.posthog.com/"), "phc"));
+        services.AddTicketFlow().AddPostHogEvents(options => options.Projects["default"] = new PostHogProject(new Uri("https://us.i.posthog.com/"), "phc", [new EventScopeRule("tenant")]));
         using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true });
         Assert.AreEqual("posthog", provider.GetServices<IEventSink>().Single().Kind);
     }

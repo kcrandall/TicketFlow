@@ -16,8 +16,8 @@ public sealed record EventLogHead(long? First, long Last);
 /// rest get gapless sequences (head + 1, head + 2, …) in draft order. Concurrent appenders to one scope serialize, so sequences are never
 /// duplicated or skipped and per-source order is preserved.</item>
 /// <item><see cref="ReadAsync"/> returns retained events after a sequence in ascending order.</item>
-/// <item><see cref="PruneAsync"/> deletes, store-wide, events recorded before a cutoff (oldest first); heads never move backwards, so
-/// sequences are never reused.</item>
+/// <item><see cref="PruneAsync"/> deletes, store-wide, events recorded before a cutoff (in no guaranteed order); heads never move backwards,
+/// so sequences are never reused.</item>
 /// <item>Checkpoints are named per scope, compare-and-set (<c>expected</c> <see langword="null"/> means absent).</item>
 /// </list>
 /// </summary>
@@ -93,11 +93,13 @@ public union EventWriteResult<T>(EventWriteApplied<T>, EventWriteNotFound, Event
 /// <item><see cref="ClaimAsync"/> (store-wide) leases up to <c>limit</c> enabled subscriptions whose retry time has come, whose lease is free
 /// or expired and whose scope log head is beyond their cursor; every claim increments the fence. Concurrent claimers never receive the same
 /// subscription under a live lease.</item>
-/// <item><see cref="CompleteAsync"/>, <see cref="FailAsync"/> and <see cref="DeadLetterAsync"/> succeed only with the current fence while the
-/// lease is held, and release it. Completion and dead-lettering advance the cursor (never backwards) and reset attempts; dead-lettering
-/// records its letters atomically.</item>
-/// <item><see cref="ReplayAsync"/> rewinds the cursor, resets attempts, deletes dead letters at or after the replay position and increments
-/// the fence (an in-flight lease can no longer complete).</item>
+/// <item><see cref="CompleteAsync"/>, <see cref="FailAsync"/>, <see cref="DeadLetterAsync"/> and <see cref="SuspendAsync"/> succeed only with
+/// the current fence while the lease is held, and release it. Completion and dead-lettering advance the cursor (never backwards), reset
+/// attempts and set the next claim time (callers pass now for round-robin fairness, later for caught-up subscriptions); dead-lettering
+/// records its letters atomically. Claims are ordered by claim time, so busy subscriptions rotate.</item>
+/// <item>Suspended subscriptions are never claimed; <see cref="UpdateAsync"/> and <see cref="ReplayAsync"/> lift a suspension.</item>
+/// <item><see cref="ReplayAsync"/> rewinds the cursor, resets attempts, deletes dead letters after the replay position, increments the replay
+/// generation and the fence (an in-flight lease can no longer complete).</item>
 /// </list>
 /// </summary>
 public interface IEventSubscriptionStore
@@ -125,13 +127,19 @@ public interface IEventSubscriptionStore
 
     Task<IReadOnlyList<EventDeliveryClaim>> ClaimAsync(DateTimeOffset now, int limit, TimeSpan lease, CancellationToken cancellationToken = default);
 
-    Task<bool> CompleteAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, DateTimeOffset? deliveredAt, CancellationToken cancellationToken = default);
+    /// <summary>Advances the cursor; <paramref name="note"/> (an error-code token, for example a retention gap) replaces the last error.</summary>
+    Task<bool> CompleteAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, DateTimeOffset? deliveredAt, DateTimeOffset availableAt, string? note = null,
+        CancellationToken cancellationToken = default);
 
     Task<bool> FailAsync(TicketScope scope, EventSubscriptionId id, long fence, int attempts, DateTimeOffset retryAt, string error, CancellationToken cancellationToken = default);
 
-    Task<bool> DeadLetterAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, IReadOnlyList<EventDeadLetter> letters, CancellationToken cancellationToken = default);
+    Task<bool> DeadLetterAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, IReadOnlyList<EventDeadLetter> letters, DateTimeOffset availableAt,
+        CancellationToken cancellationToken = default);
 
-    /// <summary>Rewinds delivery to events after <paramref name="afterSequence"/>; false when the subscription does not exist.</summary>
+    /// <summary>Suspends delivery with <paramref name="error"/> (attempts reset) until the subscription is updated or replayed.</summary>
+    Task<bool> SuspendAsync(TicketScope scope, EventSubscriptionId id, long fence, string error, CancellationToken cancellationToken = default);
+
+    /// <summary>Rewinds delivery to events after <paramref name="afterSequence"/>, lifting a suspension; false when the subscription does not exist.</summary>
     Task<bool> ReplayAsync(TicketScope scope, EventSubscriptionId id, long afterSequence, DateTimeOffset now, CancellationToken cancellationToken = default);
 
     /// <summary>Dead letters with a sequence greater than <paramref name="afterSequence"/>, ascending, at most <paramref name="limit"/> (1-200).</summary>

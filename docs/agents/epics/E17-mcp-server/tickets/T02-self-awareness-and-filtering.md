@@ -42,3 +42,5 @@ Implemented `whoami`, `list_toolsets`, `describe_tools`, `explain_access` (`Self
 describe_tools completeness and verdicts, explain_access reasons/masking/not-found, ShowAll marking and HideUnpermitted).
 
 - `dotnet test tests/Mcp/TicketFlow.Mcp.Tests -c Release` — 17 passed, 0 failed (2026-11-22).
+
+Review fixes: the probe uses `IAccessQueryPlanner.HeldAnywhereAsync`, so permissions held under any grant scope count; `whoami` reports `heldPermissions` and `workspacePermissions`; the list filter deep-clones tools and changes only `_meta`. Test: `SelfToolTests.TeamScopedCallersSeeThePermissionsTheyHoldOnTheirTeam`.

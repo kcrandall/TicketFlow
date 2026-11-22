@@ -44,3 +44,5 @@ unauthenticated/invalid/not-found mapping, toolset-unavailable, truncation and s
 
 Deferred: write tools for definitions (rules, macros, SLA/routing policies, roles, field policies), conversation/article resources and
 prompts.
+
+Review fixes: `AllToolsTests.EveryToolIsCalledByNameAndReturnsItsDeclaredOutputShape` calls all 70 tools (assist on its authorization path; no model provider is configured) and checks results against each `outputSchema`. `EveryDeclaredPermissionIsWhatTheServiceEnforces` grants a role holding every catalog permission except the tool's declared ones and expects `forbidden` (or an empty, Access-filtered list). `ToolTests.CustomerAuthoredTextIsDelimitedAsUntrustedAndTheRuleIsStated` covers the untrusted wrapping. `dotnet test tests/Mcp/TicketFlow.Mcp.Tests -c Release` — 21 passed.

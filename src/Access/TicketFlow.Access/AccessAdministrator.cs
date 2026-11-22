@@ -313,6 +313,42 @@ public sealed class AccessAdministrator : IAccessAdministrator
     private static bool InActorScope(PrincipalRef actor, AccessGrant grant) =>
         grant.Partition == AccessPartition.From(actor.Scope) && (grant.Workspace is not { } workspace || workspace == actor.Scope.WorkspaceId);
 
+    public async Task<AccessListResult<IReadOnlyList<AccessRoleListing>>> ListRolesAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
+    {
+        RequireActor(actor);
+        if (await AuthorizeAsync(actor, AccessPermissions.AccessManage, new AccessResource(actor.Scope), cancellationToken).ConfigureAwait(false) is { } refusal)
+            return new AccessChangeRefused(refusal.Reason, refusal.Errors);
+        var custom = await roles.ListAsync(actor.Scope, cancellationToken).ConfigureAwait(false);
+        return new AccessListed<IReadOnlyList<AccessRoleListing>>([.. BuiltInRoles.All.Select(role => new AccessRoleListing(role, null)),
+            .. custom.Select(stored => new AccessRoleListing(stored.Role, stored.Revision))]);
+    }
+
+    public async Task<AccessListResult<IReadOnlyList<StoredAccessGrant>>> ListGrantsAsync(PrincipalRef actor, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default)
+    {
+        RequireActor(actor);
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, AccessLimits.MaximumTargetPage);
+        if (target is TenantGrantScope)
+            return new AccessChangeRefused(AccessChangeRefusal.Invalid, ["Tenant grants are not listed by target."]);
+        AccessGrantTargets.Validate(target, limit, after);
+        if (target is WorkspaceGrantScope workspace && workspace.Workspace != actor.Scope.WorkspaceId
+            || target is TeamGrantScope team && team.Workspace != actor.Scope.WorkspaceId
+            || target is InboxGrantScope inbox && inbox.Workspace != actor.Scope.WorkspaceId)
+            return new AccessChangeRefused(AccessChangeRefusal.Forbidden, ["The actor is not authorized."]);
+        if (await AuthorizeAsync(actor, AccessPermissions.AccessManage, AccessEngine.Target(actor.Scope, target), cancellationToken).ConfigureAwait(false) is { } refusal)
+            return new AccessChangeRefused(refusal.Reason, refusal.Errors);
+        return new AccessListed<IReadOnlyList<StoredAccessGrant>>(await grants.ListForTargetAsync(AccessPartition.From(actor.Scope), target, limit, after, cancellationToken).ConfigureAwait(false));
+    }
+
+    public async Task<AccessListResult<IReadOnlyList<StoredAccessFieldPolicy>>> ListFieldPoliciesAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
+    {
+        RequireActor(actor);
+        if (await AuthorizeAsync(actor, AccessPermissions.AccessManage, new AccessResource(actor.Scope), cancellationToken).ConfigureAwait(false) is { } refusal)
+            return new AccessChangeRefused(refusal.Reason, refusal.Errors);
+        return new AccessListed<IReadOnlyList<StoredAccessFieldPolicy>>(await policies.ListAsync(actor.Scope, cancellationToken).ConfigureAwait(false));
+    }
+
     private static AccessChangeRefused Refused(IReadOnlyList<string> errors, AccessDenialReason reason) =>
         new(AccessChangeRefusal.Forbidden, errors);
 

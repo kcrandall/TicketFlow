@@ -4,10 +4,12 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Time.Testing;
 using TicketFlow.Access;
+using TicketFlow.Automation;
 using TicketFlow.Contacts;
 using TicketFlow.Conversations;
 using TicketFlow.Core;
 using TicketFlow.Hosting.Worker.StoreContracts;
+using TicketFlow.Sla;
 using TicketFlow.Surveys;
 using TicketFlow.Testing;
 using TicketFlow.Workspaces;
@@ -99,7 +101,9 @@ public sealed class WorkerLoopTests
         Assert.AreEqual(TicketFlowLoopStatus.NotConfigured, health.Find(TicketFlowLoops.Outbox)!.Status);
         Assert.AreEqual(TicketFlowLoopStatus.NotConfigured, health.Find(TicketFlowLoops.SurveyDispatch)!.Status);
         Assert.AreEqual(TicketFlowLoopStatus.Disabled, health.Find(TicketFlowLoops.LiveChatPruning)!.Status);
-        Assert.AreEqual(10, health.Loops.Count);
+        Assert.AreEqual(15, health.Loops.Count);
+        Assert.AreEqual(TicketFlowLoopStatus.NotConfigured, health.Find(TicketFlowLoops.EventDelivery)!.Status);
+        Assert.AreEqual(TicketFlowLoopStatus.NotConfigured, health.Find(TicketFlowLoops.ReportingRetention)!.Status);
         await host.StopAsync();
     }
 
@@ -151,19 +155,93 @@ public sealed class WorkerLoopTests
             {
                 options.Jitter = 0;
                 options.SurveyDispatch.Interval = TimeSpan.FromMilliseconds(20);
-                options.SurveyDispatch.InitialBackoff = TimeSpan.FromMilliseconds(20);
+                options.SurveyDispatch.InitialBackoff = TimeSpan.FromSeconds(30);
+                options.UnhealthyAfterFailures = 1;
             });
         builder.Services.AddSingleton<ISurveyDispatcher>(dispatcher);
+        builder.Services.AddHealthChecks().AddTicketFlowWorkers();
         using var host = builder.Build();
         var settings = host.Services.GetRequiredService<IWorkspaceSettingsStore>();
         foreach (var workspace in new[] { "ws-1", "ws-2", "ws-3" })
             await settings.CreateAsync(TestScopes.Create(workspaceId: workspace), new WorkspaceSettings(workspace, "en", "UTC"));
         await host.StartAsync();
         var health = host.Services.GetRequiredService<TicketFlowWorkerHealth>();
-        await WaitUntilAsync(() => dispatcher.Visits.Count(visit => visit == "ws-3") >= 2);
+        await WaitUntilAsync(() => dispatcher.Visits.Count(visit => visit == "ws-3") >= 5);
         CollectionAssert.IsSubsetOf(new[] { "ws-1", "ws-3" }, dispatcher.Visits.ToArray());
-        Assert.IsGreaterThan(0, health.Find(TicketFlowLoops.SurveyDispatch)!.ConsecutiveFailures, "A failing workspace is reported.");
+        var state = health.Find(TicketFlowLoops.SurveyDispatch)!;
+        Assert.AreEqual(0, state.ConsecutiveFailures, "Item failures never fail (and back off) the whole loop.");
+        await WaitUntilAsync(() => health.Find(TicketFlowLoops.SurveyDispatch)!.LastItemFailures > 0 || dispatcher.FailedAttempts > 0);
+        Assert.IsLessThan(dispatcher.Visits.Count(visit => visit == "ws-3"), dispatcher.FailedAttempts, "The failing workspace is backed off on its own.");
+        var report = await host.Services.GetRequiredService<HealthCheckService>().CheckHealthAsync();
+        Assert.AreNotEqual(HealthStatus.Unhealthy, report.Status, "Isolated workspace failures degrade, never fail, health.");
         await host.StopAsync();
+    }
+
+    [TestMethod]
+    public async Task CappedRunsContinueWhereThePreviousRunStoppedAndWrap()
+    {
+        var dispatcher = new RecordingDispatcher();
+        var builder = Host.CreateApplicationBuilder();
+        builder.Services.AddTicketFlow()
+            .AddWorkspaces().AddInMemoryWorkspaceStores()
+            .AddTicketFlowWorkers(options =>
+            {
+                options.Jitter = 0;
+                options.MaximumWorkspacesPerRun = 2;
+                options.SurveyDispatch.Interval = TimeSpan.FromMilliseconds(20);
+            });
+        builder.Services.AddSingleton<ISurveyDispatcher>(dispatcher);
+        using var host = builder.Build();
+        var settings = host.Services.GetRequiredService<IWorkspaceSettingsStore>();
+        var workspaces = Enumerable.Range(1, 5).Select(index => $"ws-{index}").ToList();
+        foreach (var workspace in workspaces)
+            await settings.CreateAsync(TestScopes.Create(workspaceId: workspace), new WorkspaceSettings(workspace, "en", "UTC"));
+        await host.StartAsync();
+        await WaitUntilAsync(() => dispatcher.Visits.Count >= 12);
+        await host.StopAsync();
+        var visits = dispatcher.Visits.ToList();
+        CollectionAssert.AreEquivalent(workspaces, visits.Take(5).ToList(), "Consecutive capped runs cover every workspace before revisiting any.");
+        CollectionAssert.AreEquivalent(workspaces, visits.Skip(5).Take(5).ToList(), "The position wraps to the beginning.");
+    }
+
+    [TestMethod]
+    public async Task LoopsWithoutACompletedRunForSeveralIntervalsDegradeHealth()
+    {
+        var time = new FakeTimeProvider(TestClock.DefaultStart);
+        var builder = Host.CreateApplicationBuilder();
+        builder.Services.AddSingleton<TimeProvider>(time);
+        builder.Services.AddSingleton(new Counter());
+        builder.Services.AddTicketFlow().AddTicketFlowWorkerLoop<Counter>("stuck", async (_, _, cancellationToken) =>
+        {
+            await Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        });
+        builder.Services.Configure<TicketFlowWorkerOptions>(options => options.Custom["stuck"] = new TicketFlowLoopOptions { Interval = TimeSpan.FromSeconds(30) });
+        builder.Services.AddHealthChecks().AddTicketFlowWorkers();
+        using var host = builder.Build();
+        await host.StartAsync();
+        var checks = host.Services.GetRequiredService<HealthCheckService>();
+        await WaitUntilAsync(() => host.Services.GetRequiredService<TicketFlowWorkerHealth>().Find("stuck")!.Status == TicketFlowLoopStatus.Running);
+        Assert.AreEqual(HealthStatus.Healthy, (await checks.CheckHealthAsync()).Status);
+        time.Advance(TimeSpan.FromMinutes(3));
+        Assert.AreEqual(HealthStatus.Degraded, (await checks.CheckHealthAsync()).Status, "Five intervals without a completed run is stale.");
+        await host.StopAsync();
+    }
+
+    [TestMethod]
+    public async Task MismatchedSlaWorkerIdentitiesFailStartup()
+    {
+        var builder = Host.CreateApplicationBuilder();
+        builder.Services.AddTicketFlow().AddSla().AddAutomation(options => options.SlaWorkerClientId = new ApiClientId("other-sla")).AddTicketFlowWorkers(options =>
+        {
+            foreach (var loop in new[] { options.SlaTimers, options.AutomationSchedules, options.AutomationContacts })
+                loop.Enabled = false;
+        });
+        using var host = builder.Build();
+        var error = await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => host.StartAsync());
+        Assert.Contains("AutomationOptions.SlaWorkerClientId", error.Message);
+        var ids = TicketFlowServiceIdentities.Collect(host.Services);
+        CollectionAssert.IsSubsetOf(new[] { new ApiClientId("sla-worker"), new ApiClientId("automation-worker"), new ApiClientId("other-sla") }, ids.ToArray());
     }
 
     [TestMethod]
@@ -252,10 +330,17 @@ public sealed class WorkerLoopTests
 
         public ConcurrentQueue<string> Visits { get; } = new();
 
+        private int failed;
+
+        public int FailedAttempts => Volatile.Read(ref failed);
+
         public Task<SurveyDispatchSummary> DispatchDueAsync(TicketScope scope, int limit = 100, CancellationToken cancellationToken = default)
         {
             if (scope.WorkspaceId.Value == FailingWorkspace)
+            {
+                Interlocked.Increment(ref failed);
                 throw new InvalidOperationException("boom");
+            }
             Visits.Enqueue(scope.WorkspaceId.Value);
             return Task.FromResult(new SurveyDispatchSummary(0, 0, 0, 0));
         }

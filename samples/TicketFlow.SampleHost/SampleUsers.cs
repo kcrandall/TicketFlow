@@ -26,6 +26,13 @@ internal sealed class SampleUserDirectory : ITicketFlowUserDirectory
 {
     public ValueTask<TicketFlowUserProfile?> FindAsync(TicketScope scope, UserId user, CancellationToken cancellationToken = default) =>
         ValueTask.FromResult(SampleUsers.Find(user.Value) is { } found ? new TicketFlowUserProfile(found.DisplayName, found.Email) : null);
+
+    /// <summary>One lookup for every user a page shows (the UI calls this once per page).</summary>
+    public ValueTask<IReadOnlyDictionary<UserId, TicketFlowUserProfile>> FindManyAsync(TicketScope scope, IReadOnlyCollection<UserId> users, CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult<IReadOnlyDictionary<UserId, TicketFlowUserProfile>>(users.Distinct()
+            .Select(user => (user, found: SampleUsers.Find(user.Value)))
+            .Where(pair => pair.found is not null)
+            .ToDictionary(pair => pair.user, pair => new TicketFlowUserProfile(pair.found!.DisplayName, pair.found.Email)));
 }
 
 /// <summary>DEVELOPMENT ONLY sign-in page for the support UI: pick a seeded user; the choice is stored in the development cookie.</summary>

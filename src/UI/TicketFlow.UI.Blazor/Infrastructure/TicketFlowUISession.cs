@@ -18,6 +18,16 @@ public sealed record TicketFlowUserProfile(string DisplayName, string? Email = n
 public interface ITicketFlowUserDirectory
 {
     ValueTask<TicketFlowUserProfile?> FindAsync(TicketScope scope, UserId user, CancellationToken cancellationToken = default);
+
+    /// <summary>Profiles of several users in one call (pages resolve every visible user at once). Override for a batched lookup.</summary>
+    async ValueTask<IReadOnlyDictionary<UserId, TicketFlowUserProfile>> FindManyAsync(TicketScope scope, IReadOnlyCollection<UserId> users, CancellationToken cancellationToken = default)
+    {
+        var profiles = new Dictionary<UserId, TicketFlowUserProfile>();
+        foreach (var user in users)
+            if (await FindAsync(scope, user, cancellationToken).ConfigureAwait(false) is { } profile)
+                profiles[user] = profile;
+        return profiles;
+    }
 }
 
 public enum UiSessionState
@@ -125,9 +135,11 @@ public sealed class TicketFlowUISession
     {
         if (Service<ITicketFlowUserDirectory>() is not { } directory || scope is null)
             return;
-        foreach (var user in users.OfType<UserId>().Distinct())
-            if (!userNames.ContainsKey(user.Value) && await directory.FindAsync(scope, user, Aborted) is { } profile)
-                userNames[user.Value] = profile.DisplayName;
+        var missing = users.OfType<UserId>().Distinct().Where(user => !userNames.ContainsKey(user.Value)).ToList();
+        if (missing.Count == 0)
+            return;
+        foreach (var (user, profile) in await directory.FindManyAsync(scope, missing, Aborted))
+            userNames[user.Value] = profile.DisplayName;
     }
 
     public static string Initials(string name)
@@ -169,30 +181,21 @@ public sealed class TicketFlowUISession
             return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, scope, null, none, theme);
 
         var held = new HashSet<Permission>();
-        if (services.GetService<IAccessEvaluator>() is { } evaluator && services.GetService<IPermissionCatalog>() is { } catalog)
+        if (services.GetService<IPermissionCatalog>() is { } catalog)
         {
-            var resource = WorkspaceResources.Workspace(scope);
+            // A permission counts as held when any grant provides it on some resource (workspace, team or inbox grant), so
+            // team- and inbox-scoped agents see their sections. Services still authorize every resource.
             foreach (var chunk in catalog.Definitions.Where(definition => !definition.IsSensitive).Select(definition => definition.Permission).Chunk(DecisionBatch))
-            {
-                var context = await evaluator.LoadDecisionContextAsync(principal, scope, chunk, http.RequestAborted);
-                foreach (var permission in chunk)
-                    if ((await context.DecideAsync(permission, resource, http.RequestAborted)).IsPermitted)
-                        held.Add(permission);
-            }
-            // Every decision for a sensitive permission is audited, so their snapshot is cached per principal for
-            // SensitivePermissionCacheDuration (navigation gating only; the services still authorize each call).
+                held.UnionWith(await HeldAsync(services, principal, scope, chunk, http.RequestAborted));
+            // Every plan for a sensitive permission is audited, so their snapshot is cached per principal for
+            // SensitivePermissionCacheDuration (navigation gating only; pages and services re-check with fresh decisions).
             var cache = services.GetRequiredService<UiSensitivePermissionCache>();
             var key = UiSensitivePermissionCache.Key(principal);
             if (!cache.TryGet(key, out var sensitive))
             {
                 var probed = new HashSet<Permission>();
                 foreach (var chunk in catalog.Definitions.Where(definition => definition.IsSensitive).Select(definition => definition.Permission).Chunk(DecisionBatch))
-                {
-                    var context = await evaluator.LoadDecisionContextAsync(principal, scope, chunk, http.RequestAborted);
-                    foreach (var permission in chunk)
-                        if ((await context.DecideAsync(permission, resource, http.RequestAborted)).IsPermitted)
-                            probed.Add(permission);
-                }
+                    probed.UnionWith(await HeldAsync(services, principal, scope, chunk, http.RequestAborted));
                 sensitive = probed;
                 cache.Set(key, probed, options.SensitivePermissionCacheDuration);
             }
@@ -201,6 +204,25 @@ public sealed class TicketFlowUISession
         var session = new TicketFlowUISession(http, options, UiSessionState.Ready, scope, principal, held, theme);
         await session.LoadUsersAsync([session.UserId]);
         return session;
+    }
+
+    /// <summary>
+    /// Permissions held on any resource of the scope: <see cref="IAccessQueryPlanner.HeldAnywhereAsync"/> (one grant load per batch) when
+    /// a planner is registered, otherwise workspace-level decisions.
+    /// </summary>
+    private static async Task<IReadOnlySet<Permission>> HeldAsync(IServiceProvider services, PrincipalRef principal, TicketScope scope, Permission[] permissions, CancellationToken cancellationToken)
+    {
+        if (services.GetService<IAccessQueryPlanner>() is { } planner)
+            return await planner.HeldAnywhereAsync(principal, scope, permissions, cancellationToken);
+        var held = new HashSet<Permission>();
+        if (services.GetService<IAccessEvaluator>() is not { } evaluator)
+            return held;
+        var context = await evaluator.LoadDecisionContextAsync(principal, scope, permissions, cancellationToken);
+        var resource = WorkspaceResources.Workspace(scope);
+        foreach (var permission in permissions)
+            if ((await context.DecideAsync(permission, resource, cancellationToken)).IsPermitted)
+                held.Add(permission);
+        return held;
     }
 }
 
@@ -219,7 +241,7 @@ internal static class UiUrls
     public static string SafeReturn(string basePath, string? candidate)
     {
         var root = basePath == "/" ? "/" : basePath;
-        if (string.IsNullOrEmpty(candidate) || !candidate.StartsWith('/') || candidate.StartsWith("//", StringComparison.Ordinal) || candidate.Contains('\\')
+        if (string.IsNullOrEmpty(candidate) || candidate.Any(character => character < 0x20 || character == 0x7f) || !candidate.StartsWith('/') || candidate.StartsWith("//", StringComparison.Ordinal) || candidate.Contains('\\')
             || !(candidate == root || candidate.StartsWith(root == "/" ? "/" : root + "/", StringComparison.Ordinal) || candidate.StartsWith(root + "?", StringComparison.Ordinal)))
             return root;
         return candidate;

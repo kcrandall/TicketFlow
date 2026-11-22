@@ -52,3 +52,5 @@ Verification commands (run from the repository root, 2026-11-22):
 - `bash scripts/verify-package-metadata.sh` — fails only on a concurrent E17 project (`src/Mcp/TicketFlow.Mcp`) not yet in the solution.
 
 Post-ticket parallel reviews have not been run yet.
+
+Review fixes (2026-11-22): see the [epic verification record](../PLAN.md#review-fixes-2026-11-22-after-commit-4574992).

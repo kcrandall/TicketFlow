@@ -22,7 +22,13 @@ using TicketFlow.HelpCenter.Stores.Postgres;
 using TicketFlow.Hosting.AspNetCore;
 using TicketFlow.Hosting.Worker;
 using TicketFlow.Hosting.Worker.Stores.Postgres;
+using System.Threading.RateLimiting;
+using TicketFlow.Events;
+using TicketFlow.Events.Stores.Postgres;
+using TicketFlow.Identity;
+using TicketFlow.Identity.Stores.Postgres;
 using TicketFlow.Integrations.IdentityFlow;
+using TicketFlow.Integrations.IdentityFlow.SignalR;
 using TicketFlow.Integrations.Surveys;
 using TicketFlow.Mcp;
 using TicketFlow.Mcp.AspNetCore;
@@ -78,14 +84,19 @@ public static class SampleHostApp
                     options.TokenKey = Convert.FromBase64String(key);
             })
             .AddConversationSurveys()
-            .AddReporting(options => options.SlaWorkerClientId = new ApiClientId("sla-worker"))
+            .AddReporting()
+            .AddEvents()
+            .AddStaffIdentity()
             .AddChannels(options => options.WorkerPrincipal = scope => new ApiClientPrincipal(scope, SampleSeeder.ChannelWorker))
             .AddRealtime()
             .AddLiveChat()
             .AddTicketFlowSignalR(options => options.VisitorPartition = settings.Partition)
             .AddTicketFlowEndpoints(options => options.Partition = settings.Partition)
             .AddTicketFlowOpenApi()
-            .AddIdentityFlowPrincipals();
+            .AddIdentityFlowRealtimePrincipals();
+        // Callers mapped from IdentityFlow can never become one of TicketFlow's own worker clients.
+        services.AddOptions<IdentityFlowPrincipalOptions>().PostConfigure<IServiceProvider>((options, provider) =>
+            options.ReservedApiClientIds.UnionWith(TicketFlowServiceIdentities.Collect(provider).Select(id => id.Value)));
         if (settings.UsePostgres)
         {
             var connection = configuration.GetConnectionString("TicketFlow") ?? throw new InvalidOperationException("ConnectionStrings:TicketFlow is required for Postgres storage.");
@@ -95,13 +106,14 @@ public static class SampleHostApp
                 .AddPostgresConversationStores(dataSource).AddPostgresRoutingStores(dataSource).AddPostgresSlaStores(dataSource)
                 .AddPostgresAutomationStores(dataSource).AddPostgresHelpCenterStores(dataSource).AddPostgresSurveyStores(dataSource)
                 .AddPostgresChannelStores(dataSource).AddPostgresLiveChatStores(dataSource).AddPostgresWorkerCheckpoints(dataSource)
-                .AddPostgresReportingStores(dataSource);
+                .AddPostgresReportingStores(dataSource).AddPostgresStaffIdentityStores(dataSource).AddPostgresEventStores(dataSource);
         }
         else
         {
             ticketFlow.AddInMemoryAccessStores().AddInMemoryWorkspaceStores().AddInMemoryContactStores().AddInMemoryConversationStores()
                 .AddInMemoryRoutingStores().AddInMemorySlaStores().AddInMemoryAutomationStores().AddInMemoryHelpCenterStores()
-                .AddInMemorySurveyStores().AddInMemoryChannelStores().AddInMemoryLiveChatStores().AddInMemoryReportingStores();
+                .AddInMemorySurveyStores().AddInMemoryChannelStores().AddInMemoryLiveChatStores().AddInMemoryReportingStores()
+                .AddInMemoryStaffIdentityStores().AddInMemoryEventStores();
         }
         ticketFlow.AddTicketFlowWorkers();
         if (configuration["IdentityFlow:VisitorTokens:Authority"] is { Length: > 0 } authority)
@@ -114,7 +126,7 @@ public static class SampleHostApp
         services.AddSingleton<ISurveyInvitationSender, DevelopmentSurveyInvitationSender>();
 
         // The support UI (static SSR Blazor) at /support. It inherits whatever authentication the host uses (here the development
-        // handler) and maps users with the same ITicketFlowPrincipalResolver as the REST endpoints (AddIdentityFlowPrincipals).
+        // handler) and maps users with the same ITicketFlowPrincipalResolver as the REST endpoints (AddIdentityFlowRealtimePrincipals).
         var developmentAuthentication = configuration.GetValue<bool>("TicketFlow:DevelopmentAuthentication");
         services.AddTicketFlowBlazorUI(options =>
         {
@@ -143,7 +155,7 @@ public static class SampleHostApp
             health.AddCheck<PostgresHealthCheck>("postgres");
 
         // Authentication. The development handler is for local use only and refuses to run outside Development. Production hosts plug in
-        // IdentityFlow (cookies, JWT bearer, API keys, PATs); AddIdentityFlowPrincipals() maps those users to TicketFlow principals.
+        // IdentityFlow (cookies, JWT bearer, API keys, PATs); AddIdentityFlowRealtimePrincipals() maps those users to TicketFlow principals.
         if (configuration.GetValue<bool>("TicketFlow:DevelopmentAuthentication"))
         {
             if (!builder.Environment.IsDevelopment())
@@ -154,11 +166,14 @@ public static class SampleHostApp
         else
             services.AddAuthentication();
         services.AddAuthorization();
-        services.AddRateLimiter(options => options.AddFixedWindowLimiter("ticketflow-anonymous", limiter =>
+        // Anonymous endpoints (public portal, survey responses, visitor hub, uploads) are limited per client IP. Behind a proxy, configure
+        // forwarded headers first so RemoteIpAddress is the client's address.
+        services.AddRateLimiter(options =>
         {
-            limiter.PermitLimit = 60;
-            limiter.Window = TimeSpan.FromMinutes(1);
-        }));
+            options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+            options.AddPolicy("ticketflow-anonymous", http => RateLimitPartition.GetFixedWindowLimiter(http.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions { PermitLimit = 60, Window = TimeSpan.FromMinutes(1) }));
+        });
         services.Configure<TicketFlowEndpointOptions>(options => options.AnonymousRateLimitingPolicy = "ticketflow-anonymous");
         services.AddSingleton(settings);
 
@@ -222,6 +237,8 @@ public static class SampleHostApp
             await services.GetRequiredService<PostgresLiveChatStore>().InitializeAsync(cancellationToken);
             await services.GetRequiredService<PostgresWorkerCheckpointStore>().InitializeAsync(cancellationToken);
             await services.GetRequiredService<PostgresReportingStore>().InitializeAsync(cancellationToken);
+            await services.GetRequiredService<PostgresStaffIdentityStore>().InitializeAsync(cancellationToken);
+            await services.GetRequiredService<PostgresEventStore>().InitializeAsync(cancellationToken);
         }
         if (seed || settings.SeedOnStartup)
             await SampleSeeder.SeedAsync(app.Services, settings, cancellationToken);

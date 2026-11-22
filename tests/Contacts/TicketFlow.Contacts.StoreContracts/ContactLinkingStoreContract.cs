@@ -106,4 +106,28 @@ public static class ContactLinkingStoreContract
         Assert.IsTrue(ContactStoreContract.Describe(await contacts.WriteAsync(scope, new ContactWriteBatch(deletes: [new ContactDelete(anon2!.Id, anon2.Revision)]))).StartsWith("applied", StringComparison.Ordinal));
         Assert.HasCount(2, (await primary.ListSuggestionsAsync(scope, new ContactLinkSuggestionQuery(), AllowAllFilter.Instance)).Suggestions);
     }
+
+    /// <summary>Retention over a store with no other suggestions: only decided suggestions older than the cutoff are pruned, oldest first.</summary>
+    public static async Task VerifyPruneAsync(IContactStore contacts, IContactLinkingStore store)
+    {
+        var scope = TestScopes.Create(workspaceId: "linking-prune");
+        foreach (var id in new[] { "p-1", "p-2", "p-3", "account" })
+            Assert.IsTrue(ContactStoreContract.Describe(await ContactStoreContract.CreateAsync(contacts, scope, ContactStoreContract.NewContact(id))).StartsWith("applied", StringComparison.Ordinal));
+        var old = Suggestion("p-1", "account");
+        var newer = Suggestion("p-2", "account");
+        var pending = Suggestion("p-3", "account");
+        foreach (var suggestion in new[] { old, newer, pending })
+            Assert.AreEqual("created", Describe(await store.CreateSuggestionAsync(scope, suggestion)));
+        Assert.AreEqual("applied", Describe(await store.UpdateSuggestionAsync(scope, old.Decide(ContactLinkSuggestionStatus.Rejected, Actor, ContactStoreContract.At.AddMinutes(1)), 1)));
+        Assert.AreEqual("applied", Describe(await store.UpdateSuggestionAsync(scope, newer.Decide(ContactLinkSuggestionStatus.Superseded, null, ContactStoreContract.At.AddMinutes(5)), 1)));
+
+        Assert.AreEqual(0, await store.PruneDecidedSuggestionsAsync(ContactStoreContract.At.AddMinutes(1), 100), "the cutoff is exclusive");
+        Assert.AreEqual(1, await store.PruneDecidedSuggestionsAsync(ContactStoreContract.At.AddDays(1), 1), "oldest first, bounded");
+        Assert.IsNull(await store.GetSuggestionAsync(scope, old.Id));
+        Assert.IsNotNull(await store.GetSuggestionAsync(scope, newer.Id));
+        Assert.AreEqual(1, await store.PruneDecidedSuggestionsAsync(ContactStoreContract.At.AddDays(1), 100));
+        Assert.AreEqual(0, await store.PruneDecidedSuggestionsAsync(DateTimeOffset.MaxValue, 100));
+        Assert.IsNotNull(await store.GetSuggestionAsync(scope, pending.Id), "pending suggestions are never pruned");
+        await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(() => store.PruneDecidedSuggestionsAsync(ContactStoreContract.At, 0));
+    }
 }

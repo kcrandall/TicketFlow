@@ -2,7 +2,7 @@
 
 Epic: [E7 — Live chat and realtime](../PLAN.md)
 
-Status: **Planned** (follow-up; not part of the E7 completion gate)
+Status: **Completed**
 
 ## Goal
 
@@ -37,4 +37,8 @@ E7 T01; a published outbox row contract from E5 (`ConversationOutboxRowCodec` or
 
 ## Risks and boundaries
 
-Outbox polling (`RealtimeOutboxHandler`) remains the default and is sufficient for one realtime node.
+Outbox polling (`RealtimeOutboxHandler`) remains the default for single-node deployments; `TicketFlow.Integrations.WalFlow` adds CDC fan-out and cross-node delivery.
+
+## Results
+
+Implemented `ConversationOutboxRowCodec` in `TicketFlow.Conversations.Abstractions` and `TicketFlow.Integrations.WalFlow` (2026-11-22): `WalFlowRealtimeSink` (`ISink`) decoding `tf_conversation_outbox` snapshot and streaming rows idempotently by `entry_id`, versioned v1 `RealtimePublicationEnvelope`, `CrossNodeRealtimeBus` over `IRealtimeBackplane`, and `PostgresRealtimeBackplane` (`LISTEN`/`NOTIFY`). Verified with `TicketFlow.Integrations.WalFlow.Tests` (5 passed on PostgreSQL 18 with `wal_level=logical`).

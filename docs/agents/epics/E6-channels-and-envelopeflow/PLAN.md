@@ -1,6 +1,6 @@
 # E6 — Channels and EnvelopeFlow integration
 
-Status: **Completed** (T07 mailbox channel deferred as a follow-up)
+Status: **Completed**
 
 Conversations receive and reply across channels: a provider-neutral channel contract, an inbound pipeline, an outbound
 dispatcher on the E5 outbox, delivery status, reply windows, a signed-webhook API channel and the EnvelopeFlow adapter
@@ -22,7 +22,7 @@ Outcome: Channel contract, EnvelopeFlow inbound/outbound adapter (email, SMS, Wh
 | [T04 — Generic API channel with signed webhooks](tickets/T04-api-channel.md) | Completed | E6 T03 |
 | [T05 — EnvelopeFlow integration](tickets/T05-envelopeflow-integration.md) | Completed | E6 T03, E12 |
 | [T06 — Survey resolution bridge and documentation](tickets/T06-survey-bridge-and-docs.md) | Completed | E6 T03, E12 |
-| [T07 — IMAP mailbox channel (follow-up)](tickets/T07-mailbox-channel.md) | Planned (follow-up) | E6 T03 |
+| [T07 — IMAP mailbox channel](tickets/T07-mailbox-channel.md) | Completed | E6 T03 |
 
 ## Verification record
 

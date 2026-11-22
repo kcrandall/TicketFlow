@@ -1,0 +1,156 @@
+using System.Collections.Immutable;
+using System.Text;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Npgsql;
+
+namespace TicketFlow.Integrations.WalFlow;
+
+/// <summary>
+/// PostgreSQL <c>LISTEN</c>/<c>NOTIFY</c> implementation of <see cref="IRealtimeBackplane"/>. Uses <c>pg_notify</c> for publishing
+/// and a dedicated <c>LISTEN</c> loop with automatic reconnect for receiving cross-node realtime envelopes. Call
+/// <see cref="StartAsync"/> (or run via a hosted service) before expecting remote notifications.
+/// </summary>
+public sealed class PostgresRealtimeBackplane : IRealtimeBackplane, IAsyncDisposable
+{
+    /// <summary>PostgreSQL <c>NOTIFY</c> hard payload limit is 8,000 bytes.</summary>
+    public const int PostgresNotifyLimitBytes = 7_900;
+
+    private readonly NpgsqlDataSource source;
+    private readonly WalFlowRealtimeOptions options;
+    private readonly ILogger<PostgresRealtimeBackplane>? logger;
+    private readonly CancellationTokenSource lifetime = new();
+    private ImmutableArray<Func<string, CancellationToken, Task>> handlers = [];
+    private Task? listenerLoop;
+    private int started;
+
+    public PostgresRealtimeBackplane(NpgsqlDataSource source, IOptions<WalFlowRealtimeOptions> options, ILogger<PostgresRealtimeBackplane>? logger = null)
+    {
+        this.source = source ?? throw new ArgumentNullException(nameof(source));
+        ArgumentNullException.ThrowIfNull(options);
+        this.options = options.Value;
+        this.options.Validate();
+        this.logger = logger;
+    }
+
+    /// <summary>Starts the background <c>LISTEN</c> connection and returns once <c>LISTEN</c> is registered on PostgreSQL.</summary>
+    public async Task StartAsync(CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.CompareExchange(ref started, 1, 0) != 0)
+            return;
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        listenerLoop = ListenLoopAsync(ready, lifetime.Token);
+        using var reg = cancellationToken.Register(() => ready.TrySetCanceled(cancellationToken));
+        await ready.Task.ConfigureAwait(false);
+    }
+
+    public async Task PublishAsync(string envelopeJson, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(envelopeJson);
+        if (Encoding.UTF8.GetByteCount(envelopeJson) > PostgresNotifyLimitBytes)
+        {
+            logger?.LogWarning("Skipped PostgreSQL NOTIFY broadcast exceeding {Limit} bytes.", PostgresNotifyLimitBytes);
+            return;
+        }
+        await using var command = source.CreateCommand("SELECT pg_notify(@channel, @payload)");
+        command.Parameters.AddWithValue("channel", options.PostgresNotifyChannel);
+        command.Parameters.AddWithValue("payload", envelopeJson);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public IDisposable Subscribe(Func<string, CancellationToken, Task> handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        ImmutableInterlocked.Update(ref handlers, list => list.Add(handler));
+        return new Subscription(this, handler);
+    }
+
+    private async Task ListenLoopAsync(TaskCompletionSource ready, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+                var queue = System.Threading.Channels.Channel.CreateBounded<string>(new System.Threading.Channels.BoundedChannelOptions(1024)
+                {
+                    SingleReader = true,
+                    FullMode = System.Threading.Channels.BoundedChannelFullMode.DropOldest,
+                });
+                connection.Notification += (_, args) => queue.Writer.TryWrite(args.Payload);
+                // Channel name is validated as a safe lowercase PG identifier in WalFlowRealtimeOptions.Validate().
+                await using (var listen = new NpgsqlCommand($"LISTEN {options.PostgresNotifyChannel}", connection))
+                    await listen.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                ready.TrySetResult();
+
+                var dispatch = DispatchQueueAsync(queue.Reader, cancellationToken);
+                try
+                {
+                    while (!cancellationToken.IsCancellationRequested)
+                        await connection.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    queue.Writer.TryComplete();
+                    await dispatch.ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                ready.TrySetCanceled(cancellationToken);
+                return;
+            }
+            catch (Exception error)
+            {
+                logger?.LogWarning("PostgreSQL realtime LISTEN connection failed with {Error}; reconnecting.", error.GetType().Name);
+                try
+                {
+                    await Task.Delay(options.ReconnectDelay, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    ready.TrySetCanceled(cancellationToken);
+                    return;
+                }
+            }
+        }
+    }
+
+    private async Task DispatchQueueAsync(System.Threading.Channels.ChannelReader<string> reader, CancellationToken cancellationToken)
+    {
+        await foreach (var payload in reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+        {
+            foreach (var handler in handlers)
+            {
+                try
+                {
+                    await handler(payload, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                }
+            }
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await lifetime.CancelAsync().ConfigureAwait(false);
+        if (listenerLoop is not null)
+        {
+            try
+            {
+                await listenerLoop.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+        lifetime.Dispose();
+    }
+
+    private sealed class Subscription(PostgresRealtimeBackplane backplane, Func<string, CancellationToken, Task> handler) : IDisposable
+    {
+        public void Dispose() => ImmutableInterlocked.Update(ref backplane.handlers, list => list.Remove(handler));
+    }
+}

@@ -23,8 +23,41 @@ public sealed class AutomationTools(TicketFlowToolContext context)
         [Description(WorkspaceHelp)] string? workspace = null,
         CancellationToken cancellationToken = default) =>
         context.RunAsync(workspace, async principal => Map(await context.Service<IAutomationRuleService>().ListAsync(principal, cancellationToken), list => new ToolList<AutomationRuleOutput>(
-            [.. list.Select(stored => new AutomationRuleOutput(stored.Rule.Id.Value, stored.Rule.Name, stored.Rule.Enabled, stored.Rule.Priority, stored.Revision,
-                Json(AutomationCodec.SerializeRule(stored.Rule))))])), cancellationToken);
+            [.. list.Select(RuleOutput)])), cancellationToken);
+
+    [McpServerTool(Name = "automation_create_rule", Title = "Create automation rule", Destructive = false, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(AutomationRuleOutput))]
+    [Description("Creates an automation rule from its versioned v1 definition JSON (sensitive: rules act with the automation client's grants).")]
+    [TicketFlowTool(P.AutomationManage)]
+    public Task<CallToolResult> CreateRule(
+        [Description("Rule id.")] string ruleId,
+        [Description("Versioned rule definition JSON (same format as automation_list_rules).")] string definitionJson,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await context.Service<IAutomationRuleService>().CreateAsync(principal,
+            AutomationCodec.DeserializeRule(new AutomationRuleId(ruleId), definitionJson), cancellationToken), RuleOutput), cancellationToken);
+
+    [McpServerTool(Name = "automation_update_rule", Title = "Update automation rule", Destructive = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(AutomationRuleOutput))]
+    [Description("Replaces an automation rule (fenced on expectedRevision) from its versioned v1 definition JSON.")]
+    [TicketFlowTool(P.AutomationManage)]
+    public Task<CallToolResult> UpdateRule(
+        [Description("Rule id.")] string ruleId,
+        [Description("Current rule revision.")] long expectedRevision,
+        [Description("Versioned rule definition JSON.")] string definitionJson,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await context.Service<IAutomationRuleService>().UpdateAsync(principal,
+            AutomationCodec.DeserializeRule(new AutomationRuleId(ruleId), definitionJson), expectedRevision, cancellationToken), RuleOutput), cancellationToken);
+
+    [McpServerTool(Name = "automation_delete_rule", Title = "Delete automation rule", Destructive = true, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(AutomationRuleOutput))]
+    [Description("Deletes an automation rule (fenced on expectedRevision).")]
+    [TicketFlowTool(P.AutomationManage)]
+    public Task<CallToolResult> DeleteRule(
+        [Description("Rule id.")] string ruleId,
+        [Description("Current rule revision.")] long expectedRevision,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await context.Service<IAutomationRuleService>().DeleteAsync(principal,
+            new AutomationRuleId(ruleId), expectedRevision, cancellationToken), RuleOutput), cancellationToken);
 
     [McpServerTool(Name = "automation_dry_run", Title = "Dry-run automation", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(DryRunOutput))]
     [Description("Evaluates automation rules against a live conversation for a hypothetical event without changing anything: which rules would match and what each action would do (rendered from what the caller may see)." + ToolViews.UntrustedNote)]
@@ -71,8 +104,41 @@ public sealed class AutomationTools(TicketFlowToolContext context)
         [Description(WorkspaceHelp)] string? workspace = null,
         CancellationToken cancellationToken = default) =>
         context.RunAsync(workspace, async principal => Map(await context.Service<IMacroService>().ListAsync(principal, cancellationToken), list => new ToolList<MacroOutput>(
-            [.. list.Select(stored => new MacroOutput(stored.Macro.Id.Value, stored.Macro.Name, stored.Macro.Description, TicketFlowToolJson.Token(stored.Macro.Visibility),
-                stored.Macro.Owner?.Value, stored.Revision, Json(AutomationCodec.SerializeMacro(stored.Macro))))])), cancellationToken);
+            [.. list.Select(MacroOutputOf)])), cancellationToken);
+
+    [McpServerTool(Name = "macros_create", Title = "Create macro", Destructive = false, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(MacroOutput))]
+    [Description("Creates a shared (macro:manage) or personal (macro:run) macro from its versioned v1 definition JSON.")]
+    [TicketFlowTool(P.MacroManage, P.MacroRun, AnyOf = true, Service = typeof(IMacroService))]
+    public Task<CallToolResult> CreateMacro(
+        [Description("Macro id.")] string macroId,
+        [Description("Versioned macro definition JSON (same format as macros_list).")] string definitionJson,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await context.Service<IMacroService>().CreateAsync(principal,
+            AutomationCodec.DeserializeMacro(new MacroId(macroId), definitionJson), cancellationToken), MacroOutputOf), cancellationToken);
+
+    [McpServerTool(Name = "macros_update", Title = "Update macro", Destructive = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(MacroOutput))]
+    [Description("Replaces a macro (fenced on expectedRevision) from its versioned v1 definition JSON.")]
+    [TicketFlowTool(P.MacroManage, P.MacroRun, AnyOf = true, Service = typeof(IMacroService))]
+    public Task<CallToolResult> UpdateMacro(
+        [Description("Macro id.")] string macroId,
+        [Description("Current macro revision.")] long expectedRevision,
+        [Description("Versioned macro definition JSON.")] string definitionJson,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await context.Service<IMacroService>().UpdateAsync(principal,
+            AutomationCodec.DeserializeMacro(new MacroId(macroId), definitionJson), expectedRevision, cancellationToken), MacroOutputOf), cancellationToken);
+
+    [McpServerTool(Name = "macros_delete", Title = "Delete macro", Destructive = true, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(MacroOutput))]
+    [Description("Deletes a macro (fenced on expectedRevision).")]
+    [TicketFlowTool(P.MacroManage, P.MacroRun, AnyOf = true, Service = typeof(IMacroService))]
+    public Task<CallToolResult> DeleteMacro(
+        [Description("Macro id.")] string macroId,
+        [Description("Current macro revision.")] long expectedRevision,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await context.Service<IMacroService>().DeleteAsync(principal,
+            new MacroId(macroId), expectedRevision, cancellationToken), MacroOutputOf), cancellationToken);
 
     [McpServerTool(Name = "macros_run", Title = "Run macro", Destructive = true, Idempotent = false, OpenWorld = true, UseStructuredContent = true, OutputSchemaType = typeof(MacroRunOutput))]
     [Description("Runs a macro on a conversation. Each action executes as the caller through the conversation service, so each action also needs the caller's own permission (for example conversation:reply for a reply action). Execution stops at the first refused or failed action.")]
@@ -99,10 +165,43 @@ public sealed class AutomationTools(TicketFlowToolContext context)
         {
             var after = cursor is null ? null : TicketFlowToolJson.DecodeCursor(cursor, 1)[0];
             return Map(await context.Service<ICannedResponseService>().ListAsync(principal, new CannedResponseQuery(prefix, after, limit), cancellationToken), page =>
-                new ToolPage<CannedResponseOutput>([.. page.Responses.Select(stored => new CannedResponseOutput(stored.Response.Id.Value, stored.Response.Shortcut,
-                    stored.Response.Title, stored.Response.DefaultLocale, [.. stored.Response.Variants.Select(variant => variant.Locale)], stored.Revision))],
+                new ToolPage<CannedResponseOutput>([.. page.Responses.Select(CannedOutputOf)],
                     page.NextAfterShortcut is { } next ? TicketFlowToolJson.EncodeCursor(next) : null));
         }, cancellationToken);
+
+    [McpServerTool(Name = "canned_responses_create", Title = "Create canned response", Destructive = false, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(CannedResponseOutput))]
+    [Description("Creates a canned response from its versioned v1 definition JSON.")]
+    [TicketFlowTool(P.CannedResponseManage, Service = typeof(ICannedResponseService))]
+    public Task<CallToolResult> CreateCannedResponse(
+        [Description("Canned response id.")] string responseId,
+        [Description("Versioned canned response definition JSON.")] string definitionJson,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await context.Service<ICannedResponseService>().CreateAsync(principal,
+            AutomationCodec.DeserializeCannedResponse(new CannedResponseId(responseId), definitionJson), cancellationToken), CannedOutputOf), cancellationToken);
+
+    [McpServerTool(Name = "canned_responses_update", Title = "Update canned response", Destructive = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(CannedResponseOutput))]
+    [Description("Replaces a canned response (fenced on expectedRevision) from its versioned v1 definition JSON.")]
+    [TicketFlowTool(P.CannedResponseManage, Service = typeof(ICannedResponseService))]
+    public Task<CallToolResult> UpdateCannedResponse(
+        [Description("Canned response id.")] string responseId,
+        [Description("Current canned response revision.")] long expectedRevision,
+        [Description("Versioned canned response definition JSON.")] string definitionJson,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await context.Service<ICannedResponseService>().UpdateAsync(principal,
+            AutomationCodec.DeserializeCannedResponse(new CannedResponseId(responseId), definitionJson), expectedRevision, cancellationToken), CannedOutputOf), cancellationToken);
+
+    [McpServerTool(Name = "canned_responses_delete", Title = "Delete canned response", Destructive = true, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(CannedResponseOutput))]
+    [Description("Deletes a canned response (fenced on expectedRevision).")]
+    [TicketFlowTool(P.CannedResponseManage, Service = typeof(ICannedResponseService))]
+    public Task<CallToolResult> DeleteCannedResponse(
+        [Description("Canned response id.")] string responseId,
+        [Description("Current canned response revision.")] long expectedRevision,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await context.Service<ICannedResponseService>().DeleteAsync(principal,
+            new CannedResponseId(responseId), expectedRevision, cancellationToken), CannedOutputOf), cancellationToken);
 
     [McpServerTool(Name = "canned_responses_render", Title = "Render canned response", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(RenderedCannedResponseOutput))]
     [Description("Renders a canned response for a conversation (variables filled from what the caller may see; masked values are never substituted). Nothing is sent: reply with conversations_reply." + ToolViews.UntrustedNote)]
@@ -124,6 +223,17 @@ public sealed class AutomationTools(TicketFlowToolContext context)
         AutomationActionRefused refused => new("refused", null, TicketFlowToolJson.Token(refused.Reason)),
         AutomationActionFailed failed => new("failed", null, failed.Code),
     };
+
+    private static AutomationRuleOutput RuleOutput(StoredAutomationRule stored) =>
+        new(stored.Rule.Id.Value, stored.Rule.Name, stored.Rule.Enabled, stored.Rule.Priority, stored.Revision, Json(AutomationCodec.SerializeRule(stored.Rule)));
+
+    private static MacroOutput MacroOutputOf(StoredMacro stored) =>
+        new(stored.Macro.Id.Value, stored.Macro.Name, stored.Macro.Description, TicketFlowToolJson.Token(stored.Macro.Visibility),
+            stored.Macro.Owner?.Value, stored.Revision, Json(AutomationCodec.SerializeMacro(stored.Macro)));
+
+    private static CannedResponseOutput CannedOutputOf(StoredCannedResponse stored) =>
+        new(stored.Response.Id.Value, stored.Response.Shortcut, stored.Response.Title, stored.Response.DefaultLocale,
+            [.. stored.Response.Variants.Select(variant => variant.Locale)], stored.Revision);
 
     private static JsonElement Json(string json) => TicketFlowToolJson.Parse(json);
 

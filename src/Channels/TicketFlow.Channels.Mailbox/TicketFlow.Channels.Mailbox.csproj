@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>IMAP mailbox polling channel for TicketFlow: polls IMAP folders via MailKit, parses MIME messages with Message-Id/In-Reply-To/References threading, delegates attachments to an application-owned storage seam, and tracks durable UID/UIDVALIDITY checkpoints with Message-Id deduplication.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MailKit" />
+    <ProjectReference Include="../TicketFlow.Channels.Abstractions/TicketFlow.Channels.Abstractions.csproj" />
+    <ProjectReference Include="../../TicketFlow.Core/TicketFlow.Core.csproj" />
+  </ItemGroup>
+</Project>

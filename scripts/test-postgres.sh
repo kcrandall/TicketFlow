@@ -27,7 +27,7 @@ trap 'exit 143' TERM
 container_id="$(docker run --detach --rm --cidfile "$task_dir/container.cid" \
     --label "ticketflow.postgres-test=$task_id" --publish 127.0.0.1::5432 \
     --env POSTGRES_USER=ticketflow --env POSTGRES_PASSWORD=ticketflow-local-tests-only \
-    --env POSTGRES_DB=ticketflow_tests "$postgres_image")"
+    --env POSTGRES_DB=ticketflow_tests "$postgres_image" -c wal_level=logical -c max_replication_slots=8 -c max_wal_senders=4 -c max_connections=300)"
 postgres_port="$(docker port "$container_id" 5432/tcp)"
 postgres_port="${postgres_port##*:}"
 [[ "$postgres_port" =~ ^[0-9]+$ ]] || { echo "Cannot determine isolated PostgreSQL port." >&2; exit 1; }

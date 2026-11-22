@@ -86,6 +86,7 @@ public sealed class EventContentHydrator(IConversationService? conversations = n
                 case SlaBreachedData:
                 case SlaMetData:
                 case RoutingAssignedData:
+                case RoutingQueuedData:
                 case RoutingOverflowedData:
                 case RoutingQueueWaitExceededData:
                 case ChannelDeliveryStatusData:

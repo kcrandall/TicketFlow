@@ -221,6 +221,7 @@ public sealed class ProjectionTests
             var observer = provider.GetServices<IRoutingEventObserver>().OfType<EventRoutingObserver>().Single();
             await observer.OnRoutingEventAsync(new ConversationRouted(fixture.Scope, new ConversationId("c1"), new UserId("agent"), 2, at));
             await observer.OnRoutingEventAsync(new ConversationRouted(fixture.Scope, new ConversationId("c1"), new UserId("agent"), 2, at));
+            await observer.OnRoutingEventAsync(new ConversationQueued(fixture.Scope, new ConversationId("c1"), new InboxId("email"), RoutingQueueReason.NoCapacity, at));
             await observer.OnRoutingEventAsync(new ConversationOverflowed(fixture.Scope, new ConversationId("c1"), new OverflowToTeam(new TeamId("support")), at));
             await observer.OnRoutingEventAsync(new QueueWaitExceeded(fixture.Scope, new ConversationId("c1"), new InboxId("email"), at));
             await observer.OnRoutingEventAsync(new AgentStatusChanged(fixture.Scope, new UserId("agent"), AgentStatus.Online, at));
@@ -228,9 +229,23 @@ public sealed class ProjectionTests
             return true;
         });
         var events = await fixture.EventsAsync();
-        CollectionAssert.AreEqual(new[] { IntegrationEventTypes.RoutingAssigned, IntegrationEventTypes.RoutingOverflowed, IntegrationEventTypes.RoutingQueueWaitExceeded },
+        CollectionAssert.AreEqual(new[] { IntegrationEventTypes.RoutingAssigned, IntegrationEventTypes.RoutingQueued, IntegrationEventTypes.RoutingOverflowed, IntegrationEventTypes.RoutingQueueWaitExceeded },
             events.Select(item => item.Event.Type).ToArray());
         Assert.AreEqual(new TeamId("billing"), events[0].Resource.Team);
-        Assert.AreEqual(new TeamId("support"), ((RoutingOverflowedData)events[1].Event.Data.Value!).TargetTeam);
+        Assert.AreEqual("no-capacity", ((RoutingQueuedData)events[1].Event.Data.Value!).Reason);
+        Assert.AreEqual(new TeamId("support"), ((RoutingOverflowedData)events[2].Event.Data.Value!).TargetTeam);
+    }
+
+    [TestMethod]
+    public async Task BatchOutboxProjectionAppendsMultipleChangesInOneRun()
+    {
+        using var fixture = await EventsFixture.CreateAsync();
+        await fixture.StartAsync("b1");
+        await fixture.StartAsync("b2");
+        await fixture.StartAsync("b3");
+        var result = await fixture.InScopeAsync(provider => provider.GetRequiredService<ConversationOutboxDispatcher>().RunOnceAsync());
+        Assert.AreEqual(3, result.Handled);
+        var events = await fixture.EventsAsync();
+        Assert.AreEqual(3, events.Count(item => item.Event.Type == IntegrationEventTypes.ConversationCreated));
     }
 }

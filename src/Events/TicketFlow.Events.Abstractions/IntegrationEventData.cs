@@ -534,6 +534,24 @@ public sealed record RoutingOverflowedData : IIntegrationEventPayload
     public string Subject => EventSubjects.Conversation(Conversation);
 }
 
+/// <summary>A conversation stayed queued in <see cref="TargetInbox"/> after a routing attempt.</summary>
+public sealed record RoutingQueuedData : IIntegrationEventPayload
+{
+    public RoutingQueuedData(ConversationId conversation, InboxId inbox, InboxId targetInbox, string reason)
+    {
+        EventSubjects.Require(conversation != default, inbox != default, targetInbox != default);
+        (Conversation, Inbox, TargetInbox) = (conversation, inbox, targetInbox);
+        Reason = EventSubjects.Token(reason, nameof(reason));
+    }
+
+    public ConversationId Conversation { get; }
+    public InboxId Inbox { get; }
+    public InboxId TargetInbox { get; }
+    public string Reason { get; }
+    public string Type => IntegrationEventTypes.RoutingQueued;
+    public string Subject => EventSubjects.Conversation(Conversation);
+}
+
 /// <summary>A conversation waited in the <see cref="TargetInbox"/> queue longer than its policy's maximum wait.</summary>
 public sealed record RoutingQueueWaitExceededData : IIntegrationEventPayload
 {
@@ -604,7 +622,7 @@ public union IntegrationEventData(
     ConversationCreatedData, ConversationStatusChangedData, ConversationAssignedData, ConversationTeamChangedData, ConversationPriorityChangedData,
     ConversationLabelsChangedData, ConversationMessageReceivedData, ConversationMessageSentData, ConversationNoteAddedData, ConversationResolvedData,
     ConversationReopenedData, ConversationDeletedData, ContactCreatedData, ContactUpdatedData, ContactDeletedData, ContactMergedData, ContactUnmergedData,
-    ContactIdentityLinkedData, SlaAppliedData, SlaWarningData, SlaBreachedData, SlaMetData, RoutingAssignedData, RoutingOverflowedData,
+    ContactIdentityLinkedData, SlaAppliedData, SlaWarningData, SlaBreachedData, SlaMetData, RoutingAssignedData, RoutingQueuedData, RoutingOverflowedData,
     RoutingQueueWaitExceededData, SurveyRespondedData, ChannelDeliveryStatusData)
 {
     private IIntegrationEventPayload Payload => Value as IIntegrationEventPayload ?? throw new InvalidOperationException("The event data is uninitialized.");

@@ -1,7 +1,11 @@
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using TicketFlow.Access;
+using TicketFlow.Automation;
 using TicketFlow.Core;
+using TicketFlow.Routing;
+using TicketFlow.Sla;
+using TicketFlow.Workspaces;
 
 namespace TicketFlow.Mcp.Tests;
 
@@ -80,16 +84,53 @@ public sealed class AllToolsTests
         await Call("routing_list_agents");
         await Call("routing_get_agent", new() { ["agentId"] = "agent" });
         Assert.AreEqual("online", (await Call("routing_set_agent_status", new() { ["agentId"] = "me", ["status"] = "online" }, "agent")).GetProperty("status").GetString());
+        await Call("routing_list_policies");
+        var routingJson = RoutingPolicyCodec.Serialize(new RoutingPolicy(new RoutingPolicyId("rp-test"), "Round Robin", RoutingStrategy.RoundRobin));
+        var routingPolicy = await Call("routing_create_policy", new() { ["policyId"] = "rp-test", ["definitionJson"] = routingJson });
+        routingPolicy = await Call("routing_update_policy", new()
+        {
+            ["policyId"] = "rp-test", ["expectedRevision"] = routingPolicy.GetProperty("revision").GetInt64(),
+            ["definitionJson"] = RoutingPolicyCodec.Serialize(new RoutingPolicy(new RoutingPolicyId("rp-test"), "Least Busy", RoutingStrategy.LeastBusy)),
+        });
+        await Call("routing_delete_policy", new() { ["policyId"] = "rp-test", ["expectedRevision"] = routingPolicy.GetProperty("revision").GetInt64() });
 
         await Call("sla_get_status", new() { ["conversationId"] = conversation });
         await Call("sla_risk_list");
         await Call("sla_list_policies");
+        var slaJson = SlaPolicyCodec.Serialize(new SlaPolicy(new SlaPolicyId("sla-test"), "Standard",
+            [new SlaRule("default", new SlaCondition(), new SlaTargets(TimeSpan.FromHours(1)), SlaClockBasis.CalendarTime)]));
+        var slaPolicy = await Call("sla_create_policy", new() { ["policyId"] = "sla-test", ["definitionJson"] = slaJson });
+        slaPolicy = await Call("sla_update_policy", new()
+        {
+            ["policyId"] = "sla-test", ["expectedRevision"] = slaPolicy.GetProperty("revision").GetInt64(), ["definitionJson"] = slaJson,
+        });
+        await Call("sla_delete_policy", new() { ["policyId"] = "sla-test", ["expectedRevision"] = slaPolicy.GetProperty("revision").GetInt64() });
 
         await Call("automation_list_rules");
+        var ruleJson = AutomationCodec.SerializeRule(new AutomationRule(new AutomationRuleId("rule-test"), "Auto Tag", ConversationCreatedTrigger.Instance, null,
+            [new AddLabelsAction(new LabelId("auto"))]));
+        var rule = await Call("automation_create_rule", new() { ["ruleId"] = "rule-test", ["definitionJson"] = ruleJson });
+        rule = await Call("automation_update_rule", new()
+        {
+            ["ruleId"] = "rule-test", ["expectedRevision"] = rule.GetProperty("revision").GetInt64(), ["definitionJson"] = ruleJson,
+        });
+        await Call("automation_delete_rule", new() { ["ruleId"] = "rule-test", ["expectedRevision"] = rule.GetProperty("revision").GetInt64() });
         await Call("automation_dry_run", new() { ["conversationId"] = conversation, ["eventKind"] = "statusChanged", ["status"] = "resolved" });
         await Call("macros_list");
+        var macroJson = AutomationCodec.SerializeMacro(new Macro(new MacroId("macro-test"), "Macro Test", MacroVisibility.Shared, null, [new AddLabelsAction(new LabelId("m"))]));
+        var macro = await Call("macros_create", new() { ["macroId"] = "macro-test", ["definitionJson"] = macroJson });
+        macro = await Call("macros_update", new() { ["macroId"] = "macro-test", ["expectedRevision"] = macro.GetProperty("revision").GetInt64(), ["definitionJson"] = macroJson });
+        await Call("macros_delete", new() { ["macroId"] = "macro-test", ["expectedRevision"] = macro.GetProperty("revision").GetInt64() });
         Assert.IsTrue((await Call("macros_run", new() { ["macroId"] = "tag", ["conversationId"] = conversation })).GetProperty("completed").GetBoolean());
         await Call("canned_responses_list", user: "agent");
+        var cannedJson = AutomationCodec.SerializeCannedResponse(new CannedResponse(new CannedResponseId("cr-test"), "hello", "Hello", "en",
+            [new CannedResponseVariant("en", new AutomationTemplate("Hello!"))]));
+        var canned = await Call("canned_responses_create", new() { ["responseId"] = "cr-test", ["definitionJson"] = cannedJson });
+        canned = await Call("canned_responses_update", new()
+        {
+            ["responseId"] = "cr-test", ["expectedRevision"] = canned.GetProperty("revision").GetInt64(), ["definitionJson"] = cannedJson,
+        });
+        await Call("canned_responses_delete", new() { ["responseId"] = "cr-test", ["expectedRevision"] = canned.GetProperty("revision").GetInt64() });
         await Call("canned_responses_render", new() { ["responseId"] = "thanks", ["conversationId"] = conversation }, "agent");
 
         await Call("helpcenter_list_portals");
@@ -123,8 +164,25 @@ public sealed class AllToolsTests
         Assert.AreEqual("support", (await Call("admin_get_channel_endpoint", new() { ["kind"] = "email", ["configurationId"] = "cfg-support" })).GetProperty("inboxId").GetString());
 
         await Call("access_list_roles");
+        var customRole = await Call("access_create_role", new() { ["roleId"] = "triage-bot", ["name"] = "Triage Bot", ["permissions"] = new[] { "conversation:read" } });
+        customRole = await Call("access_update_role", new()
+        {
+            ["roleId"] = "triage-bot", ["expectedRevision"] = customRole.GetProperty("revision").GetInt64(),
+            ["name"] = "Triage Bot v2", ["permissions"] = new[] { "conversation:read", "sla:read" },
+        });
+        await Call("access_delete_role", new() { ["roleId"] = "triage-bot", ["expectedRevision"] = customRole.GetProperty("revision").GetInt64() });
         await Call("access_list_grants", new() { ["scope"] = "team", ["targetId"] = "tier1" });
         await Call("access_list_field_policies");
+        var fieldPolicy = await Call("access_create_field_policy", new()
+        {
+            ["field"] = "contact.phone", ["appliesTo"] = new[] { "contact:read" }, ["unmaskedRoles"] = new[] { "owner" }, ["revealPermission"] = "contact:reveal",
+        });
+        fieldPolicy = await Call("access_update_field_policy", new()
+        {
+            ["field"] = "contact.phone", ["expectedRevision"] = fieldPolicy.GetProperty("revision").GetInt64(),
+            ["appliesTo"] = new[] { "contact:read" }, ["unmaskedRoles"] = new[] { "owner", "admin" },
+        });
+        await Call("access_delete_field_policy", new() { ["field"] = "contact.phone", ["expectedRevision"] = fieldPolicy.GetProperty("revision").GetInt64() });
         var grant = await Call("access_create_grant", new() { ["subjectKind"] = "team", ["subjectId"] = "tier1", ["role"] = "viewer", ["scope"] = "inbox", ["targetId"] = "support" });
         await Call("access_revoke_grant", new() { ["grantId"] = grant.GetProperty("id").GetString(), ["expectedRevision"] = grant.GetProperty("revision").GetInt64() });
 
@@ -203,7 +261,7 @@ public sealed class AllToolsTests
             (await host.CallAsync(read, arguments)).Content.GetProperty("revision").GetInt64();
         return tool switch
         {
-            "conversations_list" or "routing_queue" or "sla_risk_list" or "contacts_list_link_suggestions" or "routing_list_agents" or "sla_list_policies"
+            "conversations_list" or "routing_queue" or "sla_risk_list" or "contacts_list_link_suggestions" or "routing_list_agents" or "routing_list_policies" or "sla_list_policies"
                 or "automation_list_rules" or "macros_list" or "canned_responses_list" or "helpcenter_list_portals" or "surveys_list" or "admin_get_workspace"
                 or "admin_list_inboxes" or "admin_list_teams" or "admin_list_calendars" or "access_list_roles" or "access_list_grants" or "access_list_field_policies" => [],
             "conversations_get" or "conversations_timeline" or "sla_get_status" or "assist_summarize" or "assist_draft_reply" or "assist_triage" => new() { ["conversationId"] = conversation },
@@ -232,8 +290,69 @@ public sealed class AllToolsTests
             "contacts_accept_link_suggestion" or "contacts_reject_link_suggestion" => await SuggestionAsync(host, tool),
             "routing_get_agent" => new() { ["agentId"] = "agent" },
             "routing_set_agent_status" => new() { ["agentId"] = "agent", ["status"] = "away" },
+            "routing_create_policy" => new()
+            {
+                ["policyId"] = "rp-denied",
+                ["definitionJson"] = RoutingPolicyCodec.Serialize(new RoutingPolicy(new RoutingPolicyId("rp-denied"), "D", RoutingStrategy.RoundRobin)),
+            },
+            "routing_update_policy" => new()
+            {
+                ["policyId"] = "rp-denied", ["expectedRevision"] = 1L,
+                ["definitionJson"] = RoutingPolicyCodec.Serialize(new RoutingPolicy(new RoutingPolicyId("rp-denied"), "D", RoutingStrategy.RoundRobin)),
+            },
+            "routing_delete_policy" => new() { ["policyId"] = "rp-denied", ["expectedRevision"] = 1L },
+            "sla_create_policy" => new()
+            {
+                ["policyId"] = "sla-denied",
+                ["definitionJson"] = SlaPolicyCodec.Serialize(new SlaPolicy(new SlaPolicyId("sla-denied"), "D",
+                    [new SlaRule("r", new SlaCondition(), new SlaTargets(TimeSpan.FromHours(1)), SlaClockBasis.CalendarTime)])),
+            },
+            "sla_update_policy" => new()
+            {
+                ["policyId"] = "sla-denied", ["expectedRevision"] = 1L,
+                ["definitionJson"] = SlaPolicyCodec.Serialize(new SlaPolicy(new SlaPolicyId("sla-denied"), "D",
+                    [new SlaRule("r", new SlaCondition(), new SlaTargets(TimeSpan.FromHours(1)), SlaClockBasis.CalendarTime)])),
+            },
+            "sla_delete_policy" => new() { ["policyId"] = "sla-denied", ["expectedRevision"] = 1L },
+            "automation_create_rule" => new()
+            {
+                ["ruleId"] = "r-denied",
+                ["definitionJson"] = AutomationCodec.SerializeRule(new AutomationRule(new AutomationRuleId("r-denied"), "D", ConversationCreatedTrigger.Instance, null,
+                    [new AddLabelsAction(new LabelId("x"))])),
+            },
+            "automation_update_rule" => new()
+            {
+                ["ruleId"] = "r-denied", ["expectedRevision"] = 1L,
+                ["definitionJson"] = AutomationCodec.SerializeRule(new AutomationRule(new AutomationRuleId("r-denied"), "D", ConversationCreatedTrigger.Instance, null,
+                    [new AddLabelsAction(new LabelId("x"))])),
+            },
+            "automation_delete_rule" => new() { ["ruleId"] = "r-denied", ["expectedRevision"] = 1L },
             "automation_dry_run" => new() { ["conversationId"] = conversation, ["eventKind"] = "messageReceived" },
+            "macros_create" => new()
+            {
+                ["macroId"] = "m-denied",
+                ["definitionJson"] = AutomationCodec.SerializeMacro(new Macro(new MacroId("m-denied"), "D", MacroVisibility.Shared, null, [new AddLabelsAction(new LabelId("x"))])),
+            },
+            "macros_update" => new()
+            {
+                ["macroId"] = "tag", ["expectedRevision"] = 1L,
+                ["definitionJson"] = AutomationCodec.SerializeMacro(new Macro(new MacroId("tag"), "D", MacroVisibility.Shared, null, [new AddLabelsAction(new LabelId("x"))])),
+            },
+            "macros_delete" => new() { ["macroId"] = "tag", ["expectedRevision"] = 1L },
             "macros_run" => new() { ["macroId"] = "tag", ["conversationId"] = conversation },
+            "canned_responses_create" => new()
+            {
+                ["responseId"] = "cr-denied",
+                ["definitionJson"] = AutomationCodec.SerializeCannedResponse(new CannedResponse(new CannedResponseId("cr-denied"), "d", "D", "en",
+                    [new CannedResponseVariant("en", new AutomationTemplate("D"))])),
+            },
+            "canned_responses_update" => new()
+            {
+                ["responseId"] = "thanks", ["expectedRevision"] = 1L,
+                ["definitionJson"] = AutomationCodec.SerializeCannedResponse(new CannedResponse(new CannedResponseId("thanks"), "thanks", "D", "en",
+                    [new CannedResponseVariant("en", new AutomationTemplate("D"))])),
+            },
+            "canned_responses_delete" => new() { ["responseId"] = "thanks", ["expectedRevision"] = 1L },
             "canned_responses_render" => new() { ["responseId"] = "thanks", ["conversationId"] = conversation },
             "helpcenter_search" => new() { ["portalId"] = "help", ["locale"] = "en", ["query"] = "password" },
             "helpcenter_list_articles" => new() { ["portalId"] = "help" },
@@ -256,6 +375,12 @@ public sealed class AllToolsTests
             "admin_get_channel_endpoint" => new() { ["kind"] = "email", ["configurationId"] = "cfg-support" },
             "access_create_grant" => new() { ["subjectKind"] = "user", ["subjectId"] = "light", ["role"] = "viewer" },
             "access_revoke_grant" => new() { ["grantId"] = "seed-1", ["expectedRevision"] = 1 },
+            "access_create_role" => new() { ["roleId"] = "r-denied", ["name"] = "Denied", ["permissions"] = new[] { "conversation:read" } },
+            "access_update_role" => new() { ["roleId"] = "r-denied", ["expectedRevision"] = 1L, ["name"] = "Denied", ["permissions"] = new[] { "conversation:read" } },
+            "access_delete_role" => new() { ["roleId"] = "r-denied", ["expectedRevision"] = 1L },
+            "access_create_field_policy" => new() { ["field"] = "contact.phone", ["appliesTo"] = new[] { "contact:read" } },
+            "access_update_field_policy" => new() { ["field"] = "contact.email", ["expectedRevision"] = 1L, ["appliesTo"] = new[] { "contact:read" } },
+            "access_delete_field_policy" => new() { ["field"] = "contact.email", ["expectedRevision"] = 1L },
             _ => throw new AssertFailedException($"No denied-call arguments for {tool}."),
         };
     }

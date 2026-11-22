@@ -45,6 +45,9 @@ public sealed class RealtimeRoutingEventObserver(IRealtimePublisher publisher, I
             case QueueWaitExceeded exceeded:
                 await QueueAsync(new QueueChangedEvent(exceeded.Scope, exceeded.Conversation, exceeded.TargetInbox, QueueChange.WaitExceeded, exceeded.At), cancellationToken).ConfigureAwait(false);
                 break;
+            case ConversationQueued queued:
+                await QueueAsync(new QueueChangedEvent(queued.Scope, queued.Conversation, queued.TargetInbox, QueueChange.Queued, queued.At), cancellationToken).ConfigureAwait(false);
+                break;
         }
     }
 

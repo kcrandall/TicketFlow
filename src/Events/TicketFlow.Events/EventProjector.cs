@@ -15,7 +15,7 @@ namespace TicketFlow.Events;
 /// change are appended in timeline order, and the outbox delivers a conversation's changes in order, so each conversation's events are
 /// ordered in the log.
 /// </summary>
-public sealed class EventProjector : IConversationOutboxHandler
+public sealed class EventProjector : IConversationOutboxBatchHandler
 {
     private readonly IConversationStore conversations;
     private readonly IEventPublisher publisher;
@@ -40,6 +40,31 @@ public sealed class EventProjector : IConversationOutboxHandler
         var drafts = await ProjectAsync(entry.Change, cancellationToken).ConfigureAwait(false);
         if (drafts.Count > 0)
             await publisher.PublishAsync(entry.Change.Scope, drafts, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task HandleBatchAsync(IReadOnlyList<ConversationOutboxEntry> entries, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        if (entries.Count == 0)
+            return;
+        var byScope = new Dictionary<TicketScope, List<IntegrationEventDraft>>();
+        var order = new List<TicketScope>();
+        foreach (var entry in entries)
+        {
+            ArgumentNullException.ThrowIfNull(entry);
+            var drafts = await ProjectAsync(entry.Change, cancellationToken).ConfigureAwait(false);
+            if (drafts.Count == 0)
+                continue;
+            if (!byScope.TryGetValue(entry.Change.Scope, out var list))
+            {
+                list = [];
+                byScope[entry.Change.Scope] = list;
+                order.Add(entry.Change.Scope);
+            }
+            list.AddRange(drafts);
+        }
+        foreach (var scope in order)
+            await publisher.PublishAsync(scope, byScope[scope], cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The drafts for one change (idempotent: equal ids for equal sources).</summary>

@@ -32,6 +32,7 @@ public static class IntegrationEventTypes
     public const string SlaBreached = "ticketflow.sla.breached.v1";
     public const string SlaMet = "ticketflow.sla.met.v1";
     public const string RoutingAssigned = "ticketflow.routing.assigned.v1";
+    public const string RoutingQueued = "ticketflow.routing.queued.v1";
     public const string RoutingOverflowed = "ticketflow.routing.overflowed.v1";
     public const string RoutingQueueWaitExceeded = "ticketflow.routing.queue-wait-exceeded.v1";
     public const string SurveyResponded = "ticketflow.survey.responded.v1";
@@ -43,7 +44,7 @@ public static class IntegrationEventTypes
         ConversationCreated, ConversationStatusChanged, ConversationAssigned, ConversationTeamChanged, ConversationPriorityChanged, ConversationLabelsChanged,
         ConversationMessageReceived, ConversationMessageSent, ConversationNoteAdded, ConversationResolved, ConversationReopened, ConversationDeleted,
         ContactCreated, ContactUpdated, ContactDeleted, ContactMerged, ContactUnmerged, ContactIdentityLinked,
-        SlaApplied, SlaWarning, SlaBreached, SlaMet, RoutingAssigned, RoutingOverflowed, RoutingQueueWaitExceeded, SurveyResponded, ChannelDeliveryStatus,
+        SlaApplied, SlaWarning, SlaBreached, SlaMet, RoutingAssigned, RoutingQueued, RoutingOverflowed, RoutingQueueWaitExceeded, SurveyResponded, ChannelDeliveryStatus,
     }.Order(StringComparer.Ordinal)];
 
     private static readonly HashSet<string> Known = new(All, StringComparer.Ordinal);

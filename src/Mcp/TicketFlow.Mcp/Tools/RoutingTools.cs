@@ -4,6 +4,7 @@ using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using TicketFlow.Core;
 using TicketFlow.Routing;
+using TicketFlow.Workspaces;
 
 using P = TicketFlow.Mcp.TicketFlowMcpPermissions;
 
@@ -75,6 +76,52 @@ public sealed class RoutingTools(TicketFlowToolContext context)
         CancellationToken cancellationToken = default) =>
         context.RunAsync(workspace, async principal => Map(await context.Service<IAgentAvailabilityService>().SetStatusAsync(principal, Agent(principal, agentId),
             TicketFlowToolJson.Parse<AgentStatus>(status, nameof(status)), cancellationToken), Profile), cancellationToken);
+
+    [McpServerTool(Name = "routing_list_policies", Title = "List routing policies", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(ToolList<DefinitionOutput>))]
+    [Description("Lists routing policies as their versioned v1 definition JSON.")]
+    [TicketFlowTool(P.InboxRead, Service = typeof(IRoutingPolicyService))]
+    public Task<CallToolResult> ListPolicies(
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await context.Service<IRoutingPolicyService>().ListAsync(principal, cancellationToken),
+            list => new ToolList<DefinitionOutput>([.. list.Select(PolicyOutput)])), cancellationToken);
+
+    [McpServerTool(Name = "routing_create_policy", Title = "Create routing policy", Destructive = false, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(DefinitionOutput))]
+    [Description("Creates a routing policy from its versioned v1 definition JSON.")]
+    [TicketFlowTool(P.RoutingManage, Service = typeof(IRoutingPolicyService))]
+    public Task<CallToolResult> CreatePolicy(
+        [Description("Routing policy id.")] string policyId,
+        [Description("Versioned routing policy definition JSON (same format as routing_list_policies).")] string definitionJson,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await context.Service<IRoutingPolicyService>().CreateAsync(principal,
+            RoutingPolicyCodec.Deserialize(new RoutingPolicyId(policyId), definitionJson), cancellationToken), PolicyOutput), cancellationToken);
+
+    [McpServerTool(Name = "routing_update_policy", Title = "Update routing policy", Destructive = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(DefinitionOutput))]
+    [Description("Replaces a routing policy (fenced on expectedRevision) from its versioned v1 definition JSON.")]
+    [TicketFlowTool(P.RoutingManage, Service = typeof(IRoutingPolicyService))]
+    public Task<CallToolResult> UpdatePolicy(
+        [Description("Routing policy id.")] string policyId,
+        [Description("Current routing policy revision.")] long expectedRevision,
+        [Description("Versioned routing policy definition JSON.")] string definitionJson,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await context.Service<IRoutingPolicyService>().UpdateAsync(principal,
+            RoutingPolicyCodec.Deserialize(new RoutingPolicyId(policyId), definitionJson), expectedRevision, cancellationToken), PolicyOutput), cancellationToken);
+
+    [McpServerTool(Name = "routing_delete_policy", Title = "Delete routing policy", Destructive = true, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(DefinitionOutput))]
+    [Description("Deletes a routing policy (fenced on expectedRevision).")]
+    [TicketFlowTool(P.RoutingManage, Service = typeof(IRoutingPolicyService))]
+    public Task<CallToolResult> DeletePolicy(
+        [Description("Routing policy id.")] string policyId,
+        [Description("Current routing policy revision.")] long expectedRevision,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await context.Service<IRoutingPolicyService>().DeleteAsync(principal,
+            new RoutingPolicyId(policyId), expectedRevision, cancellationToken), PolicyOutput), cancellationToken);
+
+    private static DefinitionOutput PolicyOutput(StoredRoutingPolicy stored) =>
+        new(stored.Policy.Id.Value, stored.Revision, TicketFlowToolJson.Parse(RoutingPolicyCodec.Serialize(stored.Policy)));
 
     private static UserId Agent(PrincipalRef principal, string agentId) => agentId == "me"
         ? principal.Value is UserPrincipal user ? user.UserId : throw new ArgumentException("'me' requires a user principal.", nameof(agentId))

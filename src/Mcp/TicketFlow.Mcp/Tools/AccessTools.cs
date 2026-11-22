@@ -100,6 +100,105 @@ public sealed class AccessTools(TicketFlowToolContext context)
         context.RunAsync(workspace, async principal => Map(await Administrator.RevokeGrantAsync(principal, new GrantId(grantId), expectedRevision, cancellationToken), Grant),
             cancellationToken);
 
+    [McpServerTool(Name = "access_create_role", Title = "Create custom role", Destructive = true, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(RoleOutput))]
+    [Description("Creates a custom role with the given permissions. Access enforces no-escalation rules and audits every call.")]
+    [TicketFlowTool(P.AccessManage)]
+    public Task<CallToolResult> CreateRole(
+        [Description("Custom role id.")] string roleId,
+        [Description("Display name.")] string name,
+        [Description("Permission strings granted by the role.")] string[] permissions,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal =>
+        {
+            var role = new AccessRole(new RoleId(roleId), name, (permissions ?? throw new ArgumentNullException(nameof(permissions))).Select(p => new Permission(p)));
+            return Map(await Administrator.CreateRoleAsync(principal, role, cancellationToken), stored => Role(stored.Role, stored.Revision));
+        }, cancellationToken);
+
+    [McpServerTool(Name = "access_update_role", Title = "Update custom role", Destructive = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(RoleOutput))]
+    [Description("Updates a custom role's name and permissions (fenced on expectedRevision); audited.")]
+    [TicketFlowTool(P.AccessManage)]
+    public Task<CallToolResult> UpdateRole(
+        [Description("Custom role id.")] string roleId,
+        [Description("Current role revision.")] long expectedRevision,
+        [Description("Display name.")] string name,
+        [Description("Permission strings granted by the role.")] string[] permissions,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal =>
+        {
+            var role = new AccessRole(new RoleId(roleId), name, (permissions ?? throw new ArgumentNullException(nameof(permissions))).Select(p => new Permission(p)));
+            return Map(await Administrator.UpdateRoleAsync(principal, role, expectedRevision, cancellationToken), stored => Role(stored.Role, stored.Revision));
+        }, cancellationToken);
+
+    [McpServerTool(Name = "access_delete_role", Title = "Delete custom role", Destructive = true, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(RoleOutput))]
+    [Description("Deletes a custom role (fenced on expectedRevision); audited.")]
+    [TicketFlowTool(P.AccessManage)]
+    public Task<CallToolResult> DeleteRole(
+        [Description("Custom role id.")] string roleId,
+        [Description("Current role revision.")] long expectedRevision,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await Administrator.DeleteRoleAsync(principal, new RoleId(roleId), expectedRevision, cancellationToken),
+            stored => Role(stored.Role, stored.Revision)), cancellationToken);
+
+    [McpServerTool(Name = "access_create_field_policy", Title = "Create field masking policy", Destructive = true, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(FieldPolicyOutput))]
+    [Description("Creates a field masking policy (which permissions mask the field, which roles see it unmasked, optional reveal permission); audited.")]
+    [TicketFlowTool(P.AccessManage)]
+    public Task<CallToolResult> CreateFieldPolicy(
+        [Description("Field path (for example contact.email or conversation.attribute.ssn).")] string field,
+        [Description("Permissions to which masking applies.")] string[] appliesTo,
+        [Description("Optional role ids that see the field unmasked.")] string[]? unmaskedRoles = null,
+        [Description("Optional reveal permission.")] string? revealPermission = null,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal =>
+        {
+            var policy = new AccessFieldPolicy(new FieldPath(field),
+                (appliesTo ?? throw new ArgumentNullException(nameof(appliesTo))).Select(p => new Permission(p)),
+                unmaskedRoles?.Select(r => new RoleId(r)),
+                revealPermission is null ? null : new Permission(revealPermission));
+            return Map(await Administrator.CreateFieldPolicyAsync(principal, policy, cancellationToken), FieldPolicy);
+        }, cancellationToken);
+
+    [McpServerTool(Name = "access_update_field_policy", Title = "Update field masking policy", Destructive = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(FieldPolicyOutput))]
+    [Description("Updates a field masking policy (fenced on expectedRevision); audited.")]
+    [TicketFlowTool(P.AccessManage)]
+    public Task<CallToolResult> UpdateFieldPolicy(
+        [Description("Field path.")] string field,
+        [Description("Current policy revision.")] long expectedRevision,
+        [Description("Permissions to which masking applies.")] string[] appliesTo,
+        [Description("Optional role ids that see the field unmasked.")] string[]? unmaskedRoles = null,
+        [Description("Optional reveal permission.")] string? revealPermission = null,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal =>
+        {
+            var policy = new AccessFieldPolicy(new FieldPath(field),
+                (appliesTo ?? throw new ArgumentNullException(nameof(appliesTo))).Select(p => new Permission(p)),
+                unmaskedRoles?.Select(r => new RoleId(r)),
+                revealPermission is null ? null : new Permission(revealPermission));
+            return Map(await Administrator.UpdateFieldPolicyAsync(principal, policy, expectedRevision, cancellationToken), FieldPolicy);
+        }, cancellationToken);
+
+    [McpServerTool(Name = "access_delete_field_policy", Title = "Delete field masking policy", Destructive = true, Idempotent = false, UseStructuredContent = true, OutputSchemaType = typeof(FieldPolicyOutput))]
+    [Description("Deletes a field masking policy (fenced on expectedRevision); audited.")]
+    [TicketFlowTool(P.AccessManage)]
+    public Task<CallToolResult> DeleteFieldPolicy(
+        [Description("Field path.")] string field,
+        [Description("Current policy revision.")] long expectedRevision,
+        [Description(WorkspaceHelp)] string? workspace = null,
+        CancellationToken cancellationToken = default) =>
+        context.RunAsync(workspace, async principal => Map(await Administrator.DeleteFieldPolicyAsync(principal, new FieldPath(field), expectedRevision, cancellationToken),
+            FieldPolicy), cancellationToken);
+
+    private static FieldPolicyOutput FieldPolicy(StoredAccessFieldPolicy stored) => new(
+        stored.Policy.Field.Value,
+        [.. stored.Policy.AppliesTo.Select(permission => permission.Value).Order(StringComparer.Ordinal)],
+        [.. stored.Policy.UnmaskedRoles.Select(role => role.Value).Order(StringComparer.Ordinal)],
+        stored.Policy.RevealPermission?.Value,
+        stored.Revision);
+
     private static GrantScope Target(TicketScope scope, string kind, string? id) => kind switch
     {
         "workspace" => new WorkspaceGrantScope(scope.WorkspaceId),

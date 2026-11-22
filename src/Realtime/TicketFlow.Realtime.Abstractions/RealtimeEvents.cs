@@ -121,6 +121,9 @@ public enum QueueChange
 
     /// <summary>The conversation waited longer than its policy's maximum wait.</summary>
     WaitExceeded = 2,
+
+    /// <summary>The conversation was queued for routing.</summary>
+    Queued = 3,
 }
 
 /// <summary>A queue-level routing change of a waiting conversation (E8).</summary>

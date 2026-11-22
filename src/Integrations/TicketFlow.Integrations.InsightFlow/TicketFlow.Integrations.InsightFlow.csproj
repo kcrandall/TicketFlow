@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>InsightFlow reporting export adapter for TicketFlow: exports non-PII reporting facts over HTTP in InsightFlow's ClientTrackBatchRequest wire format with host-configured scope, deterministic eventId deduplication and checkpointing over IReportingStore.ListFactsAsync.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../TicketFlow.Core/TicketFlow.Core.csproj" />
+    <ProjectReference Include="../../Reporting/TicketFlow.Reporting.Abstractions/TicketFlow.Reporting.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

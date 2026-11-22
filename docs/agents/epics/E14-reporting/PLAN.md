@@ -25,7 +25,7 @@ to a follow-up ticket; the fact listing (`IReportingStore.ListFactsAsync`) is th
 | [T03 — Report queries, access filtering, CSV export and retention](tickets/T03-report-queries-and-export.md) | Completed | E14 T02 |
 | [T04 — PostgreSQL reporting store](tickets/T04-postgres-reporting-store.md) | Completed | E14 T01 |
 | [T05 — Documentation](tickets/T05-reporting-docs.md) | Completed | E14 T03, E14 T04 |
-| [T06 — InsightFlow event export (deferred)](tickets/T06-insightflow-export.md) | Deferred | E14 T04, InsightFlow HTTP ingestion contract |
+| [T06 — InsightFlow event export](tickets/T06-insightflow-export.md) | Completed | E14 T04, InsightFlow client event wire contract |
 
 ## Verification record
 

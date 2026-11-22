@@ -167,6 +167,10 @@ Verdicts come from `IAccessQueryPlanner.HeldAnywhereAsync`: a permission counts 
 | `routing_list_agents` | read-only, idempotent | `team:read` |
 | `routing_get_agent` | read-only, idempotent | `team:read` |
 | `routing_set_agent_status` | idempotent | `agent-status:update` or `agent-status:manage` |
+| `routing_list_policies` | read-only, idempotent | `inbox:read` |
+| `routing_create_policy` | — | `routing:manage` |
+| `routing_update_policy` | destructive, idempotent | `routing:manage` |
+| `routing_delete_policy` | destructive | `routing:manage` |
 
 ### `sla`
 
@@ -175,16 +179,28 @@ Verdicts come from `IAccessQueryPlanner.HeldAnywhereAsync`: a permission counts 
 | `sla_get_status` | read-only, idempotent | `sla:read` |
 | `sla_risk_list` | read-only, idempotent | `sla:read` |
 | `sla_list_policies` | read-only, idempotent | `sla:read` |
+| `sla_create_policy` | — | `sla:manage` |
+| `sla_update_policy` | destructive, idempotent | `sla:manage` |
+| `sla_delete_policy` | destructive | `sla:manage` |
 
 ### `automation`
 
 | Tool | Annotations | Requires |
 | --- | --- | --- |
 | `automation_list_rules` | read-only, idempotent | `automation:read` |
+| `automation_create_rule` | — | `automation:manage` |
+| `automation_update_rule` | destructive, idempotent | `automation:manage` |
+| `automation_delete_rule` | destructive | `automation:manage` |
 | `automation_dry_run` | read-only, idempotent | `automation:read` and `conversation:read` |
 | `macros_list` | read-only, idempotent | `macro:run` |
+| `macros_create` | — | `macro:manage` or `macro:run` |
+| `macros_update` | destructive, idempotent | `macro:manage` or `macro:run` |
+| `macros_delete` | destructive | `macro:manage` or `macro:run` |
 | `macros_run` | destructive | `macro:run` |
 | `canned_responses_list` | read-only, idempotent | `conversation:reply` or `canned-response:manage` |
+| `canned_responses_create` | — | `canned-response:manage` |
+| `canned_responses_update` | destructive, idempotent | `canned-response:manage` |
+| `canned_responses_delete` | destructive | `canned-response:manage` |
 | `canned_responses_render` | read-only, idempotent | `conversation:reply` or `canned-response:manage` |
 
 ### `helpcenter`
@@ -239,6 +255,12 @@ Verdicts come from `IAccessQueryPlanner.HeldAnywhereAsync`: a permission counts 
 | `access_list_field_policies` | read-only, idempotent | `access:manage` |
 | `access_create_grant` | destructive | `access:manage` |
 | `access_revoke_grant` | destructive | `access:manage` |
+| `access_create_role` | destructive | `access:manage` |
+| `access_update_role` | destructive, idempotent | `access:manage` |
+| `access_delete_role` | destructive | `access:manage` |
+| `access_create_field_policy` | destructive | `access:manage` |
+| `access_update_field_policy` | destructive, idempotent | `access:manage` |
+| `access_delete_field_policy` | destructive | `access:manage` |
 
 ### `assist`
 
@@ -248,10 +270,13 @@ Verdicts come from `IAccessQueryPlanner.HeldAnywhereAsync`: a permission counts 
 | `assist_draft_reply` | — | `conversation:read` and `assist:use` (optional: `helpcenter:read` for grounding) |
 | `assist_triage` | — | `conversation:read` and `assist:use` |
 
-## Resources
+## Resources and prompts
 
-`ticketflow://guide` (Markdown) explains the conventions and lists every tool with its permissions and granting built-in roles, marking
-which toolsets this server enables. It contains no support data.
+- `ticketflow://guide` (Markdown) explains the conventions and lists every tool, resource and prompt with its permissions and granting built-in roles, marking which toolsets this server enables. It contains no support data.
+- `ticketflow://conversations/{conversationId}` (JSON) reads one conversation as the calling TicketFlow principal (Access-checked, masked fields absent, customer text wrapped as `untrusted`).
+- `ticketflow://conversations/{conversationId}/timeline` (JSON) reads the first page of a conversation's timeline as the calling principal (private notes appear only with `note:read`; bodies wrapped as `untrusted`).
+- `ticketflow://helpcenter/articles/{articleId}` (JSON) reads a help center article as the calling principal (titles and bodies wrapped as `untrusted`).
+- Built-in prompts (`triage_conversation`, `draft_customer_reply`, `summarize_conversation`, `investigate_sla_risk`) guide agents through common support workflows with explicit untrusted-content safety rules.
 
 ## Sample host
 
@@ -274,8 +299,3 @@ Calling `whoami` returns `apiClient:idf:mcp-assistant` with Agent permissions; `
   self-awareness tools, filtering, in-memory MCP client/server round trips over the SDK stream transports)
 - `dotnet test tests/Mcp/TicketFlow.Mcp.AspNetCore.Tests -c Release` (HTTP endpoint with host authentication)
 - `dotnet test tests/Hosting/TicketFlow.SampleHost.Tests -c Release`
-
-## Not yet implemented
-
-- Conversation and article MCP resources, prompts, and write tools for definitions (rules, macros, policies, roles) — use the HTTP
-  endpoints or services for administration of definitions.

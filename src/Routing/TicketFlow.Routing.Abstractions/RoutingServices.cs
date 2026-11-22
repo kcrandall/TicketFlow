@@ -177,8 +177,11 @@ public sealed record ConversationOverflowed(TicketScope Scope, ConversationId Co
 /// <summary>A conversation waited longer than its policy's maximum wait (raised once per queue stay).</summary>
 public sealed record QueueWaitExceeded(TicketScope Scope, ConversationId Conversation, InboxId TargetInbox, DateTimeOffset At);
 
+/// <summary>A conversation stayed queued after a routing attempt.</summary>
+public sealed record ConversationQueued(TicketScope Scope, ConversationId Conversation, InboxId TargetInbox, RoutingQueueReason Reason, DateTimeOffset At);
+
 /// <summary>A routing event for realtime fan-out (E7). Identifiers only. Switch over every case without a discard arm.</summary>
-public union RoutingEvent(AgentStatusChanged, ConversationPresenceChanged, ReplyLockChanged, ConversationRouted, ConversationOverflowed, QueueWaitExceeded);
+public union RoutingEvent(AgentStatusChanged, ConversationPresenceChanged, ReplyLockChanged, ConversationRouted, ConversationOverflowed, QueueWaitExceeded, ConversationQueued);
 
 /// <summary>
 /// Receives routing events in-process after the change is stored. Delivery is best-effort: observer failures are swallowed so routing

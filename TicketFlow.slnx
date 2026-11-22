@@ -72,6 +72,8 @@
   <Project Path="src/Channels/TicketFlow.Channels/TicketFlow.Channels.csproj" />
   <Project Path="src/Channels/TicketFlow.Channels.Stores.Postgres/TicketFlow.Channels.Stores.Postgres.csproj" />
   <Project Path="src/Channels/TicketFlow.Channels.Api/TicketFlow.Channels.Api.csproj" />
+  <Project Path="src/Channels/TicketFlow.Channels.Mailbox/TicketFlow.Channels.Mailbox.csproj" />
+  <Project Path="src/Channels/TicketFlow.Channels.Mailbox.Stores.Postgres/TicketFlow.Channels.Mailbox.Stores.Postgres.csproj" />
   <Project Path="src/Integrations/TicketFlow.Integrations.Surveys/TicketFlow.Integrations.Surveys.csproj" />
   <Project Path="src/Integrations/TicketFlow.Integrations.EnvelopeFlow/TicketFlow.Integrations.EnvelopeFlow.csproj" />
   <Project Path="src/Integrations/TicketFlow.Integrations.EnvelopeFlow.Surveys/TicketFlow.Integrations.EnvelopeFlow.Surveys.csproj" />
@@ -80,6 +82,8 @@
   <Project Path="tests/Channels/TicketFlow.Channels.Tests/TicketFlow.Channels.Tests.csproj" />
   <Project Path="tests/Channels/TicketFlow.Channels.Stores.Postgres.Tests/TicketFlow.Channels.Stores.Postgres.Tests.csproj" />
   <Project Path="tests/Channels/TicketFlow.Channels.Api.Tests/TicketFlow.Channels.Api.Tests.csproj" />
+  <Project Path="tests/Channels/TicketFlow.Channels.Mailbox.Tests/TicketFlow.Channels.Mailbox.Tests.csproj" />
+  <Project Path="tests/Channels/TicketFlow.Channels.Mailbox.Stores.Postgres.Tests/TicketFlow.Channels.Mailbox.Stores.Postgres.Tests.csproj" />
   <Project Path="tests/Integrations/TicketFlow.Integrations.Surveys.Tests/TicketFlow.Integrations.Surveys.Tests.csproj" />
   <Project Path="tests/Integrations/TicketFlow.Integrations.EnvelopeFlow.Tests/TicketFlow.Integrations.EnvelopeFlow.Tests.csproj" />
   <Project Path="src/Assist/TicketFlow.Assist.Abstractions/TicketFlow.Assist.Abstractions.csproj" />
@@ -125,13 +129,19 @@
   <Project Path="src/Events/TicketFlow.Events.Stores.Postgres/TicketFlow.Events.Stores.Postgres.csproj" />
   <Project Path="src/Events/TicketFlow.Events.Webhooks/TicketFlow.Events.Webhooks.csproj" />
   <Project Path="src/Integrations/TicketFlow.Integrations.PostHog/TicketFlow.Integrations.PostHog.csproj" />
+  <Project Path="src/Integrations/TicketFlow.Integrations.Segment/TicketFlow.Integrations.Segment.csproj" />
+  <Project Path="src/Integrations/TicketFlow.Integrations.WalFlow/TicketFlow.Integrations.WalFlow.csproj" />
   <Project Path="src/Integrations/TicketFlow.Integrations.WalFlow.Sinks/TicketFlow.Integrations.WalFlow.Sinks.csproj" />
+  <Project Path="src/Integrations/TicketFlow.Integrations.InsightFlow/TicketFlow.Integrations.InsightFlow.csproj" />
   <Project Path="tests/Events/TicketFlow.Events.StoreContracts/TicketFlow.Events.StoreContracts.csproj" />
   <Project Path="tests/Events/TicketFlow.Events.Tests/TicketFlow.Events.Tests.csproj" />
   <Project Path="tests/Events/TicketFlow.Events.Stores.Postgres.Tests/TicketFlow.Events.Stores.Postgres.Tests.csproj" />
   <Project Path="tests/Events/TicketFlow.Events.Webhooks.Tests/TicketFlow.Events.Webhooks.Tests.csproj" />
   <Project Path="tests/Integrations/TicketFlow.Integrations.PostHog.Tests/TicketFlow.Integrations.PostHog.Tests.csproj" />
+  <Project Path="tests/Integrations/TicketFlow.Integrations.Segment.Tests/TicketFlow.Integrations.Segment.Tests.csproj" />
+  <Project Path="tests/Integrations/TicketFlow.Integrations.WalFlow.Tests/TicketFlow.Integrations.WalFlow.Tests.csproj" />
   <Project Path="tests/Integrations/TicketFlow.Integrations.WalFlow.Sinks.Tests/TicketFlow.Integrations.WalFlow.Sinks.Tests.csproj" />
+  <Project Path="tests/Integrations/TicketFlow.Integrations.InsightFlow.Tests/TicketFlow.Integrations.InsightFlow.Tests.csproj" />
   <Project Path="src/Mcp/TicketFlow.Mcp/TicketFlow.Mcp.csproj" />
   <Project Path="src/Mcp/TicketFlow.Mcp.AspNetCore/TicketFlow.Mcp.AspNetCore.csproj" />
   <Project Path="tests/Mcp/TicketFlow.Mcp.Tests/TicketFlow.Mcp.Tests.csproj" />

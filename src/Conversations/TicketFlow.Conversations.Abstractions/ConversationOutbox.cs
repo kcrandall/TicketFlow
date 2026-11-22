@@ -184,3 +184,14 @@ public interface IConversationOutboxHandler
 
     Task HandleAsync(ConversationOutboxEntry entry, CancellationToken cancellationToken = default);
 }
+
+/// <summary>
+/// Optional batch-capable <see cref="IConversationOutboxHandler"/>. When a handler implements this interface,
+/// <c>ConversationOutboxDispatcher</c> passes all eligible claimed entries of one run in sequence order to
+/// <see cref="HandleBatchAsync"/> so consumers (such as the event projector) can combine work into fewer durable writes.
+/// <see cref="HandleBatchAsync"/> must be idempotent for every entry in the batch.
+/// </summary>
+public interface IConversationOutboxBatchHandler : IConversationOutboxHandler
+{
+    Task HandleBatchAsync(IReadOnlyList<ConversationOutboxEntry> entries, CancellationToken cancellationToken = default);
+}

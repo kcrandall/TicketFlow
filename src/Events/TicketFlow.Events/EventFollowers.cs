@@ -146,6 +146,7 @@ public sealed class EventRoutingObserver(IConversationStore conversations, IEven
         var (scope, conversation, at, source) = routingEvent switch
         {
             ConversationRouted routed => (routed.Scope, routed.Conversation, routed.At, $"routed\n{routed.Conversation.Value}\n{routed.Revision}"),
+            ConversationQueued queued => (queued.Scope, queued.Conversation, queued.At, $"queued\n{queued.Conversation.Value}\n{queued.TargetInbox.Value}\n{queued.At.UtcTicks}"),
             ConversationOverflowed overflowed => (overflowed.Scope, overflowed.Conversation, overflowed.At, $"overflowed\n{overflowed.Conversation.Value}\n{overflowed.At.UtcTicks}"),
             QueueWaitExceeded exceeded => (exceeded.Scope, exceeded.Conversation, exceeded.At, $"wait\n{exceeded.Conversation.Value}\n{exceeded.At.UtcTicks}"),
             AgentStatusChanged or ConversationPresenceChanged or ReplyLockChanged => default((TicketScope?, ConversationId, DateTimeOffset, string?)),
@@ -159,6 +160,16 @@ public sealed class EventRoutingObserver(IConversationStore conversations, IEven
         IntegrationEventData data = routingEvent switch
         {
             ConversationRouted routed => new RoutingAssignedData(conversation, inbox, routed.Agent, routed.Revision),
+            ConversationQueued queued => new RoutingQueuedData(conversation, inbox, queued.TargetInbox, queued.Reason switch
+            {
+                RoutingQueueReason.Manual => "manual",
+                RoutingQueueReason.NoEligibleAgent => "no-eligible-agent",
+                RoutingQueueReason.NoCapacity => "no-capacity",
+                RoutingQueueReason.Contended => "contended",
+                RoutingQueueReason.Refused => "refused",
+                RoutingQueueReason.Misconfigured => "misconfigured",
+                _ => throw new ArgumentOutOfRangeException(nameof(routingEvent)),
+            }),
             ConversationOverflowed overflowed => overflowed.Target switch
             {
                 OverflowToTeam team => new RoutingOverflowedData(conversation, inbox, team.Team, null),

@@ -2,7 +2,7 @@
 
 Epic: [E6 — Channels and EnvelopeFlow integration](../PLAN.md)
 
-Status: **Planned** (follow-up; not part of the E6 completion gate)
+Status: **Completed**
 
 ## Goal
 
@@ -30,4 +30,4 @@ normalization and checkpointing.
 
 ## Results
 
-Not started.
+Implemented `TicketFlow.Channels.Mailbox` and `TicketFlow.Channels.Mailbox.Stores.Postgres` (2026-11-22): MailKit 5.0.0 `MailKitMailboxClientFactory` with bounded streaming fetch, `MailboxMimeNormalizer` (`Message-Id`, `In-Reply-To`, `References`, text/HTML parts, unverified sender email evidence, bounded attachment extraction through `IMailboxAttachmentStore`), `MailboxPoller` with UID/UIDVALIDITY checkpointing and safe UIDVALIDITY rescan deduplicated by `Message-Id`, plus durable `PostgresMailboxCheckpointStore`. Verified with `TicketFlow.Channels.Mailbox.Tests` (3 passed) and `TicketFlow.Channels.Mailbox.Stores.Postgres.Tests` (1 passed on PostgreSQL 18).

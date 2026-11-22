@@ -148,7 +148,9 @@ public sealed class HelpCenterTools(TicketFlowToolContext context)
         context.RunAsync(workspace, async principal => Map(await Service.UnpublishArticleAsync(principal, new ArticleId(articleId), expectedRevision, cancellationToken), Article),
             cancellationToken);
 
-    private ArticleOutput Article(StoredArticle stored) => new(
+    private ArticleOutput Article(StoredArticle stored) => ToArticleOutput(stored, context);
+
+    internal static ArticleOutput ToArticleOutput(StoredArticle stored, TicketFlowToolContext context) => new(
         stored.Id.Value,
         stored.Record.Article.Portal.Value,
         stored.Record.Article.Collection?.Value,

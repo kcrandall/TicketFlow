@@ -1,6 +1,6 @@
 # Package versioning and release workflow
 
-TicketFlow packages use one lockstep version from `TicketFlowVersion` in root `Directory.Build.props`; the initial seed is `0.1.0`. No packages have been published as part of repository creation.
+TicketFlow packages use one lockstep version from `TicketFlowVersion` in root `Directory.Build.props`; the first public prerelease (`0.1.0-alpha.2.1`, 67 packages) was published to nuget.org on 2026-11-22 via NuGet trusted publishing.
 
 ## Build conventions
 
@@ -51,8 +51,8 @@ All source libraries enable SDK package validation. Before a supported public re
 
 Publication uses [NuGet trusted publishing](https://aka.ms/nuget/trusted-publishing); no long-lived API key is stored in GitHub. The publish job requests `id-token: write`, and `NuGet/login` exchanges its GitHub OIDC token for a short-lived nuget.org API key for the nuget.org account `kcrandall`.
 
-**Owner action required before the first publish:** the nuget.org trusted publishing policy for TicketFlow does not exist yet. The owner must create it on nuget.org for account `kcrandall`, repository `kcrandall/TicketFlow`, workflow file `nuget-publish.yml`, no environment restriction (or matching `nuget-stable`/`nuget-prerelease` if restricted), and package pattern `TicketFlow*` with permission to push new packages and versions. Until then, `target=public` runs fail at the NuGet login step; dry runs are unaffected. Renaming the workflow file or adding a package outside that pattern requires updating the policy first.
+The nuget.org trusted publishing policy for TicketFlow is active (first exercised on 2026-11-22 in `0.1.0-alpha.2.1`) for account `kcrandall`, repository `kcrandall/TicketFlow`, workflow file `nuget-publish.yml`, and package pattern `TicketFlow*`. Renaming the workflow file or adding a package outside that pattern requires updating the policy on nuget.org first.
 
-The publish job runs in the `nuget-stable` environment for stable releases and `nuget-prerelease` otherwise. Neither environment needs secrets; restrict both to main and add required reviewers where the account plan supports them. Environment protections are repository settings and are not provisioned by these workflow files.
+The publish job runs in the `nuget-stable` environment for stable releases and `nuget-prerelease` otherwise. Both environments are restricted to `main` via GitHub deployment branch policies and need no stored secrets.
 
 NuGet publication is public regardless of GitHub repository visibility. It is separate from authorization to push main. Package versions are immutable, and publication deliberately omits `--skip-duplicate`. A partial publication requires investigation; the workflow must not silently accept a mixed release. `publish-nuget.sh` rejects execution outside a manually dispatched main-branch GitHub Actions run and rechecks confirmation, channel, artifact integrity, and presence of the trusted-publishing API key.

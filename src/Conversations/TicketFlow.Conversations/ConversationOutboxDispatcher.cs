@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using TicketFlow.Core;
 
 namespace TicketFlow.Conversations;
 
@@ -83,6 +84,69 @@ public sealed class ConversationOutboxDispatcher
         foreach (var handler in handlers)
         {
             var claims = await outbox.ClaimAsync(handler.Consumer, options.BatchSize, options.Lease, cancellationToken).ConfigureAwait(false);
+            if (handler is IConversationOutboxBatchHandler batchHandler)
+            {
+                var eligible = new List<ConversationOutboxClaim>(claims.Count);
+                HashSet<ConversationId>? blocked = null;
+                foreach (var claim in claims)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (claim.Attempt > options.MaximumAttempts)
+                    {
+                        if (await outbox.DeadLetterAsync(handler.Consumer, claim.Entry.Sequence, claim.Fence, cancellationToken).ConfigureAwait(false))
+                            deadLettered++;
+                        else
+                            lost++;
+                        continue;
+                    }
+                    if (blocked is not null && blocked.Contains(claim.Entry.Change.Conversation))
+                    {
+                        skipped++;
+                        continue;
+                    }
+                    if (claim.LeaseUntil <= time.GetUtcNow() + options.LeaseSafetyMargin)
+                    {
+                        (blocked ??= []).Add(claim.Entry.Change.Conversation);
+                        skipped++;
+                        continue;
+                    }
+                    eligible.Add(claim);
+                }
+                if (eligible.Count == 0)
+                    continue;
+                bool succeeded;
+                TimeSpan? retryAfter = null;
+                try
+                {
+                    await batchHandler.HandleBatchAsync([.. eligible.Select(claim => claim.Entry)], cancellationToken).ConfigureAwait(false);
+                    succeeded = true;
+                }
+                catch (Exception error) when (!cancellationToken.IsCancellationRequested)
+                {
+                    succeeded = false;
+                    retryAfter = (error as ConversationOutboxRetryException)?.RetryAfter;
+                }
+                foreach (var claim in eligible)
+                    if (succeeded)
+                    {
+                        if (await outbox.AcknowledgeAsync(handler.Consumer, claim.Entry.Sequence, claim.Fence, cancellationToken).ConfigureAwait(false))
+                            handled++;
+                        else
+                            lost++;
+                    }
+                    else if (claim.Attempt >= options.MaximumAttempts)
+                    {
+                        if (await outbox.DeadLetterAsync(handler.Consumer, claim.Entry.Sequence, claim.Fence, cancellationToken).ConfigureAwait(false))
+                            deadLettered++;
+                        else
+                            lost++;
+                    }
+                    else if (await outbox.ReleaseAsync(handler.Consumer, claim.Entry.Sequence, claim.Fence, time.GetUtcNow() + Max(Backoff(claim.Attempt), retryAfter), cancellationToken).ConfigureAwait(false))
+                        retried++;
+                    else
+                        lost++;
+                continue;
+            }
             foreach (var claim in claims)
             {
                 cancellationToken.ThrowIfCancellationRequested();

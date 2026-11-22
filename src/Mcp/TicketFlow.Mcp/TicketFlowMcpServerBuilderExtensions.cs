@@ -81,6 +81,7 @@ public static class TicketFlowMcpServerBuilderExtensions
         if (first)
         {
             builder.WithResources<TicketFlowMcpResources>();
+            builder.WithPrompts<TicketFlowMcpPrompts>();
             builder.WithRequestFilters(filters =>
             {
                 filters.AddListToolsFilter(TicketFlowToolListFilter.Create);

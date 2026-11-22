@@ -75,17 +75,26 @@ public sealed class RoutingEngine : IRoutingEngine
         ArgumentNullException.ThrowIfNull(scope);
         if (conversation == default)
             throw new ArgumentException("A conversation identifier is required.", nameof(conversation));
+        InboxId? lastTargetInbox = null;
         for (var attempt = 1; attempt <= options.MaximumRouteAttempts; attempt++)
         {
             var stored = await conversations.GetAsync(scope, conversation, cancellationToken).ConfigureAwait(false);
             var reconciled = await ReconcileAsync(scope, conversation, stored, cancellationToken).ConfigureAwait(false);
             if (reconciled.Settled is { } settled)
                 return settled;
+            lastTargetInbox = reconciled.Entry!.TargetInbox;
             var step = await TryAssignAsync(scope, stored!, reconciled.Entry!, cancellationToken).ConfigureAwait(false);
             if (step is { } outcome)
+            {
+                if (outcome.Value is RoutingQueued queued)
+                    await events.PublishAsync(new ConversationQueued(scope, conversation, lastTargetInbox.Value, queued.Reason, time.GetUtcNow()), cancellationToken).ConfigureAwait(false);
                 return outcome;
+            }
         }
-        return new RoutingQueued(RoutingQueueReason.Contended);
+        var contended = new RoutingQueued(RoutingQueueReason.Contended);
+        if (lastTargetInbox is { } targetInbox)
+            await events.PublishAsync(new ConversationQueued(scope, conversation, targetInbox, contended.Reason, time.GetUtcNow()), cancellationToken).ConfigureAwait(false);
+        return contended;
     }
 
     private async Task<(RoutingSettled? Settled, RoutingQueueEntry? Entry)> ReconcileAsync(TicketScope scope, ConversationId id, StoredConversation? stored,

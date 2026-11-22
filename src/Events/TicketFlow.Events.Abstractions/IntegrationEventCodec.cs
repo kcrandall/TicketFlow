@@ -342,6 +342,11 @@ public static class IntegrationEventCodec
                 w.Id("agent", d.Agent.Value);
                 w.Number("revision", d.Revision);
                 break;
+            case RoutingQueuedData d:
+                Conversation(w, d.Conversation, d.Inbox);
+                w.Id("targetInbox", d.TargetInbox.Value);
+                w.Text("reason", d.Reason);
+                break;
             case RoutingOverflowedData d:
                 Conversation(w, d.Conversation, d.Inbox);
                 w.Id("targetTeam", d.TargetTeam?.Value, true);
@@ -417,6 +422,7 @@ public static class IntegrationEventCodec
             IntegrationEventTypes.SlaMet => new SlaMetData(C(), I(), r.String("policy"), r.String("key"), r.String("metric"), r.Int("cycle"), r.Duration("target"),
                 r.Duration("elapsed"), r.Bool("breached"), r.Instant("at")),
             IntegrationEventTypes.RoutingAssigned => new RoutingAssignedData(C(), I(), new UserId(r.String("agent")), r.Long("revision")),
+            IntegrationEventTypes.RoutingQueued => new RoutingQueuedData(C(), I(), new InboxId(r.String("targetInbox")), r.String("reason")),
             IntegrationEventTypes.RoutingOverflowed => new RoutingOverflowedData(C(), I(), T("targetTeam"), OI("targetInbox")),
             IntegrationEventTypes.RoutingQueueWaitExceeded => new RoutingQueueWaitExceededData(C(), I(), new InboxId(r.String("targetInbox"))),
             IntegrationEventTypes.SurveyResponded => new SurveyRespondedData(new ConversationId(r.String("conversation")), new ContactId(r.String("contact")), r.String("survey"),

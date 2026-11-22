@@ -1,8 +1,8 @@
-# T06 — InsightFlow event export (deferred)
+# T06 — InsightFlow event export
 
 Epic: [E14 — Reporting](../PLAN.md)
 
-Status: **Deferred**
+Status: **Completed**
 
 ## Goal
 
@@ -31,4 +31,4 @@ routes. Revisit when InsightFlow ships an authenticated server ingestion endpoin
 
 ## Results
 
-Not started.
+Implemented `TicketFlow.Integrations.InsightFlow` (2026-11-22) with zero InsightFlow package dependency: exports non-PII `ReportFact`s from `IReportingStore.ListFactsAsync` over HTTP in InsightFlow's `ClientTrackBatchRequest` camel-case JSON wire contract, deriving deterministic RFC 9562 UUIDv8 `eventId`s from the fact key, populating `app` scope strictly from host configuration, advancing checkpoints only after HTTP 2xx, and splitting batches on oversized payloads or HTTP 413. Verified with `TicketFlow.Integrations.InsightFlow.Tests` (3 passed).

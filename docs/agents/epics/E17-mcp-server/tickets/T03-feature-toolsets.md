@@ -42,7 +42,6 @@ unauthenticated/invalid/not-found mapping, toolset-unavailable, truncation and s
 
 - `dotnet test tests/Mcp/TicketFlow.Mcp.Tests -c Release` — 17 passed, 0 failed (2026-11-22).
 
-Deferred: write tools for definitions (rules, macros, SLA/routing policies, roles, field policies), conversation/article resources and
-prompts.
+Follow-up completed (2026-11-22): added 22 definition write tools (automation rules, macros, canned responses, SLA policies, routing policies, access roles and field policies), Access-checked conversation/timeline/article MCP resources (`ticketflow://conversations/{conversationId}`, `.../timeline`, `ticketflow://helpcenter/articles/{articleId}`), and 4 safety-framed workflow prompts (`triage_conversation`, `draft_customer_reply`, `summarize_conversation`, `investigate_sla_risk`). Verified with `TicketFlow.Mcp.Tests` (23 passed; all 92 tools exercised by name, output schema and exact permission enforcement).
 
 Review fixes: `AllToolsTests.EveryToolIsCalledByNameAndReturnsItsDeclaredOutputShape` calls all 70 tools (assist on its authorization path; no model provider is configured) and checks results against each `outputSchema`. `EveryDeclaredPermissionIsWhatTheServiceEnforces` grants a role holding every catalog permission except the tool's declared ones and expects `forbidden` (or an empty, Access-filtered list). `ToolTests.CustomerAuthoredTextIsDelimitedAsUntrustedAndTheRuleIsStated` covers the untrusted wrapping. `dotnet test tests/Mcp/TicketFlow.Mcp.Tests -c Release` — 21 passed.

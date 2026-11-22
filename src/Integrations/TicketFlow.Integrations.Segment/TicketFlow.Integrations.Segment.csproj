@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Segment HTTP Tracking API sink for the TicketFlow integration event stream: maps CloudEvents to Segment /v1/batch track calls with Basic write-key auth, payload splitting and messageId deduplication.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Events/TicketFlow.Events.Abstractions/TicketFlow.Events.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

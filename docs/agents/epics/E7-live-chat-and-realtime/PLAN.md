@@ -1,6 +1,6 @@
 # E7 — Live chat and realtime
 
-Status: **Completed** (T08 WalFlow change-capture fan-out deferred as a follow-up)
+Status: **Completed**
 
 Website live chat and live agent updates.
 
@@ -21,7 +21,7 @@ Outcome: Widget client, WebSocket gateway, visitor sessions, identity verificati
 | [T05 — SignalR hubs](tickets/T05-signalr-hosting.md) | Completed | E7 T01–T03 |
 | [T06 — Web widget client](tickets/T06-web-widget.md) | Completed | E7 T05 |
 | [T07 — Documentation and WalFlow evaluation](tickets/T07-docs-and-walflow-evaluation.md) | Completed | E7 T01–T06 |
-| [T08 — WalFlow change-capture fan-out (follow-up)](tickets/T08-walflow-change-capture-fanout.md) | Planned (follow-up) | E7 T01, E5 row contract |
+| [T08 — WalFlow change-capture fan-out](tickets/T08-walflow-change-capture-fanout.md) | Completed | E7 T01, E5 row contract |
 
 ## Verification record
 

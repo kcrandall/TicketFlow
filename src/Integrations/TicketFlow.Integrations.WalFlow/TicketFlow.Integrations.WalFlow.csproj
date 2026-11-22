@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>WalFlow change-data-capture realtime fan-out and cross-node realtime bus for TicketFlow: decodes PostgreSQL tf_conversation_outbox inserts into RealtimePublications through the published ConversationOutboxRowCodec contract and fans publications across nodes with a versioned JSON envelope.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Npgsql" />
+    <PackageReference Include="WalFlow.Abstractions" />
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
+    <ProjectReference Include="../../Realtime/TicketFlow.Realtime.Abstractions/TicketFlow.Realtime.Abstractions.csproj" />
+    <ProjectReference Include="../../Realtime/TicketFlow.Realtime/TicketFlow.Realtime.csproj" />
+  </ItemGroup>
+</Project>

@@ -30,6 +30,7 @@ TicketFlow.Sla.Stores.Postgres	src/Sla/TicketFlow.Sla.Stores.Postgres/TicketFlow
 TicketFlow.Reporting.Abstractions	src/Reporting/TicketFlow.Reporting.Abstractions/TicketFlow.Reporting.Abstractions.csproj
 TicketFlow.Reporting	src/Reporting/TicketFlow.Reporting/TicketFlow.Reporting.csproj
 TicketFlow.Reporting.Stores.Postgres	src/Reporting/TicketFlow.Reporting.Stores.Postgres/TicketFlow.Reporting.Stores.Postgres.csproj
+TicketFlow.Integrations.InsightFlow	src/Integrations/TicketFlow.Integrations.InsightFlow/TicketFlow.Integrations.InsightFlow.csproj
 TicketFlow.Routing.Abstractions	src/Routing/TicketFlow.Routing.Abstractions/TicketFlow.Routing.Abstractions.csproj
 TicketFlow.Routing	src/Routing/TicketFlow.Routing/TicketFlow.Routing.csproj
 TicketFlow.Routing.Stores.Postgres	src/Routing/TicketFlow.Routing.Stores.Postgres/TicketFlow.Routing.Stores.Postgres.csproj
@@ -37,6 +38,8 @@ TicketFlow.Channels.Abstractions	src/Channels/TicketFlow.Channels.Abstractions/T
 TicketFlow.Channels	src/Channels/TicketFlow.Channels/TicketFlow.Channels.csproj
 TicketFlow.Channels.Stores.Postgres	src/Channels/TicketFlow.Channels.Stores.Postgres/TicketFlow.Channels.Stores.Postgres.csproj
 TicketFlow.Channels.Api	src/Channels/TicketFlow.Channels.Api/TicketFlow.Channels.Api.csproj
+TicketFlow.Channels.Mailbox	src/Channels/TicketFlow.Channels.Mailbox/TicketFlow.Channels.Mailbox.csproj
+TicketFlow.Channels.Mailbox.Stores.Postgres	src/Channels/TicketFlow.Channels.Mailbox.Stores.Postgres/TicketFlow.Channels.Mailbox.Stores.Postgres.csproj
 TicketFlow.Integrations.Surveys	src/Integrations/TicketFlow.Integrations.Surveys/TicketFlow.Integrations.Surveys.csproj
 TicketFlow.Integrations.EnvelopeFlow	src/Integrations/TicketFlow.Integrations.EnvelopeFlow/TicketFlow.Integrations.EnvelopeFlow.csproj
 TicketFlow.Integrations.EnvelopeFlow.Surveys	src/Integrations/TicketFlow.Integrations.EnvelopeFlow.Surveys/TicketFlow.Integrations.EnvelopeFlow.Surveys.csproj
@@ -49,6 +52,7 @@ TicketFlow.Automation	src/Automation/TicketFlow.Automation/TicketFlow.Automation
 TicketFlow.Automation.Stores.Postgres	src/Automation/TicketFlow.Automation.Stores.Postgres/TicketFlow.Automation.Stores.Postgres.csproj
 TicketFlow.Realtime.Abstractions	src/Realtime/TicketFlow.Realtime.Abstractions/TicketFlow.Realtime.Abstractions.csproj
 TicketFlow.Realtime	src/Realtime/TicketFlow.Realtime/TicketFlow.Realtime.csproj
+TicketFlow.Integrations.WalFlow	src/Integrations/TicketFlow.Integrations.WalFlow/TicketFlow.Integrations.WalFlow.csproj
 TicketFlow.Channels.LiveChat	src/Channels/TicketFlow.Channels.LiveChat/TicketFlow.Channels.LiveChat.csproj
 TicketFlow.Channels.LiveChat.Stores.Postgres	src/Channels/TicketFlow.Channels.LiveChat.Stores.Postgres/TicketFlow.Channels.LiveChat.Stores.Postgres.csproj
 TicketFlow.Realtime.SignalR	src/Hosting/TicketFlow.Realtime.SignalR/TicketFlow.Realtime.SignalR.csproj
@@ -61,6 +65,7 @@ TicketFlow.Events	src/Events/TicketFlow.Events/TicketFlow.Events.csproj
 TicketFlow.Events.Stores.Postgres	src/Events/TicketFlow.Events.Stores.Postgres/TicketFlow.Events.Stores.Postgres.csproj
 TicketFlow.Events.Webhooks	src/Events/TicketFlow.Events.Webhooks/TicketFlow.Events.Webhooks.csproj
 TicketFlow.Integrations.PostHog	src/Integrations/TicketFlow.Integrations.PostHog/TicketFlow.Integrations.PostHog.csproj
+TicketFlow.Integrations.Segment	src/Integrations/TicketFlow.Integrations.Segment/TicketFlow.Integrations.Segment.csproj
 TicketFlow.Integrations.WalFlow.Sinks	src/Integrations/TicketFlow.Integrations.WalFlow.Sinks/TicketFlow.Integrations.WalFlow.Sinks.csproj
 TicketFlow.Mcp	src/Mcp/TicketFlow.Mcp/TicketFlow.Mcp.csproj
 TicketFlow.Mcp.AspNetCore	src/Mcp/TicketFlow.Mcp.AspNetCore/TicketFlow.Mcp.AspNetCore.csproj

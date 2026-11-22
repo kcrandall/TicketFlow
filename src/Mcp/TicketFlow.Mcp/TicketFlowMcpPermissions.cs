@@ -23,9 +23,13 @@ public static class TicketFlowMcpPermissions
     public const string ContactMerge = "contact:merge";
     public const string ContactLink = "contact:link";
     public const string SlaRead = "sla:read";
+    public const string SlaManage = "sla:manage";
     public const string AutomationRead = "automation:read";
+    public const string AutomationManage = "automation:manage";
     public const string MacroRun = "macro:run";
+    public const string MacroManage = "macro:manage";
     public const string CannedResponseManage = "canned-response:manage";
+    public const string RoutingManage = "routing:manage";
     public const string HelpCenterRead = "helpcenter:read";
     public const string HelpCenterWrite = "helpcenter:write";
     public const string HelpCenterPublish = "helpcenter:publish";

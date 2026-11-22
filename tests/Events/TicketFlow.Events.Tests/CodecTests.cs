@@ -37,6 +37,7 @@ public sealed class CodecTests
         new SlaBreachedData(C, I, "gold", "gold:1", "resolution", 2, TimeSpan.FromHours(8), At),
         new SlaMetData(C, I, "gold", "gold:1", "first-response", 1, TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(12.5), false, At),
         new RoutingAssignedData(C, I, new UserId("ann"), 7),
+        new RoutingQueuedData(C, I, new InboxId("chat"), "no-capacity"),
         new RoutingOverflowedData(C, I, new TeamId("support"), null),
         new RoutingOverflowedData(C, I, null, new InboxId("chat")),
         new RoutingQueueWaitExceededData(C, I, new InboxId("chat")),

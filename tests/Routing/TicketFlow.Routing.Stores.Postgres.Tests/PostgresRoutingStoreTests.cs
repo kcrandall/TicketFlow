@@ -124,8 +124,8 @@ public sealed class PostgresRoutingStoreTests
         await using var database = await Database.CreateAsync();
         await database.Competing.InitializeAsync();
         Assert.AreEqual(2L, await database.ScalarAsync($"SELECT count(*) FROM tf_store_migrations WHERE component='{PostgresRoutingMigrations.Catalog.Component}'"));
-        Assert.AreEqual(1L, await database.ScalarAsync("SELECT count(*) FROM pg_indexes WHERE indexname='tf_routing_queue_due_v2'"));
-        Assert.AreEqual(0L, await database.ScalarAsync("SELECT count(*) FROM pg_indexes WHERE indexname='tf_routing_queue_due'"));
+        Assert.AreEqual(1L, await database.ScalarAsync("SELECT count(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname='tf_routing_queue_due_v2'"));
+        Assert.AreEqual(0L, await database.ScalarAsync("SELECT count(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname='tf_routing_queue_due'"));
         var scope = TestScopes.Create(tenantId: TestScopes.LongIdentifier(1), workspaceId: TestScopes.LongIdentifier(2));
         var conversation = new Core.ConversationId(TestScopes.LongIdentifier(3));
         await database.Store.EnqueueAsync(scope, new RoutingQueueSnapshot(conversation, new Core.InboxId(TestScopes.LongIdentifier(4)), null,

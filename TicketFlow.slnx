@@ -1,2 +1,17 @@
 <Solution>
+  <Project Path="src/Access/TicketFlow.Access.Abstractions/TicketFlow.Access.Abstractions.csproj" />
+  <Project Path="src/Access/TicketFlow.Access/TicketFlow.Access.csproj" />
+  <Project Path="src/Access/TicketFlow.Access.Stores.Postgres/TicketFlow.Access.Stores.Postgres.csproj" />
+  <Project Path="src/Stores/TicketFlow.Stores.InMemory/TicketFlow.Stores.InMemory.csproj" />
+  <Project Path="src/Stores/TicketFlow.Stores.Migrations.Postgres/TicketFlow.Stores.Migrations.Postgres.csproj" />
+  <Project Path="src/TicketFlow.Core/TicketFlow.Core.csproj" />
+  <Project Path="src/TicketFlow/TicketFlow.csproj" />
+  <Project Path="tests/Access/TicketFlow.Access.StoreContracts/TicketFlow.Access.StoreContracts.csproj" />
+  <Project Path="tests/Access/TicketFlow.Access.Tests/TicketFlow.Access.Tests.csproj" />
+  <Project Path="tests/Access/TicketFlow.Access.Stores.Postgres.Tests/TicketFlow.Access.Stores.Postgres.Tests.csproj" />
+  <Project Path="tests/Stores/TicketFlow.Stores.Migrations.Postgres.Tests/TicketFlow.Stores.Migrations.Postgres.Tests.csproj" />
+  <Project Path="tests/Stores/TicketFlow.Stores.InMemory.Tests/TicketFlow.Stores.InMemory.Tests.csproj" />
+  <Project Path="tests/TicketFlow.Core.Tests/TicketFlow.Core.Tests.csproj" />
+  <Project Path="tests/TicketFlow.Testing/TicketFlow.Testing.csproj" />
+  <Project Path="tests/TicketFlow.Tests/TicketFlow.Tests.csproj" />
 </Solution>

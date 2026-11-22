@@ -2,7 +2,7 @@
 
 Epic: [E1 — Foundation](../PLAN.md)
 
-Status: **Planned**
+Status: **Completed**
 
 ## Goal
 
@@ -28,4 +28,18 @@ Keep Core free of hosting/database/sibling dependencies. Preserve full scope. In
 
 ## Results
 
-Not started.
+Implemented:
+
+- `src/TicketFlow`: `AddTicketFlow()` returns `TicketFlowBuilder { Services }`; TryAdd registration of `TimeProvider.System`; idempotent and preserves application registrations.
+- `src/Stores/TicketFlow.Stores.InMemory`: `ScopedRevisionStore<TKey, TValue>` (full-scope keyed, single lock, bounded capacity, revision-fenced add/replace/remove) returning the `RevisionWriteResult` union (`RevisionApplied`, `RevisionNotFound`, `RevisionConflict`); README documents non-durability.
+- `tests/TicketFlow.Testing` (nonpackable): `TestClock` (Microsoft.Extensions.TimeProvider.Testing 11.0.0), `TestScopes` (factory, per-level variants, long identifiers), `TestPrincipals`, `PostgresTestServer`/`PostgresTestDatabase` random-schema fixture reading `TICKETFLOW_TEST_POSTGRES` (Inconclusive when absent). Used by Core, composition and store tests.
+- Packaging: package READMEs and Descriptions; `src/Directory.Build.props`; projects added to `TicketFlow.slnx`; packable projects listed in `scripts/nuget-projects.tsv`.
+- Tests: `tests/TicketFlow.Tests` (composition, testing helpers), `tests/Stores/TicketFlow.Stores.InMemory.Tests` (fencing, cross-scope isolation per level, capacity, concurrency).
+
+Verification commands (run from the repository root):
+
+- `dotnet build TicketFlow.slnx -c Release` — Build succeeded, 0 Warning(s), 0 Error(s).
+- `dotnet test TicketFlow.slnx -c Release` — TicketFlow.Core.Tests: Passed 29/29; TicketFlow.Tests: Passed 6/6; TicketFlow.Stores.InMemory.Tests: Passed 5/5 (40 total, 0 failed, 0 skipped).
+- `dotnet pack TicketFlow.slnx -c Release -o <scratch>` — TicketFlow.Core, TicketFlow and TicketFlow.Stores.InMemory packed with package validation; test support is nonpackable.
+
+Post-ticket parallel reviews (security, correctness, tests, perf/API) completed 2026-11-22. E1-specific findings: `TicketFlowBuilder` moved from the `TicketFlow` meta-package into `TicketFlow.Core` (public constructor, same `TicketFlow` namespace) so feature packages never reference the meta-package; `TICKETFLOW_REQUIRE_POSTGRES=1` turns inconclusive PostgreSQL tests into failures (set in both workflows and `scripts/test-postgres.sh`, covered by `TestingHelperTests`); `scripts/test_release_scripts.py` now asserts both workflows are `workflow_dispatch`-only, check `refs/heads/main`, and grant `id-token: write` only to the publish job. Re-verified: `dotnet build TicketFlow.slnx -c Release` (0 warnings), `TICKETFLOW_REQUIRE_POSTGRES=1 bash scripts/test-postgres.sh` (154 passed), `bash scripts/test-release-scripts.sh` (15 OK), `bash scripts/verify-package-metadata.sh` (7 packages).

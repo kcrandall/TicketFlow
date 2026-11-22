@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Bounded, development-only in-memory store helpers for TicketFlow.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../TicketFlow.Core/TicketFlow.Core.csproj" />
+  </ItemGroup>
+</Project>

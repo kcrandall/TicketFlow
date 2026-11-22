@@ -1,0 +1,8 @@
+# Package ID<TAB>project path; dependencies precede consumers.
+TicketFlow.Core	src/TicketFlow.Core/TicketFlow.Core.csproj
+TicketFlow	src/TicketFlow/TicketFlow.csproj
+TicketFlow.Stores.InMemory	src/Stores/TicketFlow.Stores.InMemory/TicketFlow.Stores.InMemory.csproj
+TicketFlow.Stores.Migrations.Postgres	src/Stores/TicketFlow.Stores.Migrations.Postgres/TicketFlow.Stores.Migrations.Postgres.csproj
+TicketFlow.Access.Abstractions	src/Access/TicketFlow.Access.Abstractions/TicketFlow.Access.Abstractions.csproj
+TicketFlow.Access	src/Access/TicketFlow.Access/TicketFlow.Access.csproj
+TicketFlow.Access.Stores.Postgres	src/Access/TicketFlow.Access.Stores.Postgres/TicketFlow.Access.Stores.Postgres.csproj

@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Access-control engine for TicketFlow: grant evaluation, conditions, masking, query planning, break-glass, audit and development in-memory stores.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Access.Abstractions/TicketFlow.Access.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

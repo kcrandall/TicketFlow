@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: true
+  DOTNET_NOLOGO: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  build-test-pack:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ticketflow
+          POSTGRES_PASSWORD: ticketflow-ci-only
+          POSTGRES_DB: ticketflow_tests
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TICKETFLOW_TEST_POSTGRES: Host=localhost;Port=5432;Username=ticketflow;Password=ticketflow-ci-only;Database=ticketflow_tests
+      TICKETFLOW_REQUIRE_POSTGRES: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          global-json-file: global.json
+      - name: Release script regression tests
+        run: bash scripts/test-release-scripts.sh
+      - name: Package graph and central metadata
+        run: bash scripts/verify-package-metadata.sh
+      - name: Restore
+        run: dotnet restore TicketFlow.slnx
+      - name: Build
+        run: dotnet build TicketFlow.slnx --configuration Release --no-restore
+      - name: Test
+        run: dotnet test TicketFlow.slnx --configuration Release --no-build --no-restore --logger "trx;LogFileName=test-results.trx"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ticketflow-test-results
+          path: tests/**/TestResults/*.trx
+          if-no-files-found: ignore
+      - name: Pack lockstep prerelease
+        run: |
+          BASE_VERSION="$(bash scripts/resolve-version.sh --prerelease alpha)"
+          bash scripts/pack.sh --version "${BASE_VERSION}.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}" --prerelease alpha --skip-tests
+      - name: Verify package contents and checksums
+        run: bash scripts/verify-package-contents.sh --package-dir artifacts/nuget
+      - name: Local NuGet consumer smoke
+        run: bash scripts/smoke-package-consumption.sh --package-dir artifacts/nuget
+      - name: Upload validated packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ticketflow-packages
+          path: artifacts/nuget/
+          if-no-files-found: error

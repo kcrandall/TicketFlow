@@ -4,8 +4,8 @@
 
 | Epic | Status | Outcome |
 | --- | --- | --- |
-| [E1 — Foundation](E1-foundation/PLAN.md) | Planned | Core scope, identifiers, principals, DI, in-memory stores, test helpers, CI and packaging |
-| [E2 — Access control](E2-access-control/PLAN.md) | Planned | Permission catalog, roles, scoped grants, deny, conditions, masking, query filters, break-glass and audit |
+| [E1 — Foundation](E1-foundation/PLAN.md) | Completed | Core scope, identifiers, principals, DI, in-memory stores, test helpers, CI and packaging |
+| [E2 — Access control](E2-access-control/PLAN.md) | Completed | Permission catalog, roles, scoped grants, deny, conditions, masking, query filters, break-glass and audit |
 | [E3 — Workspaces, inboxes and teams](E3-workspaces-inboxes-teams/PLAN.md) | Planned | Workspace settings, inbox definitions, teams and membership, business calendars |
 | [E4 — Contacts and identity graph](E4-contacts-and-identity-graph/PLAN.md) | Planned | Contacts, verified/claimed channel identities, audited merge/unmerge, PII-aware attributes |
 | [E5 — Conversations and timeline](E5-conversations-and-timeline/PLAN.md) | Planned | Revisioned conversation timeline, messages, notes, labels, custom attributes, status/priority |

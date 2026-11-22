@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <ProjectReference Include="../../src/TicketFlow/TicketFlow.csproj" />
+  </ItemGroup>
+  <ItemGroup><ProjectReference Include="../TicketFlow.Testing/TicketFlow.Testing.csproj" /></ItemGroup>
+</Project>

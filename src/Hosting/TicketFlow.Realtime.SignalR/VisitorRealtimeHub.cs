@@ -218,9 +218,11 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
     {
         if (Session() is not { } session)
             return HubResult.Failure("unauthenticated");
+        // Leave fan-out before ending the session: the resulting session-ended event closes the visitor's OTHER connections, and must
+        // not abort this one before the invocation result is returned. A failed end leaves the caller to Connect again.
+        subscriptions.Disconnect(Context.ConnectionId);
         var result = Simple(await visitors.EndSessionAsync(session, Context.ConnectionAborted).ConfigureAwait(false));
         Context.Items.Remove(ContextKey);
-        subscriptions.Disconnect(Context.ConnectionId);
         return result;
     }
 

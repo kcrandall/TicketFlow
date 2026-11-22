@@ -53,3 +53,10 @@ Verification commands (run from the repository root, 2026-11-22):
   model, composition and renderer tests).
 
 Post-ticket parallel reviews have not been run yet.
+
+
+### Review fixes (2026-11-22, after commit 18d5fce)
+
+- `AddHelpCenter()` / `AddInMemoryHelpCenterStores()` moved to namespace `TicketFlow.HelpCenter` (matching Access/Contacts/Conversations); regression test `BuilderExtensionsLiveInTheFeatureNamespace`.
+
+Verification (2026-11-22): `dotnet build TicketFlow.slnx -c Release` — 0 warnings, 0 errors; `dotnet test tests/HelpCenter/TicketFlow.HelpCenter.Tests -c Release` — 68 passed; `dotnet test tests/Surveys/TicketFlow.Surveys.Tests -c Release` — 30 passed; `TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/HelpCenter/TicketFlow.HelpCenter.Stores.Postgres.Tests -c Release` — 11 passed and `TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/Surveys/TicketFlow.Surveys.Stores.Postgres.Tests -c Release` — 13 passed (isolated `postgres:18` on port 55613); `dotnet test tests/Integrations/TicketFlow.Integrations.Surveys.Tests -c Release` — 3 passed; `dotnet test tests/Integrations/TicketFlow.Integrations.EnvelopeFlow.Tests -c Release` — 9 passed.

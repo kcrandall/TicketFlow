@@ -53,6 +53,68 @@ public sealed class PostgresSurveyStoreTests
     {
         await using var database = await Database.CreateAsync();
         await SurveyStoreContract.VerifyInvitationsAsync(database.Store, database.Competing);
+        await SurveyStoreContract.VerifyClaimsAsync(database.Store, database.Competing);
+    }
+
+    private sealed class CountingSender : ISurveyInvitationSender
+    {
+        public System.Collections.Concurrent.ConcurrentBag<SurveyInvitationMessage> Sent { get; } = [];
+
+        public async Task SendAsync(SurveyInvitationMessage message, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Random.Shared.Next(3), cancellationToken);
+            Sent.Add(message);
+        }
+    }
+
+    [TestMethod]
+    public async Task TwoDispatchersOnTwoDataSourcesSendEachInvitationOnce()
+    {
+        await using var database = await Database.CreateAsync();
+        var scope = SurveyStoreContract.NewScope();
+        var clock = TestClock.Create(SurveyStoreContract.Now.AddHours(1));
+        await database.Store.CreateSurveyAsync(scope, SurveyStoreContract.SampleSurvey(policy: new SurveyTriggerPolicy(TimeSpan.Zero, TimeSpan.Zero, TimeSpan.FromDays(1))));
+        for (var index = 0; index < 120; index++)
+            Assert.AreEqual("created", SurveyStoreContract.C(await database.Store.CreateInvitationAsync(scope,
+                SurveyStoreContract.SampleInvitation(conversation: $"c{index}", contact: $"k{index}"), TimeSpan.Zero)));
+        var sender = new CountingSender();
+        var options = Microsoft.Extensions.Options.Options.Create(new SurveyOptions());
+        var first = new SurveyDispatcher(database.Store, sender, clock, options);
+        var second = new SurveyDispatcher(database.Competing, sender, clock, options);
+        async Task<int> DrainAsync(SurveyDispatcher dispatcher)
+        {
+            var total = 0;
+            while ((await dispatcher.DispatchDueAsync(scope, 7)) is { Sent: > 0 } summary)
+                total += summary.Sent;
+            return total;
+        }
+        var totals = await Task.WhenAll(Task.Run(() => DrainAsync(first)), Task.Run(() => DrainAsync(second)));
+        Assert.AreEqual(120, totals.Sum());
+        Assert.HasCount(120, sender.Sent);
+        Assert.AreEqual(120, sender.Sent.Select(message => message.Invitation.Id).Distinct().Count(), "Exactly one send per invitation.");
+        Assert.IsTrue(totals.All(total => total > 0), "Both dispatchers took part.");
+        Assert.AreEqual(120L, await database.ScalarAsync("SELECT count(*) FROM tf_survey_invitations WHERE state=2 AND lease_until IS NULL AND attempts=1"));
+    }
+
+    [TestMethod]
+    public async Task VersionOneSchemasUpgradeInPlace()
+    {
+        await using var database = await Database.CreateAsync(initialize: false);
+        var runner = new PostgresMigrationRunner(database.Primary, PostgresSurveyMigrations.Catalog);
+        await runner.ApplyAsync(1);
+        var scope = SurveyStoreContract.NewScope();
+        await using (var insert = database.Primary.CreateCommand($"""
+            INSERT INTO tf_survey_invitations(tenant_id, project_id, environment_id, app_id, workspace_id, invitation_id, survey_id, kind, conversation_id, contact_id,
+                locale, created_at, send_after, state, attempts, token_hash, sent_at, expires_at, format_version, revision)
+            VALUES('{scope.TenantId}', '{scope.ProjectId}', '{scope.EnvironmentId}', '{scope.AppId}', '{scope.WorkspaceId.Value}', gen_random_uuid(), 'csat', 1, 'c1', 'k1',
+                'en', now(), now(), 2, 1, decode(repeat('ab', 32), 'hex'), now(), now() + interval '1 day', 1, 2)
+            """))
+            await insert.ExecuteNonQueryAsync();
+        await database.Store.InitializeAsync();
+        Assert.AreEqual(2, (await runner.InspectAsync()).CurrentVersion);
+        var due = await database.Store.ListDueInvitationsAsync(scope, DateTimeOffset.UtcNow.AddDays(2), 10);
+        Assert.IsEmpty(due);
+        Assert.AreEqual(1L, await database.ScalarAsync("SELECT count(*) FROM tf_survey_invitations WHERE issued_at IS NOT NULL AND lease_until IS NULL"));
     }
 
     [TestMethod]
@@ -92,6 +154,10 @@ public sealed class PostgresSurveyStoreTests
     }
 
     [TestMethod]
+    public void BuilderExtensionsLiveInTheStoreNamespace() =>
+        Assert.AreEqual("TicketFlow.Surveys.Stores.Postgres", typeof(PostgresSurveyTicketFlowBuilderExtensions).Namespace);
+
+    [TestMethod]
     public async Task InitializationIsExplicitIdempotentAndChecksummed()
     {
         await using var database = await Database.CreateAsync(initialize: false);
@@ -99,7 +165,7 @@ public sealed class PostgresSurveyStoreTests
         await database.Store.InitializeAsync();
         await database.Competing.InitializeAsync();
         var inspection = await new PostgresMigrationRunner(database.Primary, PostgresSurveyMigrations.Catalog).InspectAsync();
-        Assert.AreEqual(1, inspection.CurrentVersion);
+        Assert.AreEqual(2, inspection.CurrentVersion);
         Assert.AreEqual(PostgresSurveyMigrations.Catalog.Migrations[0].Checksum, inspection.Applied[0].Checksum);
     }
 

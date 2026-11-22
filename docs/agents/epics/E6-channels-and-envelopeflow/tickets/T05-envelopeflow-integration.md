@@ -39,4 +39,6 @@ email retry advice/unknown outcomes, survey invitations over email and WhatsApp 
 
 - `dotnet test tests/Integrations/TicketFlow.Integrations.EnvelopeFlow.Tests -c Release` — 9 passed, 0 failed.
 
+Review fixes (2026-11-22): the adapter references only `TicketFlow.Channels.Abstractions` (worker via `IChannelWorkerPrincipalResolver`); the survey sender moved to the new package `TicketFlow.Integrations.EnvelopeFlow.Surveys`; channel registration is once per kind; conflicting receipts throw for retry. New tests: alternating Slack speakers, conflicting receipts, assembly boundary and duplicate registration. `dotnet test tests/Integrations/TicketFlow.Integrations.EnvelopeFlow.Tests -c Release` — 12 passed.
+
 Post-ticket parallel reviews (docs/agents/prompts/post-ticket-*.md) have not been run yet.

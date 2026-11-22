@@ -15,6 +15,8 @@ Help center behavior for TicketFlow.
 - `InMemoryHelpCenterStore`: bounded, process-local development store with naive term search.
 
 ```csharp
+using TicketFlow.HelpCenter;
+
 services.AddTicketFlow()
     .AddAccessControl().AddInMemoryAccessStores()
     .AddHelpCenter()

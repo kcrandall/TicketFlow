@@ -16,7 +16,7 @@ public sealed partial class PostgresRoutingStore
         if (!Enum.IsDefined(activity))
             throw new ArgumentOutOfRangeException(nameof(activity));
         RequireTtl(ttl);
-        var now = Now;
+        var now = await NowAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         // Serialize writers of one conversation so the live-presence cap is checked atomically.
@@ -81,7 +81,7 @@ public sealed partial class PostgresRoutingStore
         AddScope(command, scope);
         AddText(command, "conversation", conversation.Value);
         AddText(command, "user", user.Value);
-        AddInstant(command, "now", Now);
+        AddInstant(command, "now", await NowAsync(cancellationToken).ConfigureAwait(false));
         return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is true;
     }
 
@@ -95,7 +95,7 @@ public sealed partial class PostgresRoutingStore
             """);
         AddScope(command, scope);
         AddText(command, "conversation", conversation.Value);
-        AddInstant(command, "now", Now);
+        AddInstant(command, "now", await NowAsync(cancellationToken).ConfigureAwait(false));
         var entries = new List<ConversationPresence>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -115,7 +115,7 @@ public sealed partial class PostgresRoutingStore
         RequireConversation(conversation);
         RequireAgent(holder);
         RequireTtl(duration);
-        var now = Now;
+        var now = await NowAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var insert = new NpgsqlCommand($"""
@@ -164,7 +164,7 @@ public sealed partial class PostgresRoutingStore
         ArgumentNullException.ThrowIfNull(scope);
         RequireConversation(conversation);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        return await LoadLockAsync(connection, null, scope, conversation, false, cancellationToken).ConfigureAwait(false) is { } current && current.ExpiresAt > Now ? current : null;
+        return await LoadLockAsync(connection, null, scope, conversation, false, cancellationToken).ConfigureAwait(false) is { } current && current.ExpiresAt > await NowAsync(cancellationToken).ConfigureAwait(false) ? current : null;
     }
 
     public async Task<bool> ReleaseLockAsync(TicketScope scope, ConversationId conversation, UserId holder, long fence, CancellationToken cancellationToken = default)
@@ -177,7 +177,7 @@ public sealed partial class PostgresRoutingStore
         AddText(command, "conversation", conversation.Value);
         AddText(command, "holder", holder.Value);
         AddLong(command, "fence", fence);
-        AddInstant(command, "now", Now);
+        AddInstant(command, "now", await NowAsync(cancellationToken).ConfigureAwait(false));
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
     }
 
@@ -185,7 +185,7 @@ public sealed partial class PostgresRoutingStore
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IConversationPresenceStore.MaximumPrune);
-        var now = Now;
+        var now = await NowAsync(cancellationToken).ConfigureAwait(false);
         await using var command = source.CreateCommand("""
             WITH presence AS (
                 DELETE FROM tf_routing_presence WHERE presence_key IN (

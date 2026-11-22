@@ -43,6 +43,9 @@ public sealed class SlaEngine
     public long LastSequence { get; private set; }
     public DateTimeOffset EvaluatedAt { get; private set; }
     public long EmissionCount { get; private set; }
+
+    /// <summary>When a failed flush may be retried (see <see cref="SlaTracker.FlushRetryAt"/>).</summary>
+    public DateTimeOffset? FlushRetryAt { get; private set; }
     public SlaConversationFacts Facts => facts;
     public IReadOnlyList<SlaPendingEmission> Pending => pending;
 
@@ -75,6 +78,7 @@ public sealed class SlaEngine
             LastSequence = tracker.LastSequence,
             EvaluatedAt = tracker.EvaluatedAt,
             EmissionCount = tracker.EmissionCount,
+            FlushRetryAt = tracker.FlushRetryAt,
         };
         engine.clocks.AddRange(tracker.Clocks.Select(Clock.From));
         engine.pauses.AddRange(tracker.Pauses);
@@ -185,7 +189,12 @@ public sealed class SlaEngine
     {
         var flushed = new HashSet<string>(keys ?? throw new ArgumentNullException(nameof(keys)), StringComparer.Ordinal);
         pending.RemoveAll(item => flushed.Contains(item.Key));
+        if (pending.Count == 0)
+            FlushRetryAt = null;
     }
+
+    /// <summary>Defers flushing the remaining pending emissions until <paramref name="retryAt"/> (no effect without pending emissions).</summary>
+    public void DeferFlush(DateTimeOffset retryAt) => FlushRetryAt = pending.Count == 0 ? null : SlaMath.Instant(retryAt);
 
     /// <summary>The immutable tracker with its derived schedule.</summary>
     public SlaTracker ToTracker(SlaAccessSnapshot access)
@@ -219,11 +228,12 @@ public sealed class SlaEngine
         if (IsPaused && facts.SnoozedUntil is { } until && until > EvaluatedAt)
             next = Min(next, until);
         if (pending.Count > 0)
-            next = EvaluatedAt;
+            next = FlushRetryAt is { } retry && retry > EvaluatedAt ? Min(next, retry) : EvaluatedAt;
         if (risk is not null && due is null)
             risk = null;
         var schedule = new SlaSchedule(next, due, risk, breached, Min(due, firstBreach));
-        return new SlaTracker(conversation, inbox, Applied, facts, snapshot, pauses, pending, EmissionCount, access, LastSequence, EvaluatedAt, schedule);
+        return new SlaTracker(conversation, inbox, Applied, facts, snapshot, pauses, pending, EmissionCount, access, LastSequence, EvaluatedAt, schedule,
+            pending.Count == 0 ? null : FlushRetryAt);
     }
 
     /// <summary>

@@ -1,9 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using TicketFlow.Access;
-using TicketFlow.HelpCenter;
 
-namespace TicketFlow;
+namespace TicketFlow.HelpCenter;
 
 public static class HelpCenterTicketFlowBuilderExtensions
 {

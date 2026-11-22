@@ -123,11 +123,14 @@ public sealed record SlaRiskQuery
         return Filter switch
         {
             SlaRiskFilter.AtRisk => tracker.Schedule.IsAtRisk(now),
-            SlaRiskFilter.Breached => tracker.Schedule.IsBreached(now),
-            SlaRiskFilter.AtRiskOrBreached => tracker.Schedule.IsAtRisk(now) || tracker.Schedule.IsBreached(now),
+            SlaRiskFilter.Breached => Breached(tracker.Schedule, now),
+            SlaRiskFilter.AtRiskOrBreached => tracker.Schedule.IsAtRisk(now) || Breached(tracker.Schedule, now),
             _ => false,
         };
     }
+
+    /// <summary>Breached as of <paramref name="now"/>: the urgency instant has passed (bounds the index range scan) and a clock is breached or past due.</summary>
+    private static bool Breached(SlaSchedule schedule, DateTimeOffset now) => schedule.UrgencyAt <= now && schedule.IsBreached(now);
 
     /// <summary>True when <paramref name="tracker"/> sorts after <see cref="After"/> (or there is no cursor).</summary>
     public bool IsAfterCursor(SlaTracker tracker)
@@ -149,9 +152,10 @@ public sealed record SlaTrackerPage(IReadOnlyList<StoredSlaTracker> Trackers, Sl
 /// <list type="bullet">
 /// <item>Every tracker operation is confined to one <see cref="TicketScope"/>; claims are store-wide and carry their scope.</item>
 /// <item><see cref="WriteAsync"/> creates (expected revision <see langword="null"/>, revision 1, conflict when present) or
-/// compare-and-set replaces the tracker and, atomically, sets its timer to <see cref="SlaSchedule.NextCheckAt"/> and clears any
-/// timer lease.</item>
-/// <item><see cref="ClaimDueAsync"/> leases timers with a due instant at or before the store clock's now, earliest first, whose lease is
+/// compare-and-set replaces the tracker and, atomically, sets its timer to <see cref="SlaSchedule.NextCheckAt"/>; it clears the timer
+/// lease only for the claim that holds it (matching fence), so another worker's lease survives writes from the outbox path.</item>
+/// <item><see cref="ClaimDueAsync"/> leases timers with a due instant at or before the store's lease clock (PostgreSQL: database time unless
+/// a test clock is injected), earliest first, whose lease is
 /// free or expired, incrementing each timer's fence. Concurrent claimers never receive the same timer under a live lease.</item>
 /// <item><see cref="ReleaseAsync"/> reschedules a claimed timer to <c>retryAt</c> and clears the lease; it returns
 /// <see langword="false"/> when the fence is stale or the lease expired.</item>
@@ -169,7 +173,13 @@ public interface ISlaTrackerStore
 
     Task<StoredSlaTracker?> GetAsync(TicketScope scope, ConversationId conversation, CancellationToken cancellationToken = default);
 
-    Task<SlaWriteResult<StoredSlaTracker>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Creates or compare-and-set replaces the tracker and sets its timer to <see cref="SlaSchedule.NextCheckAt"/>. The timer lease is
+    /// cleared only when <paramref name="release"/> is the current claim (same fence); otherwise a live lease held by another worker is
+    /// left untouched.
+    /// </summary>
+    Task<SlaWriteResult<StoredSlaTracker>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, SlaTimerClaim? release = null,
+        CancellationToken cancellationToken = default);
 
     Task<SlaWriteResult<StoredSlaTracker>> DeleteAsync(TicketScope scope, ConversationId conversation, long expectedRevision, CancellationToken cancellationToken = default);
 

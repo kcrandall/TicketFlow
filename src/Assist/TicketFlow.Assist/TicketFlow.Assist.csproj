@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Assistant service for TicketFlow over Microsoft.Extensions.AI: access- and masking-aware context, help-center-grounded drafts with citations, triage, sentiment, translation and tone rewrites, quotas and usage accounting, timeline recording, chat client factory with telemetry and development in-memory stores.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Assist.Abstractions/TicketFlow.Assist.Abstractions.csproj" />
+    <ProjectReference Include="../../Contacts/TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj" />
+    <PackageReference Include="Microsoft.Extensions.AI" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="TicketFlow.Assist.Tests" />
+  </ItemGroup>
+</Project>

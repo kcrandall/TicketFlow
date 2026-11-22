@@ -137,36 +137,38 @@ public sealed partial class PostgresConversationStore
     /// <summary>Appends the change and a pending delivery for every registered consumer inside the caller's transaction.</summary>
     private async Task<ConversationOutboxEntry> AppendAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, ConversationChange change, CancellationToken cancellationToken)
     {
-        long sequence;
-        await using (var insert = new NpgsqlCommand("""
-            INSERT INTO tf_conversation_outbox(entry_id, tenant_id, project_id, environment_id, app_id, workspace_id, conversation_id, inbox_id, format_version, kind,
-                revision, payload, occurred_at)
-            VALUES(@entry, @tenant, @project, @environment, @app, @workspace, @conversation, @inbox, 1, @kind, @revision, @payload, @occurred)
-            RETURNING sequence
-            """, connection, transaction))
-        {
-            insert.Parameters.AddWithValue("entry", change.Id);
-            AddScope(insert, change.Scope);
-            AddText(insert, "conversation", change.Conversation.Value);
-            AddText(insert, "inbox", change.Inbox.Value);
-            insert.Parameters.AddWithValue("kind", (short)change.Kind);
-            insert.Parameters.AddWithValue("revision", change.Revision);
-            AddText(insert, "payload", ConversationJsonCodec.SerializeChangePayload(change));
-            AddInstant(insert, "occurred", change.OccurredAt);
-            sequence = (long)(await insert.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
-        }
-        await using (var fanOut = new NpgsqlCommand("""
-            INSERT INTO tf_conversation_outbox_deliveries(consumer, sequence, conversation_key, state, fence, attempts, available_at)
-            SELECT consumer, @sequence, tf_key_v1(@tenant,@project,@environment,@app,@workspace,@conversation), 0, 0, 0, @now FROM tf_conversation_outbox_consumers
-            """, connection, transaction))
-        {
-            fanOut.Parameters.AddWithValue("sequence", sequence);
-            AddScope(fanOut, change.Scope);
-            AddText(fanOut, "conversation", change.Conversation.Value);
-            AddInstant(fanOut, "now", time.GetUtcNow());
-            await fanOut.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
+        await using var batch = new NpgsqlBatch(connection, transaction);
+        batch.BatchCommands.Add(AppendCommand(change));
+        var sequence = await ExecuteBatchAsync(batch, cancellationToken).ConfigureAwait(false) ?? throw new InvalidOperationException("The outbox entry was not written.");
         return new ConversationOutboxEntry(sequence, change);
+    }
+
+    /// <summary>One statement: the outbox entry plus a pending delivery per registered consumer, returning the entry sequence.</summary>
+    private NpgsqlBatchCommand AppendCommand(ConversationChange change)
+    {
+        var command = new NpgsqlBatchCommand("""
+            WITH entry AS (
+                INSERT INTO tf_conversation_outbox(entry_id, tenant_id, project_id, environment_id, app_id, workspace_id, conversation_id, inbox_id, format_version, kind,
+                    revision, payload, occurred_at)
+                VALUES(@entry, @tenant, @project, @environment, @app, @workspace, @conversation, @inbox, 1, @kind, @revision, @payload, @occurred)
+                RETURNING sequence),
+            fan AS (
+                INSERT INTO tf_conversation_outbox_deliveries(consumer, sequence, conversation_key, state, fence, attempts, available_at)
+                SELECT k.consumer, e.sequence, tf_key_v1(@tenant,@project,@environment,@app,@workspace,@conversation), 0, 0, 0, @now
+                FROM tf_conversation_outbox_consumers k CROSS JOIN entry e)
+            SELECT sequence FROM entry
+            """);
+        var parameters = command.Parameters;
+        parameters.AddWithValue("entry", change.Id);
+        AddScope(parameters, change.Scope);
+        AddText(parameters, "conversation", change.Conversation.Value);
+        AddText(parameters, "inbox", change.Inbox.Value);
+        parameters.AddWithValue("kind", (short)change.Kind);
+        parameters.AddWithValue("revision", change.Revision);
+        AddText(parameters, "payload", ConversationJsonCodec.SerializeChangePayload(change));
+        AddInstant(parameters, "occurred", change.OccurredAt);
+        AddInstant(parameters, "now", time.GetUtcNow());
+        return command;
     }
 
     private static ConversationOutboxEntry ReadEntry(NpgsqlDataReader reader) => Decode(() =>

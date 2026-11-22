@@ -106,6 +106,7 @@ public static class SlaTrackerCodec
             writer.WriteEndObject();
             writer.WriteNumber("lastSequence", tracker.LastSequence);
             SlaJson.WriteInstant(writer, "evaluatedAt", tracker.EvaluatedAt);
+            SlaJson.WriteOptionalInstant(writer, "flushRetryAt", tracker.FlushRetryAt);
             var schedule = tracker.Schedule;
             writer.WriteStartObject("schedule");
             SlaJson.WriteOptionalInstant(writer, "next", schedule.NextCheckAt);
@@ -121,7 +122,7 @@ public static class SlaTrackerCodec
     /// <exception cref="FormatException">The payload is malformed, invalid or of an unknown version.</exception>
     public static SlaTracker Deserialize(string json) => SlaJson.Read(json, root =>
     {
-        SlaJson.RequireProperties(root, "v", "conversation", "inbox", "applied", "facts", "clocks", "pauses", "pending", "emissions", "access", "lastSequence", "evaluatedAt", "schedule");
+        SlaJson.RequireProperties(root, "v", "conversation", "inbox", "applied", "facts", "clocks", "pauses", "pending", "emissions", "access", "lastSequence", "evaluatedAt", "flushRetryAt", "schedule");
         SlaJson.RequireVersion(root, FormatVersion);
         SlaAppliedRule? applied = null;
         if (root.TryGetProperty("applied", out var appliedElement))
@@ -167,7 +168,7 @@ public static class SlaTrackerCodec
             SlaJson.OptionalInstant(scheduleElement, "risk"), SlaJson.Bool(scheduleElement.GetProperty("breached")), SlaJson.OptionalInstant(scheduleElement, "urgency"));
         return new SlaTracker(new ConversationId(SlaJson.String(root.GetProperty("conversation"))), new InboxId(SlaJson.String(root.GetProperty("inbox"))), applied, facts,
             clocks, pauses, pending, root.GetProperty("emissions").GetInt64(), access, root.GetProperty("lastSequence").GetInt64(),
-            SlaJson.Instant(root.GetProperty("evaluatedAt")), schedule);
+            SlaJson.Instant(root.GetProperty("evaluatedAt")), schedule, SlaJson.OptionalInstant(root, "flushRetryAt"));
     });
 
     private static SlaClock ReadClock(JsonElement element)

@@ -67,13 +67,20 @@ public interface ISurveyScheduler
 /// </summary>
 public sealed record SurveyInvitationMessage(TicketScope Scope, SurveyInvitation Invitation, SurveyToken Token, SurveyKind Kind, int MinimumScore, int MaximumScore, SurveyQuestion Question)
 {
+    /// <summary>
+    /// Stable idempotency key for the provider (<c>tfs-</c> + invitation GUID): identical on every attempt for this invitation, so a
+    /// retry after an ambiguous failure is deduplicated by transports that honour idempotency keys. The token is also identical.
+    /// </summary>
+    public string DeliveryKey => $"tfs-{Invitation.Id.Value:N}";
+
     public override string ToString() => "SurveyInvitationMessage { <redacted> }";
 }
 
 /// <summary>
 /// Delivers survey invitations (for example through EnvelopeFlow templates via the E6 adapter). TicketFlow ships no transport.
 /// Implementations resolve the contact's address themselves, must not log the token or address, and throw when delivery fails so
-/// the dispatcher can retry.
+/// the dispatcher can retry. Retries carry the same token and <see cref="SurveyInvitationMessage.DeliveryKey"/>; pass the key to the
+/// provider as its idempotency key so an accepted-then-failed attempt is not delivered twice.
 /// </summary>
 public interface ISurveyInvitationSender
 {
@@ -82,7 +89,7 @@ public interface ISurveyInvitationSender
 
 public sealed record SurveyDispatchSummary(int Sent, int Retrying, int Failed, int Cancelled);
 
-/// <summary>Issues tokens for due invitations of one scope and hands them to <see cref="ISurveyInvitationSender"/>.</summary>
+/// <summary>Claims due invitations of one scope, issues their deterministic tokens and hands them to <see cref="ISurveyInvitationSender"/>.</summary>
 public interface ISurveyDispatcher
 {
     Task<SurveyDispatchSummary> DispatchDueAsync(TicketScope scope, int limit = 100, CancellationToken cancellationToken = default);
@@ -98,7 +105,7 @@ public sealed record SurveyResponseDuplicate(SurveyResponse Response);
 
 public enum SurveyResponseRejection
 {
-    /// <summary>The token is malformed, unknown in the scope, or not yet sent.</summary>
+    /// <summary>The token is malformed, unknown in the scope, not yet issued, or its invitation was cancelled.</summary>
     InvalidToken = 1,
 
     Expired = 2,
@@ -138,7 +145,8 @@ public sealed record SurveyResponseViewPage(IReadOnlyList<SurveyResponseView> It
 /// Authorized survey administration and reporting in the actor's workspace. Definitions need <c>survey:read</c> /
 /// <c>survey:manage</c> on the survey's inbox (or the workspace for workspace surveys); invitations and responses need
 /// <c>survey:read</c> on their inbox/team/agent (lists use the access query planner, comments honour the <c>survey.comment</c>
-/// field policy); aggregates need <c>report:view</c> and include only responses the actor may view.
+/// field policy); aggregates need <c>report:view</c> and include only responses the actor may view. As on every list path, an actor
+/// without any applicable grant gets an empty page or aggregate rather than a refusal.
 /// </summary>
 public interface ISurveyService
 {

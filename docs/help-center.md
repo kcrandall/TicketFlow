@@ -9,6 +9,9 @@ The help center ships as three packages:
 | `TicketFlow.HelpCenter.Stores.Postgres` | `PostgresHelpCenterStore`, `PostgresHelpCenterMigrations` (component `ticketflow.helpcenter`), per-locale full-text search. |
 
 ```csharp
+using TicketFlow.HelpCenter;
+using TicketFlow.HelpCenter.Stores.Postgres;
+
 services.AddTicketFlow()
     .AddAccessControl().AddPostgresAccessStores(dataSource)
     .AddHelpCenter()

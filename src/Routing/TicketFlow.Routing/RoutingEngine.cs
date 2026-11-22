@@ -14,10 +14,11 @@ namespace TicketFlow.Routing;
 /// <list type="number">
 /// <item>Policy: the queue entry's target inbox → its <see cref="RoutingPolicyId"/> → <see cref="RoutingPolicy"/> (none or manual: stays queued).</item>
 /// <item>Pool: effectively online agents, restricted to the conversation team (or the policy team), required skills and a positive
-/// capacity for the conversation's channel kind.</item>
+/// capacity for the conversation's channel kind — filtered inside the store query and paged, never cut off at a fixed count.</item>
 /// <item>Eligibility: each agent must be permitted <c>conversation:reply</c> on the conversation. One Access plan per agent (built from
 /// the agent's current team snapshot) is evaluated against the conversation resource and reused for
-/// <see cref="RoutingOptions.EligibilityCacheDuration"/> within this engine instance, instead of a point check per agent per conversation.</item>
+/// <see cref="RoutingOptions.RunEligibilityPlanLifetime"/> within this engine instance (one run), instead of a point check per agent per
+/// conversation; team snapshots are resolved in batches through <see cref="IRoutingTeamMembershipResolver"/>.</item>
 /// <item>Reservation: one atomic store step selects the agent (sticky preference, round robin or least busy), checks capacity and moves
 /// the cursor.</item>
 /// <item>Fenced assignment: <c>AssignAsync(expectedRevision)</c> as the engine API client. A conflict releases the reservation and retries
@@ -34,7 +35,7 @@ public sealed class RoutingEngine : IRoutingEngine
     private readonly IConversationService service;
     private readonly IInboxStore inboxes;
     private readonly ITeamStore teams;
-    private readonly ITeamMembershipResolver memberships;
+    private readonly IRoutingTeamMembershipResolver memberships;
     private readonly IAccessQueryPlanner planner;
     private readonly IRoutingPolicyStore policies;
     private readonly IAgentAvailabilityStore agents;
@@ -45,7 +46,7 @@ public sealed class RoutingEngine : IRoutingEngine
     private readonly TimeProvider time;
     private readonly ConcurrentDictionary<(TicketScope Scope, UserId Agent), (AccessFilter Filter, DateTimeOffset Until)> eligibility = new();
 
-    public RoutingEngine(IConversationStore conversations, IConversationService service, IInboxStore inboxes, ITeamStore teams, ITeamMembershipResolver memberships,
+    public RoutingEngine(IConversationStore conversations, IConversationService service, IInboxStore inboxes, ITeamStore teams, IRoutingTeamMembershipResolver memberships,
         IAccessQueryPlanner planner, IRoutingPolicyStore policies, IAgentAvailabilityStore agents, IRoutingAssignmentStore assignments, IRoutingQueueStore queue,
         IEnumerable<IRoutingEventObserver> observers, IOptions<RoutingOptions> options, TimeProvider time)
     {
@@ -155,7 +156,8 @@ public sealed class RoutingEngine : IRoutingEngine
         if (manualFallback && preferred is null)
             return new RoutingQueued(RoutingQueueReason.Manual);
 
-        var candidates = await CandidatesAsync(scope, stored, conversation.Team ?? policy.Team, channel, required, manualFallback ? preferred : null, cancellationToken)
+        var candidates = await CandidatesAsync(scope, stored, conversation.Team ?? policy.Team, channel, required, manualFallback ? preferred : null, preferred,
+            entry.TargetInbox.Value, cancellationToken)
             .ConfigureAwait(false);
         if (candidates.Count == 0)
             return new RoutingQueued(RoutingQueueReason.NoEligibleAgent);
@@ -196,37 +198,68 @@ public sealed class RoutingEngine : IRoutingEngine
         };
     }
 
+    /// <summary>
+    /// Pages through every available agent matching the pool filters (pushed into the store query), keeps those Access permits and, when
+    /// more than <see cref="RoutingReservationRequest.MaximumCandidates"/> remain, passes the window that follows the inbox cursor in
+    /// rotation order (plus the sticky preference), so no eligible agent is starved by an identifier cutoff.
+    /// </summary>
     private async Task<IReadOnlyList<RoutingCandidate>> CandidatesAsync(TicketScope scope, StoredConversation stored, TeamId? team, ChannelKind channel,
-        IReadOnlyDictionary<string, int> required, UserId? only, CancellationToken cancellationToken)
+        IReadOnlyDictionary<string, int> required, UserId? only, UserId? preferred, string cursorKey, CancellationToken cancellationToken)
     {
-        var available = await agents.ListAvailableAsync(scope, IAgentAvailabilityStore.MaximumAvailableList, cancellationToken).ConfigureAwait(false);
-        IReadOnlySet<UserId>? members = null;
+        IEnumerable<UserId>? allowed = null;
         if (team is { } teamId)
-            members = (await teams.GetAsync(scope, teamId, cancellationToken).ConfigureAwait(false))?.Team.Members ?? new HashSet<UserId>();
+            allowed = (IEnumerable<UserId>?)(await teams.GetAsync(scope, teamId, cancellationToken).ConfigureAwait(false))?.Team.Members ?? [];
+        if (only is { } single)
+            allowed = allowed is null || allowed.Contains(single) ? [single] : [];
+        if (allowed is not null && !allowed.Any())
+            return [];
         var resource = ConversationAccess.Resource(stored);
-        var candidates = new List<RoutingCandidate>();
-        foreach (var profile in available)
+        var eligible = new List<RoutingCandidate>();
+        var query = new AvailableAgentQuery(channel, allowed, required);
+        for (var pages = 0; pages * IAgentAvailabilityStore.MaximumAvailableList < IAgentAvailabilityStore.MaximumAgentsPerWorkspace; pages++)
         {
-            var settings = profile.Settings;
-            var capacity = settings.CapacityFor(channel);
-            if (capacity < 1 || (only is { } single && settings.Agent != single) || (members is not null && !members.Contains(settings.Agent)) || !settings.HasSkills(required))
-                continue;
-            var filter = await EligibilityAsync(scope, settings.Agent, cancellationToken).ConfigureAwait(false);
-            if (AccessFilterEvaluator.Matches(filter, resource))
-                candidates.Add(new RoutingCandidate(settings.Agent, capacity));
+            var page = await agents.ListAvailableAsync(scope, query, cancellationToken).ConfigureAwait(false);
+            var filters = await EligibilityAsync(scope, [.. page.Select(profile => profile.Agent)], cancellationToken).ConfigureAwait(false);
+            foreach (var profile in page)
+                if (AccessFilterEvaluator.Matches(filters[profile.Agent], resource))
+                    eligible.Add(new RoutingCandidate(profile.Agent, profile.Settings.CapacityFor(channel)));
+            if (page.Count < query.Limit)
+                break;
+            query = query.WithAfter(page[^1].Agent);
         }
-        return candidates;
+        if (eligible.Count <= RoutingReservationRequest.MaximumCandidates)
+            return eligible;
+        var cursor = await assignments.GetCursorAsync(scope, cursorKey, cancellationToken).ConfigureAwait(false);
+        var rotation = cursor is null ? eligible
+            : [.. eligible.Where(c => string.CompareOrdinal(c.Agent.Value, cursor) > 0), .. eligible.Where(c => string.CompareOrdinal(c.Agent.Value, cursor) <= 0)];
+        var window = rotation.Take(RoutingReservationRequest.MaximumCandidates).ToList();
+        if (preferred is { } sticky && !window.Any(c => c.Agent == sticky) && eligible.FirstOrDefault(c => c.Agent == sticky) is { } owner)
+            window[^1] = owner;
+        return window;
     }
 
-    private async Task<AccessFilter> EligibilityAsync(TicketScope scope, UserId agent, CancellationToken cancellationToken)
+    /// <summary>One Access plan per agent, reused within this engine instance (one run); missing plans are resolved in one batch.</summary>
+    private async Task<IReadOnlyDictionary<UserId, AccessFilter>> EligibilityAsync(TicketScope scope, IReadOnlyList<UserId> agentIds, CancellationToken cancellationToken)
     {
         var now = time.GetUtcNow();
-        if (eligibility.TryGetValue((scope, agent), out var cached) && cached.Until > now)
-            return cached.Filter;
-        var principal = await memberships.ResolveUserPrincipalAsync(scope, agent, cancellationToken).ConfigureAwait(false);
-        var filter = await planner.PlanAsync(new AccessQuery(principal, ConversationPermissions.Reply, scope), cancellationToken).ConfigureAwait(false);
-        if (options.EligibilityCacheDuration > TimeSpan.Zero)
-            eligibility[(scope, agent)] = (filter, now + options.EligibilityCacheDuration);
-        return filter;
+        var filters = new Dictionary<UserId, AccessFilter>();
+        var missing = new List<UserId>();
+        foreach (var agent in agentIds)
+            if (eligibility.TryGetValue((scope, agent), out var cached) && cached.Until > now)
+                filters[agent] = cached.Filter;
+            else
+                missing.Add(agent);
+        if (missing.Count == 0)
+            return filters;
+        var teamsByAgent = await memberships.GetTeamsAsync(scope, missing, cancellationToken).ConfigureAwait(false);
+        foreach (var agent in missing)
+        {
+            var principal = new UserPrincipal(scope, agent, teamsByAgent.GetValueOrDefault(agent) ?? []);
+            var filter = await planner.PlanAsync(new AccessQuery(principal, ConversationPermissions.Reply, scope), cancellationToken).ConfigureAwait(false);
+            filters[agent] = filter;
+            if (options.RunEligibilityPlanLifetime > TimeSpan.Zero)
+                eligibility[(scope, agent)] = (filter, now + options.RunEligibilityPlanLifetime);
+        }
+        return filters;
     }
 }

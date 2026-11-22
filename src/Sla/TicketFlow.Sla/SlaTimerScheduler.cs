@@ -3,16 +3,17 @@ using Microsoft.Extensions.Options;
 namespace TicketFlow.Sla;
 
 /// <summary>
-/// Counts from one scheduler run. <see cref="Lost"/> counts failed evaluations whose release was refused: the lease or fence was lost, or
-/// a tracker write during the failed evaluation already rescheduled the timer (and cleared the lease).
+/// Counts from one scheduler run. <see cref="Retried"/> counts failed evaluations rescheduled after <see cref="SlaOptions.TimerRetryDelay"/>
+/// (including deferred flushes); <see cref="Lost"/> counts failed evaluations whose release was refused because the lease or fence was lost.
 /// </summary>
 public sealed record SlaTimerRunResult(int Evaluated, int Retried, int Lost);
 
 /// <summary>
 /// The due-work scheduler: claims due timers from <see cref="ISlaTrackerStore"/> (leased; concurrent schedulers never share a live
-/// lease) and re-synchronizes each tracker through <see cref="SlaConversationTracker.SyncAsync"/>, so warnings and breaches fire even
-/// when the conversation sees no new events. The sync's tracker write reschedules the timer and clears the lease; a failed evaluation
-/// releases the timer for a retry after <see cref="SlaOptions.TimerRetryDelay"/>. Firing is idempotent (thresholds are recorded per
+/// lease) and re-synchronizes each tracker through <see cref="SlaConversationTracker.SyncAsync(TicketFlow.Core.TicketScope, TicketFlow.Core.ConversationId, SlaTimerClaim?, CancellationToken)"/>, so warnings and breaches fire even
+/// when the conversation sees no new events. The sync's final tracker write reschedules the timer and releases this claim's lease (writes
+/// from the outbox path never release another worker's lease); a failed evaluation releases the timer for a retry after
+/// <see cref="SlaOptions.TimerRetryDelay"/>, and a failed flush defers the timer by the same delay instead of spinning. Firing is idempotent (thresholds are recorded per
 /// clock and emissions are de-duplicated). No hosted service is included: hosts call <see cref="RunOnceAsync"/> in their own loop.
 /// </summary>
 public sealed class SlaTimerScheduler
@@ -39,20 +40,23 @@ public sealed class SlaTimerScheduler
         foreach (var claim in claims)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            bool succeeded;
             try
             {
-                await tracker.SyncAsync(claim.Scope, claim.Conversation, cancellationToken).ConfigureAwait(false);
-                succeeded = true;
+                await tracker.SyncAsync(claim.Scope, claim.Conversation, claim, cancellationToken).ConfigureAwait(false);
+                evaluated++;
+                continue;
+            }
+            catch (SlaFlushDeferredException)
+            {
+                // The tracker write already rescheduled the timer (FlushRetryAt) and released this claim's lease.
+                retried++;
+                continue;
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
                 // Exception details are not recorded: they may contain customer data.
-                succeeded = false;
             }
-            if (succeeded)
-                evaluated++;
-            else if (await store.ReleaseAsync(claim, time.GetUtcNow() + options.TimerRetryDelay, cancellationToken).ConfigureAwait(false))
+            if (await store.ReleaseAsync(claim, time.GetUtcNow() + options.TimerRetryDelay, cancellationToken).ConfigureAwait(false))
                 retried++;
             else
                 lost++;

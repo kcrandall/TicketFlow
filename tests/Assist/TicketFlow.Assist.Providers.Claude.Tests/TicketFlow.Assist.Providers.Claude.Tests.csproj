@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Assist/TicketFlow.Assist.Providers.Claude/TicketFlow.Assist.Providers.Claude.csproj" />
+    <ProjectReference Include="../../TicketFlow.Testing/TicketFlow.Testing.csproj" />
+  </ItemGroup>
+</Project>

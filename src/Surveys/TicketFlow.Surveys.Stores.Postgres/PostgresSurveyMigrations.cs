@@ -56,5 +56,17 @@ public static class PostgresSurveyMigrations
             {ScopeKey},
             PRIMARY KEY (invitation_key));
         CREATE INDEX tf_survey_responses_time ON tf_survey_responses (scope_key, responded_at DESC, invitation_id DESC);
+        """),
+        // Version 2: dispatch claims with leases (state 6 = Sending), tokens kept across retries (issued_at replaces sent_at).
+        new(2, "dispatch-leases", """
+        ALTER TABLE tf_survey_invitations DROP CONSTRAINT tf_survey_invitations_state_check;
+        ALTER TABLE tf_survey_invitations DROP CONSTRAINT tf_survey_invitations_check;
+        ALTER TABLE tf_survey_invitations RENAME COLUMN sent_at TO issued_at;
+        ALTER TABLE tf_survey_invitations ADD COLUMN lease_until timestamptz NULL;
+        ALTER TABLE tf_survey_invitations ADD CONSTRAINT tf_survey_invitations_state_v2 CHECK (state BETWEEN 1 AND 6);
+        ALTER TABLE tf_survey_invitations ADD CONSTRAINT tf_survey_invitations_token_v2 CHECK (
+            (token_hash IS NULL) = (issued_at IS NULL) AND (token_hash IS NULL) = (expires_at IS NULL) AND (state NOT IN (2, 3) OR token_hash IS NOT NULL));
+        ALTER TABLE tf_survey_invitations ADD CONSTRAINT tf_survey_invitations_lease_v2 CHECK ((state = 6) = (lease_until IS NOT NULL));
+        CREATE INDEX tf_survey_invitations_leases ON tf_survey_invitations (scope_key, lease_until) WHERE state = 6;
         """)]);
 }

@@ -294,7 +294,8 @@ public sealed record SlaTracker
         SlaAccessSnapshot access,
         long lastSequence,
         DateTimeOffset evaluatedAt,
-        SlaSchedule schedule)
+        SlaSchedule schedule,
+        DateTimeOffset? flushRetryAt = null)
     {
         if (conversation == default || inbox == default)
             throw new ArgumentException("Conversation and inbox identifiers are required.");
@@ -321,6 +322,9 @@ public sealed record SlaTracker
         LastSequence = lastSequence;
         EvaluatedAt = SlaText.Instant(evaluatedAt);
         Schedule = schedule ?? throw new ArgumentNullException(nameof(schedule));
+        FlushRetryAt = SlaText.Instant(flushRetryAt);
+        if (FlushRetryAt is not null && Pending.Count == 0)
+            throw new ArgumentException("Only trackers with pending emissions defer flushing.", nameof(flushRetryAt));
     }
 
     public ConversationId Conversation { get; }
@@ -346,6 +350,12 @@ public sealed record SlaTracker
     public DateTimeOffset EvaluatedAt { get; }
 
     public SlaSchedule Schedule { get; }
+
+    /// <summary>
+    /// When a failed flush (refused append, too many conversation conflicts, or an undecidable duplicate scan) may be retried; until then
+    /// pending emissions do not keep the timer due. <see langword="null"/> when the last flush did not fail.
+    /// </summary>
+    public DateTimeOffset? FlushRetryAt { get; }
 
     public SlaClock? Clock(SlaMetric metric) => Clocks.FirstOrDefault(clock => clock.Metric == metric);
 

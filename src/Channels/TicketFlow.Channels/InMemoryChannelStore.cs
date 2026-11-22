@@ -37,6 +37,19 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
                 && string.Equals(stored.Endpoint.Address, address, StringComparison.Ordinal)));
     }
 
+    public Task<IReadOnlyList<StoredChannelEndpoint>> ListByAddressPrefixAsync(AccessPartition partition, ChannelKind kind, string prefix, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        ArgumentNullException.ThrowIfNull(prefix);
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IChannelEndpointStore.MaximumPrefixMatches);
+        lock (gate)
+            return Task.FromResult<IReadOnlyList<StoredChannelEndpoint>>([.. endpoints.Values
+                .Where(stored => stored.Endpoint.Kind == kind && stored.Endpoint.Address is { } address && address.StartsWith(prefix, StringComparison.Ordinal)
+                    && AccessPartition.From(stored.Scope) == partition)
+                .OrderBy(stored => stored.Endpoint.Address, StringComparer.Ordinal).Take(limit)]);
+    }
+
     public Task<ChannelWriteResult<StoredChannelEndpoint>> CreateAsync(TicketScope scope, ChannelEndpoint endpoint, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -106,15 +119,28 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
         {
             var key = (scope, state.Conversation);
             states.TryGetValue(key, out var existing);
-            if (existing?.Revision != expectedRevision
-                || existing is not null && (existing.State.Inbox != state.Inbox || existing.State.Channel != state.Channel))
-                return Result<StoredChannelConversationState>(new ChannelWriteConflict(existing?.Revision));
+            if (existing is null && expectedRevision is not null)
+                return Result<StoredChannelConversationState>(ChannelWriteNotFound.Instance);
+            if (existing is not null && (existing.Revision != expectedRevision || existing.State.Inbox != state.Inbox || existing.State.Channel != state.Channel))
+                return Result<StoredChannelConversationState>(new ChannelWriteConflict(existing.Revision));
             if (existing is null && states.Count >= MaximumRecords)
                 return Result<StoredChannelConversationState>(new ChannelWriteRejected(ChannelWriteRejection.CapacityExceeded));
             var stored = new StoredChannelConversationState(scope, state, (existing?.Revision ?? 0) + 1);
             states[key] = stored;
             return Result<StoredChannelConversationState>(new ChannelWriteApplied<StoredChannelConversationState>(stored));
         }
+    }
+
+    public Task<IReadOnlyList<ConversationId>> FindByThreadAsync(TicketScope scope, InboxId inbox, ChannelKind channel, string externalThreadId, ContactId contact,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(externalThreadId);
+        lock (gate)
+            return Task.FromResult<IReadOnlyList<ConversationId>>([.. states.Values
+                .Where(stored => stored.Scope == scope && stored.State.Inbox == inbox && stored.State.Channel == channel && stored.State.Contact == contact
+                    && string.Equals(stored.State.ExternalThreadId, externalThreadId, StringComparison.Ordinal))
+                .Select(stored => stored.State.Conversation).OrderByDescending(id => id.Value, StringComparer.Ordinal).Take(IChannelConversationStateStore.MaximumThreadMatches)]);
     }
 
     public Task<bool> DeleteAsync(TicketScope scope, ConversationId conversation, CancellationToken cancellationToken = default)
@@ -189,9 +215,10 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
         {
             var key = (scope, dispatch.Conversation, dispatch.Message);
             dispatches.TryGetValue(key, out var existing);
-            if (existing?.Revision != expectedRevision
-                || existing is not null && (existing.Dispatch.Inbox != dispatch.Inbox || existing.Dispatch.Channel != dispatch.Channel))
-                return Result<StoredChannelDispatch>(new ChannelWriteConflict(existing?.Revision));
+            if (existing is null && expectedRevision is not null)
+                return Result<StoredChannelDispatch>(ChannelWriteNotFound.Instance);
+            if (existing is not null && (existing.Revision != expectedRevision || existing.Dispatch.Inbox != dispatch.Inbox || existing.Dispatch.Channel != dispatch.Channel))
+                return Result<StoredChannelDispatch>(new ChannelWriteConflict(existing.Revision));
             if (existing is null && dispatches.Count >= MaximumRecords)
                 return Result<StoredChannelDispatch>(new ChannelWriteRejected(ChannelWriteRejection.CapacityExceeded));
             var stored = new StoredChannelDispatch(scope, dispatch, (existing?.Revision ?? 0) + 1);

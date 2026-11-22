@@ -98,7 +98,7 @@ public static class RoutingStoreContract
         foreach (var other in TestScopes.LevelVariants(scope).Skip(1))
             Assert.IsNull(await competing.GetAsync(other, settings.Agent));
 
-        Assert.AreEqual(0, (await competing.ListAvailableAsync(scope, 10)).Count);
+        Assert.AreEqual(0, (await competing.ListAvailableAsync(scope, new AvailableAgentQuery(Email, limit: 10))).Count);
         var online = Applied(await competing.SetStatusAsync(scope, settings.Agent, AgentStatus.Online, ttl));
         Assert.AreEqual(2, online.Revision);
         Assert.AreEqual(clock.GetUtcNow() + ttl, online.Presence.ExpiresAt);
@@ -106,7 +106,7 @@ public static class RoutingStoreContract
         var reconfigured = Applied(await primary.SaveSettingsAsync(scope, new AgentRoutingSettings(settings.Agent, 2), 2));
         Assert.AreEqual(AgentStatus.Online, reconfigured.Presence.Status);
         Assert.AreEqual(2, reconfigured.Settings.DefaultCapacity);
-        CollectionAssert.AreEqual(new[] { "ada" }, (await primary.ListAvailableAsync(scope, 10)).Select(item => item.Agent.Value).ToArray());
+        CollectionAssert.AreEqual(new[] { "ada" }, (await primary.ListAvailableAsync(scope, new AvailableAgentQuery(Email, limit: 10))).Select(item => item.Agent.Value).ToArray());
 
         clock.Advance(TimeSpan.FromMinutes(1));
         var beat = Applied(await primary.HeartbeatAsync(scope, settings.Agent, ttl));
@@ -116,9 +116,9 @@ public static class RoutingStoreContract
 
         // Lapsed presence is effectively offline, never revived by heartbeats, and recorded by the expiry sweep.
         clock.Advance(ttl);
-        Assert.AreEqual(0, (await competing.ListAvailableAsync(scope, 10)).Count);
+        Assert.AreEqual(0, (await competing.ListAvailableAsync(scope, new AvailableAgentQuery(Email, limit: 10))).Count);
         Assert.AreEqual(AgentStatus.Online, Applied(await competing.HeartbeatAsync(scope, settings.Agent, ttl)).Presence.Status);
-        Assert.AreEqual(0, (await competing.ListAvailableAsync(scope, 10)).Count);
+        Assert.AreEqual(0, (await competing.ListAvailableAsync(scope, new AvailableAgentQuery(Email, limit: 10))).Count);
         var expired = await primary.ExpirePresenceAsync(100);
         Assert.AreEqual(1, expired.Count(item => item.Scope == scope && item.Agent == settings.Agent));
         Assert.AreEqual(0, (await competing.ExpirePresenceAsync(100)).Count(item => item.Scope == scope));
@@ -142,7 +142,7 @@ public static class RoutingStoreContract
         Applied(await primary.SetStatusAsync(scope, settings.Agent, AgentStatus.Offline, ttl));
         Assert.IsFalse((await primary.GetAsync(scope, settings.Agent))!.ReassignmentPending);
         Applied(await primary.SetStatusAsync(scope, settings.Agent, AgentStatus.Busy, ttl));
-        Assert.AreEqual(0, (await competing.ListAvailableAsync(scope, 10)).Count);
+        Assert.AreEqual(0, (await competing.ListAvailableAsync(scope, new AvailableAgentQuery(Email, limit: 10))).Count);
         Assert.IsTrue(Applied(await competing.SetStatusAsync(scope, settings.Agent, AgentStatus.Offline, ttl)).ReassignmentPending);
 
         foreach (var name in new[] { "dan", "cy", "bo" })
@@ -153,6 +153,41 @@ public static class RoutingStoreContract
         Assert.AreEqual("conflict:1", Describe(await primary.DeleteAsync(scope, current.Agent, 9)));
         Applied(await competing.DeleteAsync(scope, current.Agent, 1));
         Assert.IsNull(await primary.GetAsync(scope, current.Agent));
+    }
+
+    /// <summary>Availability filters (agent set, capacity per channel, skills) run in the store query and page by agent identifier.</summary>
+    public static async Task VerifyAvailableFiltersAsync(IAgentAvailabilityStore primary, IAgentAvailabilityStore competing)
+    {
+        var scope = TestScopes.Create(workspaceId: "available");
+        var ttl = TimeSpan.FromMinutes(5);
+        async Task OnlineAsync(AgentRoutingSettings settings, AgentStatus status = AgentStatus.Online)
+        {
+            Applied(await primary.SaveSettingsAsync(scope, settings, null));
+            Applied(await primary.SetStatusAsync(scope, settings.Agent, status, ttl));
+        }
+        await OnlineAsync(new AgentRoutingSettings(new UserId("a1"), 2, skills: [new AgentSkill("billing", 5), new AgentSkill("german", 2)]));
+        await OnlineAsync(new AgentRoutingSettings(new UserId("a2"), 2, [new(Chat, 0)], [new AgentSkill("billing", 2)]));
+        await OnlineAsync(new AgentRoutingSettings(new UserId("a3"), 0, [new(Chat, 4)]));
+        await OnlineAsync(new AgentRoutingSettings(new UserId("a4"), 1, skills: [new AgentSkill("billing", 9)]), AgentStatus.Away);
+        for (var index = 0; index < 5; index++)
+            await OnlineAsync(new AgentRoutingSettings(new UserId($"b{index}"), 1));
+
+        string[] Ids(IReadOnlyList<StoredAgentProfile> page) => [.. page.Select(profile => profile.Agent.Value)];
+        CollectionAssert.AreEqual(new[] { "a1", "a2", "b0", "b1", "b2", "b3", "b4" }, Ids(await competing.ListAvailableAsync(scope, new AvailableAgentQuery(Email))));
+        CollectionAssert.AreEqual(new[] { "a1", "a3", "b0", "b1", "b2", "b3", "b4" }, Ids(await competing.ListAvailableAsync(scope, new AvailableAgentQuery(Chat))));
+        CollectionAssert.AreEqual(new[] { "a1", "a2" }, Ids(await competing.ListAvailableAsync(scope,
+            new AvailableAgentQuery(Email, requiredSkills: new Dictionary<string, int> { ["billing"] = 2 }))));
+        CollectionAssert.AreEqual(new[] { "a1" }, Ids(await competing.ListAvailableAsync(scope,
+            new AvailableAgentQuery(Email, requiredSkills: new Dictionary<string, int> { ["billing"] = 3, ["german"] = 1 }))));
+        CollectionAssert.AreEqual(new[] { "a2", "b3" }, Ids(await competing.ListAvailableAsync(scope,
+            new AvailableAgentQuery(Email, [new UserId("b3"), new UserId("a2"), new UserId("a3"), new UserId("a4"), new UserId("zz")]))));
+        Assert.AreEqual(0, (await competing.ListAvailableAsync(scope, new AvailableAgentQuery(Email, []))).Count);
+        var first = await competing.ListAvailableAsync(scope, new AvailableAgentQuery(Email, limit: 3));
+        CollectionAssert.AreEqual(new[] { "a1", "a2", "b0" }, Ids(first));
+        var next = new AvailableAgentQuery(Email, limit: 3).WithAfter(first[^1].Agent);
+        CollectionAssert.AreEqual(new[] { "b1", "b2", "b3" }, Ids(await primary.ListAvailableAsync(scope, next)));
+        foreach (var other in TestScopes.LevelVariants(scope).Skip(1))
+            Assert.AreEqual(0, (await competing.ListAvailableAsync(other, new AvailableAgentQuery(Email))).Count);
     }
 
     public static async Task VerifyAssignmentsAsync(IRoutingAssignmentStore primary, IRoutingAssignmentStore competing, FakeTimeProvider clock)
@@ -171,6 +206,8 @@ public static class RoutingStoreContract
             Assert.IsTrue(await store.ConfirmAsync(scope, reserved.Assignment.Conversation, reserved.Assignment.Agent, 2));
         }
         CollectionAssert.AreEqual(new[] { "ann", "bob", "cat", "ann" }, order);
+        Assert.AreEqual("ann", await competing.GetCursorAsync(scope, "email"));
+        Assert.IsNull(await competing.GetCursorAsync(scope, "never-used"));
         var loads = await primary.GetLoadAsync(scope, new UserId("ann"));
         Assert.AreEqual(2, loads[Email]);
 
@@ -319,6 +356,23 @@ public static class RoutingStoreContract
         Assert.IsTrue(await competing.RemoveAsync(scope, new ConversationId("q-1"), 3));
         Assert.IsNull(await primary.GetAsync(scope, new ConversationId("q-1")));
         Assert.IsFalse(await primary.RemoveAsync(scope, new ConversationId("q-1"), long.MaxValue));
+
+        // Claims are taken in next-attempt order (index-backed), then returned oldest waiting first.
+        Assert.IsTrue(await primary.RemoveAsync(scope, new ConversationId("q-2"), long.MaxValue));
+        Assert.IsTrue(await primary.RemoveAsync(scope, new ConversationId("q-3"), long.MaxValue));
+        var order = TestScopes.Create(workspaceId: "queue-order");
+        var now = clock.GetUtcNow();
+        await primary.EnqueueAsync(order, Snapshot("old", now.AddMinutes(-30)));
+        await primary.EnqueueAsync(order, Snapshot("new", now.AddMinutes(-1)));
+        await primary.EnqueueAsync(order, Snapshot("mid", now.AddMinutes(-10)));
+        foreach (var claim in await primary.ClaimDueAsync(100, TimeSpan.FromMinutes(1)))
+        {
+            var next = claim.Entry.Conversation.Value switch { "old" => now.AddMinutes(1), "new" => now.AddSeconds(30), _ => now.AddSeconds(45) };
+            Assert.IsTrue(await competing.CompleteAttemptAsync(order, claim.Entry.Conversation, claim.Fence, new RoutingQueueUpdate(next, new InboxId("email"), 0, false)));
+        }
+        clock.Advance(TimeSpan.FromMinutes(2));
+        Assert.AreEqual("new", (await competing.ClaimDueAsync(1, TimeSpan.FromMinutes(1))).Single().Entry.Conversation.Value);
+        CollectionAssert.AreEqual(new[] { "old", "mid" }, (await primary.ClaimDueAsync(10, TimeSpan.FromMinutes(1))).Select(claim => claim.Entry.Conversation.Value).ToArray());
     }
 
     public static async Task VerifyPresenceAsync(IConversationPresenceStore primary, IConversationPresenceStore competing, FakeTimeProvider clock)

@@ -18,6 +18,10 @@ public sealed class CompositionTests
     }
 
     [TestMethod]
+    public void BuilderExtensionsLiveInTheFeatureNamespace() =>
+        Assert.AreEqual("TicketFlow.HelpCenter", typeof(HelpCenterTicketFlowBuilderExtensions).Namespace);
+
+    [TestMethod]
     public void ApplicationRegistrationsWinAndRepeatedCallsAreSafe()
     {
         var services = new ServiceCollection();

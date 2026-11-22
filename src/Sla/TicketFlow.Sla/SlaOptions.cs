@@ -28,10 +28,17 @@ public sealed class SlaOptions
     /// <summary>Conversations first seen with a longer timeline are adopted from their snapshot instead of replayed (1-10000, default 1000).</summary>
     public int MaximumReplayEvents { get; set; } = 1000;
 
+    /// <summary>
+    /// Longest timeline span (in sequences) the duplicate scan reads after the oldest pending emission's recorded head (1-100000,
+    /// default 1000). Beyond it the scan is undecidable: emissions stay pending (never appended blindly) and flushing backs off.
+    /// </summary>
+    public int MaximumDuplicateScanEvents { get; set; } = 1000;
+
     internal void Validate()
     {
         if (WorkerClientId == default || MaximumWriteAttempts is < 1 or > 64 || TimerBatchSize is < 1 or > ISlaTrackerStore.MaximumClaim
-            || TimerLease <= TimeSpan.Zero || TimerLease > ISlaTrackerStore.MaximumLease || TimerRetryDelay <= TimeSpan.Zero || MaximumReplayEvents is < 1 or > 10_000)
+            || TimerLease <= TimeSpan.Zero || TimerLease > ISlaTrackerStore.MaximumLease || TimerRetryDelay <= TimeSpan.Zero || MaximumReplayEvents is < 1 or > 10_000
+            || MaximumDuplicateScanEvents is < 1 or > 100_000)
             throw new InvalidOperationException("SLA options are invalid.");
     }
 }

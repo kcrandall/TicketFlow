@@ -131,6 +131,10 @@ public sealed class PostgresHelpCenterStoreTests
     }
 
     [TestMethod]
+    public void BuilderExtensionsLiveInTheStoreNamespace() =>
+        Assert.AreEqual("TicketFlow.HelpCenter.Stores.Postgres", typeof(PostgresHelpCenterTicketFlowBuilderExtensions).Namespace);
+
+    [TestMethod]
     public async Task InitializationIsExplicitIdempotentAndChecksummed()
     {
         await using var database = await Database.CreateAsync(initialize: false);

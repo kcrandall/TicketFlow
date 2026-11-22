@@ -9,8 +9,13 @@ namespace TicketFlow.Routing.Stores.Postgres;
 /// <summary>
 /// Durable PostgreSQL implementation of every routing store contract over an application-owned <see cref="NpgsqlDataSource"/>. Tables
 /// live in the data source's current schema and are created only by <see cref="InitializeAsync"/>. Every statement is parameterized
-/// and confined to one full scope (claims and sweeps are store-wide; rows carry their scope). Rows that fail to decode throw. Lease,
-/// presence and expiry times come from the supplied <see cref="TimeProvider"/>, so every client must use a synchronized clock.
+/// and confined to one full scope (claims and sweeps are store-wide; rows carry their scope). Rows that fail to decode throw.
+/// <para>
+/// Clock: by default every lease, reservation, presence and expiry instant comes from the database (<c>clock_timestamp()</c>, read at the
+/// start of each operation), so all clients compare leases against one authoritative clock regardless of host clock drift. Supplying a
+/// <see cref="TimeProvider"/> switches the store to that application clock — intended for deterministic tests; clients then need
+/// synchronized clocks.
+/// </para>
 /// </summary>
 public sealed partial class PostgresRoutingStore : IRoutingPolicyStore, IAgentAvailabilityStore, IRoutingAssignmentStore, IRoutingQueueStore, IConversationPresenceStore
 {
@@ -20,19 +25,32 @@ public sealed partial class PostgresRoutingStore : IRoutingPolicyStore, IAgentAv
     private const string ScopeValues = "@tenant, @project, @environment, @app, @workspace";
 
     private readonly NpgsqlDataSource source;
-    private readonly TimeProvider time;
+    private readonly TimeProvider? time;
 
+    /// <param name="dataSource">The application-owned data source.</param>
+    /// <param name="time">An application clock (tests); <see langword="null"/> (default) uses the database clock.</param>
     public PostgresRoutingStore(NpgsqlDataSource dataSource, TimeProvider? time = null)
     {
         source = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
-        this.time = time ?? TimeProvider.System;
+        this.time = time;
     }
+
+    /// <summary>True when instants come from the database clock rather than an application <see cref="TimeProvider"/>.</summary>
+    public bool UsesDatabaseClock => time is null;
 
     /// <summary>Explicitly applies <see cref="PostgresRoutingMigrations.Catalog"/> (advisory-locked, checksum-verified, idempotent).</summary>
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
         new PostgresMigrationRunner(source, PostgresRoutingMigrations.Catalog).ApplyAsync(cancellationToken: cancellationToken);
 
-    private DateTimeOffset Now => Instant(time.GetUtcNow());
+    private async ValueTask<DateTimeOffset> NowAsync(CancellationToken cancellationToken)
+    {
+        if (time is not null)
+            return Instant(time.GetUtcNow());
+        await using var command = source.CreateCommand("SELECT clock_timestamp()");
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+        return Instant(reader.GetFieldValue<DateTimeOffset>(0));
+    }
 
     // ---- Policies ----
 

@@ -10,7 +10,8 @@ EnvelopeFlow adapter for TicketFlow channels. References only EnvelopeFlow abstr
   `EnvelopeFlowWhatsAppChannel` (24-hour window, templates, optional quoted reply) and `EnvelopeFlowChatChannel` (Slack thread ts;
   Teams unthreaded). WhatsApp/chat destinations use `EnvelopeFlowDestinations`; host binding delegates call
   `EnvelopeFlowDestinationContextResolver` for the recipient and `LastCustomerMessageAtUtc`.
-- `EnvelopeFlowSurveyInvitationSender` (`ISurveyInvitationSender`) sends survey links over the conversation's channel.
+- Depends only on `TicketFlow.Channels.Abstractions`; workers resolve their principal through `IChannelWorkerPrincipalResolver`.
+- Survey invitations over EnvelopeFlow live in `TicketFlow.Integrations.EnvelopeFlow.Surveys`.
 
 ```csharp
 services.AddSingleton<IEmailTransport>(smtpTransport);
@@ -18,6 +19,5 @@ services.AddSingleton<IEnvelopeFlowSenderDirectory, MySenders>();
 services.AddTicketFlow()
     .AddChannels(options => options.WorkerPrincipal = scope => new ApiClientPrincipal(scope, new ApiClientId("channels")))
     .AddEnvelopeFlowIntegration()
-    .AddEnvelopeFlowEmailChannel()
-    .AddEnvelopeFlowSurveySender(options => options.LinkFactory = message => new Uri($"https://support.example.com/s/{message.Token}"));
+    .AddEnvelopeFlowEmailChannel();
 ```

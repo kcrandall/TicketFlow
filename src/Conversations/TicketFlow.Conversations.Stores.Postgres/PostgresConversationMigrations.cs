@@ -6,7 +6,9 @@ namespace TicketFlow.Conversations.Stores.Postgres;
 /// Feature-owned, append-only migration history for the conversation tables. Keys use fixed-size <c>tf_key_v1</c> SHA-256 keys over
 /// the raw identifiers (each up to 256 UTF-16 units); stores also compare the raw columns. List indexes lead with the scope key and
 /// end with <c>(last_activity_at DESC, conversation_id DESC)</c> (identifiers use the deterministic <c>"C"</c> collation) so keyset
-/// pages are index-backed per criterion. Never edit an applied step; append one.
+/// pages are index-backed per criterion. Version 2 adds the <c>tf_conversation_labels</c> side table (one row per conversation label,
+/// maintained in every write transaction) for index-backed label lists, compound <c>(criterion, status, activity)</c> list indexes and an
+/// outbox availability index. Never edit an applied step; append one.
 /// </summary>
 public static class PostgresConversationMigrations
 {
@@ -106,5 +108,20 @@ public static class PostgresConversationMigrations
         CREATE INDEX tf_conversation_outbox_deliveries_pending ON tf_conversation_outbox_deliveries (consumer, sequence) WHERE state = 0;
         CREATE INDEX tf_conversation_outbox_deliveries_order ON tf_conversation_outbox_deliveries (consumer, conversation_key, sequence) WHERE state = 0;
         CREATE INDEX tf_conversation_outbox_deliveries_sequence ON tf_conversation_outbox_deliveries (sequence);
+        """),
+        new(2, "label-index-compound-lists-outbox-availability", $"""
+        CREATE TABLE tf_conversation_labels (
+            scope_key bytea NOT NULL,
+            conversation_key bytea NOT NULL REFERENCES tf_conversations (conversation_key) ON DELETE CASCADE,
+            label text COLLATE "C" NOT NULL, conversation_id text COLLATE "C" NOT NULL, last_activity_at timestamptz NOT NULL,
+            PRIMARY KEY (conversation_key, label));
+        CREATE INDEX tf_conversation_labels_activity ON tf_conversation_labels (scope_key, label, {Activity});
+        INSERT INTO tf_conversation_labels (scope_key, conversation_key, label, conversation_id, last_activity_at)
+            SELECT c.scope_key, c.conversation_key, l.label, c.conversation_id, c.last_activity_at
+            FROM tf_conversations c CROSS JOIN LATERAL unnest(c.labels) AS l(label);
+        CREATE INDEX tf_conversations_inbox_status ON tf_conversations (scope_key, inbox_id, status, {Activity});
+        CREATE INDEX tf_conversations_assignee_status ON tf_conversations (scope_key, assignee_id, status, {Activity});
+        CREATE INDEX tf_conversations_team_status ON tf_conversations (scope_key, team_id, status, {Activity});
+        CREATE INDEX tf_conversation_outbox_deliveries_available ON tf_conversation_outbox_deliveries (consumer, available_at, sequence) WHERE state = 0;
         """)]);
 }

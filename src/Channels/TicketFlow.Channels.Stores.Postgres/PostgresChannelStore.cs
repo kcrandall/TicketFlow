@@ -22,7 +22,7 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
     private const string ScopeWhere = "tenant_id=@tenant AND project_id=@project AND environment_id=@environment AND app_id=@app AND workspace_id=@workspace";
     private const string ScopeArgs = "@tenant,@project,@environment,@app,@workspace";
     private const string EndpointColumns = "channel_kind, configuration_id, inbox_id, address, revision, format_version, tenant_id, project_id, environment_id, app_id, workspace_id";
-    private const string StateColumns = "conversation_id, inbox_id, channel_kind, recipient_kind, recipient_namespace, recipient_value, external_thread_id, subject, last_incoming_at, last_incoming_external_id, revision, format_version";
+    private const string StateColumns = "conversation_id, inbox_id, channel_kind, recipient_kind, recipient_namespace, recipient_value, external_thread_id, subject, last_incoming_at, last_incoming_external_id, revision, format_version, contact_id";
     private const string DispatchColumns = "conversation_id, message_id, inbox_id, channel_kind, state, attempts, updated_at, next_attempt_at, external_message_id, code, revision, format_version";
 
     private readonly NpgsqlDataSource source;
@@ -60,6 +60,32 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         AddText(command, "address", address);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadEndpoint(reader, null) : null;
+    }
+
+    public async Task<IReadOnlyList<StoredChannelEndpoint>> ListByAddressPrefixAsync(AccessPartition partition, ChannelKind kind, string prefix, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        ArgumentNullException.ThrowIfNull(prefix);
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IChannelEndpointStore.MaximumPrefixMatches);
+        await using var command = source.CreateCommand($"""
+            SELECT {EndpointColumns} FROM tf_channel_endpoints
+            WHERE tenant_id=@tenant AND project_id=@project AND environment_id=@environment AND app_id=@app AND channel_kind=@kind
+              AND address IS NOT NULL AND address >= @prefix AND left(address, char_length(@prefix)) = @prefix
+            ORDER BY address LIMIT @limit
+            """);
+        AddText(command, "tenant", partition.TenantId);
+        AddText(command, "project", partition.ProjectId);
+        AddText(command, "environment", partition.EnvironmentId);
+        AddText(command, "app", partition.AppId);
+        AddText(command, "kind", Kind(kind));
+        AddText(command, "prefix", prefix);
+        command.Parameters.AddWithValue("limit", limit);
+        var endpoints = new List<StoredChannelEndpoint>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            endpoints.Add(ReadEndpoint(reader, null));
+        return endpoints;
     }
 
     public async Task<ChannelWriteResult<StoredChannelEndpoint>> CreateAsync(TicketScope scope, ChannelEndpoint endpoint, CancellationToken cancellationToken = default)
@@ -193,14 +219,14 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         var sql = expectedRevision is null
             ? """
               INSERT INTO tf_channel_conversation_states (tenant_id, project_id, environment_id, app_id, workspace_id, conversation_id, format_version, inbox_id, channel_kind,
-                  recipient_kind, recipient_namespace, recipient_value, external_thread_id, subject, last_incoming_at, last_incoming_external_id, revision)
-              VALUES (@tenant,@project,@environment,@app,@workspace,@conversation,1,@inbox,@kind,@recipientKind,@recipientNamespace,@recipientValue,@thread,@subject,@lastAt,@lastId,1)
+                  recipient_kind, recipient_namespace, recipient_value, external_thread_id, subject, last_incoming_at, last_incoming_external_id, contact_id, revision)
+              VALUES (@tenant,@project,@environment,@app,@workspace,@conversation,1,@inbox,@kind,@recipientKind,@recipientNamespace,@recipientValue,@thread,@subject,@lastAt,@lastId,@contact,1)
               ON CONFLICT (state_key) DO NOTHING
               RETURNING revision
               """
             : $"""
               UPDATE tf_channel_conversation_states SET recipient_kind=@recipientKind, recipient_namespace=@recipientNamespace, recipient_value=@recipientValue,
-                  external_thread_id=@thread, subject=@subject, last_incoming_at=@lastAt, last_incoming_external_id=@lastId, revision=revision+1
+                  external_thread_id=@thread, subject=@subject, last_incoming_at=@lastAt, last_incoming_external_id=@lastId, contact_id=@contact, revision=revision+1
               WHERE state_key=tf_key_v1({ScopeArgs},@conversation) AND conversation_id=@conversation AND {ScopeWhere}
                 AND revision=@revision AND inbox_id=@inbox AND channel_kind=@kind
               RETURNING revision
@@ -217,11 +243,35 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         AddText(command, "subject", state.Subject);
         AddInstant(command, "lastAt", state.LastIncomingAt);
         AddText(command, "lastId", state.LastIncomingExternalId);
+        AddText(command, "contact", state.Contact?.Value);
         command.Parameters.AddWithValue("revision", expectedRevision ?? 0);
         if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
             return new ChannelWriteApplied<StoredChannelConversationState>(new StoredChannelConversationState(scope, state, revision));
         var current = await LoadStateAsync(connection, scope, state.Conversation, cancellationToken).ConfigureAwait(false);
-        return new ChannelWriteConflict(current?.Revision);
+        return current is null ? ChannelWriteNotFound.Instance : new ChannelWriteConflict(current.Revision);
+    }
+
+    public async Task<IReadOnlyList<ConversationId>> FindByThreadAsync(TicketScope scope, InboxId inbox, ChannelKind channel, string externalThreadId, ContactId contact,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(externalThreadId);
+        await using var command = source.CreateCommand($"""
+            SELECT conversation_id FROM tf_channel_conversation_states
+            WHERE thread_key=tf_key_v1({ScopeArgs},@inbox,@kind,@thread,@contact) AND {ScopeWhere}
+              AND inbox_id=@inbox AND channel_kind=@kind AND external_thread_id=@thread AND contact_id=@contact
+            ORDER BY conversation_id DESC LIMIT {IChannelConversationStateStore.MaximumThreadMatches}
+            """);
+        AddScope(command, scope);
+        AddText(command, "inbox", inbox.Value);
+        AddText(command, "kind", Kind(channel));
+        AddText(command, "thread", externalThreadId);
+        AddText(command, "contact", contact.Value);
+        var conversations = new List<ConversationId>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            conversations.Add(new ConversationId(reader.GetString(0)));
+        return conversations;
     }
 
     async Task<bool> IChannelConversationStateStore.DeleteAsync(TicketScope scope, ConversationId conversation, CancellationToken cancellationToken)
@@ -251,8 +301,8 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
                 throw new FormatException("Unsupported state format version.");
             var recipient = new ChannelRecipient(Defined((ContactIdentityKind)reader.GetInt16(3)), reader.GetString(5), NullableText(reader, 4));
             return new StoredChannelConversationState(scope, new ChannelConversationState(new ConversationId(reader.GetString(0)), new InboxId(reader.GetString(1)),
-                new ChannelKind(reader.GetString(2)), recipient, NullableText(reader, 6), NullableText(reader, 7), NullableInstant(reader, 8), NullableText(reader, 9)),
-                reader.GetInt64(10));
+                new ChannelKind(reader.GetString(2)), recipient, NullableText(reader, 6), NullableText(reader, 7), NullableInstant(reader, 8), NullableText(reader, 9),
+                NullableText(reader, 12) is { } contact ? new ContactId(contact) : null), reader.GetInt64(10));
         }, "conversation state");
     }
 
@@ -403,7 +453,7 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
             return new ChannelWriteApplied<StoredChannelDispatch>(new StoredChannelDispatch(scope, dispatch, revision));
         var current = await LoadDispatchAsync(connection, scope, dispatch.Conversation, dispatch.Message, cancellationToken).ConfigureAwait(false);
-        return new ChannelWriteConflict(current?.Revision);
+        return current is null ? ChannelWriteNotFound.Instance : new ChannelWriteConflict(current.Revision);
     }
 
     private static async Task<StoredChannelDispatch?> LoadDispatchAsync(NpgsqlConnection connection, TicketScope scope, ConversationId conversation, MessageId message, CancellationToken cancellationToken)

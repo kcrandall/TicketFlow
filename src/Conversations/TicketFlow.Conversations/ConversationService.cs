@@ -24,6 +24,7 @@ public sealed partial class ConversationService : IConversationService
     private readonly IContactStore contacts;
     private readonly ConversationsOptions options;
     private readonly TimeProvider time;
+    private readonly ContactRepointer repointer;
 
     public ConversationService(
         IConversationStore store,
@@ -49,6 +50,7 @@ public sealed partial class ConversationService : IConversationService
         this.options = options.Value;
         this.options.Validate();
         this.time = time ?? throw new ArgumentNullException(nameof(time));
+        repointer = new ContactRepointer(store, contacts, this.options.MaximumWriteAttempts, time);
     }
 
     public async Task<ConversationCommandResult> StartAsync(PrincipalRef actor, StartConversationRequest request, CancellationToken cancellationToken = default)
@@ -94,7 +96,7 @@ public sealed partial class ConversationService : IConversationService
         var result = await store.WriteAsync(scope, new ConversationWrite(conversation, null, events, change), cancellationToken).ConfigureAwait(false);
         return result switch
         {
-            ConversationWriteApplied applied => new ConversationApplied(conversation.Id, applied.Conversation.Revision, applied.Events),
+            ConversationWriteApplied applied => await StartedAsync(actor, applied, cancellationToken).ConfigureAwait(false),
             ConversationWriteNotFound => ConversationNotFound.Instance,
             ConversationWriteConflict conflict => new ConversationConflict(conflict.CurrentRevision),
             ConversationDuplicateMessage duplicate => await ReplayAsync(actor, scope, duplicate.Existing, cancellationToken).ConfigureAwait(false),
@@ -108,11 +110,12 @@ public sealed partial class ConversationService : IConversationService
         return MutateAsync(actor, id, null, ConversationPermissions.Ingest, checkResulting: false, async (stored, now) =>
         {
             var conversation = stored.Conversation;
-            if (conversation.Status.Value is ClosedStatus)
-                return ConversationRefused.Closed;
+            // A redelivered message is a replay even after the conversation was closed.
             if (message.ExternalId is { } external
                 && await ReplayAsync(actor, stored.Scope, conversation.Inbox, external, cancellationToken).ConfigureAwait(false) is { } replay)
                 return replay;
+            if (conversation.Status.Value is ClosedStatus)
+                return ConversationRefused.Closed;
             MessageEvent incoming;
             try
             {
@@ -458,7 +461,8 @@ public sealed partial class ConversationService : IConversationService
             switch (result)
             {
                 case ConversationWriteApplied applied:
-                    return new ConversationApplied(id, applied.Conversation.Revision, applied.Events);
+                    return new ConversationApplied(id, applied.Conversation.Revision,
+                        await ProjectForActorAsync(actor, applied.Conversation, applied.Events, cancellationToken).ConfigureAwait(false));
                 case ConversationWriteNotFound:
                     return ConversationNotFound.Instance;
                 case ConversationWriteConflict when expectedRevision is null && attempt < options.MaximumWriteAttempts:
@@ -490,7 +494,35 @@ public sealed partial class ConversationService : IConversationService
         if (!await PermittedAsync(actor, ConversationPermissions.Ingest, ConversationAccess.Resource(holder), cancellationToken).ConfigureAwait(false))
             return ConversationRefused.Forbidden;
         var events = await store.ReadTimelineAsync(scope, existing.Conversation, existing.Sequence - 1, 1, includeNotes: false, cancellationToken).ConfigureAwait(false);
-        return new ConversationApplied(existing.Conversation, holder.Revision, [.. events.Where(item => item.Sequence == existing.Sequence)], Replayed: true);
+        return new ConversationApplied(existing.Conversation, holder.Revision,
+            await ProjectForActorAsync(actor, holder, [.. events.Where(item => item.Sequence == existing.Sequence)], cancellationToken).ConfigureAwait(false), Replayed: true);
+    }
+
+    /// <summary>
+    /// A started conversation. If its contact was merged between the start's contact check and its write (so the merge follower's walk
+    /// may have missed it), the conversation is re-pointed along the merge chain before returning.
+    /// </summary>
+    private async Task<ConversationCommandResult> StartedAsync(PrincipalRef actor, ConversationWriteApplied applied, CancellationToken cancellationToken)
+    {
+        var stored = applied.Conversation;
+        if ((await contacts.GetAsync(stored.Scope, stored.Conversation.Contact, cancellationToken).ConfigureAwait(false))?.Contact.MergedInto is not null)
+            stored = await repointer.RepairAsync(stored.Scope, stored.Id, cancellationToken).ConfigureAwait(false) ?? stored;
+        return new ConversationApplied(stored.Id, stored.Revision, await ProjectForActorAsync(actor, stored, applied.Events, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// Returned events are projected for the actor exactly like timeline reads (masking per its <c>conversation:read</c> decision on the
+    /// resulting conversation), so a command never discloses a masked attribute value or channel identifier — including previous
+    /// values the actor could not see.
+    /// </summary>
+    private async Task<IReadOnlyList<TimelineEvent>> ProjectForActorAsync(PrincipalRef actor, StoredConversation stored, IReadOnlyList<TimelineEvent> events,
+        CancellationToken cancellationToken)
+    {
+        if (!events.Any(item => item.Event.Value is AttributeChanged or MessageEvent { ExternalId: not null }))
+            return events;
+        var decision = await DecideAsync(actor, ConversationPermissions.Read, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false);
+        var masking = await MaskingAsync(stored.Scope, cancellationToken).ConfigureAwait(false);
+        return [.. events.Select(item => masking.Project(item, decision).Event)];
     }
 
     private MessageEvent Incoming(IncomingMessageDraft draft, ContactId contact, DateTimeOffset now) =>

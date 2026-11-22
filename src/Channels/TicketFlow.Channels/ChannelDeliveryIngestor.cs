@@ -25,8 +25,9 @@ public sealed class ChannelDeliveryIngestor(IChannelEndpointStore endpoints, ICo
         {
             ConversationApplied applied => new DeliveryReportApplied(applied.Conversation, applied.Replayed),
             ConversationNotFound => new DeliveryReportRejected(DeliveryReportRejection.MessageNotFound),
-            ConversationConflict => new DeliveryReportRejected(DeliveryReportRejection.Invalid),
+            ConversationConflict => new DeliveryReportRejected(DeliveryReportRejection.Conflict),
             ConversationRefused { Reason: ConversationRefusal.Forbidden } => new DeliveryReportRejected(DeliveryReportRejection.Forbidden),
+            ConversationRefused { Reason: ConversationRefusal.Rejected } => new DeliveryReportRejected(DeliveryReportRejection.Conflict),
             ConversationRefused => new DeliveryReportRejected(DeliveryReportRejection.Invalid),
         };
     }

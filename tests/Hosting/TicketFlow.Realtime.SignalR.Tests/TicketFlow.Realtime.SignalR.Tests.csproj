@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Hosting/TicketFlow.Realtime.SignalR/TicketFlow.Realtime.SignalR.csproj" />
+    <ProjectReference Include="../../../src/Channels/TicketFlow.Channels/TicketFlow.Channels.csproj" />
+    <ProjectReference Include="../../../src/Access/TicketFlow.Access/TicketFlow.Access.csproj" />
+    <ProjectReference Include="../../../src/Workspaces/TicketFlow.Workspaces/TicketFlow.Workspaces.csproj" />
+    <ProjectReference Include="../../../src/Contacts/TicketFlow.Contacts/TicketFlow.Contacts.csproj" />
+    <ProjectReference Include="../../../src/TicketFlow/TicketFlow.csproj" />
+    <ProjectReference Include="../../TicketFlow.Testing/TicketFlow.Testing.csproj" />
+  </ItemGroup>
+</Project>

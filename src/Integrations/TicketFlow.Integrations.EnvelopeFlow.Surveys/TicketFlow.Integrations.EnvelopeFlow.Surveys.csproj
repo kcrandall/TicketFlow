@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Survey invitation delivery for TicketFlow over the EnvelopeFlow channel adapter: sends CSAT/NPS links on the surveyed conversation's channel (WhatsApp templates outside the 24-hour window).</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Integrations.EnvelopeFlow/TicketFlow.Integrations.EnvelopeFlow.csproj" />
+    <ProjectReference Include="../../Surveys/TicketFlow.Surveys.Abstractions/TicketFlow.Surveys.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

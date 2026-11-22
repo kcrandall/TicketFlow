@@ -56,5 +56,13 @@ public static class PostgresChannelMigrations
             dispatch_key bytea GENERATED ALWAYS AS (tf_key_v1({ScopeParts}, conversation_id, message_id)) STORED NOT NULL,
             PRIMARY KEY (dispatch_key),
             CHECK ((state = 2) = (next_attempt_at IS NOT NULL)));
+        """),
+        new(2, "conversation-state-contact-thread", $"""
+        ALTER TABLE tf_channel_conversation_states ADD COLUMN contact_id text COLLATE "C" NULL;
+        ALTER TABLE tf_channel_conversation_states ADD COLUMN thread_key bytea GENERATED ALWAYS AS (CASE WHEN external_thread_id IS NULL OR contact_id IS NULL THEN NULL
+            ELSE tf_key_v1({ScopeParts}, inbox_id, channel_kind, external_thread_id, contact_id) END) STORED;
+        CREATE INDEX tf_channel_conversation_states_thread ON tf_channel_conversation_states (thread_key, conversation_id DESC) WHERE thread_key IS NOT NULL;
+        CREATE INDEX tf_channel_endpoints_address_prefix ON tf_channel_endpoints (tenant_id, project_id, environment_id, app_id, channel_kind, address)
+            WHERE address IS NOT NULL;
         """)]);
 }

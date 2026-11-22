@@ -48,3 +48,25 @@ Verification commands (run from the repository root, 2026-11-22):
   authorization, masking, aggregates, model, composition).
 
 Post-ticket parallel reviews have not been run yet.
+
+
+### Review fixes (2026-11-22, after commit 18d5fce)
+
+- Dispatch now claims before sending: `ISurveyStore.ClaimDueInvitationsAsync` moves due invitations to the new `Sending` state with a
+  lease (`SurveyOptions.SendLease`) and one more attempt; concurrent dispatchers never claim the same invitation. Tests:
+  `ConcurrentDispatchersSendEachInvitationOnce`, `SurveyStoreContract.VerifyClaimsAsync`.
+- Stable tokens: tokens are derived with HMAC-SHA256 from `SurveyOptions.TokenKey` per (scope, invitation) (`SurveyToken.Derive`); the
+  hash, issue time and expiry are recorded on first issue and kept across retries, so a link already delivered (provider accepted,
+  sender threw) keeps working; `SurveyInvitationMessage.DeliveryKey` (`tfs-<guid>`) is stable for provider idempotency. Only hashes are
+  stored. Tests: `AcceptedThenFailingSendKeepsTheDeliveredLinkValid`, `ResponsesAreAcceptedWhileARetryIsPending`,
+  `DerivedTokensAreStablePerInvitationAndKeyed`.
+- Crash window closed: a dispatcher stopping after the claim (before or after the sender call) leaves the lease to expire, after which the
+  invitation is due again with the same token. Test: `DispatcherStoppingMidSendLeavesTheInvitationDueAfterTheLease`.
+- Refusal semantics aligned with `ConversationService.ListAsync`: aggregates with a deny-all plan return an empty result (as response
+  lists already did) instead of `Forbidden`; response pages check store scope and decide masking per row with
+  `IAccessEvaluator.LoadDecisionContextAsync` (one access snapshot per page).
+- `AddSurveys()` / `AddInMemorySurveyStores()` moved to namespace `TicketFlow.Surveys`.
+- Outside this epic: `EnvelopeFlowSurveyInvitationSender` (E6) now passes `message.DeliveryKey` as the idempotency key instead of
+  `tfs-<guid>-<attempts>`.
+
+Verification (2026-11-22): `dotnet build TicketFlow.slnx -c Release` — 0 warnings, 0 errors; `dotnet test tests/HelpCenter/TicketFlow.HelpCenter.Tests -c Release` — 68 passed; `dotnet test tests/Surveys/TicketFlow.Surveys.Tests -c Release` — 30 passed; `TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/HelpCenter/TicketFlow.HelpCenter.Stores.Postgres.Tests -c Release` — 11 passed and `TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/Surveys/TicketFlow.Surveys.Stores.Postgres.Tests -c Release` — 13 passed (isolated `postgres:18` on port 55613); `dotnet test tests/Integrations/TicketFlow.Integrations.Surveys.Tests -c Release` — 3 passed; `dotnet test tests/Integrations/TicketFlow.Integrations.EnvelopeFlow.Tests -c Release` — 9 passed.

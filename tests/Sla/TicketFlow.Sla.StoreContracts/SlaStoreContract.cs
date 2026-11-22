@@ -148,9 +148,16 @@ public static class SlaStoreContract
         Assert.IsTrue(early.Fence > claims[0].Fence);
         Assert.IsFalse(await primary.ReleaseAsync(claims[1], clock.GetUtcNow()), "the expired claim's fence is stale");
 
-        // A tracker write reschedules the timer and clears the lease.
+        // A write without the claim (the outbox path) reschedules but keeps another worker's live lease; a stale fence does too.
         var stored = (await primary.GetAsync(scope, new ConversationId("early")))!;
-        await primary.WriteAsync(scope, Tracker("early", nextCheckAt: clock.GetUtcNow()), stored.Revision);
+        await competing.WriteAsync(scope, Tracker("early", nextCheckAt: clock.GetUtcNow()), stored.Revision);
+        Assert.AreEqual(0, (await primary.ClaimDueAsync(10, TimeSpan.FromMinutes(1))).Count, "the live lease survives a write without the claim");
+        stored = (await primary.GetAsync(scope, new ConversationId("early")))!;
+        await primary.WriteAsync(scope, Tracker("early", nextCheckAt: clock.GetUtcNow()), stored.Revision, early with { Fence = early.Fence + 1 });
+        Assert.AreEqual(0, (await primary.ClaimDueAsync(10, TimeSpan.FromMinutes(1))).Count, "a stale fence cannot release the lease");
+        // The claim owner's write reschedules the timer and releases its lease.
+        stored = (await primary.GetAsync(scope, new ConversationId("early")))!;
+        await primary.WriteAsync(scope, Tracker("early", nextCheckAt: clock.GetUtcNow()), stored.Revision, early);
         clock.Advance(TimeSpan.FromMinutes(0.75));
         var rescheduled = await primary.ClaimDueAsync(10, TimeSpan.FromMinutes(1));
         CollectionAssert.AreEqual(new[] { "early", "late" }, rescheduled.Select(claim => claim.Conversation.Value).ToArray());
@@ -190,6 +197,8 @@ public static class SlaStoreContract
         await store.WriteAsync(scope, Tracker("overdue", dueAt: now.AddMinutes(-1), atRiskAt: now.AddMinutes(-30), assignee: "agent"), null);
         await store.WriteAsync(scope, Tracker("breached", breached: true, breachedAt: now.AddHours(-2), attributes: [new("tier", "gold")]), null);
         await store.WriteAsync(scope, Tracker("paused"), null);
+        // Breached after the query instant (evaluated by a host whose clock is ahead): not yet breached as of now.
+        await store.WriteAsync(scope, Tracker("future-breach", breached: true, breachedAt: now.AddMinutes(5)), null);
         await store.WriteAsync(TestScopes.Create(workspaceId: "risk-other"), Tracker("foreign", breached: true, breachedAt: now.AddHours(-3)), null);
 
         async Task<string[]> Ids(SlaRiskQuery query, AccessFilter? filter = null) =>

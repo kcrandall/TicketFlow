@@ -67,6 +67,7 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
         if (actor.Scope != message.Scope)
             return InboundRejected.Of(InboundRejection.Forbidden, "The principal acts in a different scope.");
         var scope = message.Scope;
+        var receivedAt = ReceivedAt(message);
 
         var endpoint = await endpoints.GetAsync(scope, message.Channel, message.ConfigurationId, cancellationToken).ConfigureAwait(false);
         if (endpoint is null)
@@ -108,14 +109,14 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
         {
             if (!await evaluator.PermittedAsync(actor, ConversationPermissions.Ingest, ConversationAccess.Resource(owner), cancellationToken).ConfigureAwait(false))
                 return InboundRejected.Of(InboundRejection.Forbidden);
-            await RecordStateAsync(scope, inboxId, existing.Conversation, existing.Message, message, recipient, replay: true, cancellationToken).ConfigureAwait(false);
+            await RecordStateAsync(scope, inboxId, existing.Conversation, existing.Message, message, receivedAt, recipient, contact: null, replay: true, cancellationToken).ConfigureAwait(false);
             return new InboundRecorded(existing.Conversation, existing.Message, false, true);
         }
 
         var source = VerificationSource(message.Channel);
         var evidence = new ContactIdentityEvidence(address, message.Sender.Verified
-            ? new IdentityVerified(source, message.ReceivedAt)
-            : new IdentityClaimed(source, message.ReceivedAt));
+            ? new IdentityVerified(source, receivedAt)
+            : new IdentityClaimed(source, receivedAt));
         ContactView contact;
         switch (await contacts.ResolveAsync(actor, new ContactResolveRequest([evidence], Profile(message), options.ClaimedIdentityMatching), cancellationToken).ConfigureAwait(false))
         {
@@ -146,7 +147,7 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
             switch (appended)
             {
                 case ConversationApplied applied:
-                    return await RecordedAsync(scope, inboxId, applied, started: false, message, recipient, cancellationToken).ConfigureAwait(false);
+                    return await RecordedAsync(scope, inboxId, applied, started: false, message, receivedAt, recipient, contact.Id, cancellationToken).ConfigureAwait(false);
                 case ConversationNotFound:
                     break;
                 case ConversationConflict:
@@ -173,7 +174,7 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
         var start = await conversations.StartAsync(actor, new StartConversationRequest(inboxId, contact.Id, thread, InitialMessage: draft), cancellationToken).ConfigureAwait(false);
         return start switch
         {
-            ConversationApplied applied => await RecordedAsync(scope, inboxId, applied, started: !applied.Replayed, message, recipient, cancellationToken).ConfigureAwait(false),
+            ConversationApplied applied => await RecordedAsync(scope, inboxId, applied, started: !applied.Replayed, message, receivedAt, recipient, contact.Id, cancellationToken).ConfigureAwait(false),
             ConversationNotFound => InboundRejected.Of(InboundRejection.Invalid, "The conversation could not be started."),
             ConversationConflict => InboundRejected.Of(InboundRejection.Rejected, "The conversation identifier is already used."),
             ConversationRefused refused => Rejected(refused),
@@ -181,11 +182,11 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
     }
 
     private async Task<InboundResult> RecordedAsync(TicketScope scope, InboxId inbox, ConversationApplied applied, bool started, InboundChannelMessage message,
-        ChannelRecipient recipient, CancellationToken cancellationToken)
+        DateTimeOffset receivedAt, ChannelRecipient recipient, ContactId contact, CancellationToken cancellationToken)
     {
         var incoming = applied.Events.Select(item => item.Event.Value).OfType<MessageEvent>().FirstOrDefault(item => item.Direction == MessageDirection.Incoming)
             ?? throw new InvalidOperationException("The conversation service returned no incoming message event.");
-        await RecordStateAsync(scope, inbox, applied.Conversation, incoming.Id, message, recipient, applied.Replayed, cancellationToken).ConfigureAwait(false);
+        await RecordStateAsync(scope, inbox, applied.Conversation, incoming.Id, message, receivedAt, recipient, contact, applied.Replayed, cancellationToken).ConfigureAwait(false);
         return new InboundRecorded(applied.Conversation, incoming.Id, started, applied.Replayed);
     }
 
@@ -213,6 +214,15 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
         {
             return null;
         }
+        // Per-contact lookup first: a shared thread (a Slack thread with several speakers) keeps one conversation per contact.
+        StoredConversation? newest = null;
+        foreach (var candidate in await states.FindByThreadAsync(scope, inbox, message.Channel, threadId, contact, cancellationToken).ConfigureAwait(false))
+            if (await conversationStore.GetAsync(scope, candidate, cancellationToken).ConfigureAwait(false) is { } owned
+                && owned.Conversation.Contact == contact && owned.Conversation.Status.Value is not ClosedStatus
+                && (newest is null || owned.Conversation.CreatedAt > newest.Conversation.CreatedAt))
+                newest = owned;
+        if (newest is not null)
+            return newest.Id;
         var found = await conversations.FindByThreadAsync(actor, inbox, thread, cancellationToken).ConfigureAwait(false);
         return found.Value is ConversationView view && view.Contact == contact ? view.Id : null;
     }
@@ -222,7 +232,7 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
     /// match the original) only creates missing state and never changes an existing recipient.
     /// </summary>
     private async Task RecordStateAsync(TicketScope scope, InboxId inbox, ConversationId conversation, MessageId messageId, InboundChannelMessage message,
-        ChannelRecipient recipient, bool replay, CancellationToken cancellationToken)
+        DateTimeOffset receivedAt, ChannelRecipient recipient, ContactId? contact, bool replay, CancellationToken cancellationToken)
     {
         var ownReference = ChannelText.NormalizeReference(message.ExternalMessageId);
         for (var attempt = 0; attempt < 8; attempt++)
@@ -230,13 +240,14 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
             var current = await states.GetAsync(scope, conversation, cancellationToken).ConfigureAwait(false);
             if (current is not null && (replay || current.State.Inbox != inbox || current.State.Channel != message.Channel))
                 break;
-            var newer = current?.State.LastIncomingAt is not { } last || message.ReceivedAt >= last;
+            var newer = current?.State.LastIncomingAt is not { } last || receivedAt >= last;
             var next = new ChannelConversationState(conversation, inbox, message.Channel,
                 newer ? recipient : current!.State.Recipient,
                 current?.State.ExternalThreadId ?? message.ExternalThreadId,
                 current?.State.Subject ?? ThreadSubject(message.Subject),
-                newer ? message.ReceivedAt : current!.State.LastIncomingAt,
-                newer ? ownReference : current!.State.LastIncomingExternalId);
+                newer ? receivedAt : current!.State.LastIncomingAt,
+                newer ? ownReference : current!.State.LastIncomingExternalId,
+                contact ?? current?.State.Contact);
             if (current is not null && Same(current.State, next))
                 break;
             var written = await states.WriteAsync(scope, next, current?.Revision, cancellationToken).ConfigureAwait(false);
@@ -256,8 +267,18 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
     }
 
     private static bool Same(ChannelConversationState left, ChannelConversationState right) =>
-        left.Recipient == right.Recipient && left.ExternalThreadId == right.ExternalThreadId && left.Subject == right.Subject
+        left.Recipient == right.Recipient && left.Contact == right.Contact && left.ExternalThreadId == right.ExternalThreadId && left.Subject == right.Subject
         && left.LastIncomingAt == right.LastIncomingAt && left.LastIncomingExternalId == right.LastIncomingExternalId;
+
+    /// <summary>Provider receive times later than now plus <see cref="MaximumFutureSkew"/> are clamped, so a skewed or forged timestamp cannot hold a reply window open.</summary>
+    private DateTimeOffset ReceivedAt(InboundChannelMessage message)
+    {
+        var latest = time.GetUtcNow() + MaximumFutureSkew;
+        return message.ReceivedAt > latest ? latest : message.ReceivedAt;
+    }
+
+    /// <summary>Allowed clock skew for provider receive times (2 minutes).</summary>
+    public static readonly TimeSpan MaximumFutureSkew = TimeSpan.FromMinutes(2);
 
     private static IncomingMessageDraft Draft(InboundChannelMessage message)
     {

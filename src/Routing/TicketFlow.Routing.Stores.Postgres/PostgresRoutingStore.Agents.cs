@@ -32,19 +32,32 @@ public sealed partial class PostgresRoutingStore
         return await ReadAgentsAsync(command, scope, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<StoredAgentProfile>> ListAvailableAsync(TicketScope scope, int limit, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<StoredAgentProfile>> ListAvailableAsync(TicketScope scope, AvailableAgentQuery query, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
-        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IAgentAvailabilityStore.MaximumAvailableList);
+        ArgumentNullException.ThrowIfNull(query);
+        // Capacity and skills live in the versioned settings document; the filters read it as jsonb inside the keyset query.
         await using var command = source.CreateCommand($"""
             SELECT {AgentColumns} FROM tf_routing_agents
             WHERE scope_key={ScopeKey} AND {ScopeWhere} AND status=1 AND expires_at > @now
+              AND (@after::text IS NULL OR agent_id > @after COLLATE "C")
+              AND (@filter_agents = false OR agent_id = ANY(@agents))
+              AND COALESCE((SELECT (c->>'max')::integer FROM jsonb_array_elements(settings::jsonb->'capacities') c WHERE c->>'kind'=@channel LIMIT 1),
+                  default_capacity) > 0
+              AND NOT EXISTS (SELECT 1 FROM unnest(@skill_names::text[], @skill_levels::integer[]) r(name, level)
+                  WHERE NOT EXISTS (SELECT 1 FROM jsonb_array_elements(settings::jsonb->'skills') s
+                      WHERE s->>'name'=r.name AND (s->>'level')::integer >= r.level))
             ORDER BY agent_id LIMIT @limit
             """);
         AddScope(command, scope);
-        AddInstant(command, "now", Now);
-        AddInt(command, "limit", limit);
+        AddInstant(command, "now", await NowAsync(cancellationToken).ConfigureAwait(false));
+        AddText(command, "after", query.After?.Value);
+        command.Parameters.AddWithValue("filter_agents", query.Agents is not null);
+        AddTextArray(command, "agents", query.Agents?.Select(agent => agent.Value) ?? []);
+        AddText(command, "channel", query.Channel.Value);
+        AddTextArray(command, "skill_names", query.RequiredSkills.Keys);
+        command.Parameters.Add(new NpgsqlParameter("skill_levels", NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer) { Value = query.RequiredSkills.Values.ToArray() });
+        AddInt(command, "limit", query.Limit);
         return await ReadAgentsAsync(command, scope, cancellationToken).ConfigureAwait(false);
     }
 
@@ -54,7 +67,7 @@ public sealed partial class PostgresRoutingStore
         ArgumentNullException.ThrowIfNull(settings);
         if (expectedRevision is < 1)
             throw new ArgumentOutOfRangeException(nameof(expectedRevision));
-        var now = Now;
+        var now = await NowAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         if (expectedRevision is null)
@@ -102,7 +115,7 @@ public sealed partial class PostgresRoutingStore
         if (!Enum.IsDefined(status))
             throw new ArgumentOutOfRangeException(nameof(status));
         RequireTtl(presenceTtl);
-        var now = Now;
+        var now = await NowAsync(cancellationToken).ConfigureAwait(false);
         var offline = status == AgentStatus.Offline;
         await using var command = source.CreateCommand($"""
             UPDATE tf_routing_agents SET status=@status, changed_at=@now,
@@ -128,7 +141,7 @@ public sealed partial class PostgresRoutingStore
         ArgumentNullException.ThrowIfNull(scope);
         RequireAgent(agent);
         RequireTtl(presenceTtl);
-        var now = Now;
+        var now = await NowAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using (var command = new NpgsqlCommand($"""
             UPDATE tf_routing_agents SET last_heartbeat_at=@now, expires_at=@expires WHERE {AgentKey} AND status <> 4 AND expires_at > @now
@@ -169,7 +182,7 @@ public sealed partial class PostgresRoutingStore
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IAgentAvailabilityStore.MaximumAvailableList);
-        var now = Now;
+        var now = await NowAsync(cancellationToken).ConfigureAwait(false);
         await using var command = source.CreateCommand($"""
             WITH due AS (
                 SELECT agent_key FROM tf_routing_agents WHERE status <> 4 AND expires_at <= @now
@@ -192,7 +205,7 @@ public sealed partial class PostgresRoutingStore
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IRoutingQueueStore.MaximumClaim);
         RequireLease(lease);
-        var now = Now;
+        var now = await NowAsync(cancellationToken).ConfigureAwait(false);
         await using var command = source.CreateCommand($"""
             WITH due AS (
                 SELECT agent_key FROM tf_routing_agents WHERE reassign_pending AND (reassign_lease_until IS NULL OR reassign_lease_until <= @now)

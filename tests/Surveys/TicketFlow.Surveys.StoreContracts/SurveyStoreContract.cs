@@ -58,7 +58,7 @@ public static class SurveyStoreContract
     {
         var created = await store.CreateInvitationAsync(scope, invitation, TimeSpan.Zero);
         Assert.AreEqual("created", C(created));
-        var sent = invitation.MarkSent(token.Hash(), sentAt, lifetime ?? TimeSpan.FromDays(3));
+        var sent = invitation.Issue(token.Hash(), sentAt, lifetime ?? TimeSpan.FromDays(3)).MarkSent();
         var updated = await store.UpdateInvitationAsync(scope, sent, 1);
         Assert.AreEqual("applied:2", I(updated));
         return ((SurveyWriteApplied<StoredInvitation>)updated.Value!).Value;
@@ -141,23 +141,23 @@ public static class SurveyStoreContract
 
         // Token issue, lookup and fixed fields.
         var token = SurveyToken.Create();
-        var sent = first.MarkSent(token.Hash(), Now.AddHours(1), TimeSpan.FromDays(3));
+        var sent = first.Issue(token.Hash(), Now.AddHours(1), TimeSpan.FromDays(3)).MarkSent();
         Assert.AreEqual("conflict:1", I(await primary.UpdateInvitationAsync(scope, sent, 2)));
         Assert.AreEqual("applied:2", I(await primary.UpdateInvitationAsync(scope, sent, 1)));
         var found = (await competing.FindInvitationByTokenAsync(scope, token.Hash()))!;
         Assert.AreEqual(first.Id, found.Invitation.Id);
         Assert.AreEqual(SurveyInvitationState.Sent, found.Invitation.State);
         Assert.AreEqual(token.Hash(), found.Invitation.TokenHash);
-        Assert.AreEqual(Now.AddHours(1), found.Invitation.SentAt);
+        Assert.AreEqual(Now.AddHours(1), found.Invitation.IssuedAt);
         Assert.AreEqual(Now.AddHours(1).AddDays(3), found.Invitation.ExpiresAt);
-        Assert.AreEqual(1, found.Invitation.Attempts);
+        Assert.AreEqual(0, found.Invitation.Attempts);
         Assert.IsNull(await competing.FindInvitationByTokenAsync(scope, SurveyToken.Create().Hash()));
         Assert.IsNull(await competing.FindInvitationByTokenAsync(TestScopes.LevelVariants(scope)[1], token.Hash()));
         Assert.IsFalse((await primary.ListDueInvitationsAsync(scope, Now.AddDays(30), 100)).Any(item => item.Invitation.Id == first.Id));
 
-        var retried = sent.Retry(Now.AddHours(2), 1);
+        var retried = sent.Retry(Now.AddHours(2));
         Assert.AreEqual("applied:3", I(await competing.UpdateInvitationAsync(scope, retried, 2)));
-        Assert.IsNull(await primary.FindInvitationByTokenAsync(scope, token.Hash()), "Retry clears the token.");
+        Assert.AreEqual(SurveyInvitationState.Pending, (await primary.FindInvitationByTokenAsync(scope, token.Hash()))!.Invitation.State, "Retries keep the token valid.");
         var moved = new SurveyInvitation(first.Id, first.Survey, first.Kind, new ConversationId("other"), first.Contact, first.Inbox, first.Team, first.Agent, first.Locale, first.CreatedAt, first.SendAfter);
         Assert.AreEqual("rejected:InUse", I(await primary.UpdateInvitationAsync(scope, moved, 3)));
         Assert.AreEqual("not-found", I(await primary.UpdateInvitationAsync(scope, SampleInvitation(conversation: "missing"), 1)));
@@ -167,6 +167,58 @@ public static class SurveyStoreContract
             Assert.IsEmpty(await primary.ListDueInvitationsAsync(other, Now.AddDays(30), 10));
             Assert.AreEqual("not-found", I(await primary.UpdateInvitationAsync(other, retried, 3)));
         }
+    }
+
+    public static async Task VerifyClaimsAsync(ISurveyStore primary, ISurveyStore competing)
+    {
+        var scope = NewScope();
+        var ids = new List<SurveyInvitationId>();
+        for (var index = 0; index < 40; index++)
+        {
+            var invitation = SampleInvitation(conversation: $"claim-{index}", contact: $"k{index}", createdAt: Now.AddSeconds(index));
+            Assert.AreEqual("created", C(await primary.CreateInvitationAsync(scope, invitation, TimeSpan.Zero)));
+            ids.Add(invitation.Id);
+        }
+        var due = Now.AddHours(1);
+        var lease = TimeSpan.FromMinutes(5);
+
+        // Concurrent claims from independent clients are disjoint and together cover every due invitation exactly once.
+        var claims = await Task.WhenAll(Enumerable.Range(0, 8).Select(index =>
+            (index % 2 == 0 ? primary : competing).ClaimDueInvitationsAsync(scope, due, lease, 7)));
+        var claimed = claims.SelectMany(batch => batch).ToList();
+        Assert.AreEqual(claimed.Count, claimed.Select(item => item.Invitation.Id).Distinct().Count(), "No invitation is claimed twice.");
+        var remainder = await primary.ClaimDueInvitationsAsync(scope, due, lease, 500);
+        CollectionAssert.AreEquivalent(ids, claimed.Concat(remainder).Select(item => item.Invitation.Id).ToArray());
+        var first = claimed.Concat(remainder).First();
+        Assert.AreEqual(SurveyInvitationState.Sending, first.Invitation.State);
+        Assert.AreEqual(due + lease, first.Invitation.LeaseUntil);
+        Assert.AreEqual(1, first.Invitation.Attempts);
+        Assert.AreEqual(2, first.Revision);
+        Assert.IsEmpty(await competing.ClaimDueInvitationsAsync(scope, due.AddMinutes(4), lease, 500), "Leases are held.");
+        Assert.IsEmpty(await competing.ListDueInvitationsAsync(scope, due.AddMinutes(4), 500));
+
+        // An expired lease (a dispatcher stopped mid-send) makes the invitation due again, with one more attempt.
+        Assert.HasCount(40, await competing.ListDueInvitationsAsync(scope, due + lease, 500));
+        var reclaimed = await competing.ClaimDueInvitationsAsync(scope, due + lease, lease, 500);
+        Assert.HasCount(40, reclaimed);
+        Assert.IsTrue(reclaimed.All(item => item.Invitation.Attempts == 2 && item.Revision == 3));
+        CollectionAssert.AreEqual(reclaimed.OrderBy(item => item.Invitation.SendAfter).ThenBy(item => item.Invitation.Id).Select(item => item.Invitation.Id).ToArray(),
+            reclaimed.Select(item => item.Invitation.Id).ToArray());
+
+        // Claimed invitations stay fenced: a writer holding the pre-claim revision conflicts.
+        Assert.AreEqual("conflict:3", I(await primary.UpdateInvitationAsync(scope, reclaimed[0].Invitation.Retry(due), 2)));
+        Assert.AreEqual("applied:4", I(await primary.UpdateInvitationAsync(scope, reclaimed[0].Invitation.Retry(due), 3)));
+        Assert.HasCount(1, await primary.ClaimDueInvitationsAsync(scope, due.AddMinutes(6), lease, 500), "Only the released invitation; the others are still leased.");
+        foreach (var other in TestScopes.LevelVariants(scope).Skip(1))
+            Assert.IsEmpty(await primary.ClaimDueInvitationsAsync(other, due.AddDays(1), lease, 500));
+
+        // Attempts are capped.
+        var capped = SampleInvitation(conversation: "capped", contact: "kc");
+        Assert.AreEqual("created", C(await primary.CreateInvitationAsync(scope, capped, TimeSpan.Zero)));
+        var exhausted = new SurveyInvitation(capped.Id, capped.Survey, capped.Kind, capped.Conversation, capped.Contact, capped.Inbox, capped.Team, capped.Agent, capped.Locale,
+            capped.CreatedAt, capped.SendAfter, attempts: SurveyInvitation.MaximumAttempts);
+        Assert.AreEqual("applied:2", I(await primary.UpdateInvitationAsync(scope, exhausted, 1)));
+        Assert.IsFalse((await primary.ClaimDueInvitationsAsync(scope, due.AddDays(1), lease, 500)).Any(item => item.Invitation.Id == capped.Id));
     }
 
     public static async Task VerifyResponsesAsync(ISurveyStore primary, ISurveyStore competing)
@@ -193,6 +245,21 @@ public static class SurveyStoreContract
         Assert.AreEqual(SurveyInvitationState.Responded, (await primary.GetInvitationAsync(scope, invitation.Id))!.Invitation.State);
         Assert.AreEqual(3, (await primary.GetInvitationAsync(scope, invitation.Id))!.Revision);
         Assert.AreEqual("already", R(await primary.RecordResponseAsync(scope, response)));
+
+        // A token is answerable from first issue, also while the invitation is being sent or waits for a retry; not once cancelled.
+        var retrying = SampleInvitation(conversation: "retrying");
+        Assert.AreEqual("created", C(await primary.CreateInvitationAsync(scope, retrying, TimeSpan.Zero)));
+        var claimedRetry = (await primary.ClaimDueInvitationsAsync(scope, Now.AddHours(1), TimeSpan.FromMinutes(5), 500)).Single(item => item.Invitation.Id == retrying.Id);
+        var issuedRetry = claimedRetry.Invitation.Issue(SurveyToken.Create().Hash(), Now.AddHours(1), TimeSpan.FromDays(1));
+        Assert.AreEqual("applied:3", I(await primary.UpdateInvitationAsync(scope, issuedRetry, 2)));
+        Assert.AreEqual("applied:4", I(await primary.UpdateInvitationAsync(scope, issuedRetry.Retry(Now.AddHours(2)), 3)));
+        Assert.AreEqual("recorded", R(await competing.RecordResponseAsync(scope, SurveyResponse.For(issuedRetry, 3, null, Now.AddHours(1).AddMinutes(1)))));
+        Assert.AreEqual(SurveyInvitationState.Responded, (await primary.GetInvitationAsync(scope, retrying.Id))!.Invitation.State);
+        Assert.IsNull((await primary.GetInvitationAsync(scope, retrying.Id))!.Invitation.LeaseUntil);
+        var cancelled = SampleInvitation(conversation: "cancelled");
+        var cancelledSent = await CreateSentAsync(primary, scope, cancelled, SurveyToken.Create(), Now);
+        Assert.AreEqual("applied:3", I(await primary.UpdateInvitationAsync(scope, cancelledSent.Invitation.Close(SurveyInvitationState.Cancelled), 2)));
+        Assert.AreEqual("not-found", R(await primary.RecordResponseAsync(scope, SurveyResponse.For(cancelledSent.Invitation, 3, null, Now.AddMinutes(1)))));
 
         var expiring = await CreateSentAsync(primary, scope, SampleInvitation(conversation: "late"), SurveyToken.Create(), Now, TimeSpan.FromHours(1));
         Assert.AreEqual("expired", R(await primary.RecordResponseAsync(scope, SurveyResponse.For(expiring.Invitation, 3, null, Now.AddHours(1)))));

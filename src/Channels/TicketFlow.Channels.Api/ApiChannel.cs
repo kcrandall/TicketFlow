@@ -85,6 +85,7 @@ public sealed class ApiChannel : ITicketChannel, IDisposable
     private readonly ApiWebhookDestinationPolicy policy;
     private readonly HttpClient client;
     private readonly TimeProvider time;
+    private readonly TimeSpan timeout;
 
     public ApiChannel(IApiChannelDestinationResolver destinations, IOptions<ApiChannelOptions> options, TimeProvider time, HttpMessageHandler? innerHandler = null)
     {
@@ -96,6 +97,7 @@ public sealed class ApiChannel : ITicketChannel, IDisposable
         policy = new ApiWebhookDestinationPolicy(value.AllowedHosts, value.AllowedPorts);
         var handler = innerHandler is null ? ApiWebhookHttp.CreateHandler(policy) : ApiWebhookHttp.Guard(policy, innerHandler);
         client = new HttpClient(handler) { Timeout = value.Timeout };
+        timeout = value.Timeout;
         Kind = new ChannelKind(value.Kind);
         RecipientKinds = [.. value.RecipientKinds];
     }
@@ -151,7 +153,22 @@ public sealed class ApiChannel : ITicketChannel, IDisposable
         {
             var status = (int)response.StatusCode;
             if (status is >= 200 and < 300)
-                return new ChannelSendAccepted(await ExternalIdAsync(response, cancellationToken).ConfigureAwait(false));
+            {
+                // HttpClient.Timeout does not cover the body after ResponseHeadersRead; bound it separately. The submission is already
+                // accepted, so a slow or stalled body only loses the optional external id.
+                using var bodyTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                bodyTimeout.CancelAfter(timeout);
+                string? externalId;
+                try
+                {
+                    externalId = await ExternalIdAsync(response, bodyTimeout.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    externalId = null;
+                }
+                return new ChannelSendAccepted(externalId);
+            }
             var code = "http-" + status.ToString(CultureInfo.InvariantCulture);
             if (response.StatusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || status >= 500)
                 return new ChannelSendRejected(code, retryable: true, RetryAfter(response));

@@ -13,6 +13,14 @@ public interface IAccessEvaluator
 
     /// <summary>Authorizes revealing one masked field. Every call is audited (granted or refused) without the field value.</summary>
     Task<RevealResult> RevealAsync(RevealRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Loads a batch decision snapshot for <paramref name="principal"/> in <paramref name="scope"/> and the given permissions (1-32),
+    /// so list pages and multi-permission reads decide many resources without a store round trip per decision. The default
+    /// implementation delegates each decision to <see cref="AuthorizeAsync"/>.
+    /// </summary>
+    Task<IAccessDecisionContext> LoadDecisionContextAsync(PrincipalRef principal, TicketScope scope, IEnumerable<Permission> permissions, CancellationToken cancellationToken = default) =>
+        Task.FromResult<IAccessDecisionContext>(new PointAccessDecisionContext(this, principal, scope, permissions));
 }
 
 /// <summary>

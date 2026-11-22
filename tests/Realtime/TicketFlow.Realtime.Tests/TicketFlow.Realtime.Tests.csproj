@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Realtime.Testing/TicketFlow.Realtime.Testing.csproj" />
+  </ItemGroup>
+</Project>

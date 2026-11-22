@@ -33,10 +33,12 @@ public sealed partial class ConversationService
         if (stored is null)
             return ConversationNotFound.Instance;
         var resource = ConversationAccess.Resource(stored);
-        var decision = await DecideAsync(actor, ConversationPermissions.Read, resource, cancellationToken).ConfigureAwait(false);
+        // One access snapshot decides both permissions.
+        var access = await evaluator.LoadDecisionContextAsync(actor, scope, [ConversationPermissions.Read, ConversationPermissions.NoteRead], cancellationToken).ConfigureAwait(false);
+        var decision = await access.DecideAsync(ConversationPermissions.Read, resource, cancellationToken).ConfigureAwait(false);
         if (!decision.IsPermitted)
             return ConversationRefused.Forbidden;
-        var includeNotes = await PermittedAsync(actor, ConversationPermissions.NoteRead, resource, cancellationToken).ConfigureAwait(false);
+        var includeNotes = (await access.DecideAsync(ConversationPermissions.NoteRead, resource, cancellationToken).ConfigureAwait(false)).IsPermitted;
         var events = await store.ReadTimelineAsync(scope, id, afterSequence, limit, includeNotes, cancellationToken).ConfigureAwait(false);
         var masking = await MaskingAsync(scope, cancellationToken).ConfigureAwait(false);
         // Defense in depth: never return a note to a principal without note:read, whatever the store returned.
@@ -55,13 +57,15 @@ public sealed partial class ConversationService
         var filter = await planner.PlanAsync(new AccessQuery(actor, ConversationPermissions.Read, scope), cancellationToken).ConfigureAwait(false);
         var page = await store.ListAsync(scope, query.WithAfter(after ?? query.After), filter, cancellationToken).ConfigureAwait(false);
         var masking = await MaskingAsync(scope, cancellationToken).ConfigureAwait(false);
+        var access = await evaluator.LoadDecisionContextAsync(actor, scope, [ConversationPermissions.Read], cancellationToken).ConfigureAwait(false);
         var views = new List<ConversationView>(page.Conversations.Count);
         foreach (var stored in page.Conversations)
         {
             if (stored.Scope != scope)
                 throw new InvalidOperationException("The conversation store returned a record outside the requested scope.");
-            // Masking depends on the grants that apply to each row, so every row gets a point decision; the filter and point check agree.
-            var decision = await DecideAsync(actor, ConversationPermissions.Read, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false);
+            // Masking depends on the grants that apply to each row, so every row is decided against one access snapshot (no store
+            // round trip per row); the filter and the decision agree.
+            var decision = await access.DecideAsync(ConversationPermissions.Read, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false);
             if (decision.IsPermitted)
                 views.Add(masking.Project(stored, decision));
         }

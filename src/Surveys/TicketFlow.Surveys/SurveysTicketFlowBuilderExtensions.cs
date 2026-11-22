@@ -1,9 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using TicketFlow.Access;
-using TicketFlow.Surveys;
 
-namespace TicketFlow;
+namespace TicketFlow.Surveys;
 
 public static class SurveysTicketFlowBuilderExtensions
 {

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Automation engine for TicketFlow: access-checked rule, macro and canned-response management, three-valued condition evaluation, the conversation outbox rule handler with loop prevention and idempotent execution records, cron scheduler, contact-change follower, dry-run and replay, signed SSRF-guarded webhooks and development in-memory stores.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Automation.Abstractions/TicketFlow.Automation.Abstractions.csproj" />
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
+    <ProjectReference Include="../../Channels/TicketFlow.Channels.Api/TicketFlow.Channels.Api.csproj" />
+  </ItemGroup>
+</Project>

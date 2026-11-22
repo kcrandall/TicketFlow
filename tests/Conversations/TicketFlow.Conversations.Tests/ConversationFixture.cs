@@ -54,11 +54,12 @@ internal sealed class ConversationFixture : IDisposable
     public UserPrincipal Viewer => TestPrincipals.User(Scope, "viewer");
     public ApiClientPrincipal Channel => TestPrincipals.ApiClient(Scope, "channel");
 
-    public static async Task<ConversationFixture> CreateAsync(Action<ConversationsOptions>? options = null)
+    public static async Task<ConversationFixture> CreateAsync(Action<ConversationsOptions>? options = null, Action<IServiceCollection>? configure = null)
     {
         var clock = TestClock.Create();
         var services = new ServiceCollection();
         services.AddSingleton<TimeProvider>(clock);
+        configure?.Invoke(services);
         services.AddTicketFlow()
             .AddAccessControl()
             .AddInMemoryAccessStores()

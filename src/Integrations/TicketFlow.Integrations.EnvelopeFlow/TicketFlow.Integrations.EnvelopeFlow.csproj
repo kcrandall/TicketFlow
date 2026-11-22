@@ -1,10 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <Description>EnvelopeFlow adapter for TicketFlow channels: inbound event handler (messages and delivery receipts), email, SMS, WhatsApp and Slack/Teams channels over EnvelopeFlow transports with threading and reply windows, and a survey invitation sender.</Description>
+    <Description>EnvelopeFlow adapter for TicketFlow channels: inbound event handler (messages and delivery receipts), email, SMS, WhatsApp and Slack/Teams channels over EnvelopeFlow transports with threading and reply windows,.</Description>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../../Channels/TicketFlow.Channels/TicketFlow.Channels.csproj" />
-    <ProjectReference Include="../../Surveys/TicketFlow.Surveys.Abstractions/TicketFlow.Surveys.Abstractions.csproj" />
+    <ProjectReference Include="../../Channels/TicketFlow.Channels.Abstractions/TicketFlow.Channels.Abstractions.csproj" />
     <PackageReference Include="EnvelopeFlow.Core" />
     <PackageReference Include="EnvelopeFlow.Inbound.Abstractions" />
     <PackageReference Include="EnvelopeFlow.Email.Abstractions" />

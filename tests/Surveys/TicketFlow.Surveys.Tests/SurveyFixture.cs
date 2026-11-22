@@ -6,20 +6,40 @@ using TicketFlow.Testing;
 
 namespace TicketFlow.Surveys.Tests;
 
-/// <summary>Records sent messages; throws while <see cref="Failures"/> is positive.</summary>
+/// <summary>
+/// Records sent messages (thread-safe). Throws without delivering while <see cref="Failures"/> is positive, and records then throws
+/// (provider accepted, sender failed) while <see cref="AcceptThenFail"/> is positive.
+/// </summary>
 internal sealed class RecordingSender : ISurveyInvitationSender
 {
+    private readonly Lock gate = new();
+
     public List<SurveyInvitationMessage> Sent { get; } = [];
     public int Failures { get; set; }
+    public int AcceptThenFail { get; set; }
+    public Action<SurveyInvitationMessage>? OnSend { get; set; }
 
     public Task SendAsync(SurveyInvitationMessage message, CancellationToken cancellationToken = default)
     {
-        if (Failures > 0)
+        if (OnSend is { } custom)
         {
-            Failures--;
-            throw new InvalidOperationException("transport down");
+            custom(message);
+            return Task.CompletedTask;
         }
-        Sent.Add(message);
+        lock (gate)
+        {
+            if (Failures > 0)
+            {
+                Failures--;
+                throw new InvalidOperationException("transport down");
+            }
+            Sent.Add(message);
+            if (AcceptThenFail > 0)
+            {
+                AcceptThenFail--;
+                throw new TimeoutException("provider accepted, response lost");
+            }
+        }
         return Task.CompletedTask;
     }
 }

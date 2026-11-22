@@ -99,5 +99,9 @@ public static class PostgresRoutingMigrations
             {ConversationKey},
             PRIMARY KEY (conversation_key));
         CREATE INDEX tf_routing_reply_locks_expiry ON tf_routing_reply_locks (expires_at);
+        """),
+        new(2, "queue-due-claim-order", """
+        CREATE INDEX tf_routing_queue_due_v2 ON tf_routing_queue (next_attempt_at, conversation_key);
+        DROP INDEX tf_routing_queue_due;
         """)]);
 }

@@ -34,7 +34,7 @@ public sealed partial class PostgresRoutingStore
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(snapshot);
-        var now = Now;
+        var now = await NowAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using (var upsert = new NpgsqlCommand($"""
             INSERT INTO tf_routing_queue({ScopeColumns}, conversation_id, format_version, inbox_id, team_id, assignee_id, contact_id, labels, access_attributes,
@@ -131,12 +131,13 @@ public sealed partial class PostgresRoutingStore
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IRoutingQueueStore.MaximumClaim);
         RequireLease(lease);
-        var now = Now;
+        var now = await NowAsync(cancellationToken).ConfigureAwait(false);
         await using var command = source.CreateCommand($"""
+            -- Taken in (next_attempt_at, conversation_key) order, served by tf_routing_queue_due_v2; re-sorted by waiting time below.
             WITH due AS (
                 SELECT conversation_key FROM tf_routing_queue
                 WHERE next_attempt_at <= @now AND (lease_until IS NULL OR lease_until <= @now)
-                ORDER BY waiting_since, conversation_id LIMIT @limit FOR UPDATE SKIP LOCKED)
+                ORDER BY next_attempt_at, conversation_key LIMIT @limit FOR UPDATE SKIP LOCKED)
             UPDATE tf_routing_queue q SET fence=nextval('tf_routing_fences'), lease_until=@until
             FROM due WHERE q.conversation_key=due.conversation_key
             RETURNING {QueueColumns}, q.tenant_id, q.project_id, q.environment_id, q.app_id, q.workspace_id, q.fence
@@ -167,7 +168,7 @@ public sealed partial class PostgresRoutingStore
         AddInt(command, "stage", update.OverflowStage);
         command.Parameters.AddWithValue("exceeded", update.WaitExceeded);
         AddLong(command, "fence", fence);
-        AddInstant(command, "now", Now);
+        AddInstant(command, "now", await NowAsync(cancellationToken).ConfigureAwait(false));
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
     }
 
@@ -182,7 +183,7 @@ public sealed partial class PostgresRoutingStore
             """);
         AddScope(command, scope);
         AddText(command, "target", targetInbox?.Value);
-        AddInstant(command, "now", Now);
+        AddInstant(command, "now", await NowAsync(cancellationToken).ConfigureAwait(false));
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 

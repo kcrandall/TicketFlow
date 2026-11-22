@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using TicketFlow.Routing.Tests;
 using TicketFlow.Testing;
 
@@ -7,13 +8,18 @@ namespace TicketFlow.Routing.Stores.Postgres.Tests;
 [TestClass]
 public sealed class PostgresRoutingEngineTests
 {
-    private static async Task<(PostgresTestDatabase Database, RoutingFixture Fixture)> CreateAsync()
+    private static async Task<(PostgresTestDatabase Database, RoutingFixture Fixture)> CreateAsync(ConcurrencyScenarios.ReservationInterceptor? interceptor = null)
     {
         var database = await PostgresTestDatabase.CreateAsync("tf_routing_engine_", maximumPoolSize: 24);
         try
         {
             await new PostgresRoutingStore(database.First).InitializeAsync();
-            var fixture = await RoutingFixture.CreateAsync(stores: builder => builder.AddPostgresRoutingStores(database.First));
+            var fixture = await RoutingFixture.CreateAsync(stores: builder =>
+            {
+                if (interceptor is not null)
+                    builder.Services.AddSingleton<IRoutingAssignmentStore>(provider => interceptor.Wrap(provider.GetRequiredService<PostgresRoutingStore>()));
+                builder.AddPostgresRoutingStores(database.First, useApplicationClock: true);
+            });
             return (database, fixture);
         }
         catch
@@ -39,6 +45,25 @@ public sealed class PostgresRoutingEngineTests
         await using (database)
         using (fixture)
             await ConcurrencyScenarios.RacingWorkersNeverExceedCapacityAsync(fixture);
+    }
+
+    [TestMethod]
+    public async Task StaleQueueSnapshotUsesTheCurrentTeam()
+    {
+        var (database, fixture) = await CreateAsync();
+        await using (database)
+        using (fixture)
+            await ConcurrencyScenarios.StaleQueueSnapshotAsync(fixture);
+    }
+
+    [TestMethod]
+    public async Task TeamChangeBetweenReserveAndAssignIsRetried()
+    {
+        var interceptor = new ConcurrencyScenarios.ReservationInterceptor();
+        var (database, fixture) = await CreateAsync(interceptor);
+        await using (database)
+        using (fixture)
+            await ConcurrencyScenarios.TeamChangeBetweenReserveAndAssignAsync(fixture, interceptor);
     }
 
     [TestMethod]

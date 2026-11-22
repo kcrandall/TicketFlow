@@ -25,6 +25,22 @@ public sealed class ModelTests
     }
 
     [TestMethod]
+    public void DerivedTokensAreStablePerInvitationAndKeyed()
+    {
+        var key = new byte[32];
+        key[0] = 1;
+        var scope = Testing.TestScopes.Create();
+        var id = SurveyInvitationId.New();
+        var token = SurveyToken.Derive(key, scope, id);
+        Assert.AreEqual(token, SurveyToken.Derive(key, scope, id));
+        Assert.IsTrue(SurveyToken.TryParse(token.Value, out _));
+        Assert.AreNotEqual(token, SurveyToken.Derive(key, scope, SurveyInvitationId.New()));
+        Assert.AreNotEqual(token, SurveyToken.Derive(key, Testing.TestScopes.LevelVariants(scope)[1], id));
+        Assert.AreNotEqual(token, SurveyToken.Derive(new byte[32], scope, id));
+        Assert.ThrowsExactly<ArgumentException>(() => SurveyToken.Derive(new byte[31], scope, id));
+    }
+
+    [TestMethod]
     public void ScalesAndSentiment()
     {
         Assert.IsTrue(SurveyScales.IsValid(SurveyKind.Csat, 1));
@@ -61,10 +77,21 @@ public sealed class ModelTests
         var invitation = SampleInvitation();
         Assert.ThrowsExactly<ArgumentException>(() => new SurveyInvitation(invitation.Id, invitation.Survey, invitation.Kind, invitation.Conversation, invitation.Contact, null, null, null,
             English, Now, Now, SurveyInvitationState.Sent));
-        var sent = invitation.MarkSent(SurveyToken.Create().Hash(), Now.AddHours(1).AddTicks(7), TimeSpan.FromHours(1));
-        Assert.AreEqual(0, sent.SentAt!.Value.UtcTicks % 10, "Times are truncated to microseconds.");
-        Assert.AreEqual(1, sent.Attempts);
-        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => sent.Close(SurveyInvitationState.Responded, 1));
+        Assert.ThrowsExactly<ArgumentException>(() => invitation.MarkSent(), "Sent requires a token.");
+        var claimed = invitation.Claim(Now.AddMinutes(5));
+        Assert.AreEqual((SurveyInvitationState.Sending, 1), (claimed.State, claimed.Attempts));
+        var sent = claimed.Issue(SurveyToken.Create().Hash(), Now.AddHours(1).AddTicks(7), TimeSpan.FromHours(1)).MarkSent();
+        Assert.AreEqual(0, sent.IssuedAt!.Value.UtcTicks % 10, "Times are truncated to microseconds.");
+        Assert.IsNull(sent.LeaseUntil);
+        Assert.IsTrue(sent.AcceptsResponses(Now.AddHours(1).AddMinutes(1)));
+        Assert.IsFalse(sent.AcceptsResponses(Now.AddHours(2).AddTicks(7)));
+        var retry = sent.Retry(Now.AddDays(1));
+        Assert.AreEqual(sent.TokenHash, retry.TokenHash, "Retries keep the token.");
+        Assert.IsTrue(retry.AcceptsResponses(Now.AddHours(1).AddMinutes(1)));
+        Assert.IsFalse(sent.Close(SurveyInvitationState.Cancelled).AcceptsResponses(Now.AddHours(1).AddMinutes(1)));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => sent.Close(SurveyInvitationState.Responded));
+        Assert.ThrowsExactly<ArgumentException>(() => new SurveyInvitation(invitation.Id, invitation.Survey, invitation.Kind, invitation.Conversation, invitation.Contact, null, null, null,
+            English, Now, Now, SurveyInvitationState.Sending));
         Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => SurveyResponse.For(invitation, 6, null, Now));
         Assert.ThrowsExactly<ArgumentException>(() => SurveyResponse.For(invitation, 5, "   ", Now));
         Assert.AreEqual("SurveyInvitation { <redacted> }", invitation.ToString());

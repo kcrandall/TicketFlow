@@ -33,9 +33,15 @@ public sealed class CompositionTests
     }
 
     [TestMethod]
+    public void BuilderExtensionsLiveInTheFeatureNamespace() =>
+        Assert.AreEqual("TicketFlow.Surveys", typeof(SurveysTicketFlowBuilderExtensions).Namespace);
+
+    [TestMethod]
     public void InvalidOptionsFailFast()
     {
         var exception = Assert.ThrowsExactly<InvalidOperationException>(() => SurveyFixture.Create(options => options.MaximumSendAttempts = 0));
         StringAssert.Contains(exception.Message, "MaximumSendAttempts");
+        StringAssert.Contains(Assert.ThrowsExactly<InvalidOperationException>(() => SurveyFixture.Create(options => options.TokenKey = new byte[16])).Message, "TokenKey");
+        StringAssert.Contains(Assert.ThrowsExactly<InvalidOperationException>(() => SurveyFixture.Create(options => options.SendLease = TimeSpan.Zero)).Message, "SendLease");
     }
 }

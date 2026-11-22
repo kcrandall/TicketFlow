@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Assist/TicketFlow.Assist.Stores.Postgres/TicketFlow.Assist.Stores.Postgres.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../TicketFlow.Testing/TicketFlow.Testing.csproj" />
+    <ProjectReference Include="../TicketFlow.Assist.StoreContracts/TicketFlow.Assist.StoreContracts.csproj" />
+  </ItemGroup>
+</Project>

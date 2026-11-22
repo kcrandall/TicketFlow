@@ -29,6 +29,8 @@ public static class ChannelsTicketFlowBuilderExtensions
         }
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton<IChannelRegistry, ChannelRegistry>();
+        services.TryAddSingleton<IChannelWorkerPrincipalResolver, OptionsChannelWorkerPrincipalResolver>();
+        services.TryAddScoped<IChannelAddressOwnershipValidator, CrossScopeAddressOwnershipValidator>();
         services.TryAddScoped<IInboundChannelPipeline, InboundChannelPipeline>();
         services.TryAddScoped<IChannelReplyService, ChannelReplyService>();
         services.TryAddScoped<IChannelDeliveryIngestor, ChannelDeliveryIngestor>();

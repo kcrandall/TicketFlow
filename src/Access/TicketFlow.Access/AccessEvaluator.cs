@@ -1,3 +1,5 @@
+using TicketFlow.Core;
+
 namespace TicketFlow.Access;
 
 /// <summary>
@@ -106,13 +108,16 @@ public sealed class AccessEvaluator : IAccessEvaluator
         return result.BreakGlassAllows.Any(allow => policy.UnmaskedRoles.Contains(allow.Grant.Role)) ? MaskOutcome.UnmaskedByBreakGlass : MaskOutcome.Masked;
     }
 
-    private async Task<AccessDecision> MaskAsync(AccessContext context, Permission permission, AccessResource resource, PointResult result, CancellationToken cancellationToken)
+    private async Task<AccessDecision> MaskAsync(AccessContext context, Permission permission, AccessResource resource, PointResult result, CancellationToken cancellationToken) =>
+        Mask(context, permission, resource, result, await policies.ListAsync(resource.Scope, cancellationToken).ConfigureAwait(false));
+
+    private AccessDecision Mask(AccessContext context, Permission permission, AccessResource resource, PointResult result, IReadOnlyList<StoredAccessFieldPolicy> stored)
     {
         var usedBreakGlass = result.UsedBreakGlass;
         var masked = new List<MaskedField>();
-        foreach (var stored in await policies.ListAsync(resource.Scope, cancellationToken).ConfigureAwait(false))
+        foreach (var entry in stored)
         {
-            var policy = stored.Policy;
+            var policy = entry.Policy;
             if (!policy.AppliesTo.Contains(permission))
                 continue;
             switch (Unmasking(policy, result))
@@ -135,6 +140,65 @@ public sealed class AccessEvaluator : IAccessEvaluator
             }
         }
         return masked.Count == 0 ? new AccessAllowed(permission, usedBreakGlass) : new AccessMasked(permission, masked, usedBreakGlass);
+    }
+
+    /// <summary>
+    /// Loads grants, roles and field policies once. Each decision then evaluates in memory; sensitive permissions are still audited
+    /// per decision and break-glass use once per permission per context.
+    /// </summary>
+    public async Task<IAccessDecisionContext> LoadDecisionContextAsync(PrincipalRef principal, TicketScope scope, IEnumerable<Permission> permissions, CancellationToken cancellationToken = default)
+    {
+        var loaded = AccessDecisionContexts.Validate(principal, scope, permissions);
+        var prechecks = loaded.ToDictionary(permission => permission, permission => engine.Precheck(principal, permission, scope));
+        AccessContext? context = null;
+        IReadOnlyList<StoredAccessFieldPolicy> stored = [];
+        if (prechecks.Values.Any(reason => reason is null))
+        {
+            context = await engine.LoadAsync(principal, scope, cancellationToken).ConfigureAwait(false);
+            stored = await policies.ListAsync(scope, cancellationToken).ConfigureAwait(false);
+        }
+        return new BatchContext(this, principal, scope, loaded, prechecks, context, stored);
+    }
+
+    private sealed class BatchContext(AccessEvaluator owner, PrincipalRef principal, TicketScope scope, IReadOnlySet<Permission> permissions,
+        IReadOnlyDictionary<Permission, AccessDenialReason?> prechecks, AccessContext? context, IReadOnlyList<StoredAccessFieldPolicy> policies) : IAccessDecisionContext
+    {
+        private readonly Lock gate = new();
+        private readonly HashSet<Permission> breakGlassAudited = [];
+
+        public PrincipalRef Principal { get; } = principal;
+        public TicketScope Scope { get; } = scope;
+        public IReadOnlySet<Permission> Permissions { get; } = permissions;
+
+        public ValueTask<AccessDecision> DecideAsync(Permission permission, AccessResource resource, CancellationToken cancellationToken = default)
+        {
+            AccessDecisionContexts.RequireLoaded(Permissions, permission);
+            ArgumentNullException.ThrowIfNull(resource);
+            var sensitive = owner.engine.Catalog.Find(permission)?.IsSensitive == true;
+            AccessDecision decision;
+            if (prechecks[permission] is { } reason)
+                decision = new AccessDenied(permission, reason);
+            else if (resource.Scope != Scope)
+                decision = new AccessDenied(permission, AccessDenialReason.ScopeMismatch);
+            else
+            {
+                var result = AccessEngine.Evaluate(context!, permission, resource, includeBreakGlass: true);
+                decision = result.Denial is { } denial ? new AccessDenied(permission, denial) : owner.Mask(context!, permission, resource, result, policies);
+            }
+            var audit = sensitive;
+            if (!audit && UsedBreakGlass(decision))
+                lock (gate)
+                    audit = breakGlassAudited.Add(permission);
+            if (!audit)
+                return ValueTask.FromResult(decision);
+            return RecordAsync(permission, resource, decision, cancellationToken);
+        }
+
+        private async ValueTask<AccessDecision> RecordAsync(Permission permission, AccessResource resource, AccessDecision decision, CancellationToken cancellationToken)
+        {
+            await owner.RecordDecisionAsync(new AccessRequest(Principal, permission, resource), decision, context?.Now ?? owner.engine.Now, cancellationToken).ConfigureAwait(false);
+            return decision;
+        }
     }
 
     private static bool UsedBreakGlass(AccessDecision decision) => decision switch

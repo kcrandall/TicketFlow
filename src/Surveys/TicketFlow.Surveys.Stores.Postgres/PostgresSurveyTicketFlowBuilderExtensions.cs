@@ -1,10 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
-using TicketFlow.Surveys;
-using TicketFlow.Surveys.Stores.Postgres;
 
-namespace TicketFlow;
+namespace TicketFlow.Surveys.Stores.Postgres;
 
 public static class PostgresSurveyTicketFlowBuilderExtensions
 {

@@ -23,3 +23,8 @@ Outcome: Round robin, capacity, skills, sticky owner, overflow, fenced assignmen
 ## Verification record
 
 T01–T05 (2026-11-22): `dotnet build TicketFlow.slnx -c Release` (0 warnings, 0 errors); `dotnet test tests/Routing/TicketFlow.Routing.Tests -c Release` (41 passed); `TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/Routing/TicketFlow.Routing.Stores.Postgres.Tests -c Release` against an isolated `postgres:18` container (11 passed; without PostgreSQL these 11 are inconclusive); Access (99), Workspaces (50), Conversations (36), composition (6) and Access PostgreSQL (15) suites re-run green after adding the routing built-ins. `bash scripts/verify-package-metadata.sh` currently fails only on E6's in-progress Channels project. Parallel post-ticket reviews are still outstanding before commit.
+
+Review fixes (2026-11-22): outbox relevance filter, store-side availability filters with full paging and cursor windowing, batched
+principal resolution, per-run plan lifetime (`RunEligibilityPlanLifetime`), index-backed queue claim order (migration 2) and database
+clock for PostgreSQL leases. `dotnet test tests/Routing/TicketFlow.Routing.Tests -c Release` (48 passed);
+`TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/Routing/TicketFlow.Routing.Stores.Postgres.Tests -c Release` (15 passed). See T02/T04/T05.

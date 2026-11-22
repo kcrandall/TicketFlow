@@ -23,3 +23,5 @@ Outcome: First/next response and resolution targets, pause states, escalations, 
 ## Verification record
 
 T01–T05 (2026-11-22): `dotnet build TicketFlow.slnx -c Release` (0 warnings, 0 errors); `dotnet test tests/Sla/TicketFlow.Sla.Tests -c Release` (26 passed); `TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/Sla/TicketFlow.Sla.Stores.Postgres.Tests -c Release` against an isolated `postgres:18` container (6 passed; without PostgreSQL these 6 are inconclusive). `bash scripts/verify-package-metadata.sh` currently fails only on E6's in-progress Channels project. Parallel post-ticket reviews are still outstanding before commit. See [docs/sla.md](../../../sla.md).
+
+Review fixes (2026-11-22, after ee963dc): fenced exactly-once appends, actor-checked dedupe, flush back-off, bounded duplicate scan, claim-scoped lease release, label replay, bounded risk queries with an at-risk index (migration 2), database lease clock. `TicketFlow.Sla.Tests` 31 passed; PostgreSQL 8 passed (`tf-pg-e9fix`); solution build 0 warnings, 0 errors. See the T03-T05 Results.

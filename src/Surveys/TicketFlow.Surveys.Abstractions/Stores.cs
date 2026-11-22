@@ -15,8 +15,12 @@ namespace TicketFlow.Surveys;
 /// so the cooldown cannot be raced.</item>
 /// <item>Invitation updates may not change survey, kind, conversation or contact. Token hashes are unique; lookups by hash are
 /// confined to the scope.</item>
-/// <item><see cref="RecordResponseAsync"/> atomically stores the single response and moves a <see cref="SurveyInvitationState.Sent"/>
-/// invitation to <see cref="SurveyInvitationState.Responded"/>; a second response returns the first.</item>
+/// <item><see cref="ClaimDueInvitationsAsync"/> atomically claims due invitations — Pending with <c>SendAfter ≤ now</c>, or Sending
+/// whose lease expired — skipping rows another client is claiming, so concurrent dispatchers never claim the same invitation; claimed
+/// invitations become Sending with a lease and one more attempt.</item>
+/// <item><see cref="RecordResponseAsync"/> atomically stores the single response and moves the invitation to
+/// <see cref="SurveyInvitationState.Responded"/> when <see cref="SurveyInvitation.AcceptsResponses"/> holds at the response time;
+/// a second response returns the first.</item>
 /// <item>Response lists and aggregates include exactly the responses for which
 /// <see cref="AccessFilterEvaluator.Matches"/>(filter, <see cref="SurveyResources.Response"/>) is true, applying the filter in the
 /// query; a store that cannot apply a filter node must return no rows.</item>
@@ -41,8 +45,18 @@ public interface ISurveyStore
 
     Task<StoredInvitation?> FindInvitationByTokenAsync(TicketScope scope, SurveyTokenHash tokenHash, CancellationToken cancellationToken = default);
 
-    /// <summary>Pending invitations with <c>SendAfter ≤ now</c>, ordered by (send after, identifier), at most <paramref name="limit"/> (1-500).</summary>
+    /// <summary>
+    /// Due invitations (Pending with <c>SendAfter ≤ now</c>, or Sending with <c>LeaseUntil ≤ now</c>), ordered by (send after,
+    /// identifier), at most <paramref name="limit"/> (1-500). Read-only; dispatchers use <see cref="ClaimDueInvitationsAsync"/>.
+    /// </summary>
     Task<IReadOnlyList<StoredInvitation>> ListDueInvitationsAsync(TicketScope scope, DateTimeOffset now, int limit, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Claims at most <paramref name="limit"/> (1-500) due invitations in (send after, identifier) order: each becomes
+    /// <see cref="SurveyInvitationState.Sending"/> with <c>LeaseUntil = now + lease</c>, attempts + 1 and revision + 1. Invitations at
+    /// <see cref="SurveyInvitation.MaximumAttempts"/> are not claimed. Rows locked by a concurrent claim are skipped.
+    /// </summary>
+    Task<IReadOnlyList<StoredInvitation>> ClaimDueInvitationsAsync(TicketScope scope, DateTimeOffset now, TimeSpan lease, int limit, CancellationToken cancellationToken = default);
 
     Task<SurveyWriteResult<StoredInvitation>> UpdateInvitationAsync(TicketScope scope, SurveyInvitation invitation, long expectedRevision, CancellationToken cancellationToken = default);
 

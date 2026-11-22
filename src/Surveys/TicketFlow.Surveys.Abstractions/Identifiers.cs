@@ -113,6 +113,29 @@ public readonly record struct SurveyToken
 
     public static SurveyToken Create() => new(Prefix + Base64Url(RandomNumberGenerator.GetBytes(32)));
 
+    /// <summary>Minimum length of a derivation key in bytes.</summary>
+    public const int MinimumKeyLength = 32;
+
+    /// <summary>
+    /// The deterministic token of one invitation: HMAC-SHA256 under an application-held secret <paramref name="key"/> (at least 32
+    /// bytes) over the JSON array ["tf-survey-token-v1", tenant, project, environment, app, workspace, invitation]. Re-deriving on a retry
+    /// yields the same token, so a link the contact already received stays valid, while the database alone (which keeps only the hash)
+    /// cannot reproduce it.
+    /// </summary>
+    public static SurveyToken Derive(ReadOnlySpan<byte> key, TicketScope scope, SurveyInvitationId invitation)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        if (key.Length < MinimumKeyLength)
+            throw new ArgumentException($"Token keys must contain at least {MinimumKeyLength} bytes.", nameof(key));
+        if (!invitation.IsInitialized)
+            throw new ArgumentException("An invitation identifier is required.", nameof(invitation));
+        var framed = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new[]
+        {
+            "tf-survey-token-v1", scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value, invitation.ToString(),
+        });
+        return new(Prefix + Base64Url(HMACSHA256.HashData(key, framed)));
+    }
+
     /// <summary>Parses untrusted input; false for anything that is not a well-formed version-1 token.</summary>
     public static bool TryParse(string? text, out SurveyToken token)
     {

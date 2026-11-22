@@ -4,12 +4,20 @@ using TicketFlow.Core;
 namespace TicketFlow.Surveys;
 
 /// <summary>
-/// Default <see cref="ISurveyDispatcher"/>. For each due invitation it issues a fresh <see cref="SurveyToken"/>, records only its
-/// hash (state Sent, expiry = now + lifetime) with a revision-fenced update, then calls <see cref="ISurveyInvitationSender"/>. When
-/// the sender throws, the invitation returns to Pending without a token (exponential backoff) or becomes Failed after
-/// <see cref="SurveyOptions.MaximumSendAttempts"/>. Delivery is at-most-once if the process stops between recording the hash and
-/// sending. Invitations of disabled or deleted surveys are cancelled. Concurrent dispatchers are safe: the fenced update lets only
-/// one of them issue a token.
+/// Default <see cref="ISurveyDispatcher"/>.
+/// <list type="number">
+/// <item>Claims due invitations atomically (<see cref="ISurveyStore.ClaimDueInvitationsAsync"/>): concurrent dispatchers never claim the
+/// same invitation, and each claim holds a lease of <see cref="SurveyOptions.SendLease"/>.</item>
+/// <item>Derives the invitation's token deterministically from <see cref="SurveyOptions.TokenKey"/> (<see cref="SurveyToken.Derive"/>)
+/// and records its hash and expiry on first issue. Retries derive the same token, so a link that already reached the contact (for
+/// example when the provider accepted but the sender then failed) keeps working; the database never holds the raw token.</item>
+/// <item>Calls <see cref="ISurveyInvitationSender"/> with the token and the stable <see cref="SurveyInvitationMessage.DeliveryKey"/>,
+/// then marks the invitation Sent. A throwing sender returns it to Pending with exponential backoff, or Failed after
+/// <see cref="SurveyOptions.MaximumSendAttempts"/>; the token stays valid either way.</item>
+/// </list>
+/// If the process stops after claiming (before or after the sender call), the lease expires and the invitation is due again; the
+/// re-send carries the same token and delivery key, so delivery is at-least-once with provider-side deduplication. Invitations of
+/// disabled or deleted surveys are cancelled; invitations past their response window are failed.
 /// </summary>
 public sealed class SurveyDispatcher : ISurveyDispatcher
 {
@@ -33,57 +41,77 @@ public sealed class SurveyDispatcher : ISurveyDispatcher
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, SurveyLimits.MaximumDuePerRead);
-        var due = await store.ListDueInvitationsAsync(scope, clock.GetUtcNow(), limit, cancellationToken).ConfigureAwait(false);
+        var claimed = await store.ClaimDueInvitationsAsync(scope, clock.GetUtcNow(), options.SendLease, limit, cancellationToken).ConfigureAwait(false);
         var surveys = new Dictionary<SurveyId, SurveyDefinition?>();
         int sent = 0, retrying = 0, failed = 0, cancelled = 0;
-        foreach (var stored in due)
+        foreach (var stored in claimed)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var invitation = stored.Invitation;
+            var revision = stored.Revision;
             if (!surveys.TryGetValue(invitation.Survey, out var survey))
             {
                 survey = (await store.GetSurveyAsync(scope, invitation.Survey, cancellationToken).ConfigureAwait(false))?.Survey;
                 surveys[invitation.Survey] = survey;
             }
+            var now = clock.GetUtcNow();
             if (survey is null || !survey.Enabled || survey.Kind != invitation.Kind)
             {
-                if (await store.UpdateInvitationAsync(scope, invitation.Close(SurveyInvitationState.Cancelled, invitation.Attempts), stored.Revision, cancellationToken).ConfigureAwait(false) is { Value: SurveyWriteApplied<StoredInvitation> })
+                if (await WriteAsync(scope, invitation.Close(SurveyInvitationState.Cancelled), revision).ConfigureAwait(false) is not null)
                     cancelled++;
                 continue;
             }
-
-            var token = SurveyToken.Create();
-            var now = clock.GetUtcNow();
-            var issued = invitation.MarkSent(token.Hash(), now, survey.Policy.InvitationLifetime);
-            if (await store.UpdateInvitationAsync(scope, issued, stored.Revision, cancellationToken).ConfigureAwait(false) is not { Value: SurveyWriteApplied<StoredInvitation> applied })
+            if (invitation.Attempts > options.MaximumSendAttempts || invitation.ExpiresAt <= now)
+            {
+                if (await WriteAsync(scope, invitation.Close(SurveyInvitationState.Failed), revision).ConfigureAwait(false) is not null)
+                    failed++;
                 continue;
+            }
+
+            var token = SurveyToken.Derive(options.TokenKey, scope, invitation.Id);
+            if (invitation.TokenHash != token.Hash())
+            {
+                // First issue (or a changed TokenKey, which cannot reproduce the earlier link).
+                var issued = invitation.Issue(token.Hash(), now, survey.Policy.InvitationLifetime);
+                if (await WriteAsync(scope, issued, revision).ConfigureAwait(false) is not { } applied)
+                    continue;
+                (invitation, revision) = (issued, applied.Revision);
+            }
             try
             {
-                var message = new SurveyInvitationMessage(scope, applied.Value.Invitation, token, survey.Kind, SurveyScales.Minimum(survey.Kind), SurveyScales.Maximum(survey.Kind), survey.QuestionFor(invitation.Locale));
+                var message = new SurveyInvitationMessage(scope, invitation, token, survey.Kind, SurveyScales.Minimum(survey.Kind), SurveyScales.Maximum(survey.Kind), survey.QuestionFor(invitation.Locale));
                 await sender.SendAsync(message, cancellationToken).ConfigureAwait(false);
-                sent++;
             }
             catch (Exception error) when (error is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
-                var attempts = issued.Attempts;
-                var next = attempts >= options.MaximumSendAttempts
-                    ? issued.Close(SurveyInvitationState.Failed, attempts)
-                    : issued.Retry(clock.GetUtcNow() + Backoff(attempts), attempts);
-                if (await store.UpdateInvitationAsync(scope, next, applied.Value.Revision, CancellationToken.None).ConfigureAwait(false) is { Value: SurveyWriteApplied<StoredInvitation> })
+                var next = invitation.Attempts >= options.MaximumSendAttempts
+                    ? invitation.Close(SurveyInvitationState.Failed)
+                    : invitation.Retry(clock.GetUtcNow() + Backoff(invitation.Attempts));
+                if (await WriteAsync(scope, next, revision).ConfigureAwait(false) is not null)
                 {
                     if (next.State == SurveyInvitationState.Failed)
                         failed++;
                     else
                         retrying++;
                 }
+                continue;
             }
+            // A conflict here means a response arrived (or the lease was lost) meanwhile; the invitation was still delivered.
+            await WriteAsync(scope, invitation.MarkSent(), revision).ConfigureAwait(false);
+            sent++;
         }
         return new SurveyDispatchSummary(sent, retrying, failed, cancelled);
     }
 
+    /// <summary>Revision-fenced write; returns the stored invitation or null when another writer got there first.</summary>
+    private async Task<StoredInvitation?> WriteAsync(TicketScope scope, SurveyInvitation invitation, long revision) =>
+        await store.UpdateInvitationAsync(scope, invitation, revision, CancellationToken.None).ConfigureAwait(false) is { Value: SurveyWriteApplied<StoredInvitation> applied }
+            ? applied.Value
+            : null;
+
     private TimeSpan Backoff(int attempts)
     {
-        var delay = options.RetryDelay * Math.Pow(2, Math.Min(attempts - 1, 20));
+        var delay = options.RetryDelay * Math.Pow(2, Math.Clamp(attempts - 1, 0, 20));
         return delay > options.MaximumRetryDelay ? options.MaximumRetryDelay : delay;
     }
 }

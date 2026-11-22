@@ -1,10 +1,12 @@
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using TicketFlow.Channels;
 using TicketFlow.Conversations;
 using TicketFlow.Surveys;
 using TicketFlow.Workspaces;
 
-namespace TicketFlow.Integrations.EnvelopeFlow;
+namespace TicketFlow.Integrations.EnvelopeFlow.Surveys;
 
 public sealed class EnvelopeFlowSurveyOptions
 {
@@ -22,7 +24,8 @@ public sealed class EnvelopeFlowSurveyOptions
 /// Sends survey invitations (<see cref="ISurveyInvitationSender"/>) through the EnvelopeFlow channel of the surveyed conversation, to
 /// the recipient the channel layer recorded. WhatsApp invitations outside the 24-hour window use
 /// <see cref="EnvelopeFlowSurveyOptions.WhatsAppTemplate"/> (failing when none is configured). Throws on rejections so the survey
-/// dispatcher retries; an unknown outcome is not thrown (the invitation may have been delivered; survey dispatch is at-most-once).
+/// dispatcher retries; an unknown outcome is not thrown (the invitation may have been delivered). Retries reuse the token and the stable
+/// <see cref="SurveyInvitationMessage.DeliveryKey"/> as the idempotency key.
 /// Never logs the token, link or address.
 /// </summary>
 public sealed class EnvelopeFlowSurveyInvitationSender(
@@ -65,7 +68,7 @@ public sealed class EnvelopeFlowSurveyInvitationSender(
         }
         var request = new OutboundChannelMessage(message.Scope, stored.Conversation.Inbox, inbox.Inbox.Channel, stored.Id, null, stored.Conversation.Contact,
             state.State.Recipient, options.TextFormatter(message, link), MessageContentType.PlainText,
-            $"tfs-{invitation.Id.Value:N}-{invitation.Attempts}",
+            message.DeliveryKey,
             thread: new ChannelThreadContext(state.State.ExternalThreadId, subject: state.State.Subject), lastIncomingAt: lastIncoming, template: template);
         switch (await channel.SendAsync(request, cancellationToken).ConfigureAwait(false))
         {
@@ -75,5 +78,19 @@ public sealed class EnvelopeFlowSurveyInvitationSender(
             case ChannelSendRejected rejected:
                 throw new InvalidOperationException($"The survey invitation was rejected ({rejected.Code}).");
         }
+    }
+}
+
+public static class EnvelopeFlowSurveysTicketFlowBuilderExtensions
+{
+    /// <summary>Registers <see cref="EnvelopeFlowSurveyInvitationSender"/> as the <see cref="ISurveyInvitationSender"/> (TryAdd).</summary>
+    public static TicketFlowBuilder AddEnvelopeFlowSurveySender(this TicketFlowBuilder builder, Action<EnvelopeFlowSurveyOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(configure);
+        builder.Services.AddOptions<EnvelopeFlowSurveyOptions>().Configure(configure);
+        builder.Services.TryAddSingleton(TimeProvider.System);
+        builder.Services.TryAddScoped<ISurveyInvitationSender, EnvelopeFlowSurveyInvitationSender>();
+        return builder;
     }
 }

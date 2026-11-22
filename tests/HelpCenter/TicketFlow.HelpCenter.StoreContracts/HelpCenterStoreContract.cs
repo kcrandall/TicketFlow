@@ -84,7 +84,9 @@ public static class HelpCenterStoreContract
         Assert.AreEqual("rejected:SlugConflict", P(await primary.UpdatePortalAsync(scope, SamplePortal("second", "support"), 1)));
         CollectionAssert.AreEqual(new[] { "portal", "second" }, (await competing.ListPortalsAsync(scope)).Select(item => item.Portal.Id.Value).ToArray());
 
-        var outcomes = await Task.WhenAll(primary.UpdatePortalAsync(scope, renamed, 2), competing.UpdatePortalAsync(scope, portal, 2));
+        // Both writers keep the slug unique so the race can only end in a revision conflict.
+        var retitled = new Portal(portal.Id, new HelpCenterSlug("support"), "Support desk", German, [English], PortalVisibility.Private);
+        var outcomes = await Task.WhenAll(primary.UpdatePortalAsync(scope, renamed, 2), competing.UpdatePortalAsync(scope, retitled, 2));
         CollectionAssert.AreEquivalent(new[] { "applied:3", "conflict:3" }, outcomes.Select(P).ToArray());
 
         foreach (var other in TestScopes.LevelVariants(scope).Skip(1))

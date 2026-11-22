@@ -146,7 +146,7 @@ public sealed class PostgresConversationStoreTests
         await using var database = await Database.CreateAsync();
         await database.Competing.InitializeAsync();
         var inspection = await new PostgresMigrationRunner(database.Primary, PostgresConversationMigrations.Catalog).InspectAsync();
-        Assert.AreEqual(1, inspection.CurrentVersion);
+        Assert.AreEqual(2, inspection.CurrentVersion);
         Assert.AreEqual("ticketflow.conversations", inspection.Component);
     }
 

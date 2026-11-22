@@ -4,10 +4,10 @@ namespace TicketFlow.Surveys;
 
 public enum SurveyInvitationState
 {
-    /// <summary>Created and waiting for <see cref="SurveyInvitation.SendAfter"/>; no token exists yet.</summary>
+    /// <summary>Waiting for <see cref="SurveyInvitation.SendAfter"/> (first attempt, or a retry after a failed send).</summary>
     Pending = 1,
 
-    /// <summary>A token was issued and handed to the sender; responses are accepted until <see cref="SurveyInvitation.ExpiresAt"/>.</summary>
+    /// <summary>The sender accepted the invitation.</summary>
     Sent = 2,
 
     /// <summary>The single response was recorded.</summary>
@@ -16,14 +16,26 @@ public enum SurveyInvitationState
     /// <summary>Delivery failed permanently after the maximum number of attempts.</summary>
     Failed = 4,
 
-    /// <summary>The survey was disabled before delivery.</summary>
+    /// <summary>The survey was disabled or deleted before delivery.</summary>
     Cancelled = 5,
+
+    /// <summary>
+    /// Claimed by one dispatcher until <see cref="SurveyInvitation.LeaseUntil"/>. A dispatcher that stops mid-send leaves the lease to
+    /// expire, after which the invitation is due again.
+    /// </summary>
+    Sending = 6,
 }
 
 /// <summary>
 /// An invitation for one contact to answer one survey about one conversation. It carries the conversation's inbox, team and agent
-/// at resolution time (the response's access and reporting dimensions). <see cref="TokenHash"/> is set only while
-/// <see cref="State"/> is <see cref="SurveyInvitationState.Sent"/> or <see cref="SurveyInvitationState.Responded"/>.
+/// at resolution time (the response's access and reporting dimensions).
+/// <para>
+/// <see cref="TokenHash"/>, <see cref="IssuedAt"/> and <see cref="ExpiresAt"/> are set together when the token is first issued and then
+/// kept across retries, so a link that already reached the contact stays valid; <see cref="SurveyInvitationState.Sent"/> and
+/// <see cref="SurveyInvitationState.Responded"/> always have them. <see cref="LeaseUntil"/> is set exactly while
+/// <see cref="SurveyInvitationState.Sending"/>. A response is accepted while a token exists, the state is neither Responded nor
+/// Cancelled, and <see cref="ExpiresAt"/> has not passed (<see cref="AcceptsResponses"/>).
+/// </para>
 /// </summary>
 public sealed record SurveyInvitation
 {
@@ -44,8 +56,9 @@ public sealed record SurveyInvitation
         SurveyInvitationState state = SurveyInvitationState.Pending,
         int attempts = 0,
         SurveyTokenHash? tokenHash = null,
-        DateTimeOffset? sentAt = null,
-        DateTimeOffset? expiresAt = null)
+        DateTimeOffset? issuedAt = null,
+        DateTimeOffset? expiresAt = null,
+        DateTimeOffset? leaseUntil = null)
     {
         if (!id.IsInitialized || !survey.IsInitialized || conversation == default || contact == default || !locale.IsInitialized
             || inbox == default(InboxId) || team == default(TeamId) || agent == default(UserId) || tokenHash is { IsInitialized: false })
@@ -56,10 +69,14 @@ public sealed record SurveyInvitation
             throw new ArgumentOutOfRangeException(nameof(state));
         ArgumentOutOfRangeException.ThrowIfNegative(attempts);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(attempts, MaximumAttempts);
-        var issued = state is SurveyInvitationState.Sent or SurveyInvitationState.Responded;
-        if (issued != (tokenHash is not null) || issued != (sentAt is not null) || issued != (expiresAt is not null))
-            throw new ArgumentException("Token hash, sent and expiry times are present exactly when the invitation was sent.");
-        if (sendAfter < createdAt || (expiresAt is { } expiry && sentAt is { } sent && expiry <= sent))
+        var issued = tokenHash is not null;
+        if (issued != (issuedAt is not null) || issued != (expiresAt is not null))
+            throw new ArgumentException("Token hash, issue and expiry times are set together.");
+        if (!issued && state is SurveyInvitationState.Sent or SurveyInvitationState.Responded)
+            throw new ArgumentException("Sent and responded invitations have a token.");
+        if ((state == SurveyInvitationState.Sending) != (leaseUntil is not null))
+            throw new ArgumentException("A lease is present exactly while the invitation is being sent.");
+        if (sendAfter < createdAt || (expiresAt is { } expiry && issuedAt is { } at && expiry <= at))
             throw new ArgumentException("Invitation times are inconsistent.");
         Id = id;
         Survey = survey;
@@ -75,8 +92,9 @@ public sealed record SurveyInvitation
         State = state;
         Attempts = attempts;
         TokenHash = tokenHash;
-        SentAt = sentAt is { } delivered ? SurveyLimits.Truncate(delivered) : null;
+        IssuedAt = issuedAt is { } first ? SurveyLimits.Truncate(first) : null;
         ExpiresAt = expiresAt is { } expires ? SurveyLimits.Truncate(expires) : null;
+        LeaseUntil = leaseUntil is { } lease ? SurveyLimits.Truncate(lease) : null;
     }
 
     public SurveyInvitationId Id { get; }
@@ -91,21 +109,43 @@ public sealed record SurveyInvitation
     public DateTimeOffset CreatedAt { get; }
     public DateTimeOffset SendAfter { get; }
     public SurveyInvitationState State { get; }
+
+    /// <summary>Dispatch claims so far (each claim counts, including ones whose dispatcher stopped).</summary>
     public int Attempts { get; }
+
     public SurveyTokenHash? TokenHash { get; }
-    public DateTimeOffset? SentAt { get; }
+
+    /// <summary>When the token was first issued.</summary>
+    public DateTimeOffset? IssuedAt { get; }
+
     public DateTimeOffset? ExpiresAt { get; }
 
-    public SurveyInvitation MarkSent(SurveyTokenHash hash, DateTimeOffset sentAt, TimeSpan lifetime) =>
-        new(Id, Survey, Kind, Conversation, Contact, Inbox, Team, Agent, Locale, CreatedAt, SendAfter, SurveyInvitationState.Sent, Attempts + 1, hash, sentAt, sentAt + lifetime);
+    public DateTimeOffset? LeaseUntil { get; }
 
-    public SurveyInvitation Retry(DateTimeOffset sendAfter, int attempts) =>
-        new(Id, Survey, Kind, Conversation, Contact, Inbox, Team, Agent, Locale, CreatedAt, sendAfter < CreatedAt ? CreatedAt : sendAfter, SurveyInvitationState.Pending, attempts);
+    /// <summary>True when a response presented at <paramref name="now"/> can be recorded.</summary>
+    public bool AcceptsResponses(DateTimeOffset now) =>
+        TokenHash is not null && State is not (SurveyInvitationState.Responded or SurveyInvitationState.Cancelled) && now < ExpiresAt;
 
-    public SurveyInvitation Close(SurveyInvitationState state, int attempts) =>
-        state is SurveyInvitationState.Failed or SurveyInvitationState.Cancelled
-            ? new(Id, Survey, Kind, Conversation, Contact, Inbox, Team, Agent, Locale, CreatedAt, SendAfter, state, attempts)
-            : throw new ArgumentOutOfRangeException(nameof(state));
+    /// <summary>Claims the invitation for one dispatcher until <paramref name="leaseUntil"/> (one more attempt).</summary>
+    public SurveyInvitation Claim(DateTimeOffset leaseUntil) =>
+        With(SurveyInvitationState.Sending, Math.Min(Attempts + 1, MaximumAttempts), leaseUntil: leaseUntil);
+
+    /// <summary>Records the token hash and expiry (replacing any previous token).</summary>
+    public SurveyInvitation Issue(SurveyTokenHash hash, DateTimeOffset issuedAt, TimeSpan lifetime) =>
+        new(Id, Survey, Kind, Conversation, Contact, Inbox, Team, Agent, Locale, CreatedAt, SendAfter, State, Attempts, hash, issuedAt, issuedAt + lifetime, LeaseUntil);
+
+    public SurveyInvitation MarkSent() => With(SurveyInvitationState.Sent, Attempts);
+
+    /// <summary>Back to Pending (keeping the token) until <paramref name="sendAfter"/>.</summary>
+    public SurveyInvitation Retry(DateTimeOffset sendAfter) =>
+        new(Id, Survey, Kind, Conversation, Contact, Inbox, Team, Agent, Locale, CreatedAt, sendAfter < CreatedAt ? CreatedAt : sendAfter, SurveyInvitationState.Pending, Attempts,
+            TokenHash, IssuedAt, ExpiresAt);
+
+    public SurveyInvitation Close(SurveyInvitationState state) =>
+        state is SurveyInvitationState.Failed or SurveyInvitationState.Cancelled ? With(state, Attempts) : throw new ArgumentOutOfRangeException(nameof(state));
+
+    private SurveyInvitation With(SurveyInvitationState state, int attempts, DateTimeOffset? leaseUntil = null) =>
+        new(Id, Survey, Kind, Conversation, Contact, Inbox, Team, Agent, Locale, CreatedAt, SendAfter, state, attempts, TokenHash, IssuedAt, ExpiresAt, leaseUntil);
 
     public override string ToString() => "SurveyInvitation { <redacted> }";
 }

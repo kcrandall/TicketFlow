@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Automation contracts for TicketFlow: rules (trigger union, bounded condition AST, ordered action union, cron schedules), macros, canned responses with safe templates, execution records with per-action outcomes, versioned codecs, permissions, store and service contracts.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
+    <ProjectReference Include="../../Contacts/TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj" />
+    <ProjectReference Include="../../Workspaces/TicketFlow.Workspaces.Abstractions/TicketFlow.Workspaces.Abstractions.csproj" />
+    <ProjectReference Include="../../Sla/TicketFlow.Sla.Abstractions/TicketFlow.Sla.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

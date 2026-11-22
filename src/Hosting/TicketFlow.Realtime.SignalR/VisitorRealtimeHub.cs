@@ -1,0 +1,287 @@
+using Microsoft.AspNetCore.SignalR;
+using TicketFlow.Channels.LiveChat;
+using TicketFlow.Conversations;
+using TicketFlow.Core;
+
+namespace TicketFlow.Realtime.SignalR;
+
+/// <summary>
+/// The live-chat visitor hub. Connections are anonymous until <see cref="Connect"/> authenticates a session token (or starts a session)
+/// against the widget key and the request's Origin header; the token travels in the hub call, never in URLs. Afterwards the connection
+/// is registered as the session's <see cref="VisitorSubscriber"/> and receives only that session's visitor-facing events. Every call
+/// re-checks that the session is still live.
+/// </summary>
+public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILiveChatVisitorService visitors, IVisitorPartitionResolver partitions, IHubContext<VisitorRealtimeHub> hub) : Hub
+{
+    private const string ContextKey = "tf.visitor";
+
+    public override Task OnDisconnectedAsync(Exception? exception)
+    {
+        subscriptions.Disconnect(Context.ConnectionId);
+        return base.OnDisconnectedAsync(exception);
+    }
+
+    /// <summary>
+    /// Authenticates <paramref name="token"/> (or, when it is absent, starts a new anonymous session) for the widget. Returns the
+    /// (possibly rotated) token, the visitor id, the widget state and the session's conversations. An invalid token returns
+    /// <c>unauthenticated</c>: the client discards it and connects without one.
+    /// </summary>
+    public async Task<HubResult> Connect(string widgetKey, string? token)
+    {
+        var http = Context.GetHttpContext();
+        if (partitions.Resolve(http) is not { } partition)
+            return HubResult.Failure("unavailable");
+        var origin = http?.Request.Headers.Origin.ToString() is { Length: > 0 } header ? header : null;
+        VisitorSessionContext session;
+        string? issued = null;
+        if (string.IsNullOrEmpty(token))
+        {
+            switch (await visitors.StartSessionAsync(partition, widgetKey, origin, Context.ConnectionAborted).ConfigureAwait(false))
+            {
+                case LiveChatValue<VisitorSessionGrant> grant:
+                    session = grant.Value.Context;
+                    issued = grant.Value.Token;
+                    break;
+                case LiveChatRefused refused:
+                    return Failure(refused);
+                default:
+                    return HubResult.Failure("unavailable");
+            }
+        }
+        else
+        {
+            switch (await visitors.AuthenticateAsync(partition, token, origin, Context.ConnectionAborted).ConfigureAwait(false))
+            {
+                case LiveChatValue<VisitorSessionContext> authenticated:
+                    session = authenticated.Value;
+                    break;
+                case LiveChatRefused refused:
+                    return Failure(refused);
+                default:
+                    return HubResult.Failure("unavailable");
+            }
+            if (session.RotationRecommended && await visitors.RotateTokenAsync(session, Context.ConnectionAborted).ConfigureAwait(false) is { Value: LiveChatValue<VisitorTokenRotated> rotated })
+            {
+                session = rotated.Value.Context;
+                issued = rotated.Value.Token;
+            }
+        }
+
+        subscriptions.Disconnect(Context.ConnectionId);
+        var subscriber = new VisitorSubscriber(session.Scope, session.Session.Session.Id);
+        if (subscriptions.Connect(new SignalRRealtimeConnection(Context.ConnectionId, subscriber, hub.Clients.Client(Context.ConnectionId))).Value is not RealtimeConnected
+            || (await subscriptions.SubscribeAsync(Context.ConnectionId, new VisitorSessionTopic(session.Scope, session.Session.Session.Id), Context.ConnectionAborted).ConfigureAwait(false))
+                .Value is not RealtimeSubscribed)
+            return HubResult.Failure("limit-reached");
+        Context.Items[ContextKey] = session;
+
+        var widget = await visitors.GetSessionWidgetAsync(session, Context.ConnectionAborted).ConfigureAwait(false);
+        var conversations = await visitors.ListConversationsAsync(session, Context.ConnectionAborted).ConfigureAwait(false);
+        return HubResult.Success(new Dictionary<string, object?>
+        {
+            ["token"] = issued,
+            ["visitorId"] = session.Session.Session.VisitorId,
+            ["verified"] = session.Session.Session.Identity is not null,
+            ["prechatAnswered"] = session.Session.Session.Prechat.Count > 0,
+            ["widget"] = widget.Value is LiveChatValue<LiveChatWidgetState> state ? Widget(state.Value) : null,
+            ["conversations"] = conversations.Value is LiveChatValue<IReadOnlyList<VisitorConversationView>> list ? list.Value.Select(Conversation).ToList() : [],
+        });
+    }
+
+    public async Task<HubResult> SubmitPrechat(Dictionary<string, string> answers)
+    {
+        if (Session() is not { } session)
+            return HubResult.Failure("unauthenticated");
+        return Store(await visitors.SubmitPrechatAsync(session, answers ?? [], Context.ConnectionAborted).ConfigureAwait(false));
+    }
+
+    /// <summary><paramref name="method"/> is <c>hmac</c> (<paramref name="value"/> = user id, <paramref name="signature"/> = hex HMAC) or <c>token</c> (<paramref name="value"/> = signed token).</summary>
+    public async Task<HubResult> Identify(string method, string value, string? signature, string? displayName)
+    {
+        if (Session() is not { } session)
+            return HubResult.Failure("unauthenticated");
+        VisitorIdentification identification = method switch
+        {
+            "hmac" => new HmacVisitorIdentification(value ?? string.Empty, signature ?? string.Empty, displayName),
+            "token" => new SignedTokenVisitorIdentification(value ?? string.Empty),
+            _ => default,
+        };
+        if (identification.Value is null)
+            return HubResult.Failure("invalid");
+        return Store(await visitors.IdentifyAsync(session, identification, Context.ConnectionAborted).ConfigureAwait(false));
+    }
+
+    public async Task<HubResult> SendMessage(string clientMessageId, string? text, string[]? attachments)
+    {
+        if (Session() is not { } session)
+            return HubResult.Failure("unauthenticated");
+        return await visitors.SendMessageAsync(session, new VisitorMessageDraft(clientMessageId ?? string.Empty, text, attachments), Context.ConnectionAborted).ConfigureAwait(false) switch
+        {
+            LiveChatValue<VisitorMessageAccepted> accepted => HubResult.Success(new Dictionary<string, object?>
+            {
+                ["conversation"] = accepted.Value.Conversation.Value,
+                ["message"] = accepted.Value.Message.Value,
+                ["sequence"] = accepted.Value.Sequence,
+                ["started"] = accepted.Value.StartedConversation,
+                ["replayed"] = accepted.Value.Replayed,
+            }),
+            LiveChatRefused refused => Failure(refused),
+        };
+    }
+
+    public async Task<HubResult> ListConversations()
+    {
+        if (Session() is not { } session)
+            return HubResult.Failure("unauthenticated");
+        return await visitors.ListConversationsAsync(session, Context.ConnectionAborted).ConfigureAwait(false) switch
+        {
+            LiveChatValue<IReadOnlyList<VisitorConversationView>> list => HubResult.Success(list.Value.Select(Conversation).ToList()),
+            LiveChatRefused refused => Failure(refused),
+        };
+    }
+
+    /// <summary>Visitor-visible messages after <paramref name="afterSequence"/> (reconnect with cursor).</summary>
+    public async Task<HubResult> FetchMessages(string conversation, long afterSequence, int limit)
+    {
+        if (Session() is not { } session)
+            return HubResult.Failure("unauthenticated");
+        if (Id(conversation) is not { } id)
+            return HubResult.Failure("invalid");
+        return await visitors.ReadMessagesAsync(session, id, afterSequence, limit <= 0 ? 50 : limit, Context.ConnectionAborted).ConfigureAwait(false) switch
+        {
+            LiveChatValue<VisitorMessagePage> page => HubResult.Success(new Dictionary<string, object?>
+            {
+                ["conversation"] = page.Value.Conversation.Value,
+                ["readSequence"] = page.Value.ReadSequence,
+                ["next"] = page.Value.NextAfterSequence,
+                ["messages"] = page.Value.Messages.Select(message => new Dictionary<string, object?>
+                {
+                    ["message"] = message.Message.Value,
+                    ["sequence"] = message.Sequence,
+                    ["direction"] = RealtimeWireFormat.Token(message.Direction.ToString()),
+                    ["body"] = message.Body,
+                    ["contentType"] = RealtimeWireFormat.Token(message.ContentType.ToString()),
+                    ["attachments"] = message.Attachments.Select(RealtimeWireFormat.Attachment).ToList(),
+                    ["at"] = message.At,
+                    ["delivery"] = RealtimeWireFormat.Token(message.Delivery.ToString()),
+                }).ToList(),
+            }),
+            LiveChatRefused refused => Failure(refused),
+        };
+    }
+
+    public async Task<HubResult> Typing(string conversation, bool typing)
+    {
+        if (Session() is not { } session)
+            return HubResult.Failure("unauthenticated");
+        if (Id(conversation) is not { } id)
+            return HubResult.Failure("invalid");
+        return Simple(await visitors.SetTypingAsync(session, id, typing, Context.ConnectionAborted).ConfigureAwait(false));
+    }
+
+    public async Task<HubResult> MarkRead(string conversation, long upToSequence)
+    {
+        if (Session() is not { } session)
+            return HubResult.Failure("unauthenticated");
+        if (Id(conversation) is not { } id)
+            return HubResult.Failure("invalid");
+        return await visitors.MarkReadAsync(session, id, upToSequence, Context.ConnectionAborted).ConfigureAwait(false) switch
+        {
+            LiveChatValue<long> read => HubResult.Success(read.Value),
+            LiveChatRefused refused => Failure(refused),
+        };
+    }
+
+    public async Task<HubResult> SearchArticles(string text)
+    {
+        if (Session() is not { } session)
+            return HubResult.Failure("unauthenticated");
+        return await visitors.SearchArticlesAsync(session, text ?? string.Empty, Context.ConnectionAborted).ConfigureAwait(false) switch
+        {
+            LiveChatValue<IReadOnlyList<TicketFlow.HelpCenter.ArticleSnippet>> hits => HubResult.Success(hits.Value.Select(hit => new Dictionary<string, object?>
+            {
+                ["article"] = hit.Article.Value,
+                ["title"] = hit.Title,
+                ["slug"] = hit.Slug.Value,
+                ["snippet"] = hit.Snippet,
+                ["locale"] = hit.Locale.Value,
+            }).ToList()),
+            LiveChatRefused refused => Failure(refused),
+        };
+    }
+
+    public async Task<HubResult> EndSession()
+    {
+        if (Session() is not { } session)
+            return HubResult.Failure("unauthenticated");
+        var result = Simple(await visitors.EndSessionAsync(session, Context.ConnectionAborted).ConfigureAwait(false));
+        Context.Items.Remove(ContextKey);
+        subscriptions.Disconnect(Context.ConnectionId);
+        return result;
+    }
+
+    private VisitorSessionContext? Session() => Context.Items.TryGetValue(ContextKey, out var value) && value is VisitorSessionContext session ? session : null;
+
+    private HubResult Store(LiveChatResult<VisitorSessionContext> result)
+    {
+        switch (result)
+        {
+            case LiveChatValue<VisitorSessionContext> updated:
+                Context.Items[ContextKey] = updated.Value;
+                return HubResult.Success(new Dictionary<string, object?> { ["verified"] = updated.Value.Session.Session.Identity is not null });
+            case LiveChatRefused refused:
+                return Failure(refused);
+        }
+        return HubResult.Failure("unavailable");
+    }
+
+    private static HubResult Simple(LiveChatResult<bool> result) => result switch
+    {
+        LiveChatValue<bool> => HubResult.Success(),
+        LiveChatRefused refused => Failure(refused),
+    };
+
+    private static HubResult Failure(LiveChatRefused refused) => new(false, RealtimeWireFormat.Token(refused.Reason.ToString()), refused.Errors.Count > 0 ? refused.Errors : null);
+
+    private static ConversationId? Id(string? value)
+    {
+        try
+        {
+            return value is null ? null : new ConversationId(value);
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private static Dictionary<string, object?> Conversation(VisitorConversationView view) => new()
+    {
+        ["conversation"] = view.Conversation.Value,
+        ["closed"] = view.Closed,
+        ["lastSequence"] = view.LastSequence,
+        ["readSequence"] = view.ReadSequence,
+        ["lastActivityAt"] = view.LastActivityAt,
+    };
+
+    private static Dictionary<string, object?> Widget(LiveChatWidgetState state) => new()
+    {
+        ["themeRef"] = state.ThemeRef,
+        ["greeting"] = state.GreetingMessage,
+        ["online"] = state.Online,
+        ["awayMessage"] = state.AwayMessage,
+        ["deflection"] = state.DeflectionEnabled,
+        ["requireVerified"] = state.RequireVerifiedIdentity,
+        ["attachments"] = state.Attachments is { } policy
+            ? new Dictionary<string, object?> { ["maxBytes"] = policy.MaximumBytes, ["types"] = policy.AllowedMediaTypes }
+            : null,
+        ["prechat"] = state.PrechatFields.Select(field => new Dictionary<string, object?>
+        {
+            ["key"] = field.Key,
+            ["label"] = field.Label,
+            ["kind"] = RealtimeWireFormat.Token(field.Kind.ToString()),
+            ["required"] = field.Required,
+            ["maxLength"] = field.MaximumLength,
+        }).ToList(),
+    };
+}

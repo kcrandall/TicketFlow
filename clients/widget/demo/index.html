@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TicketFlow chat widget demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 48rem; }
+    /* Theme the widget through CSS custom properties on its host element. */
+    #ticketflow-chat { --tf-accent: #8250df; --tf-accent-text: #fff; }
+  </style>
+</head>
+<body>
+  <h1>Acme Shop</h1>
+  <p>
+    This page embeds the TicketFlow live-chat widget. Run a TicketFlow host that maps <code>MapTicketFlowRealtime()</code> and
+    <code>MapLiveChatAttachmentUpload()</code>, create a live-chat inbox with a channel endpoint whose address is the widget key, add
+    this page's origin to the widget's allowed origins, then build the widget (<code>npm run build</code>) and serve this folder.
+  </p>
+  <div id="ticketflow-chat"></div>
+  <script src="../dist/ticketflow-chat.js"></script>
+  <script>
+    TicketFlowChat.mount({
+      container: document.getElementById("ticketflow-chat"),
+      hubUrl: "http://localhost:5000/ticketflow/realtime/visitor",
+      uploadUrl: "http://localhost:5000/ticketflow/livechat/attachments",
+      widgetKey: "wk_demo",
+      title: "Acme support",
+      articleUrl: (hit) => `http://localhost:5000/help/${hit.locale}/${hit.slug}`,
+    });
+  </script>
+</body>
+</html>

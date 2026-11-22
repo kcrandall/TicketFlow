@@ -59,7 +59,7 @@ internal sealed class SlaFixture : IDisposable
         if (grantWorker)
             await fixture.GrantWorkerAsync();
 
-        await fixture.Get<IBusinessCalendarStore>().CreateAsync(fixture.Scope, SlaEngineTests.NewYork());
+        await fixture.Get<IBusinessCalendarStore>().CreateAsync(fixture.Scope, NewYork());
         using (var scope = fixture.Provider.CreateScope())
         {
             var policies = scope.ServiceProvider.GetRequiredService<ISlaPolicyService>();
@@ -77,6 +77,11 @@ internal sealed class SlaFixture : IDisposable
                 new ContactDraft(new ContactProfile("ada"), Id: new ContactId("ada")))).Value);
         return fixture;
     }
+
+    /// <summary>Monday-Friday 09:00-17:00 America/New_York.</summary>
+    public static BusinessCalendar NewYork(params CalendarDateOverride[] overrides) => new(new BusinessCalendarId("ny"), "New York", "America/New_York",
+        [.. new[] { DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday }
+            .Select(day => new WeeklyBusinessHours(day, BusinessHours.From(9, 0, 17, 0)))], overrides);
 
     public T Get<T>() where T : notnull => Provider.GetRequiredService<T>();
 
@@ -135,6 +140,24 @@ internal sealed class SlaFixture : IDisposable
             InitialMessage: new IncomingMessageDraft("Help please"), Id: new ConversationId(id))));
         Assert.IsInstanceOfType<ConversationApplied>(result.Value);
     }
+
+    /// <summary>SLA timeline events with their actors, read through the store (notes excluded, up to 2000 events).</summary>
+    public async Task<IReadOnlyList<(AccessActor Actor, SlaTimelineEvent Event)>> SlaEventsWithActorsAsync(string id)
+    {
+        var result = new List<(AccessActor, SlaTimelineEvent)>();
+        for (long after = 0; ;)
+        {
+            var events = await Get<IConversationStore>().ReadTimelineAsync(Scope, new ConversationId(id), after, 200, includeNotes: false);
+            foreach (var item in events)
+                if (item.Event.Value is ExtensionEvent extension && SlaEventCodec.TryDecode(extension, out var decoded))
+                    result.Add((item.Actor, decoded));
+            if (events.Count < 200)
+                return result;
+            after = events[^1].Sequence;
+        }
+    }
+
+    public static AccessActor Worker { get; } = new(AccessActorKind.ApiClient, "sla-worker");
 
     /// <summary>SLA timeline events of a conversation, read through the store (notes excluded).</summary>
     public async Task<IReadOnlyList<SlaTimelineEvent>> SlaEventsAsync(string id)

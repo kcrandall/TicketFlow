@@ -17,8 +17,8 @@ namespace TicketFlow.Sla.Stores.Postgres;
 /// <see cref="InitializeAsync"/>. Every statement is parameterized and confined to one full scope (timer claims are store-wide and
 /// return their scope). Policy capacity is checked under a workspace advisory lock. Tracker writes are revision-fenced and update the
 /// timer row in the same transaction; timers are claimed with <c>FOR UPDATE SKIP LOCKED</c> plus a lease and fence. Risk lists apply
-/// the translated <see cref="AccessFilter"/> in the keyset query. Rows that fail to decode throw. Lease times come from the supplied
-/// <see cref="TimeProvider"/>, so every client must use a synchronized clock.
+/// the translated <see cref="AccessFilter"/> in the keyset query. Rows that fail to decode throw. Lease and claim comparisons use the
+/// database clock unless a test clock is injected; due instants are computed by application hosts, which still need synchronized clocks.
 /// </summary>
 public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
 {
@@ -42,12 +42,19 @@ public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
     };
 
     private readonly NpgsqlDataSource source;
-    private readonly TimeProvider time;
+    private const string Now = "COALESCE(@now, statement_timestamp())";
 
-    public PostgresSlaStore(NpgsqlDataSource dataSource, TimeProvider? time = null)
+    private readonly TimeProvider? leaseClock;
+
+    /// <summary>
+    /// Creates the store. Timer claims, lease expiry and release checks use the database clock (<c>statement_timestamp()</c>) so
+    /// application hosts with skewed clocks cannot steal or keep leases; pass <paramref name="leaseClock"/> only to substitute a
+    /// deterministic clock (tests).
+    /// </summary>
+    public PostgresSlaStore(NpgsqlDataSource dataSource, TimeProvider? leaseClock = null)
     {
         source = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
-        this.time = time ?? TimeProvider.System;
+        this.leaseClock = leaseClock;
     }
 
     /// <summary>
@@ -167,7 +174,8 @@ public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadTracker(reader, scope) : null;
     }
 
-    public async Task<SlaWriteResult<StoredSlaTracker>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<SlaWriteResult<StoredSlaTracker>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, SlaTimerClaim? release = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(tracker);
@@ -216,9 +224,11 @@ public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
         await using (var timer = new NpgsqlCommand("""
             INSERT INTO tf_sla_timers(tracker_key, tenant_id, project_id, environment_id, app_id, workspace_id, conversation_id, due_at, lease_until, fence)
             VALUES(tf_key_v1(@tenant,@project,@environment,@app,@workspace,@conversation), @tenant, @project, @environment, @app, @workspace, @conversation, @due, NULL, 0)
-            ON CONFLICT (tracker_key) DO UPDATE SET due_at=EXCLUDED.due_at, lease_until=NULL
+            ON CONFLICT (tracker_key) DO UPDATE SET due_at=EXCLUDED.due_at,
+                lease_until=CASE WHEN tf_sla_timers.fence = @release THEN NULL ELSE tf_sla_timers.lease_until END
             """, connection, transaction))
         {
+            timer.Parameters.Add(new NpgsqlParameter("release", NpgsqlDbType.Bigint) { Value = (object?)release?.Fence ?? DBNull.Value });
             AddScope(timer, scope);
             AddText(timer, "conversation", tracker.Conversation.Value);
             AddInstant(timer, "due", tracker.Schedule.NextCheckAt);
@@ -253,19 +263,18 @@ public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, ISlaTrackerStore.MaximumClaim);
         if (lease <= TimeSpan.Zero || lease > ISlaTrackerStore.MaximumLease)
             throw new ArgumentOutOfRangeException(nameof(lease), "Leases are positive and at most one hour.");
-        var now = time.GetUtcNow();
         // SKIP LOCKED keeps concurrent claimers from blocking on or double-claiming the same timer; the lease covers the time after commit.
-        await using var command = source.CreateCommand("""
+        await using var command = source.CreateCommand($"""
             WITH candidates AS (
                 SELECT tracker_key FROM tf_sla_timers
-                WHERE due_at <= @now AND (lease_until IS NULL OR lease_until <= @now)
+                WHERE due_at <= {Now} AND (lease_until IS NULL OR lease_until <= {Now})
                 ORDER BY due_at, tracker_key LIMIT @limit FOR UPDATE SKIP LOCKED)
-            UPDATE tf_sla_timers t SET fence=t.fence+1, lease_until=@until
+            UPDATE tf_sla_timers t SET fence=t.fence+1, lease_until={Now} + @lease
             FROM candidates c WHERE t.tracker_key=c.tracker_key
             RETURNING t.tenant_id, t.project_id, t.environment_id, t.app_id, t.workspace_id, t.conversation_id, t.due_at, t.fence, t.lease_until
             """);
-        AddInstant(command, "now", now);
-        AddInstant(command, "until", now + lease);
+        AddInstant(command, "now", leaseClock?.GetUtcNow());
+        command.Parameters.Add(new NpgsqlParameter("lease", NpgsqlDbType.Interval) { Value = lease });
         command.Parameters.AddWithValue("limit", limit);
         var claims = new List<SlaTimerClaim>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -281,13 +290,13 @@ public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
         ArgumentNullException.ThrowIfNull(claim);
         await using var command = source.CreateCommand($"""
             UPDATE tf_sla_timers SET due_at=@retry, lease_until=NULL
-            WHERE {TrackerWhere} AND fence=@fence AND lease_until > @now
+            WHERE {TrackerWhere} AND fence=@fence AND lease_until > {Now}
             """);
         AddScope(command, claim.Scope);
         AddText(command, "conversation", claim.Conversation.Value);
         command.Parameters.AddWithValue("fence", claim.Fence);
         AddInstant(command, "retry", retryAt);
-        AddInstant(command, "now", time.GetUtcNow());
+        AddInstant(command, "now", leaseClock?.GetUtcNow());
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
     }
 
@@ -302,14 +311,16 @@ public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
         foreach (var parameter in translated.Parameters)
             command.Parameters.Add(parameter.Clone());
         AddInstant(command, "now", now);
-        const string breached = "(t.breached OR COALESCE(t.due_at <= @now, FALSE))";
+        // Breached rows are bounded by urgency_at <= now (index range on the urgency indexes); at-risk rows by the partial at_risk_at index.
+        const string breached = "(t.urgency_at <= @now AND (t.breached OR COALESCE(t.due_at <= @now, FALSE)))";
+        const string atRisk = "(t.at_risk_at <= @now AND NOT t.breached AND NOT COALESCE(t.due_at <= @now, FALSE))";
         var criteria = new List<string>
         {
             query.Filter switch
             {
-                SlaRiskFilter.AtRisk => $"NOT {breached} AND COALESCE(t.at_risk_at <= @now, FALSE)",
+                SlaRiskFilter.AtRisk => atRisk,
                 SlaRiskFilter.Breached => breached,
-                SlaRiskFilter.AtRiskOrBreached => $"({breached} OR COALESCE(t.at_risk_at <= @now, FALSE))",
+                SlaRiskFilter.AtRiskOrBreached => $"({breached} OR {atRisk})",
                 _ => throw new ArgumentOutOfRangeException(nameof(query)),
             },
         };

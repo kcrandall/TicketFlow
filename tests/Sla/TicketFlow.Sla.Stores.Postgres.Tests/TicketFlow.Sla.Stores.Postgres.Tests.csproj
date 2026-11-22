@@ -1,9 +1,21 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <ProjectReference Include="../../../src/Sla/TicketFlow.Sla.Stores.Postgres/TicketFlow.Sla.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../../src/Sla/TicketFlow.Sla/TicketFlow.Sla.csproj" />
+    <ProjectReference Include="../../../src/Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
+    <ProjectReference Include="../../../src/Contacts/TicketFlow.Contacts/TicketFlow.Contacts.csproj" />
+    <ProjectReference Include="../../../src/Workspaces/TicketFlow.Workspaces/TicketFlow.Workspaces.csproj" />
+    <ProjectReference Include="../../../src/Access/TicketFlow.Access/TicketFlow.Access.csproj" />
+    <ProjectReference Include="../../../src/TicketFlow/TicketFlow.csproj" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../TicketFlow.Testing/TicketFlow.Testing.csproj" />
     <ProjectReference Include="../TicketFlow.Sla.StoreContracts/TicketFlow.Sla.StoreContracts.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The in-memory feature fixture and store-independent scenarios, run here against PostgreSQL SLA stores. -->
+    <Compile Include="../TicketFlow.Sla.Tests/SlaFixture.cs" Link="Shared/SlaFixture.cs" />
+    <Compile Include="../TicketFlow.Sla.Tests/SlaScenarios.cs" Link="Shared/SlaScenarios.cs" />
   </ItemGroup>
 </Project>

@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <ProjectReference Include="../../../src/Assist/TicketFlow.Assist/TicketFlow.Assist.csproj" />
+    <ProjectReference Include="../../../src/Assist/TicketFlow.Assist.Providers.Claude/TicketFlow.Assist.Providers.Claude.csproj" />
+    <ProjectReference Include="../../../src/Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
+    <ProjectReference Include="../../../src/Contacts/TicketFlow.Contacts/TicketFlow.Contacts.csproj" />
+    <ProjectReference Include="../../../src/Workspaces/TicketFlow.Workspaces/TicketFlow.Workspaces.csproj" />
+    <ProjectReference Include="../../../src/HelpCenter/TicketFlow.HelpCenter/TicketFlow.HelpCenter.csproj" />
+    <ProjectReference Include="../../../src/Access/TicketFlow.Access/TicketFlow.Access.csproj" />
+    <ProjectReference Include="../../../src/TicketFlow/TicketFlow.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../TicketFlow.Testing/TicketFlow.Testing.csproj" />
+    <ProjectReference Include="../TicketFlow.Assist.StoreContracts/TicketFlow.Assist.StoreContracts.csproj" />
+  </ItemGroup>
+</Project>

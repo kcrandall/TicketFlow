@@ -52,7 +52,7 @@ public sealed record ResponseRecorded(StoredResponse Response);
 /// <summary>The invitation already has a response (returned); nothing was written.</summary>
 public sealed record ResponseAlreadyRecorded(StoredResponse Existing);
 
-/// <summary>The invitation does not exist in the scope or was never sent.</summary>
+/// <summary>The invitation does not exist in the scope, has no token yet, or was cancelled.</summary>
 public sealed record ResponseInvitationNotFound
 {
     private ResponseInvitationNotFound()

@@ -31,7 +31,7 @@ public sealed partial class PostgresRoutingStore
         }
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        var now = Now;
+        var now = await NowAsync(cancellationToken).ConfigureAwait(false);
         // Lock order: cursor, then load anchors in key order. Every multi-row locker follows it, so reservations cannot deadlock.
         string? cursor;
         await using (var lockCursor = new NpgsqlCommand($"""
@@ -135,7 +135,7 @@ public sealed partial class PostgresRoutingStore
             return false;
         if (row.State == RoutingAssignmentState.Reserved || row.ConversationRevision < conversationRevision)
         {
-            var now = Now;
+            var now = await NowAsync(cancellationToken).ConfigureAwait(false);
             await using (var update = new NpgsqlCommand($"""
                 UPDATE tf_routing_assignments SET state=2, reserved_until=NULL, conversation_revision=@revision, updated_at=@now WHERE {AssignmentKey}
                 """, connection, transaction))
@@ -168,7 +168,7 @@ public sealed partial class PostgresRoutingStore
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(record);
-        var now = Now;
+        var now = await NowAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var upsert = new NpgsqlCommand($"""
@@ -207,7 +207,7 @@ public sealed partial class PostgresRoutingStore
         AddScope(command, scope);
         AddText(command, "conversation", conversation.Value);
         AddLong(command, "revision", conversationRevision);
-        AddInstant(command, "now", Now);
+        AddInstant(command, "now", await NowAsync(cancellationToken).ConfigureAwait(false));
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
     }
 
@@ -252,7 +252,7 @@ public sealed partial class PostgresRoutingStore
             """);
         AddScope(command, scope);
         AddText(command, "agent", agent.Value);
-        AddInstant(command, "now", Now);
+        AddInstant(command, "now", await NowAsync(cancellationToken).ConfigureAwait(false));
         var loads = new Dictionary<ChannelKind, int>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -275,6 +275,19 @@ public sealed partial class PostgresRoutingStore
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
             ? Decode(() => new StickyOwner(contact, new UserId(reader.GetString(0)), reader.GetFieldValue<DateTimeOffset>(1)), "sticky owner")
             : null;
+    }
+
+    public async Task<string?> GetCursorAsync(TicketScope scope, string cursorKey, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        TicketScope.RequireIdentifier(cursorKey, nameof(cursorKey));
+        await using var command = source.CreateCommand($"""
+            SELECT last_agent_id FROM tf_routing_cursors
+            WHERE cursor_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@cursor) AND cursor_name=@cursor AND {ScopeWhere}
+            """);
+        AddScope(command, scope);
+        AddText(command, "cursor", cursorKey);
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
     }
 
     private static bool Blocks(RoutingAssignment existing, long revision, DateTimeOffset now) =>

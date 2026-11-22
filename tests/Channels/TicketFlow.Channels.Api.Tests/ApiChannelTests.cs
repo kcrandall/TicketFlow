@@ -114,6 +114,41 @@ public sealed class ApiChannelTests
         Assert.AreEqual("destination-missing", Is<ChannelSendRejected>((await missing.SendAsync(Message())).Value).Code);
     }
 
+    private sealed class StalledStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return 0;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [TestMethod]
+    public async Task StalledResponseBodiesAreBoundedByTheTimeout()
+    {
+        var handler = new ScriptedHandler((_, _) =>
+        {
+            var content = new StreamContent(new StalledStream());
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+        });
+        using var channel = Channel(handler, configure: options => options.Timeout = TimeSpan.FromSeconds(1));
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        var accepted = Is<ChannelSendAccepted>((await channel.SendAsync(Message())).Value);
+        Assert.IsNull(accepted.ExternalMessageId);
+        Assert.IsTrue(started.Elapsed < TimeSpan.FromSeconds(10), "The body read must not hang.");
+    }
+
     [TestMethod]
     public async Task BlocksUnsafeDestinationsBeforeConnecting()
     {

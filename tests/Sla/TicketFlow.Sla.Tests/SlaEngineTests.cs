@@ -17,9 +17,7 @@ public sealed class SlaEngineTests
     // Friday 2026-03-06 15:00 EST; US DST starts Sunday 2026-03-08; Monday 2026-03-09 09:00 EDT is 13:00Z.
     private static readonly DateTimeOffset FridayAfternoon = new(2026, 3, 6, 20, 0, 0, TimeSpan.Zero);
 
-    internal static BusinessCalendar NewYork(params CalendarDateOverride[] overrides) => new(new BusinessCalendarId("ny"), "New York", "America/New_York",
-        [.. new[] { DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday }
-            .Select(day => new WeeklyBusinessHours(day, BusinessHours.From(9, 0, 17, 0)))], overrides);
+    internal static BusinessCalendar NewYork(params CalendarDateOverride[] overrides) => SlaFixture.NewYork(overrides);
 
     private static SlaPolicy FirstResponsePolicy(SlaClockBasis basis = SlaClockBasis.BusinessHours, SlaPausePolicy? pause = null) => new(new SlaPolicyId("standard"), "Standard",
         [new SlaRule("default", SlaCondition.Always, new SlaTargets(TimeSpan.FromHours(4)), basis,

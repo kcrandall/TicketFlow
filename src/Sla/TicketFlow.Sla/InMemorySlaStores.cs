@@ -95,7 +95,8 @@ public sealed class InMemorySlaTrackerStore(TimeProvider? time = null) : ISlaTra
             return Task.FromResult(entries.GetValueOrDefault((scope, conversation.Value))?.Stored);
     }
 
-    public Task<SlaWriteResult<StoredSlaTracker>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, CancellationToken cancellationToken = default)
+    public Task<SlaWriteResult<StoredSlaTracker>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, SlaTimerClaim? release = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(tracker);
@@ -118,7 +119,9 @@ public sealed class InMemorySlaTrackerStore(TimeProvider? time = null) : ISlaTra
                     throw new ArgumentException("A tracker's inbox cannot change.", nameof(tracker));
             }
             var stored = new StoredSlaTracker(scope, tracker, (existing?.Stored.Revision ?? 0) + 1);
-            entries[key] = new Entry(stored, tracker.Schedule.NextCheckAt, null, existing?.Fence ?? 0);
+            var fence = existing?.Fence ?? 0;
+            var lease = release is not null && release.Fence == fence ? null : existing?.LeaseUntil;
+            entries[key] = new Entry(stored, tracker.Schedule.NextCheckAt, lease, fence);
             return Task.FromResult<SlaWriteResult<StoredSlaTracker>>(new SlaWriteApplied<StoredSlaTracker>(stored));
         }
     }

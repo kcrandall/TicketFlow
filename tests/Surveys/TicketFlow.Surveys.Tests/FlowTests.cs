@@ -81,7 +81,7 @@ public sealed class FlowTests
         var retrying = (await fixture.Store.GetInvitationAsync(fixture.Scope, invitation.Id))!.Invitation;
         Assert.AreEqual(SurveyInvitationState.Pending, retrying.State);
         Assert.AreEqual(1, retrying.Attempts);
-        Assert.IsNull(retrying.TokenHash);
+        Assert.IsNotNull(retrying.TokenHash, "The token survives the failed attempt.");
         Assert.AreEqual(new SurveyDispatchSummary(0, 0, 0, 0), await fixture.Dispatcher.DispatchDueAsync(fixture.Scope), "Backoff not yet elapsed.");
         fixture.Clock.Advance(TimeSpan.FromMinutes(1));
         Assert.AreEqual(new SurveyDispatchSummary(0, 0, 1, 0), await fixture.Dispatcher.DispatchDueAsync(fixture.Scope));
@@ -99,5 +99,86 @@ public sealed class FlowTests
         Assert.AreEqual(SurveyInvitationState.Cancelled, (await fixture.Store.GetInvitationAsync(fixture.Scope, invitation.Id))!.Invitation.State);
         Assert.IsEmpty(fixture.Sender.Sent);
         Assert.IsEmpty((await fixture.Scheduler.HandleResolvedAsync(fixture.Resolved(conversation: "c2", contact: "k2"))).Created);
+    }
+
+    [TestMethod]
+    public async Task AcceptedThenFailingSendKeepsTheDeliveredLinkValid()
+    {
+        using var fixture = Create(options => options.RetryDelay = TimeSpan.FromMinutes(1));
+        await fixture.Store.CreateSurveyAsync(fixture.Scope, SampleSurvey(policy: new SurveyTriggerPolicy(TimeSpan.Zero, TimeSpan.Zero, TimeSpan.FromDays(1))));
+        var invitation = (await fixture.Scheduler.HandleResolvedAsync(fixture.Resolved())).Created.Single().Invitation;
+        fixture.Sender.AcceptThenFail = 1;
+        Assert.AreEqual(new SurveyDispatchSummary(0, 1, 0, 0), await fixture.Dispatcher.DispatchDueAsync(fixture.Scope));
+        var delivered = fixture.Sender.Sent.Single();
+        fixture.Clock.Advance(TimeSpan.FromMinutes(1));
+        Assert.AreEqual(new SurveyDispatchSummary(1, 0, 0, 0), await fixture.Dispatcher.DispatchDueAsync(fixture.Scope));
+        var retried = fixture.Sender.Sent[1];
+        Assert.AreEqual(delivered.Token, retried.Token, "The retry re-sends the same link.");
+        Assert.AreEqual(delivered.DeliveryKey, retried.DeliveryKey, "The provider can deduplicate the retry.");
+        Assert.AreEqual($"tfs-{invitation.Id.Value:N}", retried.DeliveryKey);
+        Assert.AreEqual("accepted", Describe(await fixture.Responder.RespondAsync(fixture.Scope, delivered.Token.Value, 4)));
+    }
+
+    [TestMethod]
+    public async Task ResponsesAreAcceptedWhileARetryIsPending()
+    {
+        using var fixture = Create(options => options.RetryDelay = TimeSpan.FromHours(1));
+        await fixture.Store.CreateSurveyAsync(fixture.Scope, SampleSurvey(policy: new SurveyTriggerPolicy(TimeSpan.Zero, TimeSpan.Zero, TimeSpan.FromDays(1))));
+        await fixture.Scheduler.HandleResolvedAsync(fixture.Resolved());
+        fixture.Sender.AcceptThenFail = 1;
+        await fixture.Dispatcher.DispatchDueAsync(fixture.Scope);
+        var token = fixture.Sender.Sent.Single().Token.Value;
+        Assert.IsNotNull(await fixture.Responder.GetInvitationAsync(fixture.Scope, token));
+        Assert.AreEqual("accepted", Describe(await fixture.Responder.RespondAsync(fixture.Scope, token, 5)));
+        fixture.Clock.Advance(TimeSpan.FromHours(2));
+        Assert.AreEqual(new SurveyDispatchSummary(0, 0, 0, 0), await fixture.Dispatcher.DispatchDueAsync(fixture.Scope), "Responded invitations are not re-sent.");
+    }
+
+    [TestMethod]
+    public async Task DispatcherStoppingMidSendLeavesTheInvitationDueAfterTheLease()
+    {
+        using var fixture = Create(options => options.SendLease = TimeSpan.FromMinutes(2));
+        await fixture.Store.CreateSurveyAsync(fixture.Scope, SampleSurvey(policy: new SurveyTriggerPolicy(TimeSpan.Zero, TimeSpan.Zero, TimeSpan.FromDays(1))));
+        var invitation = (await fixture.Scheduler.HandleResolvedAsync(fixture.Resolved())).Created.Single().Invitation;
+        using (var stop = new CancellationTokenSource())
+        {
+            fixture.Sender.OnSend = message =>
+            {
+                fixture.Sender.Sent.Add(message);   // the provider got it ...
+                stop.Cancel();                      // ... and then the host shut down before the dispatcher recorded the outcome
+                stop.Token.ThrowIfCancellationRequested();
+            };
+            await Assert.ThrowsAsync<OperationCanceledException>(() => fixture.Dispatcher.DispatchDueAsync(fixture.Scope, cancellationToken: stop.Token));
+        }
+        fixture.Sender.OnSend = null;
+        var stuck = (await fixture.Store.GetInvitationAsync(fixture.Scope, invitation.Id))!.Invitation;
+        Assert.AreEqual(SurveyInvitationState.Sending, stuck.State);
+        Assert.AreEqual(new SurveyDispatchSummary(0, 0, 0, 0), await fixture.Dispatcher.DispatchDueAsync(fixture.Scope), "The lease is still held.");
+        fixture.Clock.Advance(TimeSpan.FromMinutes(2));
+        Assert.AreEqual(new SurveyDispatchSummary(1, 0, 0, 0), await fixture.Dispatcher.DispatchDueAsync(fixture.Scope));
+        Assert.HasCount(2, fixture.Sender.Sent);
+        Assert.AreEqual(fixture.Sender.Sent[0].Token, fixture.Sender.Sent[1].Token);
+        Assert.AreEqual(SurveyInvitationState.Sent, (await fixture.Store.GetInvitationAsync(fixture.Scope, invitation.Id))!.Invitation.State);
+
+        // A claim abandoned before the token was issued also becomes due again.
+        await fixture.Scheduler.HandleResolvedAsync(fixture.Resolved("c2", "k2"));
+        Assert.HasCount(1, await fixture.Store.ClaimDueInvitationsAsync(fixture.Scope, fixture.Clock.GetUtcNow(), TimeSpan.FromMinutes(2), 10));
+        fixture.Clock.Advance(TimeSpan.FromMinutes(2));
+        Assert.AreEqual(new SurveyDispatchSummary(1, 0, 0, 0), await fixture.Dispatcher.DispatchDueAsync(fixture.Scope));
+    }
+
+    [TestMethod]
+    public async Task ConcurrentDispatchersSendEachInvitationOnce()
+    {
+        using var fixture = Create();
+        await fixture.Store.CreateSurveyAsync(fixture.Scope, SampleSurvey(policy: new SurveyTriggerPolicy(TimeSpan.Zero, TimeSpan.Zero, TimeSpan.FromDays(1))));
+        for (var index = 0; index < 50; index++)
+            await fixture.Scheduler.HandleResolvedAsync(fixture.Resolved($"c{index}", $"k{index}"));
+        var dispatchers = Enumerable.Range(0, 4).Select(_ => new SurveyDispatcher(fixture.Store, fixture.Sender, fixture.Clock,
+            Microsoft.Extensions.Options.Options.Create(new SurveyOptions()))).ToList();
+        var summaries = await Task.WhenAll(dispatchers.Select(dispatcher => Task.Run(() => dispatcher.DispatchDueAsync(fixture.Scope, 20))));
+        await Task.WhenAll(dispatchers.Select(dispatcher => dispatcher.DispatchDueAsync(fixture.Scope, 500)));
+        Assert.HasCount(50, fixture.Sender.Sent);
+        Assert.AreEqual(50, fixture.Sender.Sent.Select(message => message.Invitation.Id).Distinct().Count());
     }
 }

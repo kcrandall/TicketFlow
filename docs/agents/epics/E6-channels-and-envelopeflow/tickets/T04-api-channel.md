@@ -37,4 +37,6 @@ Tests: `ApiWebhookSignatureTests` (5: valid, tampering of body/id/timestamp/key/
 
 - `dotnet test tests/Channels/TicketFlow.Channels.Api.Tests -c Release` — 10 passed, 0 failed.
 
+Review fix (2026-11-22): the response body read after `ResponseHeadersRead` is bounded by a linked timeout (`StalledResponseBodiesAreBoundedByTheTimeout`). `dotnet test tests/Channels/TicketFlow.Channels.Api.Tests -c Release` — 11 passed.
+
 Post-ticket parallel reviews (docs/agents/prompts/post-ticket-*.md) have not been run yet.

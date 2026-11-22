@@ -8,8 +8,12 @@ using TicketFlow.Workspaces;
 
 namespace TicketFlow.Channels;
 
-/// <summary>A retryable channel rejection; the outbox dispatcher releases the entry for a backoff retry.</summary>
-public sealed class ChannelDispatchRetryException(string code) : Exception("The channel asked to retry the submission later.")
+/// <summary>
+/// A retryable channel rejection (or a retry that is not due yet); the outbox dispatcher releases the entry no earlier than
+/// <see cref="ConversationOutboxRetryException.RetryAfter"/>.
+/// </summary>
+public sealed class ChannelDispatchRetryException(string code, TimeSpan? retryAfter = null)
+    : ConversationOutboxRetryException("The channel asked to retry the submission later.", retryAfter)
 {
     public string Code { get; } = code;
 }
@@ -19,7 +23,7 @@ public sealed class ChannelDispatchRetryException(string code) : Exception("The 
 /// outgoing message of a change it keeps a <see cref="ChannelDispatch"/> record: <c>Sending</c> is written before the channel is
 /// called, so a redelivered entry that still finds <c>Sending</c> treats the earlier attempt as an unknown outcome (failed with
 /// <c>outcome-unknown</c>, never resent). Accepted submissions move the message to Sent with the provider id and record the email
-/// thread reference; retryable rejections throw <see cref="ChannelDispatchRetryException"/> so the outbox dispatcher backs off
+/// thread reference; retryable rejections throw <see cref="ChannelDispatchRetryException"/> so the outbox dispatcher retries at the later of its backoff and the provider's Retry-After
 /// (its exponential schedule is the retry schedule) until <see cref="ChannelsOptions.MaximumSendAttempts"/>, then the message
 /// fails (dead-letter); permanent rejections, unknown outcomes and channel-rule refusals (reply window closed, no recipient) fail
 /// it immediately. Delivery updates run as <see cref="ChannelsOptions.WorkerPrincipal"/>. Bodies are read through trusted store
@@ -35,6 +39,7 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
     private readonly IChannelConversationStateStore states;
     private readonly IChannelThreadStore threads;
     private readonly IChannelDispatchStore dispatches;
+    private readonly IChannelWorkerPrincipalResolver workers;
     private readonly ChannelsOptions options;
     private readonly TimeProvider time;
     private readonly ILogger logger;
@@ -48,6 +53,7 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
         IChannelConversationStateStore states,
         IChannelThreadStore threads,
         IChannelDispatchStore dispatches,
+        IChannelWorkerPrincipalResolver workers,
         IOptions<ChannelsOptions> options,
         IOptions<ConversationOutboxDispatcherOptions> outboxOptions,
         TimeProvider time,
@@ -61,6 +67,7 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
         this.states = states ?? throw new ArgumentNullException(nameof(states));
         this.threads = threads ?? throw new ArgumentNullException(nameof(threads));
         this.dispatches = dispatches ?? throw new ArgumentNullException(nameof(dispatches));
+        this.workers = workers ?? throw new ArgumentNullException(nameof(workers));
         ArgumentNullException.ThrowIfNull(options);
         this.options = options.Value;
         this.options.Validate();
@@ -115,6 +122,8 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
             return;
 
         var now = time.GetUtcNow();
+        if (existing is { Dispatch: { State: ChannelDispatchState.RetryScheduled, NextAttemptAt: { } due } scheduled } && due > now)
+            throw new ChannelDispatchRetryException(scheduled.Code ?? "retry-scheduled", due - now);
         var attempts = existing?.Dispatch.Attempts ?? 0;
         var events = await conversationStore.ReadTimelineAsync(scope, conversationId, row.Sequence - 1, 1, includeNotes: false, cancellationToken).ConfigureAwait(false);
         if (events.Count != 1 || events[0].Event.Value is not MessageEvent { Direction: MessageDirection.Outgoing } outgoing || outgoing.Id != messageId)
@@ -177,7 +186,7 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
                     time.GetUtcNow(), time.GetUtcNow() + (rejected.RetryAfter ?? TimeSpan.Zero), code: rejected.Code);
                 if (await dispatches.WriteAsync(scope, retry, current.Revision, cancellationToken).ConfigureAwait(false) is { Value: not ChannelWriteApplied<StoredChannelDispatch> })
                     throw new InvalidOperationException("The dispatch record changed concurrently; the entry will be retried.");
-                throw new ChannelDispatchRetryException(rejected.Code);
+                throw new ChannelDispatchRetryException(rejected.Code, rejected.RetryAfter);
             case ChannelSendRejected rejected:
                 logger.LogWarning("Channel {Channel} rejected message {Message} with {Code} after {Attempts} attempt(s).", binding.Kind, messageId, rejected.Code, attempts);
                 await FinishAsync(scope, current, attempts, ChannelDispatchState.Rejected, null, rejected.Code, cancellationToken).ConfigureAwait(false);
@@ -206,7 +215,7 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
     /// <summary>Mirrors a terminal dispatch into the message delivery state (idempotent: E5 replays repeated or stale updates).</summary>
     private async Task ApplyAsync(TicketScope scope, ChannelDispatch dispatch, CancellationToken cancellationToken)
     {
-        var worker = options.ResolveWorker(scope);
+        var worker = workers.Resolve(scope);
         var update = dispatch.State == ChannelDispatchState.Accepted
             ? DeliveryStatusUpdate.ByMessage(dispatch.Conversation, dispatch.Message, MessageDeliveryState.Sent, providerMessageId: dispatch.ExternalMessageId)
             : DeliveryStatusUpdate.ByMessage(dispatch.Conversation, dispatch.Message, MessageDeliveryState.Failed, dispatch.Code ?? "failed");

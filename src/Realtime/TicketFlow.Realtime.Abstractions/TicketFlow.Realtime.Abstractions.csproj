@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Transport-neutral realtime contracts for TicketFlow: topics per conversation, inbox queue, agent and visitor session, subscribers, identifier-only realtime events, publisher, bus and subscription contracts.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
+    <ProjectReference Include="../../Routing/TicketFlow.Routing.Abstractions/TicketFlow.Routing.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

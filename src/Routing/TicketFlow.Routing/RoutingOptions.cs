@@ -31,8 +31,12 @@ public sealed class RoutingOptions
     /// <summary>Delay before a queued conversation is retried by the maintenance worker (default 30 seconds).</summary>
     public TimeSpan RetryDelay { get; set; } = TimeSpan.FromSeconds(30);
 
-    /// <summary>How long one planned eligibility filter per agent is reused within one engine instance (default 15 seconds; zero disables).</summary>
-    public TimeSpan EligibilityCacheDuration { get; set; } = TimeSpan.FromSeconds(15);
+    /// <summary>
+    /// Upper bound on reusing one agent's planned eligibility filter <em>within a run</em> (default 15 seconds; zero disables reuse). Plans
+    /// live only in the scoped engine instance — one DI scope, typically one dispatcher or maintenance run — and are never shared across
+    /// runs, so revoked grants, team changes and removed agents take effect on the next run at the latest.
+    /// </summary>
+    public TimeSpan RunEligibilityPlanLifetime { get; set; } = TimeSpan.FromSeconds(15);
 
     /// <summary>Items per maintenance step (queue claims, expiries, reassignments; 1-100, default 50).</summary>
     public int MaintenanceBatchSize { get; set; } = 50;
@@ -46,7 +50,7 @@ public sealed class RoutingOptions
         if (EngineClient == default || !Positive(AgentPresenceTtl, TimeSpan.FromHours(24)) || !Positive(ConversationPresenceTtl, TimeSpan.FromHours(24))
             || !Positive(MaximumReplyLockDuration, TimeSpan.FromHours(24)) || !Positive(ReplyLockDuration, MaximumReplyLockDuration)
             || !Positive(ReservationLease, RoutingReservationRequest.MaximumLease) || MaximumRouteAttempts is < 1 or > 16
-            || !Positive(RetryDelay, TimeSpan.FromDays(1)) || EligibilityCacheDuration < TimeSpan.Zero || EligibilityCacheDuration > TimeSpan.FromMinutes(10)
+            || !Positive(RetryDelay, TimeSpan.FromDays(1)) || RunEligibilityPlanLifetime < TimeSpan.Zero || RunEligibilityPlanLifetime > TimeSpan.FromMinutes(10)
             || MaintenanceBatchSize is < 1 or > IRoutingQueueStore.MaximumClaim || !Positive(MaintenanceLease, IRoutingQueueStore.MaximumLease))
             throw new InvalidOperationException("Routing options are invalid.");
     }

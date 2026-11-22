@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Provider-neutral assistant contracts for TicketFlow over Microsoft.Extensions.AI: model registry and chat client factory contracts, summary/draft/triage/sentiment/translate/tone features with union results, assist permissions, workspace quotas and usage store contracts.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
+    <ProjectReference Include="../../HelpCenter/TicketFlow.HelpCenter.Abstractions/TicketFlow.HelpCenter.Abstractions.csproj" />
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" />
+  </ItemGroup>
+</Project>

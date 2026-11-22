@@ -21,4 +21,5 @@ await new PostgresRoutingStore(dataSource).InitializeAsync();   // explicit sche
 ```
 
 `InitializeAsync` applies the append-only, checksummed `PostgresRoutingMigrations.Catalog` with the shared migration runner. Lease,
-presence and expiry times come from the store's `TimeProvider`, so clients need synchronized clocks.
+presence and expiry times come from the database clock (`clock_timestamp()`) by default; pass a `TimeProvider` (or
+`useApplicationClock: true`) only for deterministic tests.

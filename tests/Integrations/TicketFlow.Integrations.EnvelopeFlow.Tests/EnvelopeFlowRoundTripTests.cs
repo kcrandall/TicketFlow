@@ -7,6 +7,7 @@ using TicketFlow.Contacts;
 using TicketFlow.Conversations;
 using TicketFlow.Core;
 using TicketFlow.Surveys;
+using TicketFlow.Integrations.EnvelopeFlow.Surveys;
 
 namespace TicketFlow.Integrations.EnvelopeFlow.Tests;
 
@@ -222,5 +223,49 @@ public sealed class EnvelopeFlowRoundTripTests
         var (request, _) = fixture.WhatsApp.Sent.Single();
         Assert.AreEqual("csat_invite", request.Message.Template!.Name, "Outside the 24-hour window an approved template is used.");
         StringAssert.StartsWith(request.Message.Template.Components.Single().Parameters.Single(), "https://support.acme.example/s/tfs1.");
+    }
+
+    [TestMethod]
+    public async Task AlternatingSlackSpeakersKeepOneConversationEach()
+    {
+        await using var fixture = await EnvelopeFlowFixture.CreateAsync();
+        await fixture.Handler.HandleAsync(fixture.Message("slack", "T1", "T1:C1:1700000000.000100", "U-A", "C1", "Question"));
+        await fixture.Handler.HandleAsync(fixture.Message("slack", "T1", "T1:C1:1700000001.000100", "U-B", "C1", "Me too", inReplyTo: "T1:C1:1700000000.000100"));
+        await fixture.Handler.HandleAsync(fixture.Message("slack", "T1", "T1:C1:1700000002.000100", "U-A", "C1", "Any update?", inReplyTo: "T1:C1:1700000000.000100"));
+        await fixture.Handler.HandleAsync(fixture.Message("slack", "T1", "T1:C1:1700000003.000100", "U-B", "C1", "Same", inReplyTo: "T1:C1:1700000000.000100"));
+        var page = ChannelHost.Is<ConversationListPage>((await fixture.Host.Conversations.ListAsync(fixture.Host.Owner, new ConversationListQuery(inbox: new InboxId("slack-inbox")))).Value);
+        Assert.AreEqual(2, page.Conversations.Count);
+        foreach (var conversation in page.Conversations)
+            Assert.AreEqual(2, (await fixture.MessagesAsync(conversation.Id)).Count);
+    }
+
+    [TestMethod]
+    public async Task ConflictingReceiptsAreRetried()
+    {
+        await using var fixture = await EnvelopeFlowFixture.CreateAsync();
+        var handler = new EnvelopeFlowInboundEventHandler(fixture.Host.Services.GetRequiredService<IChannelEndpointStore>(),
+            fixture.Host.Services.GetRequiredService<IInboundChannelPipeline>(), new ConflictingDeliveries(),
+            fixture.Host.Services.GetRequiredService<IChannelWorkerPrincipalResolver>(),
+            fixture.Host.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<EnvelopeFlowIntegrationOptions>>(), fixture.Host.Clock);
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+            handler.HandleAsync(fixture.Receipt("mailgun", "acct", "<out@x>", InboundDeliveryState.Delivered, observedAt: fixture.Host.Clock.GetUtcNow().AddDays(-1))));
+    }
+
+    [TestMethod]
+    public void AdapterDependsOnlyOnChannelAbstractionsAndRegistersEachKindOnce()
+    {
+        var references = typeof(EnvelopeFlowInboundEventHandler).Assembly.GetReferencedAssemblies().Select(name => name.Name).ToList();
+        CollectionAssert.Contains(references, "TicketFlow.Channels.Abstractions");
+        CollectionAssert.DoesNotContain(references, "TicketFlow.Channels");
+        CollectionAssert.DoesNotContain(references, "TicketFlow.Surveys.Abstractions");
+        var services = new ServiceCollection();
+        services.AddTicketFlow().AddEnvelopeFlowEmailChannel().AddEnvelopeFlowEmailChannel().AddEnvelopeFlowSlackChannel().AddEnvelopeFlowSlackChannel();
+        Assert.AreEqual(2, services.Count(descriptor => descriptor.ServiceType == typeof(ITicketChannel)));
+    }
+
+    private sealed class ConflictingDeliveries : IChannelDeliveryIngestor
+    {
+        public Task<DeliveryReportResult> ReportAsync(PrincipalRef actor, ChannelDeliveryReport report, CancellationToken cancellationToken = default) =>
+            Task.FromResult<DeliveryReportResult>(new DeliveryReportRejected(DeliveryReportRejection.Conflict));
     }
 }

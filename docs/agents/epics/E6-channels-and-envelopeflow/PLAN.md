@@ -32,3 +32,10 @@ the tree); `dotnet test tests/Channels/TicketFlow.Channels.Tests -c Release` (35
 (3 passed); `tests/TicketFlow.Tests` (6 passed); `TICKETFLOW_TEST_POSTGRES=Host=127.0.0.1;Port=55606;... TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/Channels/TicketFlow.Channels.Stores.Postgres.Tests -c Release`
 against an isolated `postgres:18` container (6 passed); `bash scripts/verify-package-metadata.sh` (34 package projects validated).
 EnvelopeFlow packages restored from nuget.org at `0.1.0-alpha.3.1`. Parallel post-ticket reviews are still outstanding before commit.
+
+Review fixes (2026-11-22, after ee963dc): address-hijack ownership validator, per-contact thread lookup, `Retry-After` honoured through
+the additive E5 `ConversationOutboxRetryException`, bounded API response body, clamped receive times, retryable delivery conflicts,
+abstraction-only EnvelopeFlow adapter plus `TicketFlow.Integrations.EnvelopeFlow.Surveys`, once-per-kind registration, non-nullable
+conflict revisions. `dotnet build TicketFlow.slnx -c Release` (0 warnings, 0 errors); Channels (42), Channels.Api (11),
+Integrations.EnvelopeFlow (12), Integrations.Surveys (3), Conversations (46) and Channels PostgreSQL (6, isolated `postgres:18` on
+port 55616) passed. `scripts/verify-package-metadata.sh` currently fails only on E13's in-progress `src/Assist/TicketFlow.Assist`.

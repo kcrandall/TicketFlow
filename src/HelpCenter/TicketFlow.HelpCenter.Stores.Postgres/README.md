@@ -17,6 +17,8 @@ Durable PostgreSQL storage for the TicketFlow help center. `PostgresHelpCenterSt
   transaction; markers and counters cascade with the article. `PurgeViewMarkersAsync` removes old view markers in bounded batches.
 
 ```csharp
+using TicketFlow.HelpCenter.Stores.Postgres;
+
 await using var dataSource = NpgsqlDataSource.Create(connectionString);
 services.AddTicketFlow().AddAccessControl().AddPostgresAccessStores(dataSource)
     .AddHelpCenter().AddPostgresHelpCenterStores(dataSource);

@@ -17,6 +17,11 @@
     <PackageVersion Include="MSTest.TestFramework" Version="4.5.3" />
     <PackageVersion Include="Markdig" Version="1.5.1" />
     <PackageVersion Include="HtmlSanitizer" Version="10.0.1120" />
+    <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="11.0.0" />
+    <PackageVersion Include="Microsoft.AspNetCore.SignalR.Client" Version="11.0.0" />
+    <PackageVersion Include="Anthropic" Version="13.6.0" />
+    <PackageVersion Include="Microsoft.Extensions.AI" Version="11.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="11.0.0" />
     <!-- EnvelopeFlow packages are lockstep-versioned; keep every entry on the same pinned version. -->
     <PackageVersion Include="EnvelopeFlow.Core" Version="0.1.0-alpha.3.1" />
     <PackageVersion Include="EnvelopeFlow.Inbound.Abstractions" Version="0.1.0-alpha.3.1" />

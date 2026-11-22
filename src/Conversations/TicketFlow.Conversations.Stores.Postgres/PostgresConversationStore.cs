@@ -153,11 +153,29 @@ public sealed partial class PostgresConversationStore : IConversationStore, ICon
 
     public async Task<ConversationPage> ListAsync(TicketScope scope, ConversationListQuery query, AccessFilter filter, CancellationToken cancellationToken = default)
     {
+        await using var command = CreateListCommand(scope, query, filter);
+        var rows = new List<StoredConversation>();
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                rows.Add(ReadConversation(reader, scope));
+        if (rows.Count <= query.Limit)
+            return new ConversationPage(rows, null);
+        var page = rows[..query.Limit];
+        return new ConversationPage(page, new ConversationListCursor(page[^1].Conversation.LastActivityAt, page[^1].Id));
+    }
+
+    /// <summary>
+    /// The list statement: criteria as equality predicates matching the <c>(scope_key, criterion[, status], activity)</c> indexes, a label
+    /// criterion driven from the <c>tf_conversation_labels</c> side table, the keyset cursor as a row comparison and the translated access
+    /// filter in the same statement. Internal so plan tests can EXPLAIN the exact SQL.
+    /// </summary>
+    internal NpgsqlCommand CreateListCommand(TicketScope scope, ConversationListQuery query, AccessFilter filter)
+    {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(filter);
         var translated = PostgresAccessFilterTranslator.Translate(filter, FilterColumns).OrDenyAll();
-        await using var command = source.CreateCommand();
+        var command = source.CreateCommand();
         AddScope(command, scope);
         foreach (var parameter in translated.Parameters)
             command.Parameters.Add(parameter.Clone());
@@ -177,32 +195,33 @@ public sealed partial class PostgresConversationStore : IConversationStore, ICon
             criteria.Add("c.assignee_id IS NULL");
         if (query.Team is { } team)
             Criterion("c.team_id=@team", "team", team.Value, NpgsqlDbType.Text);
-        if (query.Label is { } label)
-            Criterion("c.labels @> ARRAY[@label]::text[]", "label", label.Value, NpgsqlDbType.Text);
         if (query.Contact is { } contact)
             Criterion("c.contact_id=@contact", "contact", contact.Value, NpgsqlDbType.Text);
+        // With a label, the label side table (same activity and identifier columns) drives the keyset scan.
+        var order = query.Label is null ? "c" : "l";
         if (query.After is { } after)
         {
-            criteria.Add("(c.last_activity_at, c.conversation_id) < (@after_at, @after_id COLLATE \"C\")");
+            criteria.Add($"({order}.last_activity_at, {order}.conversation_id) < (@after_at, @after_id COLLATE \"C\")");
             command.Parameters.Add(new NpgsqlParameter("after_at", NpgsqlDbType.TimestampTz) { Value = after.LastActivityAt });
             AddText(command, "after_id", after.Conversation.Value);
         }
         command.Parameters.AddWithValue("limit", query.Limit + 1);
+        var from = "FROM tf_conversations c";
+        var scopeKey = $"c.scope_key={ScopeKey}";
+        if (query.Label is { } label)
+        {
+            from = "FROM tf_conversation_labels l JOIN tf_conversations c ON c.conversation_key=l.conversation_key AND c.conversation_id=l.conversation_id";
+            scopeKey = $"l.scope_key={ScopeKey} AND l.label=@label";
+            AddText(command, "label", label.Value);
+        }
         command.CommandText = $"""
-            SELECT {ConversationColumns} FROM tf_conversations c
-            WHERE c.scope_key={ScopeKey} AND c.{ScopeWhere.Replace(" AND ", " AND c.", StringComparison.Ordinal)}
+            SELECT {ConversationColumns} {from}
+            WHERE {scopeKey} AND c.{ScopeWhere.Replace(" AND ", " AND c.", StringComparison.Ordinal)}
               {string.Concat(criteria.Select(item => " AND " + item))}
               AND ({translated.Sql})
-            ORDER BY c.last_activity_at DESC, c.conversation_id DESC LIMIT @limit
+            ORDER BY {order}.last_activity_at DESC, {order}.conversation_id DESC LIMIT @limit
             """;
-        var rows = new List<StoredConversation>();
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                rows.Add(ReadConversation(reader, scope));
-        if (rows.Count <= query.Limit)
-            return new ConversationPage(rows, null);
-        var page = rows[..query.Limit];
-        return new ConversationPage(page, new ConversationListCursor(page[^1].Conversation.LastActivityAt, page[^1].Id));
+        return command;
     }
 
     private static async Task<StoredConversation?> LoadAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, TicketScope scope, ConversationId id, bool forUpdate,
@@ -293,23 +312,31 @@ public sealed partial class PostgresConversationStore : IConversationStore, ICon
 
     private static DateTimeOffset? NullableInstant(NpgsqlDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetFieldValue<DateTimeOffset>(ordinal);
 
-    private static void AddScope(NpgsqlCommand command, TicketScope scope)
+    private static void AddScope(NpgsqlCommand command, TicketScope scope) => AddScope(command.Parameters, scope);
+
+    private static void AddScope(NpgsqlParameterCollection parameters, TicketScope scope)
     {
-        AddText(command, "tenant", scope.TenantId);
-        AddText(command, "project", scope.ProjectId);
-        AddText(command, "environment", scope.EnvironmentId);
-        AddText(command, "app", scope.AppId);
-        AddText(command, "workspace", scope.WorkspaceId.Value);
+        AddText(parameters, "tenant", scope.TenantId);
+        AddText(parameters, "project", scope.ProjectId);
+        AddText(parameters, "environment", scope.EnvironmentId);
+        AddText(parameters, "app", scope.AppId);
+        AddText(parameters, "workspace", scope.WorkspaceId.Value);
     }
 
-    private static void AddText(NpgsqlCommand command, string name, string? value) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = (object?)value ?? DBNull.Value });
+    private static void AddText(NpgsqlCommand command, string name, string? value) => AddText(command.Parameters, name, value);
 
-    private static void AddTextArray(NpgsqlCommand command, string name, IEnumerable<string> values) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { Value = values.ToArray() });
+    private static void AddText(NpgsqlParameterCollection parameters, string name, string? value) =>
+        parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = (object?)value ?? DBNull.Value });
 
-    private static void AddInstant(NpgsqlCommand command, string name, DateTimeOffset? value) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = (object?)value ?? DBNull.Value });
+    private static void AddTextArray(NpgsqlCommand command, string name, IEnumerable<string> values) => AddTextArray(command.Parameters, name, values);
+
+    private static void AddTextArray(NpgsqlParameterCollection parameters, string name, IEnumerable<string> values) =>
+        parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { Value = values.ToArray() });
+
+    private static void AddInstant(NpgsqlCommand command, string name, DateTimeOffset? value) => AddInstant(command.Parameters, name, value);
+
+    private static void AddInstant(NpgsqlParameterCollection parameters, string name, DateTimeOffset? value) =>
+        parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = (object?)value ?? DBNull.Value });
 
     private static void RequireId(ConversationId id)
     {

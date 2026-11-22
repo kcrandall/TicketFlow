@@ -52,6 +52,17 @@ public static class ChannelStoreContract
         Assert.IsNull(await store.FindByAddressAsync(AccessPartition.From(scope), Email, "mailgun:acct"));
         Applied(await store.CreateAsync(other, new ChannelEndpoint(Email, "cfg-3", new InboxId("inbox-2"), "mailgun:acct")));
 
+        // Prefix listing is partition-wide, kind-specific and ordinal.
+        Applied(await store.CreateAsync(other, new ChannelEndpoint(Email, "cfg-4", new InboxId("inbox-2"), "mailgun:acct:+1555")));
+        Applied(await store.CreateAsync(other, new ChannelEndpoint(Email, "cfg-5", new InboxId("inbox-2"), "mailgun:acctx")));
+        var nested = await competing.ListByAddressPrefixAsync(AccessPartition.From(scope), Email, "mailgun:acct:", IChannelEndpointStore.MaximumPrefixMatches);
+        CollectionAssert.AreEqual(new[] { "mailgun:acct:+1555" }, nested.Select(item => item.Endpoint.Address).ToArray());
+        Assert.AreEqual(other, nested[0].Scope);
+        Assert.AreEqual(4, (await store.ListByAddressPrefixAsync(AccessPartition.From(scope), Email, "mailgun:acct", IChannelEndpointStore.MaximumPrefixMatches)).Count);
+        Assert.AreEqual(1, (await store.ListByAddressPrefixAsync(AccessPartition.From(scope), Email, "mailgun:acct", 1)).Count);
+        Assert.AreEqual(0, (await store.ListByAddressPrefixAsync(AccessPartition.From(scope), Sms, "mailgun:acct:", 10)).Count);
+        Assert.AreEqual(0, (await store.ListByAddressPrefixAsync(AccessPartition.From(TestScopes.Create(tenantId: "nobody")), Email, "mailgun:", 10)).Count);
+
         Assert.AreEqual(2L, Is<ChannelWriteConflict>((await store.DeleteAsync(scope, Email, "cfg-1", 1)).Value).CurrentRevision);
         Applied(await store.DeleteAsync(scope, Email, "cfg-1", 2));
         Assert.IsNull(await competing.GetAsync(scope, Email, "cfg-1"));
@@ -79,6 +90,20 @@ public static class ChannelStoreContract
         var otherChannel = new ChannelConversationState(state.Conversation, state.Inbox, Sms, new ChannelRecipient(ContactIdentityKind.Phone, "+15550001111"));
         Assert.IsInstanceOfType<ChannelWriteConflict>((await store.WriteAsync(scope, otherChannel, 2)).Value);
         Assert.AreEqual(next, (await store.GetAsync(scope, state.Conversation))!.State);
+        Assert.IsInstanceOfType<ChannelWriteNotFound>((await store.WriteAsync(scope, new ChannelConversationState(new ConversationId("c-missing"), state.Inbox, Email, state.Recipient), 1)).Value);
+
+        // Thread lookups are per contact.
+        var ada = new ContactId("ada");
+        var bob = new ContactId("bob");
+        foreach (var (id, contact) in new[] { ("t-a1", ada), ("t-b1", bob), ("t-a2", ada) })
+            Applied(await store.WriteAsync(scope, new ChannelConversationState(new ConversationId(id), state.Inbox, Email, state.Recipient, "C1:100.1", contact: contact), null));
+        CollectionAssert.AreEqual(new[] { new ConversationId("t-a2"), new ConversationId("t-a1") },
+            (await competing.FindByThreadAsync(scope, state.Inbox, Email, "C1:100.1", ada)).ToArray());
+        CollectionAssert.AreEqual(new[] { new ConversationId("t-b1") }, (await store.FindByThreadAsync(scope, state.Inbox, Email, "C1:100.1", bob)).ToArray());
+        Assert.AreEqual(0, (await store.FindByThreadAsync(scope, state.Inbox, Sms, "C1:100.1", ada)).Count);
+        Assert.AreEqual(0, (await store.FindByThreadAsync(scope, new InboxId("other"), Email, "C1:100.1", ada)).Count);
+        Assert.AreEqual(0, (await store.FindByThreadAsync(TestScopes.LevelVariants(scope)[1], state.Inbox, Email, "C1:100.1", ada)).Count);
+        Assert.AreEqual(ada, (await store.GetAsync(scope, new ConversationId("t-a1")))!.State.Contact);
 
         // Concurrent creates: exactly one wins.
         var racing = new ChannelConversationState(new ConversationId("c-race"), state.Inbox, Email, state.Recipient);
@@ -150,6 +175,8 @@ public static class ChannelStoreContract
             new ChannelDispatch(sending.Conversation, sending.Message, new InboxId("inbox-2"), Email, ChannelDispatchState.Accepted, 2, at), 2)).Value);
         var accepted = new ChannelDispatch(sending.Conversation, sending.Message, sending.Inbox, Email, ChannelDispatchState.Accepted, 2, at.AddMinutes(1), externalMessageId: "provider-1");
         Applied(await store.WriteAsync(scope, accepted, 2));
+        Assert.IsInstanceOfType<ChannelWriteNotFound>((await store.WriteAsync(scope,
+            new ChannelDispatch(sending.Conversation, new MessageId("m-missing"), sending.Inbox, Email, ChannelDispatchState.Sending, 1, at), 1)).Value);
         var stored = await competing.GetAsync(scope, sending.Conversation, sending.Message);
         Assert.IsNotNull(stored);
         Assert.AreEqual(accepted, stored.Dispatch);

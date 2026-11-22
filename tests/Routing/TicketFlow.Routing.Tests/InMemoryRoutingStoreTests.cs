@@ -22,6 +22,13 @@ public sealed class InMemoryRoutingStoreTests
     }
 
     [TestMethod]
+    public Task AvailableAgentFilterContract()
+    {
+        var store = new InMemoryRoutingStore(TestClock.Create());
+        return RoutingStoreContract.VerifyAvailableFiltersAsync(store, store);
+    }
+
+    [TestMethod]
     public Task AssignmentContract()
     {
         var clock = TestClock.Create();

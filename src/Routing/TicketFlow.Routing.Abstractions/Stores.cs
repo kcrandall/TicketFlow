@@ -78,8 +78,12 @@ public interface IAgentAvailabilityStore
     /// <summary>Profiles ordered by agent identifier (ordinal) after <paramref name="after"/>; 1-<see cref="MaximumList"/>.</summary>
     Task<IReadOnlyList<StoredAgentProfile>> ListAsync(TicketScope scope, UserId? after, int limit, CancellationToken cancellationToken = default);
 
-    /// <summary>Profiles effectively Online now, ordered by agent identifier, 1-<see cref="MaximumAvailableList"/>.</summary>
-    Task<IReadOnlyList<StoredAgentProfile>> ListAvailableAsync(TicketScope scope, int limit, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// One keyset page of profiles effectively Online now that match <paramref name="query"/> (positive capacity for its channel kind,
+    /// within its agent set, holding its required skills), ordered by agent identifier after <see cref="AvailableAgentQuery.After"/>.
+    /// The filters run inside the store query, so callers page through every match.
+    /// </summary>
+    Task<IReadOnlyList<StoredAgentProfile>> ListAvailableAsync(TicketScope scope, AvailableAgentQuery query, CancellationToken cancellationToken = default);
 
     Task<RoutingWriteResult<StoredAgentProfile>> SaveSettingsAsync(TicketScope scope, AgentRoutingSettings settings, long? expectedRevision, CancellationToken cancellationToken = default);
 
@@ -133,6 +137,9 @@ public interface IRoutingAssignmentStore
     Task<IReadOnlyDictionary<Workspaces.ChannelKind, int>> GetLoadAsync(TicketScope scope, UserId agent, CancellationToken cancellationToken = default);
 
     Task<StickyOwner?> GetStickyOwnerAsync(TicketScope scope, ContactId contact, CancellationToken cancellationToken = default);
+
+    /// <summary>The agent identifier the round-robin cursor <paramref name="cursorKey"/> last chose, if any.</summary>
+    Task<string?> GetCursorAsync(TicketScope scope, string cursorKey, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -142,9 +149,9 @@ public interface IRoutingAssignmentStore
 /// snapshot when its conversation revision is not older, keeping queue position, target, overflow progress and attempts.</item>
 /// <item><see cref="ListAsync"/> applies the <see cref="AccessFilter"/> over <see cref="RoutingQueueEntry.Resource"/> inside the bounded
 /// keyset query (waiting since, conversation identifier ascending); untranslatable filters return no rows.</item>
-/// <item><see cref="ClaimDueAsync"/> (store-wide) leases entries whose next attempt is due and whose lease is free or expired, oldest
-/// waiting first; every claim increments the fence; concurrent claimers never share a live lease.
-/// <see cref="CompleteAttemptAsync"/> applies the update and frees the lease only with the current fence while the lease is held.</item>
+/// <item><see cref="ClaimDueAsync"/> (store-wide) leases entries whose next attempt is due and whose lease is free or expired, taken in
+/// next-attempt order (index-backed) and returned oldest waiting first; every claim increments the fence; concurrent claimers never
+/// share a live lease. <see cref="CompleteAttemptAsync"/> applies the update and frees the lease only with the current fence while the lease is held.</item>
 /// <item><see cref="RemoveAsync"/> deletes the entry only when its snapshot revision is not newer than the given revision.</item>
 /// <item><see cref="NudgeAsync"/> makes the scope's entries (optionally one target inbox) due now.</item>
 /// </list>

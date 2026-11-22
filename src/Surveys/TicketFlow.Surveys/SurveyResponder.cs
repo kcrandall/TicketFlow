@@ -4,7 +4,7 @@ namespace TicketFlow.Surveys;
 
 /// <summary>
 /// Default <see cref="ISurveyResponder"/>. Tokens are parsed strictly, hashed and looked up within the host-resolved scope; unknown,
-/// malformed and unsent tokens are indistinguishable. Responses are single-use and idempotent: replaying the same score and comment
+/// malformed, unissued and cancelled tokens are indistinguishable. Tokens stay valid across delivery retries. Responses are single-use and idempotent: replaying the same score and comment
 /// returns <see cref="SurveyResponseDuplicate"/>, anything else after the first response is refused.
 /// </summary>
 public sealed class SurveyResponder(ISurveyStore store, TimeProvider clock) : ISurveyResponder
@@ -20,7 +20,7 @@ public sealed class SurveyResponder(ISurveyStore store, TimeProvider clock) : IS
             return null;
         var invitation = stored.Invitation;
         var responded = invitation.State == SurveyInvitationState.Responded;
-        if (!responded && clock.GetUtcNow() >= invitation.ExpiresAt)
+        if (!responded && !invitation.AcceptsResponses(clock.GetUtcNow()))
             return null;
         var survey = (await store.GetSurveyAsync(scope, invitation.Survey, cancellationToken).ConfigureAwait(false))?.Survey;
         if (survey is null)
@@ -45,7 +45,7 @@ public sealed class SurveyResponder(ISurveyStore store, TimeProvider clock) : IS
         if (comment is not null && !SurveyText.IsMultiline(comment, SurveyResponse.MaximumCommentLength))
             return new SurveyResponseRejected(SurveyResponseRejection.InvalidComment);
         var now = clock.GetUtcNow();
-        if (now >= invitation.ExpiresAt)
+        if (!invitation.AcceptsResponses(now))
             return new SurveyResponseRejected(SurveyResponseRejection.Expired);
         var result = await store.RecordResponseAsync(scope, SurveyResponse.For(invitation, score, comment, now), cancellationToken).ConfigureAwait(false);
         return result switch
@@ -72,6 +72,7 @@ public sealed class SurveyResponder(ISurveyStore store, TimeProvider clock) : IS
         if (!SurveyToken.TryParse(token, out var parsed))
             return null;
         var stored = await store.FindInvitationByTokenAsync(scope, parsed.Hash(), cancellationToken).ConfigureAwait(false);
-        return stored is { Invitation.State: SurveyInvitationState.Sent or SurveyInvitationState.Responded } ? stored : null;
+        // A token is valid from first issue (even while a retry is pending) until the invitation is cancelled.
+        return stored is { Invitation.TokenHash: not null } && stored.Invitation.State != SurveyInvitationState.Cancelled ? stored : null;
     }
 }

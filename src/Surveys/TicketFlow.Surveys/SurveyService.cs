@@ -117,10 +117,18 @@ public sealed class SurveyService : ISurveyService
         if (filter is DenyAllFilter)
             return new SurveySucceeded<SurveyResponseViewPage>(new([], null));
         var page = await store.ListResponsesAsync(actor.Scope, query, filter, cancellationToken).ConfigureAwait(false);
+        var access = await evaluator.LoadDecisionContextAsync(actor, actor.Scope, [SurveyPermissions.Read], cancellationToken).ConfigureAwait(false);
         var views = new List<SurveyResponseView>(page.Items.Count);
         foreach (var stored in page.Items)
-            if (await ViewAsync(actor, stored.Response, cancellationToken).ConfigureAwait(false) is { } view)
+        {
+            if (stored.Scope != actor.Scope)
+                throw new InvalidOperationException("The survey store returned a response outside the requested scope.");
+            // Masking depends on the grants that apply to each row, so every row is decided against one access snapshot (no store
+            // round trip per row); the filter and the decision agree.
+            var decision = await access.DecideAsync(SurveyPermissions.Read, SurveyResources.Response(actor.Scope, stored.Response), cancellationToken).ConfigureAwait(false);
+            if (View(stored.Response, decision) is { } view)
                 views.Add(view);
+        }
         return new SurveySucceeded<SurveyResponseViewPage>(new(views, page.Next));
     }
 
@@ -128,9 +136,10 @@ public sealed class SurveyService : ISurveyService
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
+        // Like other list/search paths (conversations, inboxes, help center), a denied plan yields an empty result, not Forbidden.
         var filter = await planner.PlanAsync(new AccessQuery(actor, SurveyPermissions.ReportView, actor.Scope), cancellationToken).ConfigureAwait(false);
         if (filter is DenyAllFilter)
-            return Forbidden(SurveyPermissions.ReportView);
+            return new SurveySucceeded<SurveyAggregateResult>(new([], false));
         return new SurveySucceeded<SurveyAggregateResult>(await store.AggregateAsync(actor.Scope, query, filter, cancellationToken).ConfigureAwait(false));
     }
 
@@ -138,6 +147,11 @@ public sealed class SurveyService : ISurveyService
     private async Task<SurveyResponseView?> ViewAsync(PrincipalRef actor, SurveyResponse response, CancellationToken cancellationToken)
     {
         var decision = await evaluator.AuthorizeAsync(new AccessRequest(actor, SurveyPermissions.Read, SurveyResources.Response(actor.Scope, response)), cancellationToken).ConfigureAwait(false);
+        return View(response, decision);
+    }
+
+    private static SurveyResponseView? View(SurveyResponse response, AccessDecision decision)
+    {
         return decision switch
         {
             AccessAllowed => new SurveyResponseView(response, response.Comment, false, false),

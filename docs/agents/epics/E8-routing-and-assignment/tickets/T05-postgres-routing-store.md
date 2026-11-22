@@ -39,3 +39,23 @@ Verification commands (run from the repository root, 2026-11-22):
 - `bash scripts/verify-package-metadata.sh` — fails only on E6's in-progress `src/Channels/TicketFlow.Channels` project not yet in the solution (not an E8 project).
 
 Post-ticket parallel reviews (docs/agents/prompts/post-ticket-*.md) have not been run yet.
+
+### Review fixes (2026-11-22)
+
+- P1: `RoutingOutboxHandler` reacts only to `Started`/`Deleted` changes and batches with an incoming message or a status, assignment,
+  team, label or attribute change; notes, extensions, outgoing replies, other metadata and delivery updates are skipped
+  (`OutboxHandlerSkipsChangesThatCannotAffectRouting`, `ExtensionAppendsDoNotTouchRoutingState`).
+- P1/P3: team, skill and channel-capacity filters moved into `IAgentAvailabilityStore.ListAvailableAsync(scope, AvailableAgentQuery)`
+  (in-memory and PostgreSQL `jsonb`), the engine pages through every match and windows > 1000 eligible agents after the round-robin
+  cursor (`IRoutingAssignmentStore.GetCursorAsync`); principals are resolved in batches by `IRoutingTeamMembershipResolver`
+  (`StoreRoutingTeamMembershipResolver`); the plan cache stays per run and the option is renamed `RunEligibilityPlanLifetime`
+  (`RevokedOrRemovedAgentsAreNeverChosenInTheNextRun`, `PoolsLargerThanOnePageStayEligible`, `AvailableAgentFilterContract`).
+- P2: queue claims are taken in `(next_attempt_at, conversation_key)` order backed by the new append-only migration 2 index
+  `tf_routing_queue_due_v2` and re-sorted by waiting time (queue contract ordering check).
+- P2: `PostgresRoutingStore` uses the database clock for every lease, reservation, presence and expiry instant unless an application
+  `TimeProvider` is supplied (`DatabaseClockGovernsLeases`; `AddPostgresRoutingStores(..., useApplicationClock)`).
+- Tests: `StaleQueueSnapshotAsync` and `TeamChangeBetweenReserveAndAssignAsync` in `ConcurrencyScenarios`, run against both stores.
+
+Verification after the fixes (2026-11-22): `dotnet test tests/Routing/TicketFlow.Routing.Tests -c Release` — 48 passed;
+`TICKETFLOW_TEST_POSTGRES=Host=127.0.0.1;Port=55618;... TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/Routing/TicketFlow.Routing.Stores.Postgres.Tests -c Release`
+(isolated `postgres:18`) — 15 passed; both suites re-run 3 times without failures.

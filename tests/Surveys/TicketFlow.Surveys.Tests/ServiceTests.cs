@@ -63,7 +63,9 @@ public sealed class ServiceTests
         Assert.AreEqual(100.0, aggregate.Rows[1].CsatPercent);
         var scoped = Value(await fixture.Service.AggregateAsync(inboxReader, new SurveyAggregateQuery(SurveyKind.Csat, query.From, query.To)));
         Assert.AreEqual(2, scoped.Rows.Single().Responses);
-        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.AggregateAsync(stranger, new SurveyAggregateQuery(SurveyKind.Csat, query.From, query.To))));
+        var denied = Value(await fixture.Service.AggregateAsync(stranger, new SurveyAggregateQuery(SurveyKind.Csat, query.From, query.To)));
+        Assert.IsEmpty(denied.Rows, "Like every list path, denial yields an empty aggregate.");
+        Assert.IsFalse(denied.Truncated);
 
         var c3 = fixture.Sender.Sent.Single(item => item.Invitation.Conversation.Value == "c3").Invitation.Id;
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.GetResponseAsync(inboxReader, c3)));

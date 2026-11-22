@@ -9,7 +9,7 @@ namespace TicketFlow.Surveys.Stores.Postgres;
 public sealed partial class PostgresSurveyStore
 {
     private const string InvitationColumns =
-        "invitation_id, survey_id, kind, conversation_id, contact_id, inbox_id, team_id, agent_id, locale, created_at, send_after, state, attempts, token_hash, sent_at, expires_at, format_version, revision";
+        "invitation_id, survey_id, kind, conversation_id, contact_id, inbox_id, team_id, agent_id, locale, created_at, send_after, state, attempts, token_hash, issued_at, expires_at, format_version, revision, lease_until";
 
     private const string InvitationKeyWhere = "invitation_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@invitation::text) AND " + WorkspaceWhere + " AND invitation_id=@invitation";
     private const string ResponseColumns = "invitation_id, survey_id, kind, score, comment, responded_at, conversation_id, contact_id, inbox_id, team_id, agent_id, format_version";
@@ -46,9 +46,9 @@ public sealed partial class PostgresSurveyStore
         {
             await using var insert = new NpgsqlCommand($"""
                 INSERT INTO tf_survey_invitations({ScopeColumns}, invitation_id, survey_id, kind, conversation_id, contact_id, inbox_id, team_id, agent_id, locale,
-                    created_at, send_after, state, attempts, token_hash, sent_at, expires_at, format_version, revision)
+                    created_at, send_after, state, attempts, token_hash, issued_at, expires_at, format_version, revision, lease_until)
                 VALUES({ScopeParameters}, @invitation, @survey, @kind, @conversation, @contact, @inbox, @team, @agent, @locale,
-                    @created_at, @send_after, @state, @attempts, @token, @sent_at, @expires_at, 1, 1)
+                    @created_at, @send_after, @state, @attempts, @token, @issued_at, @expires_at, 1, 1, @lease_until)
                 """, connection, transaction);
             BindInvitation(insert, scope, invitation);
             await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -83,19 +83,47 @@ public sealed partial class PostgresSurveyStore
         return await ReadSingleAsync(command, reader => ReadInvitation(reader, scope), cancellationToken).ConfigureAwait(false);
     }
 
+    private static readonly string DueWhere =
+        $"((state=1 AND send_after <= @now) OR (state=6 AND lease_until <= @now)) AND attempts < {SurveyInvitation.MaximumAttempts}";
+
     public async Task<IReadOnlyList<StoredInvitation>> ListDueInvitationsAsync(TicketScope scope, DateTimeOffset now, int limit, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, SurveyLimits.MaximumDuePerRead);
         await using var command = source.CreateCommand($"""
-            SELECT {InvitationColumns} FROM tf_survey_invitations WHERE {ScopeKeyWhere} AND state=1 AND send_after <= @now
+            SELECT {InvitationColumns} FROM tf_survey_invitations WHERE {ScopeKeyWhere} AND {DueWhere}
             ORDER BY send_after, invitation_id LIMIT @limit
             """);
         AddScope(command, scope);
         AddTime(command, "now", now);
         command.Parameters.AddWithValue("limit", limit);
         return await ReadListAsync(command, reader => ReadInvitation(reader, scope), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// One statement: lock up to <paramref name="limit"/> due rows with <c>FOR UPDATE SKIP LOCKED</c> (rows another dispatcher is
+    /// claiming are skipped; rows it already claimed no longer match after re-check) and move them to Sending with a lease.
+    /// </summary>
+    public async Task<IReadOnlyList<StoredInvitation>> ClaimDueInvitationsAsync(TicketScope scope, DateTimeOffset now, TimeSpan lease, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(lease, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, SurveyLimits.MaximumDuePerRead);
+        await using var command = source.CreateCommand($"""
+            UPDATE tf_survey_invitations SET state=6, lease_until=@lease_until, attempts=attempts+1, revision=revision+1
+            WHERE invitation_key IN (
+                SELECT invitation_key FROM tf_survey_invitations WHERE {ScopeKeyWhere} AND {DueWhere}
+                ORDER BY send_after, invitation_id LIMIT @limit FOR UPDATE SKIP LOCKED)
+            RETURNING {InvitationColumns}
+            """);
+        AddScope(command, scope);
+        AddTime(command, "now", now);
+        AddTime(command, "lease_until", SurveyLimits.Truncate(now + lease));
+        command.Parameters.AddWithValue("limit", limit);
+        var rows = await ReadListAsync(command, reader => ReadInvitation(reader, scope), cancellationToken).ConfigureAwait(false);
+        return [.. rows.OrderBy(row => row.Invitation.SendAfter).ThenBy(row => row.Invitation.Id)];
     }
 
     public async Task<SurveyWriteResult<StoredInvitation>> UpdateInvitationAsync(TicketScope scope, SurveyInvitation invitation, long expectedRevision, CancellationToken cancellationToken = default)
@@ -122,7 +150,7 @@ public sealed partial class PostgresSurveyStore
         {
             await using var update = new NpgsqlCommand($"""
                 UPDATE tf_survey_invitations SET inbox_id=@inbox, team_id=@team, agent_id=@agent, locale=@locale, created_at=@created_at, send_after=@send_after,
-                    state=@state, attempts=@attempts, token_hash=@token, sent_at=@sent_at, expires_at=@expires_at, revision=revision+1
+                    state=@state, attempts=@attempts, token_hash=@token, issued_at=@issued_at, expires_at=@expires_at, lease_until=@lease_until, revision=revision+1
                 WHERE {InvitationKeyWhere}
                 """, connection, transaction);
             BindInvitation(update, scope, invitation);
@@ -157,11 +185,11 @@ public sealed partial class PostgresSurveyStore
                 return new ResponseAlreadyRecorded(recorded);
         }
         var invitation = current.Invitation;
-        if (invitation.State != SurveyInvitationState.Sent || invitation.Survey != response.Survey || invitation.Kind != response.Kind
+        if (invitation.TokenHash is null || invitation.State is SurveyInvitationState.Responded or SurveyInvitationState.Cancelled || invitation.Survey != response.Survey || invitation.Kind != response.Kind
             || invitation.Conversation != response.Conversation || invitation.Contact != response.Contact || invitation.Inbox != response.Inbox
             || invitation.Team != response.Team || invitation.Agent != response.Agent)
             return ResponseInvitationNotFound.Instance;
-        if (response.RespondedAt >= invitation.ExpiresAt)
+        if (!invitation.AcceptsResponses(response.RespondedAt))
             return new ResponseInvitationExpired(invitation.ExpiresAt!.Value);
         await using (var insert = new NpgsqlCommand($"""
             INSERT INTO tf_survey_responses({ScopeColumns}, invitation_id, survey_id, kind, score, comment, responded_at, conversation_id, contact_id, inbox_id, team_id, agent_id, format_version)
@@ -181,7 +209,7 @@ public sealed partial class PostgresSurveyStore
             AddText(insert, "agent", response.Agent?.Value);
             await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
-        await using (var update = new NpgsqlCommand($"UPDATE tf_survey_invitations SET state=3, revision=revision+1 WHERE {InvitationKeyWhere}", connection, transaction))
+        await using (var update = new NpgsqlCommand($"UPDATE tf_survey_invitations SET state=3, lease_until=NULL, revision=revision+1 WHERE {InvitationKeyWhere}", connection, transaction))
         {
             BindInvitationKey(update, scope, response.Invitation);
             await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -337,8 +365,9 @@ public sealed partial class PostgresSurveyStore
         command.Parameters.AddWithValue("state", (short)invitation.State);
         command.Parameters.AddWithValue("attempts", invitation.Attempts);
         command.Parameters.Add(new NpgsqlParameter("token", NpgsqlDbType.Bytea) { Value = invitation.TokenHash is { } hash ? hash.ToBytes() : DBNull.Value });
-        AddTime(command, "sent_at", invitation.SentAt);
+        AddTime(command, "issued_at", invitation.IssuedAt);
         AddTime(command, "expires_at", invitation.ExpiresAt);
+        AddTime(command, "lease_until", invitation.LeaseUntil);
     }
 
     private static StoredInvitation ReadInvitation(NpgsqlDataReader reader, TicketScope scope) => Decode(() =>
@@ -350,7 +379,8 @@ public sealed partial class PostgresSurveyStore
         var invitation = new SurveyInvitation(new SurveyInvitationId(reader.GetGuid(0)), new SurveyId(reader.GetString(1)), Enum<SurveyKind>(reader.GetInt16(2)),
             new ConversationId(reader.GetString(3)), new ContactId(reader.GetString(4)), Text(5) is { } inbox ? new InboxId(inbox) : null, Text(6) is { } team ? new TeamId(team) : null,
             Text(7) is { } agent ? new UserId(agent) : null, new SurveyLocale(reader.GetString(8)), reader.GetFieldValue<DateTimeOffset>(9), reader.GetFieldValue<DateTimeOffset>(10),
-            Enum<SurveyInvitationState>(reader.GetInt16(11)), reader.GetInt32(12), reader.IsDBNull(13) ? null : SurveyTokenHash.FromBytes(reader.GetFieldValue<byte[]>(13)), Time(14), Time(15));
+            Enum<SurveyInvitationState>(reader.GetInt16(11)), reader.GetInt32(12), reader.IsDBNull(13) ? null : SurveyTokenHash.FromBytes(reader.GetFieldValue<byte[]>(13)), Time(14), Time(15),
+            Time(18));
         return new StoredInvitation(scope, invitation, reader.GetInt64(17));
     }, "invitation");
 

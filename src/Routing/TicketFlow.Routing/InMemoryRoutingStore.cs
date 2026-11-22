@@ -120,16 +120,18 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
                 .Select(pair => pair.Value.Profile).OrderBy(profile => profile.Agent.Value, StringComparer.Ordinal).Take(limit)]);
     }
 
-    public Task<IReadOnlyList<StoredAgentProfile>> ListAvailableAsync(TicketScope scope, int limit, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<StoredAgentProfile>> ListAvailableAsync(TicketScope scope, AvailableAgentQuery query, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
-        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IAgentAvailabilityStore.MaximumAvailableList);
+        ArgumentNullException.ThrowIfNull(query);
         var now = Now;
+        var allowed = query.Agents?.ToHashSet();
         lock (gate)
             return Task.FromResult<IReadOnlyList<StoredAgentProfile>>([.. agents.Where(pair => pair.Key.Scope == scope
-                    && pair.Value.Profile.Presence.EffectiveStatus(now) == AgentStatus.Online)
-                .Select(pair => pair.Value.Profile).OrderBy(profile => profile.Agent.Value, StringComparer.Ordinal).Take(limit)]);
+                    && (allowed is null || allowed.Contains(pair.Key.Agent))
+                    && (query.After is not { } after || string.CompareOrdinal(pair.Key.Agent.Value, after.Value) > 0)
+                    && pair.Value.Profile.Presence.EffectiveStatus(now) == AgentStatus.Online && query.Matches(pair.Value.Profile))
+                .Select(pair => pair.Value.Profile).OrderBy(profile => profile.Agent.Value, StringComparer.Ordinal).Take(query.Limit)]);
     }
 
     public Task<RoutingWriteResult<StoredAgentProfile>> SaveSettingsAsync(TicketScope scope, AgentRoutingSettings settings, long? expectedRevision, CancellationToken cancellationToken = default)
@@ -405,6 +407,14 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
             return Task.FromResult(sticky.GetValueOrDefault((scope, contact)));
     }
 
+    public Task<string?> GetCursorAsync(TicketScope scope, string cursorKey, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        TicketScope.RequireIdentifier(cursorKey, nameof(cursorKey));
+        lock (gate)
+            return Task.FromResult(cursors.GetValueOrDefault((scope, cursorKey)));
+    }
+
     private int LoadLocked(TicketScope scope, UserId agent, ChannelKind channel, ConversationId excluded, DateTimeOffset now) =>
         assignments.Count(pair => pair.Key.Scope == scope && pair.Value.Agent == agent && pair.Value.Channel == channel && pair.Key.Conversation != excluded
             && pair.Value.CountsAt(now));
@@ -479,13 +489,14 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         {
             var claims = new List<RoutingQueueClaim>();
             foreach (var (key, row) in queue.Where(pair => pair.Value.Entry.NextAttemptAt <= now && !(pair.Value.LeaseUntil > now))
-                .OrderBy(pair => pair.Value.Entry.Snapshot.WaitingSince).ThenBy(pair => pair.Key.Conversation.Value, StringComparer.Ordinal).Take(limit).ToList())
+                .OrderBy(pair => pair.Value.Entry.NextAttemptAt).ThenBy(pair => pair.Key.Conversation.Value, StringComparer.Ordinal).Take(limit).ToList())
             {
                 row.Fence = ++nextFence;
                 row.LeaseUntil = now + lease;
                 claims.Add(new RoutingQueueClaim(key.Scope, row.Entry, row.Fence, now + lease));
             }
-            return Task.FromResult<IReadOnlyList<RoutingQueueClaim>>(claims);
+            return Task.FromResult<IReadOnlyList<RoutingQueueClaim>>([.. claims.OrderBy(claim => claim.Entry.Snapshot.WaitingSince)
+                .ThenBy(claim => claim.Entry.Conversation.Value, StringComparer.Ordinal)]);
         }
     }
 

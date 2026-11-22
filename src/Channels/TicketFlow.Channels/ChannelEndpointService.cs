@@ -14,13 +14,15 @@ public sealed class ChannelEndpointService(
     IChannelDispatchStore dispatches,
     IConversationStore conversations,
     IInboxStore inboxes,
-    IAccessEvaluator evaluator) : IChannelEndpointService
+    IAccessEvaluator evaluator,
+    IChannelAddressOwnershipValidator ownership) : IChannelEndpointService
 {
     private readonly IChannelEndpointStore endpoints = endpoints ?? throw new ArgumentNullException(nameof(endpoints));
     private readonly IChannelDispatchStore dispatches = dispatches ?? throw new ArgumentNullException(nameof(dispatches));
     private readonly IConversationStore conversations = conversations ?? throw new ArgumentNullException(nameof(conversations));
     private readonly IInboxStore inboxes = inboxes ?? throw new ArgumentNullException(nameof(inboxes));
     private readonly IAccessEvaluator evaluator = evaluator ?? throw new ArgumentNullException(nameof(evaluator));
+    private readonly IChannelAddressOwnershipValidator ownership = ownership ?? throw new ArgumentNullException(nameof(ownership));
 
     public async Task<ChannelResult<StoredChannelEndpoint>> GetAsync(PrincipalRef actor, ChannelKind kind, string configurationId, CancellationToken cancellationToken = default)
     {
@@ -41,6 +43,8 @@ public sealed class ChannelEndpointService(
             return ChannelRefused.Forbidden;
         if (await ValidateInboxAsync(scope, endpoint, cancellationToken).ConfigureAwait(false) is { } invalid)
             return invalid;
+        if (!await ownership.MayBindAsync(actor, scope, endpoint, cancellationToken).ConfigureAwait(false))
+            return NotOwned;
         return Map(await endpoints.CreateAsync(scope, endpoint, cancellationToken).ConfigureAwait(false));
     }
 
@@ -58,6 +62,8 @@ public sealed class ChannelEndpointService(
             return ChannelRefused.Forbidden;
         if (await ValidateInboxAsync(scope, endpoint, cancellationToken).ConfigureAwait(false) is { } invalid)
             return invalid;
+        if (endpoint.Address != stored.Endpoint.Address && !await ownership.MayBindAsync(actor, scope, endpoint, cancellationToken).ConfigureAwait(false))
+            return NotOwned;
         return Map(await endpoints.UpdateAsync(scope, endpoint, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
@@ -85,6 +91,8 @@ public sealed class ChannelEndpointService(
         var dispatch = await dispatches.GetAsync(scope, conversation, message, cancellationToken).ConfigureAwait(false);
         return dispatch is null ? ChannelNotFound.Instance : new ChannelValue<StoredChannelDispatch>(dispatch);
     }
+
+    private static ChannelRefused NotOwned { get; } = new(ChannelRefusal.AddressNotOwned, ["The endpoint address overlaps a provider address bound by another scope."]);
 
     private static TicketScope Scope(PrincipalRef actor) =>
         actor.Value is null ? throw new ArgumentException("A principal is required.", nameof(actor)) : actor.Scope;

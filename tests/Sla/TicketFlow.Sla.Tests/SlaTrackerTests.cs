@@ -170,8 +170,8 @@ public sealed class SlaTrackerTests
         await fixture.DispatchAsync();
         AdvanceTo(fixture, Monday(14, 30));
         flaky.FailNextAcknowledgement = true;
-        // The first tracker write already rescheduled the timer (pending emissions keep it due), so the release reports the lease lost.
-        Assert.AreEqual(new SlaTimerRunResult(0, 0, 1), await fixture.RunTimersAsync(), "the write after the append failed");
+        // The first tracker write kept the lease (emissions were pending), so the failed evaluation releases it for a retry.
+        Assert.AreEqual(new SlaTimerRunResult(0, 1, 0), await fixture.RunTimersAsync(), "the write after the append failed");
         Assert.AreEqual(2, (await fixture.SlaEventsAsync("c1")).Count, "the warning was appended");
         Assert.AreEqual(1, (await flaky.GetAsync(fixture.Scope, new ConversationId("c1")))!.Tracker.Pending.Count, "and is still pending");
 
@@ -247,7 +247,8 @@ public sealed class SlaTrackerTests
         public Task<StoredSlaTracker?> GetAsync(TicketScope scope, ConversationId conversation, CancellationToken cancellationToken = default) =>
             Inner.GetAsync(scope, conversation, cancellationToken);
 
-        public async Task<SlaWriteResult<StoredSlaTracker>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, CancellationToken cancellationToken = default)
+        public async Task<SlaWriteResult<StoredSlaTracker>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, SlaTimerClaim? release = null,
+            CancellationToken cancellationToken = default)
         {
             if (FailNextAcknowledgement && tracker.Pending.Count == 0 && expectedRevision is not null
                 && (await Inner.GetAsync(scope, tracker.Conversation, cancellationToken))?.Tracker.Pending.Count > 0)
@@ -255,7 +256,7 @@ public sealed class SlaTrackerTests
                 FailNextAcknowledgement = false;
                 throw new InvalidOperationException("Simulated crash after the timeline append.");
             }
-            return await Inner.WriteAsync(scope, tracker, expectedRevision, cancellationToken);
+            return await Inner.WriteAsync(scope, tracker, expectedRevision, release, cancellationToken);
         }
 
         public Task<SlaWriteResult<StoredSlaTracker>> DeleteAsync(TicketScope scope, ConversationId conversation, long expectedRevision, CancellationToken cancellationToken = default) =>

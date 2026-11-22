@@ -11,6 +11,7 @@ using TicketFlow.Conversations;
 using TicketFlow.Core;
 using TicketFlow.Surveys;
 using TicketFlow.Integrations.Surveys;
+using TicketFlow.Integrations.EnvelopeFlow.Surveys;
 using TicketFlow.Workspaces;
 
 namespace TicketFlow.Integrations.EnvelopeFlow.Tests;
@@ -61,6 +62,7 @@ internal sealed class EnvelopeFlowFixture : IAsyncDisposable
             services.AddSingleton<IEnvelopeFlowSenderDirectory, Senders>();
             var builder = services.AddTicketFlow()
                 .AddEnvelopeFlowIntegration()
+                .AddEnvelopeFlowEmailChannel()
                 .AddEnvelopeFlowEmailChannel()
                 .AddEnvelopeFlowSmsChannel()
                 .AddEnvelopeFlowWhatsAppChannel()

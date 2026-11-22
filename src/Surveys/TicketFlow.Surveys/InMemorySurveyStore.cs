@@ -163,13 +163,35 @@ public sealed class InMemorySurveyStore : ISurveyStore
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, SurveyLimits.MaximumDuePerRead);
         lock (gate)
+            return Task.FromResult<IReadOnlyList<StoredInvitation>>(Due(scope, now, limit));
+    }
+
+    public Task<IReadOnlyList<StoredInvitation>> ClaimDueInvitationsAsync(TicketScope scope, DateTimeOffset now, TimeSpan lease, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(lease, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, SurveyLimits.MaximumDuePerRead);
+        lock (gate)
         {
-            return Task.FromResult<IReadOnlyList<StoredInvitation>>([.. (Find(scope)?.Invitations.Values ?? Enumerable.Empty<StoredInvitation>())
-                .Where(stored => stored.Invitation.State == SurveyInvitationState.Pending && stored.Invitation.SendAfter <= now)
-                .OrderBy(stored => stored.Invitation.SendAfter).ThenBy(stored => stored.Invitation.Id)
-                .Take(limit)]);
+            var claimed = new List<StoredInvitation>();
+            foreach (var stored in Due(scope, now, limit))
+            {
+                var next = new StoredInvitation(scope, stored.Invitation.Claim(now + lease), checked(stored.Revision + 1));
+                scopes[scope].Invitations[stored.Invitation.Id] = next;
+                claimed.Add(next);
+            }
+            return Task.FromResult<IReadOnlyList<StoredInvitation>>(claimed);
         }
     }
+
+    private List<StoredInvitation> Due(TicketScope scope, DateTimeOffset now, int limit) =>
+        [.. (Find(scope)?.Invitations.Values ?? Enumerable.Empty<StoredInvitation>())
+            .Where(stored => stored.Invitation.Attempts < SurveyInvitation.MaximumAttempts
+                && ((stored.Invitation.State == SurveyInvitationState.Pending && stored.Invitation.SendAfter <= now)
+                    || (stored.Invitation.State == SurveyInvitationState.Sending && stored.Invitation.LeaseUntil <= now)))
+            .OrderBy(stored => stored.Invitation.SendAfter).ThenBy(stored => stored.Invitation.Id)
+            .Take(limit)];
 
     public Task<SurveyWriteResult<StoredInvitation>> UpdateInvitationAsync(TicketScope scope, SurveyInvitation invitation, long expectedRevision, CancellationToken cancellationToken = default)
     {
@@ -207,13 +229,13 @@ public sealed class InMemorySurveyStore : ISurveyStore
             if (state.Responses.TryGetValue(response.Invitation, out var existing))
                 return Task.FromResult<ResponseRecordResult>(new ResponseAlreadyRecorded(existing));
             var invitation = stored.Invitation;
-            if (invitation.State != SurveyInvitationState.Sent || !Matches(invitation, response))
+            if (invitation.TokenHash is null || invitation.State is SurveyInvitationState.Responded or SurveyInvitationState.Cancelled || !Matches(invitation, response))
                 return Task.FromResult<ResponseRecordResult>(ResponseInvitationNotFound.Instance);
-            if (response.RespondedAt >= invitation.ExpiresAt)
+            if (!invitation.AcceptsResponses(response.RespondedAt))
                 return Task.FromResult<ResponseRecordResult>(new ResponseInvitationExpired(invitation.ExpiresAt!.Value));
             var responded = new SurveyInvitation(invitation.Id, invitation.Survey, invitation.Kind, invitation.Conversation, invitation.Contact, invitation.Inbox, invitation.Team,
                 invitation.Agent, invitation.Locale, invitation.CreatedAt, invitation.SendAfter, SurveyInvitationState.Responded, invitation.Attempts, invitation.TokenHash,
-                invitation.SentAt, invitation.ExpiresAt);
+                invitation.IssuedAt, invitation.ExpiresAt);
             state.Invitations[invitation.Id] = new StoredInvitation(scope, responded, checked(stored.Revision + 1));
             var recorded = new StoredResponse(scope, response);
             state.Responses.Add(invitation.Id, recorded);

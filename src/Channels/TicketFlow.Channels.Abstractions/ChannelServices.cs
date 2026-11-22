@@ -70,6 +70,9 @@ public enum DeliveryReportRejection
     Forbidden = 3,
 
     Invalid = 4,
+
+    /// <summary>Concurrent delivery updates kept winning; retry the report.</summary>
+    Conflict = 5,
 }
 
 public sealed record DeliveryReportRejected(DeliveryReportRejection Reason);
@@ -113,7 +116,7 @@ public sealed record ChannelNotFound
     public static ChannelNotFound Instance { get; } = new();
 }
 
-public sealed record ChannelConflict(long? CurrentRevision);
+public sealed record ChannelConflict(long CurrentRevision);
 
 public enum ChannelRefusal
 {
@@ -122,6 +125,9 @@ public enum ChannelRefusal
 
     /// <summary>The endpoint address is bound elsewhere in the partition, or a capacity limit was reached.</summary>
     Rejected = 3,
+
+    /// <summary>The address ownership validator refused the address (for example it nests under an account bound by another scope).</summary>
+    AddressNotOwned = 4,
 }
 
 public sealed record ChannelRefused(ChannelRefusal Reason, IReadOnlyList<string> Errors)

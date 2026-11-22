@@ -95,6 +95,11 @@ Instants are UTC ISO-8601 with microseconds; durations integer microseconds; met
 Consumers decode with `SlaEventCodec.TryDecode(extension, out var slaEvent)` and switch over the `SlaTimelineEvent` union. Payloads
 carry identifiers only (no bodies, addresses or attribute values).
 
+**Consumers must verify the actor.** Any principal holding `conversation:manage` can append an extension event of any kind, so an
+`sla.*` event is authentic only when `TimelineEvent.Actor` is the configured SLA worker (`AccessActorKind.ApiClient` with
+`SlaOptions.WorkerClientId`). Automation (E10) and notifications (E7) must ignore `sla.*` events from other actors; the tracker's own
+duplicate detection does the same, so a forged event can neither trigger escalations nor suppress the real one.
+
 ## Tracker and timers
 
 `SlaConversationTracker` is an `IConversationOutboxHandler` (consumer `sla`). For each change (delivery updates and extension/note-only
@@ -107,13 +112,23 @@ changes are skipped) it synchronizes the conversation:
 3. Write the tracker revision-fenced (`expectedRevision`), retrying conflicts up to `MaximumWriteAttempts`; the same transaction sets
    the timer to `NextCheckAt`.
 4. Flush pending emissions through `IConversationService.AppendExtensionAsync` as the worker principal. Each emission was recorded
-   in the tracker (with a unique `key` and the conversation head at the time) before the append; on retry the tracker scans the
-   timeline after that head and skips emissions already present, then removes the flushed ones. Redelivery, concurrent syncs and a
-   crash between append and acknowledgement therefore never duplicate a timeline entry.
+   in the tracker (with a unique `key` and the conversation head at the time) before any append. Each flush round reads the
+   conversation revision, scans the timeline **once** from the oldest pending emission's recorded head for `sla.*` events whose actor
+   is the worker, and appends the missing emissions **fenced on that revision** (`expectedRevision`, advancing with each successful
+   append). Any concurrent conversation write — including another worker appending the same emission — makes the append conflict and
+   the round rescans. Redelivery, concurrent schedulers and syncs, and a crash between append and acknowledgement therefore never
+   duplicate a timeline entry.
+5. Acknowledge the flushed emissions in a final tracker write. When the flush fails — the append is refused (no grant), conversation
+   writers keep winning (`MaximumWriteAttempts` rounds), or the scan span exceeds `MaximumDuplicateScanEvents` (default 1000; the
+   result is treated as unknown, nothing is appended blindly) — the remaining emissions stay pending, `SlaTracker.FlushRetryAt` is set
+   to now + `TimerRetryDelay` and the timer follows it, so failures back off instead of spinning; the sync then throws
+   `SlaFlushDeferredException` (the outbox delivery retries; the scheduler counts it as retried).
 
-`SlaTimerScheduler.RunOnceAsync` claims due timers (`ClaimDueAsync`, leased, store clock) and synchronizes each tracker, so warnings,
-breaches and snooze expiries happen without new conversation events. The sync's tracker write reschedules the timer and clears the
-lease; a failed evaluation releases the timer for `TimerRetryDelay`.
+`SlaTimerScheduler.RunOnceAsync` claims due timers (`ClaimDueAsync`, leased) and synchronizes each tracker on behalf of its claim, so
+warnings, breaches and snooze expiries happen without new conversation events. Tracker writes release a timer lease only for the claim
+that holds it (matching fence): the scheduler's final write releases its own lease, while writes from the outbox path reschedule the
+timer but leave another worker's live lease alone. A failed evaluation (other than a deferred flush) releases the timer for
+`TimerRetryDelay`.
 
 The tracker reads conversations and timelines through the trusted `IConversationStore`, because it mirrors the exact Access resource
 (team, inbox, assignee, labels and attribute condition values) for list filtering; every timeline write is access-checked.
@@ -129,8 +144,8 @@ The tracker reads conversations and timelines through the trusted `IConversation
 - `ListAsync(actor, SlaRiskQuery(filter, inbox, limit, after), cursor)`: `AtRisk`, `Breached` or `AtRiskOrBreached` conversations,
   ordered by `UrgencyAt` then conversation id, keyset-paged (1-100) with an opaque cursor bound to the query. The `sla:read` plan from
   `IAccessQueryPlanner` is applied inside the store query over the mirrored resource; every returned row is also point-checked against
-  the live conversation, so a stale mirror never leaks a row. "Breached" includes running clocks past their due instant whose timer has
-  not fired yet.
+  the live conversation, so a stale mirror never leaks a row. "Breached" (as of the query instant: `UrgencyAt <= now`) includes running
+  clocks past their due instant whose timer has not fired yet.
 
 ## Permissions
 
@@ -140,6 +155,10 @@ The tracker reads conversations and timelines through the trusted `IConversation
 | `sla:manage` | no | Policy create/update/delete (workspace level). |
 
 Both are registered by `AddSla()` (feature-owned, not Access built-ins), so only Owner holds them until custom roles grant them.
+
+The SLA worker needs `conversation:manage` to append extension events. That permission also allows changing priority, labels,
+attributes and participants, so the worker is over-privileged relative to its job; a narrower extension-append permission would
+need a change in the conversations feature and is not part of E9. Treat the worker's API client credentials accordingly.
 Existence of a policy is checked after authorization (`Forbidden` precedes `NotFound`); for status, the conversation's existence is
 checked first, like the conversation service.
 
@@ -148,7 +167,7 @@ checked first, like the conversation service.
 | Contract | Guarantees |
 | --- | --- |
 | `ISlaPolicyStore` | Scope-confined; create at revision 1 (conflict when present); compare-and-set update/delete; ≤ 256 policies per workspace, atomically. |
-| `ISlaTrackerStore` | Scope-confined trackers; create or compare-and-set write that atomically sets the timer and clears its lease; delete removes the timer; `ClaimDueAsync` leases due timers earliest first, incrementing a fence, never sharing a live lease; `ReleaseAsync` is fenced and requires a live lease; `ListAsync` applies the risk filter at `now` and the `AccessFilter` in the bounded keyset query (untranslatable → no rows). |
+| `ISlaTrackerStore` | Scope-confined trackers; create or compare-and-set write that atomically sets the timer and releases the lease only for the holding claim (`release` fence); delete removes the timer; `ClaimDueAsync` leases due timers earliest first, incrementing a fence, never sharing a live lease; `ReleaseAsync` is fenced and requires a live lease; `ListAsync` applies the risk filter at `now` and the `AccessFilter` in the bounded keyset query (untranslatable → no rows). |
 
 `tests/Sla/TicketFlow.Sla.StoreContracts` verifies both against the in-memory stores and PostgreSQL (two independent data sources),
 including concurrent compare-and-set writers, concurrent timer claimers (each due timer claimed exactly once) and risk-list parity
@@ -158,15 +177,22 @@ PostgreSQL: `tf_sla_policies`, `tf_sla_trackers` and `tf_sla_timers`, created on
 `ticketflow.sla` migration catalog; `tf_key_v1` keys plus raw-column comparison and `"C"`-collated identifiers; `format_version` on
 every row; tracker state stored as `SlaTrackerCodec` text with indexed `due_at`/`at_risk_at`/`breached`/`urgency_at` and Access
 columns (`team_id`, `inbox_id`, `assignee_id`, `labels`, `access_attributes`); policy capacity under a workspace advisory lock; timers
-indexed on `due_at` and claimed with `FOR UPDATE SKIP LOCKED` plus lease and fence. Lease times come from the store's `TimeProvider`,
-so clients need synchronized clocks. Undecodable rows throw.
+indexed on `due_at` and claimed with `FOR UPDATE SKIP LOCKED` plus lease and fence. Claims, lease expiry and release checks use the
+**database clock** (`statement_timestamp()`), so hosts with skewed clocks cannot steal or keep leases; `new PostgresSlaStore(dataSource,
+leaseClock)` substitutes a deterministic clock for tests (`AddPostgresSlaStores` always uses the database clock). Due instants are
+still computed by application hosts, which need reasonably synchronized clocks. Risk lists bound breached rows with
+`urgency_at <= now` (range scan on the urgency indexes) and at-risk rows with the partial index
+`tf_sla_trackers_at_risk (scope_key, at_risk_at) WHERE at_risk_at IS NOT NULL AND NOT breached` (migration 2, `at-risk-index`).
+Undecodable rows throw.
 
 ## Known limits
 
-- A tracker that cannot append (missing grant, unknown time zone on the host) keeps its emissions pending and its timer due; outbox
-  deliveries dead-letter after the dispatcher's attempt limit, timers retry every `TimerRetryDelay`.
+- A tracker that cannot append (missing grant, unknown time zone on the host) keeps its emissions pending; outbox deliveries
+  dead-letter after the dispatcher's attempt limit, timers retry every `TimerRetryDelay`.
+- An emission whose duplicate-scan span exceeds `MaximumDuplicateScanEvents` (a very busy conversation while the worker could not
+  append) stays pending until the option is raised; it is never appended without a decidable scan. At most 64 emissions can be pending.
 - Initial priority and labels come from the conversation snapshot at the first sync (start requests carry them without timeline
-  events); later changes are replayed at their event instants.
+  events); a resumed tracker keeps its own label set and replays later changes at their event instants.
 - Changing an inbox's policy or calendar affects conversations at their next re-match; deleting a policy leaves existing trackers on
   their applied rule snapshot.
 - Facts committed while a sync is evaluating can be applied at the sync's evaluation instant (milliseconds late).

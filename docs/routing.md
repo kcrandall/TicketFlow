@@ -66,13 +66,18 @@ projection write carries the conversation revision and never moves a row back to
 For an open unassigned conversation it then routes:
 
 1. **Policy** of the queue entry's target inbox.
-2. **Pool**: effectively online agents (≤ 1000), members of the conversation team or else the policy team, holding the required
-   skills, with capacity ≥ 1 for the conversation's channel kind (from its own inbox's `ChannelBinding`).
-3. **Eligibility through Access**: one `IAccessQueryPlanner` plan of `conversation:reply` per agent (principal built with
-   `ITeamMembershipResolver`, so team grants apply) is evaluated with `AccessFilterEvaluator` against
-   `ConversationAccess.Resource(conversation)`, and reused for `EligibilityCacheDuration` (default 15 s) within the engine instance
-   — one plan per agent per run instead of a point check per agent per conversation. Plans equal point checks at plan time, so
-   denies, conditions and inbox/team scopes apply.
+2. **Pool**: effectively online agents that are members of the conversation team (or else the policy team), hold the required
+   skills and have capacity ≥ 1 for the conversation's channel kind (from its own inbox's `ChannelBinding`). These filters run inside
+   the store query (`AvailableAgentQuery`; PostgreSQL reads the versioned settings document as `jsonb`) and the engine pages through
+   every match — there is no identifier cutoff. When more than 1000 agents remain eligible, the reservation receives the 1000 that
+   follow the inbox's round-robin cursor in rotation order (plus the sticky preference), so rotation continues past any page.
+3. **Eligibility through Access**: one `IAccessQueryPlanner` plan of `conversation:reply` per agent is evaluated with
+   `AccessFilterEvaluator` against `ConversationAccess.Resource(conversation)`. Principals' team snapshots are resolved in batches by
+   `IRoutingTeamMembershipResolver` (default `StoreRoutingTeamMembershipResolver`: per agent for ≤ 8 agents, otherwise one read per
+   team; replace it together with `ITeamMembershipResolver`). Plans live only in the scoped engine instance — one DI scope, i.e. one
+   dispatcher or maintenance run — bounded by `RunEligibilityPlanLifetime` (default 15 s) and are never shared across runs, so a
+   revoked grant, team change or removed agent takes effect on the next run at the latest. Plans equal point checks at plan time,
+   so denies, conditions and inbox/team scopes apply.
 4. **Atomic reservation** (`IRoutingAssignmentStore.ReserveAsync`): refuse when a live reservation or a newer assignment exists;
    count each candidate's load (assigned rows + live reservations on the channel); pick the sticky preference, else round robin or
    least busy (`RoutingReservationRequest.Select` is the reference); write the reservation (lease `ReservationLease`, default 30 s);
@@ -90,16 +95,19 @@ calls the service at all. Capacity: reservations for the same agent and channel 
 counts live reservations, so concurrent workers cannot overshoot. Manual assignments are recorded without a capacity check (they
 may exceed capacity) and count toward load.
 
-**Outbox handler**: `RoutingOutboxHandler` (`routing`) runs the engine for every change except delivery updates — started
-conversations, incoming messages on unassigned conversations, reopenings, unassignments, assignments, team/label/attribute changes,
-resolutions and deletions. Handlers are idempotent because the engine reconciles from the snapshot.
+**Outbox handler**: `RoutingOutboxHandler` (`routing`) runs the engine only for changes that can affect routing: `Started` and
+`Deleted` changes, and appended batches containing an incoming message or a status, assignment, team, label or attribute change
+(attributes feed skill rules and Access conditions; the conversation inbox is immutable). Notes, outgoing replies, priority,
+participant, contact, system and extension events and delivery updates are acknowledged without touching any routing store.
+Handlers are idempotent because the engine reconciles from the snapshot.
 
 **Maintenance worker** (`RoutingMaintenanceWorker.RunOnceAsync`, store-wide, no hosted service included):
 
 1. records lapsed agent presence as Offline;
 2. claims pending offline reassignments (leased, fenced) and, for each conversation still assigned to the offline agent whose inbox
    policy says `ReturnToQueue`, unassigns it fenced on its revision and routes it again;
-3. claims due queue entries (`ClaimDueAsync`, leased, fenced; `SKIP LOCKED` in PostgreSQL), routes them, applies at most one due
+3. claims due queue entries (`ClaimDueAsync`, leased, fenced; taken in `(next_attempt_at, conversation_key)` order backed by
+   `tf_routing_queue_due_v2` with `SKIP LOCKED` in PostgreSQL, then processed oldest waiting first), routes them, applies at most one due
    overflow rule per run, raises `QueueWaitExceeded` once and schedules the next attempt (`RetryDelay`, default 30 s, or the next
    overflow/max-wait instant);
 4. prunes expired presence and reply locks.
@@ -169,7 +177,13 @@ exactly at capacity) run against both stores.
 transaction locks the cursor row, then one load-anchor row per candidate agent and channel kind in key order (anchor and cursor
 rows are created outside the transaction), counts load and upserts the reservation only when no live reservation or newer
 assignment exists; queue lists use `PostgresAccessFilterTranslator` (untranslatable → no rows); claims and sweeps use
-`FOR UPDATE SKIP LOCKED`; all fences come from one sequence. Lease, presence and expiry times come from the store `TimeProvider`.
+`FOR UPDATE SKIP LOCKED`; all fences come from one sequence. Migration 2 replaces the due index with
+`(next_attempt_at, conversation_key)`. **Clock**: by default every lease, reservation, presence and expiry instant comes from the
+database (`clock_timestamp()`, read at the start of each operation), so leases are compared against one authoritative clock
+whatever the hosts' drift. `new PostgresRoutingStore(dataSource, timeProvider)` or
+`AddPostgresRoutingStores(dataSource, useApplicationClock: true)` switches to the application clock (deterministic tests). Policy
+timing (overflow, maximum wait, sticky windows) is evaluated by the engine and worker with the application `TimeProvider` against
+store instants, so hosts still need reasonably synchronized clocks.
 The in-memory store is a bounded, process-local development example without durability.
 
 ## Not yet implemented

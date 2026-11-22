@@ -42,5 +42,7 @@ public static class PostgresSlaMigrations
             {Scope}, conversation_id text NOT NULL,
             due_at timestamptz NULL, lease_until timestamptz NULL, fence bigint NOT NULL CHECK (fence >= 0));
         CREATE INDEX tf_sla_timers_due ON tf_sla_timers (due_at, tracker_key) WHERE due_at IS NOT NULL;
+        """), new(2, "at-risk-index", """
+        CREATE INDEX tf_sla_trackers_at_risk ON tf_sla_trackers (scope_key, at_risk_at) WHERE at_risk_at IS NOT NULL AND NOT breached;
         """)]);
 }

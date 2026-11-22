@@ -18,6 +18,7 @@ public sealed class InMemorySurveyStoreTests
     {
         var store = new InMemorySurveyStore();
         await SurveyStoreContract.VerifyInvitationsAsync(store, store);
+        await SurveyStoreContract.VerifyClaimsAsync(store, store);
     }
 
     [TestMethod]

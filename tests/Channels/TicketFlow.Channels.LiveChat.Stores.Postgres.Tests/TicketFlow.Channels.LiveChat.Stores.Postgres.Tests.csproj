@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Channels/TicketFlow.Channels.LiveChat.Stores.Postgres/TicketFlow.Channels.LiveChat.Stores.Postgres.csproj" />
+    <ProjectReference Include="../TicketFlow.Channels.LiveChat.StoreContracts/TicketFlow.Channels.LiveChat.StoreContracts.csproj" />
+  </ItemGroup>
+</Project>

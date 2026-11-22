@@ -91,6 +91,13 @@ and fences are checked before authorization, like the contact service and access
 `expectedRevision`; without it they apply to the current revision and re-run the pipeline when a concurrent writer wins
 (`ConversationsOptions.MaximumWriteAttempts`, default 16), so concurrent replies all land with gapless sequences.
 
+Events returned in `ConversationApplied` (including replayed inbound messages) are projected for the actor exactly like timeline
+reads: masked per its `conversation:read` decision on the resulting conversation, so a command never discloses a masked attribute
+value (including the previous value it overwrote or removed) or channel identifier. An actor without `conversation:read` (for
+example a channel client) receives fully masked events. A redelivered inbound message is a replay even after the conversation was
+closed. `StartAsync` re-checks the contact after its write; if a merge raced the start, the new conversation is re-pointed along the
+merge chain before returning.
+
 Automation and system principals cannot hold grants (Access denies them). Channel ingestion, SLA and automation workers act as
 grant-holding API client principals (for example a custom role with `conversation:create` and `conversation:ingest`), or —
 for trusted internal followers such as the contact-merge follower — write through the store directly.
@@ -107,11 +114,14 @@ for trusted internal followers such as the contact-merge follower — write thro
   is masked and not revealable (fail closed); a denied read decision masks everything. Masked values are removed, not obfuscated,
   and `MaskedFields` lists them. `ConversationFieldPaths.SensitivePolicy` builds the recommended policy. Conversations reference
   contacts by id only, so no contact PII is copied into conversations; contact details are read (and masked) through E4.
+- **Access snapshots**: lists and timelines load one `IAccessDecisionContext` per call (`IAccessEvaluator.LoadDecisionContextAsync`)
+  and decide every row (and `conversation:read` plus `note:read` for timelines) from it, so access store round trips per page are
+  constant.
 - **Lists** (`ListAsync`, `conversation:read`): criteria inbox, status, assignee or unassigned, team, label, contact; ordered by
   `LastActivityAt` descending then id descending (ordinal); keyset-paged (1-100) with an opaque cursor bound to the query. The
   planned `AccessFilter` is applied inside the store query over `ConversationAccess.Resource` (scope, id, team, inbox, assignee,
   labels and attribute condition values — text verbatim, numbers invariant, booleans `true`/`false`, dates `yyyy-MM-dd`; list
-  attributes are unknown). Each returned row also gets a point decision for its masking.
+  attributes are unknown). Each returned row is also decided against the access snapshot for its masking.
 
 ## Outbox
 
@@ -125,14 +135,20 @@ per-event summaries — never bodies) in the same transaction. `IConversationOut
 - `AcknowledgeAsync` and `ReleaseAsync(retryAt)` succeed only with the current fence while the lease is held; `DeadLetterAsync`
   parks a delivery (unblocking later entries); `PruneAsync(olderThan)` deletes entries no consumer still owes.
 - `ConversationOutboxDispatcher` runs registered `IConversationOutboxHandler`s: claim, handle, acknowledge, exponential backoff
-  (`InitialRetryDelay` doubling to `MaximumRetryDelay`), dead-letter after `MaximumAttempts`. Handlers must be idempotent. No
+  (`InitialRetryDelay` doubling to `MaximumRetryDelay`, or later when a handler throws `ConversationOutboxRetryException`),
+  dead-letter after `MaximumAttempts`. A claim whose attempt count already exceeds the maximum (earlier attempts hung or crashed
+  until the lease expired) is dead-lettered without running the handler again, and a claim whose lease ends within
+  `LeaseSafetyMargin` (default 5 s) is skipped so work is never started that cannot be acknowledged. Handlers must be idempotent. No
   hosted service is included; hosts (E11) call `RunOnceAsync` in their loop.
 
 ## Contact merge hook
 
 `ConversationContactMergeFollower` is registered as an `IContactChangeObserver`, so in-process contact merges re-point
-conversations immediately; `CatchUpAsync(scope, afterSequence)` replays the durable contact change log (the caller keeps the
-checkpoint). On `Merged` every conversation of the source moves to the target with a `ContactChanged` event and a redirect; on
+conversations immediately. That path is best-effort: failures other than cancellation are logged (identifiers only) and swallowed so
+a committed contact write never fails afterwards. `CatchUpAsync(scope, afterSequence)` replays the durable contact change log (the
+caller keeps the checkpoint) and is the reliable path; it throws on failure. Walks over a contact's conversations repeat full
+passes until a pass changes nothing (at most 16), so conversations reordered by concurrent activity are not skipped; listed
+snapshots are written directly and re-read only on conflict. On `Merged` every conversation of the source moves to the target with a `ContactChanged` event and a redirect; on
 `Unmerged` exactly the conversations re-pointed by that merge return to their previous contact (chains unwind newest first). Both
 are idempotent: redirects are keyed by merge id and merges whose record was removed by an unmerge are skipped on replay. Writes use
 the system actor `contact-merge`.
@@ -152,9 +168,13 @@ bounded, process-local development examples with no durability.
 
 `PostgresConversationStore` uses `tf_key_v1` keys (conversation, message, external id, thread), explicit `format_version` columns,
 parameterized SQL and `"C"`-collated identifiers. List indexes are `(scope_key, [inbox_id|status|assignee_id|team_id|contact_id],
-last_activity_at DESC, conversation_id DESC)` plus GIN on labels; the translated Access filter runs in the same statement over
+last_activity_at DESC, conversation_id DESC)`, compound `(scope_key, [inbox_id|assignee_id|team_id], status, …)` indexes (migration
+2) and, for label criteria, the `tf_conversation_labels(scope_key, label, last_activity_at, conversation_id)` side table maintained
+in every write transaction (migration 2; backfilled); the translated Access filter runs in the same statement over
 `tenant_id … workspace_id`, `team_id`, `inbox_id`, `assignee_id`, `labels` and the `access_attributes` jsonb. Outbox claims use
-`FOR UPDATE SKIP LOCKED`; lease times come from the store's `TimeProvider`, so clients need synchronized clocks.
+`FOR UPDATE SKIP LOCKED` with a `(consumer, available_at, sequence) WHERE state = 0` index; lease times come from the store's
+`TimeProvider`, so clients need synchronized clocks. After the fenced snapshot row, a write sends events, label sync, message rows
+and the outbox entry (one statement with its per-consumer deliveries) as one `NpgsqlBatch`.
 
 ## Not yet implemented
 

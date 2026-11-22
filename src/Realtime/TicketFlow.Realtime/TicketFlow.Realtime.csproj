@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Realtime fan-out for TicketFlow: Access-aware subscription registry with per-subscriber delivery filtering, in-process bus, conversation outbox handler (consumer realtime), routing event observer for presence, reply locks and agent status, and agent typing/read actions.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Realtime.Abstractions/TicketFlow.Realtime.Abstractions.csproj" />
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
+  </ItemGroup>
+</Project>

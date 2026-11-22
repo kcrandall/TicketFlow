@@ -9,10 +9,13 @@ CSAT and NPS satisfaction surveys ship as three packages:
 | `TicketFlow.Surveys.Stores.Postgres` | `PostgresSurveyStore`, `PostgresSurveyMigrations` (component `ticketflow.surveys`). |
 
 ```csharp
+using TicketFlow.Surveys;
+using TicketFlow.Surveys.Stores.Postgres;
+
 services.AddSingleton<ISurveyInvitationSender, MyEnvelopeFlowSender>();   // supplied by the E6/EnvelopeFlow adapter
 services.AddTicketFlow()
     .AddAccessControl().AddPostgresAccessStores(dataSource)
-    .AddSurveys(options => options.MaximumSendAttempts = 5)
+    .AddSurveys(options => options.TokenKey = secrets.SurveyTokenKey)   // stable ≥ 32-byte secret shared by all dispatcher hosts
     .AddPostgresSurveyStores(dataSource);      // or .AddInMemorySurveyStores() for development
 await new PostgresSurveyStore(dataSource).InitializeAsync();
 ```
@@ -25,10 +28,15 @@ await new PostgresSurveyStore(dataSource).InitializeAsync();
   `ConversationResolved`, delay 0–7 days, per-contact cooldown 0–365 days, invitation lifetime 1 hour–30 days (whole seconds). At
   most 64 surveys per workspace; a survey with invitations cannot be deleted (disable it instead) and its kind cannot change.
 - **SurveyInvitation** — bound to scope + survey + conversation + contact, carrying the conversation's inbox, team and agent at
-  resolution (the reporting and access dimensions) and the locale. States: Pending → Sent → Responded, or Failed / Cancelled.
-- **Tokens** — `SurveyToken` is `tfs1.` + 43 base64url characters (256 random bits from `RandomNumberGenerator`). Raw tokens exist
-  only in memory between issue and delivery and in the respondent's link; stores persist only `SurveyTokenHash` (SHA-256, unique) and
-  look tokens up within the scope. Tokens are re-issued on retry, so a failed delivery's token stops working.
+  resolution (the reporting and access dimensions) and the locale. States: Pending → Sending (claimed, with a lease) → Sent →
+  Responded, or back to Pending for a retry, or Failed / Cancelled.
+- **Tokens** — `SurveyToken` is `tfs1.` + 43 base64url characters (256 bits). Dispatch derives each invitation's token
+  deterministically: `HMAC-SHA256(SurveyOptions.TokenKey, ["tf-survey-token-v1", scope…, invitation])`. Stores persist only
+  `SurveyTokenHash` (SHA-256, unique) and look tokens up within the scope; the raw token is never stored, and the database alone cannot
+  reproduce it. Every retry re-derives the **same** token, so a link that already reached the contact stays valid. The token (hash,
+  issue time, expiry = first issue + lifetime) is recorded on first issue and kept across retries; responses are accepted from then on
+  until expiry unless the invitation was cancelled. Configure a stable `TokenKey` in production: the default is a random per-process
+  key, and a retry on another host or after a restart (or a key rotation) must issue a new token, invalidating earlier links.
 - **SurveyResponse** — score on the survey's scale plus an optional comment (≤ 2000 characters, line breaks allowed; customer
   content, never logged), with the invitation's dimensions copied. One response per invitation.
 
@@ -39,15 +47,23 @@ await new PostgresSurveyStore(dataSource).InitializeAsync();
    must never be built from end-user requests. For each kind the enabled survey bound to the conversation's inbox wins over the
    enabled workspace survey. Invitations are created Pending with `SendAfter = resolvedAt + delay`; creation is idempotent per
    (survey, conversation) (`Duplicate`) and refused within the contact's cooldown (`CoolingDown`), atomically in the store.
-2. **Dispatch** — `ISurveyDispatcher.DispatchDueAsync(scope, limit ≤ 500)` reads due invitations, issues a token, records its hash
-   (state Sent, `ExpiresAt = now + lifetime`) with a revision-fenced update and calls `ISurveyInvitationSender.SendAsync` with the
-   token, localized question and scale. If the sender throws, the invitation returns to Pending without a token and retries with
-   exponential backoff (`SurveyOptions.RetryDelay`, capped by `MaximumRetryDelay`) until `MaximumSendAttempts`, then Failed.
-   Invitations of disabled surveys are Cancelled. Delivery is at-most-once if the process stops between recording the hash and
-   sending; concurrent dispatchers are safe (only one wins the fenced update). Hosts run the dispatcher per workspace scope.
+2. **Dispatch** — `ISurveyDispatcher.DispatchDueAsync(scope, limit ≤ 500)`:
+   - **Claim**: `ISurveyStore.ClaimDueInvitationsAsync` atomically moves due invitations (Pending with `SendAfter ≤ now`, or Sending
+     whose lease expired) to Sending with `LeaseUntil = now + SurveyOptions.SendLease` and one more attempt. PostgreSQL uses
+     `UPDATE … WHERE invitation_key IN (SELECT … FOR UPDATE SKIP LOCKED LIMIT n)`, so concurrent dispatchers on any number of hosts
+     never claim the same invitation; the in-memory store claims under its lock.
+   - **Issue and send**: the dispatcher derives the token, records its hash on first issue (revision-fenced), calls
+     `ISurveyInvitationSender.SendAsync` with the token, the localized question, the scale and the stable
+     `SurveyInvitationMessage.DeliveryKey` (`tfs-<invitation guid>`), then marks the invitation Sent.
+   - **Failures**: a throwing sender returns the invitation to Pending with exponential backoff (`RetryDelay`, capped by
+     `MaximumRetryDelay`), or Failed after `MaximumSendAttempts` claims; the token stays valid either way. If the process stops at any
+     point after the claim (before or after the sender call), the lease expires and the invitation is due again; the re-send carries
+     the same token and delivery key, so delivery is at-least-once and senders should pass the delivery key to the provider as its
+     idempotency key (the EnvelopeFlow adapter does). Invitations of disabled or deleted surveys are Cancelled; invitations whose
+     response window has passed are Failed. Hosts run the dispatcher per workspace scope; a send must finish within the lease.
 3. **Respond** — `ISurveyResponder` (anonymous, host-resolved scope): `GetInvitationAsync(scope, token)` returns the localized
-   question for a sent, unexpired token; `RespondAsync(scope, token, score, comment)` validates the token strictly (malformed,
-   unknown, other-scope and unsent tokens are all `InvalidToken`), expiry, score range and comment, then records the response and
+   question for an issued, unexpired token; `RespondAsync(scope, token, score, comment)` validates the token strictly (malformed,
+   unknown, other-scope, unissued and cancelled tokens are all `InvalidToken`), expiry, score range and comment, then records the response and
    marks the invitation Responded in one atomic store write. Replaying the same score and comment returns
    `SurveyResponseDuplicate`; anything different after the first response is `AlreadyResponded`.
 
@@ -74,7 +90,11 @@ ships no transport.
 | Create / update / delete definitions | `survey:manage` on the survey's inbox or workspace; moving between inboxes needs both |
 | Read invitations and responses | `survey:read` on `SurveyResources.Response` (scope, inbox, team, agent as assignee) |
 | List responses | `IAccessQueryPlanner` filter for `survey:read`, pushed into the store |
-| Aggregates | `IAccessQueryPlanner` filter for `report:view`, pushed into the store; deny-all is `Forbidden` |
+| Aggregates | `IAccessQueryPlanner` filter for `report:view`, pushed into the store |
+
+Like every list path (conversations, inboxes, help center), an actor without an applicable grant gets an empty page or empty
+aggregate rather than a refusal. Response pages decide masking per row against one `IAccessDecisionContext`
+(`IAccessEvaluator.LoadDecisionContextAsync`), without a store round trip per row.
 
 Response labels are unknown and attributes absent, so label/attribute conditions fail closed. A field policy on `survey.comment`
 (`SurveyFieldPaths.Comment`) for `survey:read` masks comments in `SurveyResponseView` (`Comment = null`, `CommentMasked`,
@@ -91,7 +111,8 @@ responses, positive / neutral / negative counts, score sum, `CsatPercent` (satis
 `ISurveyStore` documents scope confinement, revision fencing, capacity, atomic idempotent invitation creation with a race-free
 cooldown, fixed invitation identity fields, unique token hashes, the atomic single response and Access-filtered lists and aggregates.
 The shared fixture `tests/Surveys/TicketFlow.Surveys.StoreContracts` verifies them against the in-memory store and PostgreSQL (two
-independent data sources), including concurrent cooldown and response races and randomized grant parity
-(`AccessFilteredResponseParity`: store lists equal point checks). The PostgreSQL store serializes invitation creates per
+independent data sources), including concurrent cooldown, claim and response races, lease expiry, and randomized grant parity
+(`AccessFilteredResponseParity`: store lists equal point checks). Schema version 2 (`dispatch-leases`) adds the Sending state, `lease_until` and renames `sent_at` to `issued_at`; version-1 schemas
+upgrade in place through `InitializeAsync`. The PostgreSQL store serializes invitation creates per
 (survey, contact) on a transaction-scoped advisory lock, locks invitation rows for updates and responses, translates filters with
 `PostgresAccessFilterTranslator` (untranslatable filters return no rows) and uses `tf_key_v1` keys with raw-column comparison.

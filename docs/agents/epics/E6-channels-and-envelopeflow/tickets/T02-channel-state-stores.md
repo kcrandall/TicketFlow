@@ -42,4 +42,6 @@ partial unique address index, conversation states, references with advisory-lock
 - `TICKETFLOW_TEST_POSTGRES=Host=127.0.0.1;Port=55606;... TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/Channels/TicketFlow.Channels.Stores.Postgres.Tests -c Release` against an isolated `postgres:18`
   container — 6 passed, 0 failed (4 contracts, decode failure, PostgreSQL round trip). Without PostgreSQL they are inconclusive.
 
+Review fixes (2026-11-22): `ChannelWriteConflict(long)`; CAS writes of absent state/dispatch return not found; `IChannelEndpointStore.ListByAddressPrefixAsync`; per-contact `IChannelConversationStateStore.FindByThreadAsync` (state gains `Contact`; PostgreSQL migration 2 adds `contact_id`, `thread_key` and an address prefix index). Contract tests extended (prefix listing, thread-by-contact, not-found CAS); Postgres 6 passed against an isolated `postgres:18` container (port 55616).
+
 Post-ticket parallel reviews (docs/agents/prompts/post-ticket-*.md) have not been run yet.

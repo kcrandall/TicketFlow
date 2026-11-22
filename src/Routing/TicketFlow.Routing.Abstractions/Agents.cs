@@ -152,3 +152,75 @@ public sealed record AgentReassignmentClaim(TicketScope Scope, UserId Agent, lon
 
 /// <summary>An agent whose presence lapsed and was recorded offline.</summary>
 public sealed record AgentPresenceExpired(TicketScope Scope, UserId Agent, DateTimeOffset At);
+
+/// <summary>
+/// Filters for <see cref="IAgentAvailabilityStore.ListAvailableAsync"/>: effectively Online agents with a positive capacity for
+/// <see cref="Channel"/>, optionally restricted to <see cref="Agents"/> (for example a team's members, ≤ 1000) and holding every
+/// <see cref="RequiredSkills"/> entry at or above its level; one keyset page after <see cref="After"/> of at most <see cref="Limit"/>.
+/// </summary>
+public sealed record AvailableAgentQuery
+{
+    public const int MaximumAgents = 1000;
+
+    public AvailableAgentQuery(ChannelKind channel, IEnumerable<UserId>? agents = null, IReadOnlyDictionary<string, int>? requiredSkills = null, UserId? after = null,
+        int limit = IAgentAvailabilityStore.MaximumAvailableList)
+    {
+        if (!channel.IsInitialized || after == default(UserId))
+            throw new ArgumentException("A channel kind is required; the cursor must be initialized when supplied.");
+        if (agents is not null)
+        {
+            var set = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (var agent in agents)
+            {
+                if (agent == default)
+                    throw new ArgumentException("Agents must be initialized.", nameof(agents));
+                if (set.Add(agent.Value) && set.Count > MaximumAgents)
+                    throw new ArgumentException($"At most {MaximumAgents} agents can be listed.", nameof(agents));
+            }
+            Agents = [.. set.Select(value => new UserId(value))];
+        }
+        var skills = new SortedDictionary<string, int>(StringComparer.Ordinal);
+        foreach (var (name, level) in requiredSkills ?? new Dictionary<string, int>())
+        {
+            AgentSkill.RequireName(name, nameof(requiredSkills));
+            if (level is < AgentSkill.MinimumLevel or > AgentSkill.MaximumLevel || skills.Count >= AgentRoutingSettings.MaximumSkills)
+                throw new ArgumentException("Required skills are bounded and levels are 1-10.", nameof(requiredSkills));
+            skills[name] = level;
+        }
+        RequiredSkills = skills.AsReadOnly();
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IAgentAvailabilityStore.MaximumAvailableList);
+        Channel = channel;
+        After = after;
+        Limit = limit;
+    }
+
+    public ChannelKind Channel { get; }
+
+    /// <summary>Allowed agents in identifier order, or <see langword="null"/> for any agent.</summary>
+    public IReadOnlyList<UserId>? Agents { get; }
+
+    public IReadOnlyDictionary<string, int> RequiredSkills { get; }
+    public UserId? After { get; }
+    public int Limit { get; }
+
+    public AvailableAgentQuery WithAfter(UserId after) => new(Channel, Agents, RequiredSkills, after, Limit);
+
+    /// <summary>True when <paramref name="profile"/> matches every filter except availability and the cursor.</summary>
+    public bool Matches(StoredAgentProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        var settings = profile.Settings;
+        return settings.CapacityFor(Channel) > 0 && (Agents is null || Agents.Contains(settings.Agent)) && settings.HasSkills(RequiredSkills);
+    }
+}
+
+/// <summary>
+/// Resolves team snapshots for many agents at once, for building the <see cref="UserPrincipal"/>s whose Access plans decide routing
+/// eligibility. A trusted, unauthorized path like <c>ITeamMembershipResolver</c>; replace both together.
+/// </summary>
+public interface IRoutingTeamMembershipResolver
+{
+    /// <summary>Teams per agent (every requested agent is a key; ordered team identifiers, at most 256 each).</summary>
+    Task<IReadOnlyDictionary<UserId, IReadOnlyList<TeamId>>> GetTeamsAsync(TicketScope scope, IReadOnlyCollection<UserId> agents, CancellationToken cancellationToken = default);
+}

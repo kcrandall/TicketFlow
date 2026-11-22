@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Optional ASP.NET Core SignalR hosting for TicketFlow realtime: an agent hub (host-authenticated principals), a live-chat visitor hub (session-token handshake, origin checks) and a visitor attachment upload endpoint over the transport-neutral realtime registry.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Realtime/TicketFlow.Realtime/TicketFlow.Realtime.csproj" />
+    <ProjectReference Include="../../Channels/TicketFlow.Channels.LiveChat/TicketFlow.Channels.LiveChat.csproj" />
+  </ItemGroup>
+</Project>

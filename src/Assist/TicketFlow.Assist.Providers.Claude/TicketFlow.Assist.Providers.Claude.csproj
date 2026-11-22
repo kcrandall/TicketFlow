@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Claude provider for TicketFlow Assist over the official Anthropic .NET SDK and its Microsoft.Extensions.AI IChatClient: cached system prompts, structured outputs, effort mapping, retries with backoff honoring retry-after, timeouts and provider-neutral error mapping.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Assist/TicketFlow.Assist.csproj" />
+    <PackageReference Include="Anthropic" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="TicketFlow.Assist.Providers.Claude.Tests" />
+  </ItemGroup>
+</Project>

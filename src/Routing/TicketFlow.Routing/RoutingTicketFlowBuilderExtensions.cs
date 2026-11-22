@@ -31,6 +31,7 @@ public static class RoutingTicketFlowBuilderExtensions
         services.TryAddScoped<IAgentAvailabilityService, AgentAvailabilityService>();
         services.TryAddScoped<IConversationCollisionService, ConversationCollisionService>();
         services.TryAddScoped<IRoutingQueueService, RoutingQueueService>();
+        services.TryAddScoped<IRoutingTeamMembershipResolver, StoreRoutingTeamMembershipResolver>();
         services.TryAddScoped<IRoutingEngine, RoutingEngine>();
         services.TryAddScoped<RoutingMaintenanceWorker>();
         services.TryAddEnumerable(ServiceDescriptor.Scoped<IConversationOutboxHandler, RoutingOutboxHandler>());

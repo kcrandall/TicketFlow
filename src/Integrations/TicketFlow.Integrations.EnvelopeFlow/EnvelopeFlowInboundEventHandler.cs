@@ -19,13 +19,13 @@ public sealed class EnvelopeFlowReceiptPendingException() : Exception("The deliv
 /// <item><c>Message</c> events become <see cref="InboundChannelMessage"/>s (email threads by In-Reply-To; SMS and WhatsApp by the
 /// sender number; Slack by channel and thread root ts) recorded by <see cref="IInboundChannelPipeline"/>.</item>
 /// <item><c>DeliveryReceipt</c> events become delivery reports (Accepted/Sent → Sent, Delivered, Read, Failed/Undelivered → Failed
-/// with the provider error or bounce class; Deferred is ignored). Receipts for messages not yet correlated throw
+/// with the provider error or bounce class; Deferred is ignored). Conflicting concurrent updates throw so the receipt is retried. Receipts for messages not yet correlated throw
 /// <see cref="EnvelopeFlowReceiptPendingException"/> within <see cref="EnvelopeFlowIntegrationOptions.ReceiptCorrelationGrace"/> so
 /// the durable receipt is retried, and are dropped afterwards.</item>
 /// <item><c>Feedback</c> events are ignored (suppression belongs to EnvelopeFlow's feedback packages).</item>
 /// </list>
 /// Delivery is at-least-once; TicketFlow's per-inbox external message id and monotonic delivery states make redelivery idempotent.
-/// Runs as <see cref="ChannelsOptions.WorkerPrincipal"/>. Unknown providers, endpoints and invalid messages are dropped (not
+/// Runs as the principal from <see cref="IChannelWorkerPrincipalResolver"/>. Unknown providers, endpoints and invalid messages are dropped (not
 /// retried). Never logs bodies or addresses.
 /// </summary>
 public sealed class EnvelopeFlowInboundEventHandler : IInboundEventHandler
@@ -33,18 +33,18 @@ public sealed class EnvelopeFlowInboundEventHandler : IInboundEventHandler
     private readonly IChannelEndpointStore endpoints;
     private readonly IInboundChannelPipeline pipeline;
     private readonly IChannelDeliveryIngestor deliveries;
-    private readonly ChannelsOptions channels;
+    private readonly IChannelWorkerPrincipalResolver workers;
     private readonly EnvelopeFlowIntegrationOptions options;
     private readonly TimeProvider time;
     private readonly ILogger logger;
 
     public EnvelopeFlowInboundEventHandler(IChannelEndpointStore endpoints, IInboundChannelPipeline pipeline, IChannelDeliveryIngestor deliveries,
-        IOptions<ChannelsOptions> channels, IOptions<EnvelopeFlowIntegrationOptions> options, TimeProvider time, ILogger<EnvelopeFlowInboundEventHandler>? logger = null)
+        IChannelWorkerPrincipalResolver workers, IOptions<EnvelopeFlowIntegrationOptions> options, TimeProvider time, ILogger<EnvelopeFlowInboundEventHandler>? logger = null)
     {
         this.endpoints = endpoints ?? throw new ArgumentNullException(nameof(endpoints));
         this.pipeline = pipeline ?? throw new ArgumentNullException(nameof(pipeline));
         this.deliveries = deliveries ?? throw new ArgumentNullException(nameof(deliveries));
-        this.channels = (channels ?? throw new ArgumentNullException(nameof(channels))).Value;
+        this.workers = workers ?? throw new ArgumentNullException(nameof(workers));
         this.options = (options ?? throw new ArgumentNullException(nameof(options))).Value;
         this.options.Validate();
         this.time = time ?? throw new ArgumentNullException(nameof(time));
@@ -71,7 +71,7 @@ public sealed class EnvelopeFlowInboundEventHandler : IInboundEventHandler
             logger.LogWarning("Dropped an EnvelopeFlow {Kind} event without a matching channel endpoint.", inboundEvent.Kind);
             return;
         }
-        var actor = channels.ResolveWorker(endpoint.Scope);
+        var actor = workers.Resolve(endpoint.Scope);
         switch (inboundEvent.Kind)
         {
             case InboundEventKind.Message:
@@ -200,6 +200,8 @@ public sealed class EnvelopeFlowInboundEventHandler : IInboundEventHandler
                 throw new EnvelopeFlowReceiptPendingException();
             case DeliveryReportRejected { Reason: DeliveryReportRejection.Forbidden }:
                 throw new InvalidOperationException("The channel worker principal lacks conversation:ingest.");
+            case DeliveryReportRejected { Reason: DeliveryReportRejection.Conflict }:
+                throw new InvalidOperationException("The delivery update conflicted with concurrent updates; it will be retried.");
             case DeliveryReportRejected rejected:
                 logger.LogInformation("Dropped an EnvelopeFlow {Channel} delivery receipt: {Reason}.", kind, rejected.Reason);
                 return;

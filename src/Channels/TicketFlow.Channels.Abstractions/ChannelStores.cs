@@ -47,10 +47,11 @@ public sealed record StoredChannelEndpoint(TicketScope Scope, ChannelEndpoint En
 public sealed record ChannelConversationState
 {
     public ChannelConversationState(ConversationId conversation, InboxId inbox, ChannelKind channel, ChannelRecipient recipient, string? externalThreadId = null,
-        string? subject = null, DateTimeOffset? lastIncomingAt = null, string? lastIncomingExternalId = null)
+        string? subject = null, DateTimeOffset? lastIncomingAt = null, string? lastIncomingExternalId = null, ContactId? contact = null)
     {
-        if (conversation == default || inbox == default)
-            throw new ArgumentException("Conversation and inbox identifiers are required.");
+        if (conversation == default || inbox == default || contact == default(ContactId))
+            throw new ArgumentException("Conversation and inbox identifiers are required; the contact must be initialized when supplied.");
+        Contact = contact;
         if (!channel.IsInitialized)
             throw new ArgumentException("A channel kind is required.", nameof(channel));
         Conversation = conversation;
@@ -71,6 +72,9 @@ public sealed record ChannelConversationState
     public string? Subject { get; }
     public DateTimeOffset? LastIncomingAt { get; }
     public string? LastIncomingExternalId { get; }
+
+    /// <summary>The contact whose traffic this state tracks (thread lookups are per contact, so a shared channel thread keeps one conversation per speaker).</summary>
+    public ContactId? Contact { get; }
 
     /// <summary>UTC with microsecond precision (PostgreSQL <c>timestamptz</c>).</summary>
     public static DateTimeOffset Microseconds(DateTimeOffset value) => new(value.UtcTicks - value.UtcTicks % 10, TimeSpan.Zero);
@@ -182,8 +186,8 @@ public sealed record ChannelWriteNotFound
     public static ChannelWriteNotFound Instance { get; } = new();
 }
 
-/// <summary>The revision did not match, or a create found an existing record (<see cref="CurrentRevision"/>; <see langword="null"/> when absent).</summary>
-public sealed record ChannelWriteConflict(long? CurrentRevision);
+/// <summary>The revision did not match, an immutable field differed, or a create found an existing record at <see cref="CurrentRevision"/>.</summary>
+public sealed record ChannelWriteConflict(long CurrentRevision);
 
 public enum ChannelWriteRejection
 {
@@ -207,11 +211,19 @@ public union ChannelWriteResult<T>(ChannelWriteApplied<T>, ChannelWriteNotFound,
 /// </summary>
 public interface IChannelEndpointStore
 {
+    public const int MaximumPrefixMatches = 100;
+
     public const int MaximumEndpointsPerScope = 1000;
 
     Task<StoredChannelEndpoint?> GetAsync(TicketScope scope, ChannelKind kind, string configurationId, CancellationToken cancellationToken = default);
 
     Task<StoredChannelEndpoint?> FindByAddressAsync(AccessPartition partition, ChannelKind kind, string address, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Partition-wide: endpoints of <paramref name="kind"/> whose address starts with <paramref name="prefix"/> (ordinal), at most
+    /// <paramref name="limit"/> (1-100), ordered by address. Used to detect addresses nested under an account owned elsewhere.
+    /// </summary>
+    Task<IReadOnlyList<StoredChannelEndpoint>> ListByAddressPrefixAsync(AccessPartition partition, ChannelKind kind, string prefix, int limit, CancellationToken cancellationToken = default);
 
     Task<ChannelWriteResult<StoredChannelEndpoint>> CreateAsync(TicketScope scope, ChannelEndpoint endpoint, CancellationToken cancellationToken = default);
 
@@ -222,11 +234,18 @@ public interface IChannelEndpointStore
 
 /// <summary>
 /// Per-conversation channel state. Contract: scope-confined; <see cref="WriteAsync"/> creates (expected revision
-/// <see langword="null"/>, conflict when present) at revision 1 or compare-and-sets; the conversation, inbox and channel of a stored
-/// state never change (a write that changes them is a conflict).
+/// <see langword="null"/>, conflict when present) at revision 1 or compare-and-sets (not found when absent); the conversation, inbox
+/// and channel of a stored state never change (a write that changes them is a conflict). <see cref="FindByThreadAsync"/> returns the
+/// conversations whose state has exactly this inbox, channel, thread id and contact.
 /// </summary>
 public interface IChannelConversationStateStore
 {
+    public const int MaximumThreadMatches = 16;
+
+    /// <summary>At most <see cref="MaximumThreadMatches"/> conversations of <paramref name="contact"/> on this channel thread, in identifier order (descending).</summary>
+    Task<IReadOnlyList<ConversationId>> FindByThreadAsync(TicketScope scope, InboxId inbox, ChannelKind channel, string externalThreadId, ContactId contact,
+        CancellationToken cancellationToken = default);
+
     Task<StoredChannelConversationState?> GetAsync(TicketScope scope, ConversationId conversation, CancellationToken cancellationToken = default);
 
     Task<ChannelWriteResult<StoredChannelConversationState>> WriteAsync(TicketScope scope, ChannelConversationState state, long? expectedRevision, CancellationToken cancellationToken = default);
@@ -261,11 +280,30 @@ public interface IChannelThreadStore
 
 /// <summary>
 /// Dispatch records keyed by (scope, conversation, message). Contract: scope-confined; <see cref="WriteAsync"/> creates at revision 1
-/// (conflict when present) or compare-and-sets; the inbox and channel of a record never change.
+/// (conflict when present) or compare-and-sets (not found when absent); the inbox and channel of a record never change.
 /// </summary>
 public interface IChannelDispatchStore
 {
     Task<StoredChannelDispatch?> GetAsync(TicketScope scope, ConversationId conversation, MessageId message, CancellationToken cancellationToken = default);
 
     Task<ChannelWriteResult<StoredChannelDispatch>> WriteAsync(TicketScope scope, ChannelDispatch dispatch, long? expectedRevision, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Decides whether a scope may bind a provider address (an endpoint <see cref="ChannelEndpoint.Address"/>). Addresses route provider
+/// traffic for a whole partition, so binding one is a claim over a provider account, not a workspace setting. Applications should
+/// supply a validator that checks provider-account ownership; the default (<c>CrossScopeAddressOwnershipValidator</c>) denies any
+/// address that nests under, or encloses, an address bound by another scope.
+/// </summary>
+public interface IChannelAddressOwnershipValidator
+{
+    /// <summary>True when <paramref name="scope"/> may bind <paramref name="endpoint"/>'s address (which is non-null).</summary>
+    Task<bool> MayBindAsync(PrincipalRef actor, TicketScope scope, ChannelEndpoint endpoint, CancellationToken cancellationToken = default);
+}
+
+/// <summary>Resolves the grant-holding principal channel workers act as in a scope (an API client or user; never automation or system).</summary>
+public interface IChannelWorkerPrincipalResolver
+{
+    /// <summary>Throws <see cref="InvalidOperationException"/> when no worker is configured for the scope.</summary>
+    PrincipalRef Resolve(TicketScope scope);
 }

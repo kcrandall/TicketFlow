@@ -26,14 +26,14 @@ depend on scoped application stores. `TicketFlowBuilder` lives in `TicketFlow.Co
 - **Permission**: `Permission` is a validated `resource:action` value (each segment 1-64 characters of `a-z 0-9 - _ .`,
   starting with a letter). `default(Permission)` is uninitialized and never granted. Built-in permissions live in
   `AccessPermissions` (`conversation:read|reply|assign|resolve|delete`, `note:read|write`,
-  `contact:read|update|export|merge|reveal`, `report:view`, `inbox:manage`, `team:manage`, `workspace:manage`,
-  `access:manage`, `access:manage-tenant`, `access:audit-read`, `access:break-glass`).
+  `contact:read|update|export|merge|reveal`, `report:view`, `inbox:read|manage`, `team:read|manage`, `workspace:read|manage`,
+  `calendar:manage`, `access:manage`, `access:manage-tenant`, `access:audit-read`, `access:break-glass`).
 - **Catalog**: `PermissionCatalog` holds the built-ins plus feature registrations (`services.AddAccessPermissions(...)`).
   Registering an identical `PermissionDefinition` twice is idempotent; a conflicting definition throws, naming the first
   conflicting permission in ordinal order. Definitions flagged `IsSensitive` audit every decision. Permissions missing from the
   catalog are always denied (`AccessDenialReason.UnknownPermission`), even for Owners.
 - **Roles**: `BuiltInRoles` — Owner (every catalog permission, including feature permissions), Admin (every built-in permission
-  except `access:manage-tenant` and `workspace:manage`), Supervisor, Agent, LightAgent (conversation read plus notes), Viewer. Built-ins
+  except `access:manage-tenant` and `workspace:manage`), Supervisor, Agent, LightAgent (conversation read plus notes), Viewer. Every built-in role holds `workspace:read`, `inbox:read` and `team:read`. Built-ins
   are immutable and resolved without a store; stores reject writes to built-in IDs. Custom `AccessRole`s are workspace-scoped,
   bounded (512 permissions) and revisioned by `IAccessRoleStore`; they cannot reuse built-in IDs.
 - **Grant**: `AccessGrant` = `GrantId` + `AccessPartition` (tenant → project → environment → app) + `GrantSubject`

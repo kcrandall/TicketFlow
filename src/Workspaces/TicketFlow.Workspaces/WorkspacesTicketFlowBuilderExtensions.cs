@@ -1,0 +1,44 @@
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using TicketFlow.Access;
+using TicketFlow.Workspaces;
+
+namespace TicketFlow;
+
+public static class WorkspacesTicketFlowBuilderExtensions
+{
+    /// <summary>
+    /// Registers scoped <see cref="IWorkspaceSettingsService"/>, <see cref="IInboxService"/>, <see cref="ITeamService"/>,
+    /// <see cref="IBusinessCalendarService"/> and <see cref="ITeamMembershipResolver"/>, and the workspace permissions (identical to
+    /// the built-in Access definitions, so registration is idempotent). Uses TryAdd, so application registrations win. Requires
+    /// <c>AddAccessControl()</c> plus access stores, and selects no workspace store: call <see cref="AddInMemoryWorkspaceStores"/> for
+    /// development or register durable stores.
+    /// </summary>
+    public static TicketFlowBuilder AddWorkspaces(this TicketFlowBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        var services = builder.Services;
+        services.AddAccessPermissions(WorkspacePermissions.Definitions);
+        services.TryAddScoped<IWorkspaceSettingsService, WorkspaceSettingsService>();
+        services.TryAddScoped<IInboxService, InboxService>();
+        services.TryAddScoped<ITeamService, TeamService>();
+        services.TryAddScoped<IBusinessCalendarService, BusinessCalendarService>();
+        services.TryAddScoped<ITeamMembershipResolver, StoreTeamMembershipResolver>();
+        return builder;
+    }
+
+    /// <summary>
+    /// Registers development-only, non-durable in-memory workspace settings, inbox, team and calendar stores with TryAdd. State is
+    /// lost on restart and never shared between processes.
+    /// </summary>
+    public static TicketFlowBuilder AddInMemoryWorkspaceStores(this TicketFlowBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        var services = builder.Services;
+        services.TryAddSingleton<IWorkspaceSettingsStore, InMemoryWorkspaceSettingsStore>();
+        services.TryAddSingleton<IInboxStore, InMemoryInboxStore>();
+        services.TryAddSingleton<ITeamStore, InMemoryTeamStore>();
+        services.TryAddSingleton<IBusinessCalendarStore, InMemoryBusinessCalendarStore>();
+        return builder;
+    }
+}

@@ -1,0 +1,147 @@
+using System.Security.Cryptography;
+using System.Text.Json;
+using TicketFlow.Access;
+using TicketFlow.Core;
+
+namespace TicketFlow.Workspaces;
+
+/// <summary>
+/// Authorized workspace settings for the actor's own workspace (<see cref="PrincipalRef.Scope"/>). Reads need
+/// <c>workspace:read</c>; creates and updates need <c>workspace:manage</c>. Time zones must resolve on the host.
+/// </summary>
+public interface IWorkspaceSettingsService
+{
+    Task<WorkspaceResult<StoredWorkspaceSettings>> GetAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<StoredWorkspaceSettings>> CreateAsync(PrincipalRef actor, WorkspaceSettings settings, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<StoredWorkspaceSettings>> UpdateAsync(PrincipalRef actor, WorkspaceSettings settings, long expectedRevision, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Authorized inbox administration in the actor's workspace. Reads need <c>inbox:read</c> on the inbox; lists are filtered by the
+/// access query planner. Create and delete need workspace-level <c>inbox:manage</c>; update accepts an inbox-scoped grant.
+/// Inbox agents are inbox-scoped Access grants written through <see cref="IAccessAdministrator"/>, not a parallel list.
+/// </summary>
+public interface IInboxService
+{
+    Task<WorkspaceResult<StoredInbox>> GetAsync(PrincipalRef actor, InboxId id, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<WorkspacePage<StoredInbox>>> ListAsync(PrincipalRef actor, WorkspacePageRequest? page = null, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<StoredInbox>> CreateAsync(PrincipalRef actor, Inbox inbox, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<StoredInbox>> UpdateAsync(PrincipalRef actor, Inbox inbox, long expectedRevision, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<StoredInbox>> DeleteAsync(PrincipalRef actor, InboxId id, long expectedRevision, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Grants <paramref name="agent"/> <paramref name="role"/> (default <see cref="BuiltInRoles.Agent"/>) on the inbox. Requires
+    /// <c>inbox:manage</c> on the inbox plus everything <see cref="IAccessAdministrator.CreateGrantAsync"/> requires (including
+    /// <c>access:manage</c> on the inbox and no escalation). The grant identifier is <see cref="InboxAgentGrants.For"/>, so adding
+    /// twice is a <see cref="WorkspaceRefusal.Conflict"/>.
+    /// </summary>
+    Task<WorkspaceResult<StoredAccessGrant>> AddAgentAsync(PrincipalRef actor, InboxId inbox, UserId agent, RoleId? role = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Revokes the grant created by <see cref="AddAgentAsync"/> for the same inbox, agent and role.</summary>
+    Task<WorkspaceResult<StoredAccessGrant>> RemoveAgentAsync(PrincipalRef actor, InboxId inbox, UserId agent, RoleId? role = null, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Authorized team administration in the actor's workspace. Reads need <c>team:read</c> on the team; lists are filtered by the access
+/// query planner. Create and delete need workspace-level <c>team:manage</c>; updates and membership changes accept a team-scoped grant.
+/// Adding members to a team that holds allow grants additionally requires the actor to hold every permission those grants confer on
+/// their targets, so team membership can never escalate privileges beyond the actor's own.
+/// </summary>
+public interface ITeamService
+{
+    Task<WorkspaceResult<StoredTeam>> GetAsync(PrincipalRef actor, TeamId id, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<WorkspacePage<TeamSummary>>> ListAsync(PrincipalRef actor, WorkspacePageRequest? page = null, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<StoredTeam>> CreateAsync(PrincipalRef actor, Team team, CancellationToken cancellationToken = default);
+
+    /// <summary>Replaces name, description and members together (revision-fenced).</summary>
+    Task<WorkspaceResult<StoredTeam>> UpdateAsync(PrincipalRef actor, Team team, long expectedRevision, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<StoredTeam>> DeleteAsync(PrincipalRef actor, TeamId id, long expectedRevision, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<StoredTeam>> AddMemberAsync(PrincipalRef actor, TeamId team, UserId member, long expectedRevision, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<StoredTeam>> RemoveMemberAsync(PrincipalRef actor, TeamId team, UserId member, long expectedRevision, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Authorized business calendars in the actor's workspace. Reads need <c>workspace:read</c>; writes need <c>calendar:manage</c>.
+/// Time zones must resolve on the host.
+/// </summary>
+public interface IBusinessCalendarService
+{
+    Task<WorkspaceResult<StoredBusinessCalendar>> GetAsync(PrincipalRef actor, BusinessCalendarId id, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<IReadOnlyList<StoredBusinessCalendar>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<StoredBusinessCalendar>> CreateAsync(PrincipalRef actor, BusinessCalendar calendar, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<StoredBusinessCalendar>> UpdateAsync(PrincipalRef actor, BusinessCalendar calendar, long expectedRevision, CancellationToken cancellationToken = default);
+
+    Task<WorkspaceResult<StoredBusinessCalendar>> DeleteAsync(PrincipalRef actor, BusinessCalendarId id, long expectedRevision, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Resolves a user's current team memberships within one workspace, for building <see cref="UserPrincipal"/> team snapshots. This
+/// is an unauthorized, trusted path used while resolving the authenticated principal itself; never expose it to end users directly.
+/// </summary>
+public interface ITeamMembershipResolver
+{
+    /// <summary>Teams in <paramref name="scope"/> containing <paramref name="user"/>, ordered by identifier, at most <see cref="WorkspaceLimits.MaximumTeamsPerUser"/>.</summary>
+    Task<IReadOnlyList<TeamId>> GetTeamsAsync(TicketScope scope, UserId user, CancellationToken cancellationToken = default);
+}
+
+public static class TeamMembershipResolverExtensions
+{
+    /// <summary>
+    /// Builds a <see cref="UserPrincipal"/> for an application-authenticated <paramref name="user"/> with the current team snapshot,
+    /// so team-subject grants and team conditions apply. The snapshot does not change when membership later changes.
+    /// </summary>
+    public static async Task<UserPrincipal> ResolveUserPrincipalAsync(this ITeamMembershipResolver resolver, TicketScope scope, UserId user, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(resolver);
+        ArgumentNullException.ThrowIfNull(scope);
+        if (user == default)
+            throw new ArgumentException("A user identifier is required.", nameof(user));
+        var teams = await resolver.GetTeamsAsync(scope, user, cancellationToken).ConfigureAwait(false);
+        return new UserPrincipal(scope, user, teams);
+    }
+}
+
+/// <summary>Deterministic grant identifiers for inbox agent membership.</summary>
+public static class InboxAgentGrants
+{
+    /// <summary>Identifier prefix of inbox agent grants.</summary>
+    public const string Prefix = "tf-inbox-agent-v1-";
+
+    /// <summary>
+    /// <c>tf-inbox-agent-v1-</c> + lowercase hex SHA-256 of the JSON array [workspace, inbox, agent, role]: fixed length, unique per
+    /// workspace/inbox/agent/role within an <see cref="AccessPartition"/>, and free of the raw identifiers.
+    /// </summary>
+    public static GrantId For(WorkspaceId workspace, InboxId inbox, UserId agent, RoleId role)
+    {
+        if (workspace == default || inbox == default || agent == default || !role.IsInitialized)
+            throw new ArgumentException("Workspace, inbox, agent and role identifiers are required.");
+        var framed = JsonSerializer.SerializeToUtf8Bytes(new[] { workspace.Value, inbox.Value, agent.Value, role.Value });
+        return new GrantId(Prefix + Convert.ToHexStringLower(SHA256.HashData(framed)));
+    }
+
+    /// <summary>The grant <see cref="IInboxService.AddAgentAsync"/> creates.</summary>
+    public static AccessGrant Create(TicketScope scope, InboxId inbox, UserId agent, RoleId role)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        return new AccessGrant(For(scope.WorkspaceId, inbox, agent, role), AccessPartition.From(scope), agent, role, new InboxGrantScope(scope.WorkspaceId, inbox));
+    }
+
+    /// <summary>True when <paramref name="grant"/> has exactly the shape <see cref="Create"/> produces.</summary>
+    public static bool Matches(AccessGrant grant, TicketScope scope, InboxId inbox, UserId agent, RoleId role) =>
+        grant is not null && grant == Create(scope, inbox, agent, role);
+
+}

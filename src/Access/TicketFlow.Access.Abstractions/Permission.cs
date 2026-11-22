@@ -106,9 +106,13 @@ public static class AccessPermissions
     public static Permission ContactMerge { get; } = new("contact:merge");
     public static Permission ContactReveal { get; } = new("contact:reveal");
     public static Permission ReportView { get; } = new("report:view");
+    public static Permission InboxRead { get; } = new("inbox:read");
     public static Permission InboxManage { get; } = new("inbox:manage");
+    public static Permission TeamRead { get; } = new("team:read");
     public static Permission TeamManage { get; } = new("team:manage");
+    public static Permission WorkspaceRead { get; } = new("workspace:read");
     public static Permission WorkspaceManage { get; } = new("workspace:manage");
+    public static Permission CalendarManage { get; } = new("calendar:manage");
     public static Permission AccessManage { get; } = new("access:manage");
     public static Permission AccessManageTenant { get; } = new("access:manage-tenant");
     public static Permission AccessAuditRead { get; } = new("access:audit-read");
@@ -121,6 +125,7 @@ public static class AccessPermissions
         new(AccessBreakGlass, true, "Activate a time-bound break-glass grant."),
         new(AccessManage, true, "Manage workspace roles, grants and field policies."),
         new(AccessManageTenant, true, "Manage tenant-wide grants."),
+        new(CalendarManage, false, "Manage business calendars."),
         new(ContactExport, true, "Export contacts."),
         new(ContactMerge, true, "Merge or unmerge contacts."),
         new(ContactRead, false, "Read contacts."),
@@ -132,10 +137,13 @@ public static class AccessPermissions
         new(ConversationReply, false, "Reply to conversations."),
         new(ConversationResolve, false, "Resolve or reopen conversations."),
         new(InboxManage, false, "Manage inboxes."),
+        new(InboxRead, false, "Read inbox definitions."),
         new(NoteRead, false, "Read private notes."),
         new(NoteWrite, false, "Write private notes."),
         new(ReportView, false, "View reports."),
         new(TeamManage, false, "Manage teams and membership."),
+        new(TeamRead, false, "Read teams and membership."),
         new(WorkspaceManage, true, "Manage workspace settings."),
+        new(WorkspaceRead, false, "Read workspace settings and business calendars."),
     ];
 }

@@ -6,3 +6,9 @@ TicketFlow.Stores.Migrations.Postgres	src/Stores/TicketFlow.Stores.Migrations.Po
 TicketFlow.Access.Abstractions	src/Access/TicketFlow.Access.Abstractions/TicketFlow.Access.Abstractions.csproj
 TicketFlow.Access	src/Access/TicketFlow.Access/TicketFlow.Access.csproj
 TicketFlow.Access.Stores.Postgres	src/Access/TicketFlow.Access.Stores.Postgres/TicketFlow.Access.Stores.Postgres.csproj
+TicketFlow.Workspaces.Abstractions	src/Workspaces/TicketFlow.Workspaces.Abstractions/TicketFlow.Workspaces.Abstractions.csproj
+TicketFlow.Workspaces	src/Workspaces/TicketFlow.Workspaces/TicketFlow.Workspaces.csproj
+TicketFlow.Workspaces.Stores.Postgres	src/Workspaces/TicketFlow.Workspaces.Stores.Postgres/TicketFlow.Workspaces.Stores.Postgres.csproj
+TicketFlow.Contacts.Abstractions	src/Contacts/TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj
+TicketFlow.Contacts	src/Contacts/TicketFlow.Contacts/TicketFlow.Contacts.csproj
+TicketFlow.Contacts.Stores.Postgres	src/Contacts/TicketFlow.Contacts.Stores.Postgres/TicketFlow.Contacts.Stores.Postgres.csproj

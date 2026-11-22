@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Contact service for TicketFlow: access-checked commands, inbound resolve-or-create, masking and reveal, filtered search, audited export, merge/unmerge and development in-memory stores.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

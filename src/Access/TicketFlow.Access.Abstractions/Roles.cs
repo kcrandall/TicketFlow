@@ -95,11 +95,15 @@ public sealed record AccessRole
 /// <summary>The immutable built-in roles.</summary>
 public static class BuiltInRoles
 {
+    /// <summary>Read access to the support structure (workspace settings, calendars, inboxes, teams) held by every built-in role.</summary>
+    private static readonly Permission[] StructureReadPermissions =
+        [AccessPermissions.WorkspaceRead, AccessPermissions.InboxRead, AccessPermissions.TeamRead];
+
     private static readonly Permission[] AgentPermissions =
     [
         AccessPermissions.ConversationRead, AccessPermissions.ConversationReply, AccessPermissions.ConversationAssign,
         AccessPermissions.ConversationResolve, AccessPermissions.NoteRead, AccessPermissions.NoteWrite,
-        AccessPermissions.ContactRead, AccessPermissions.ContactUpdate,
+        AccessPermissions.ContactRead, AccessPermissions.ContactUpdate, .. StructureReadPermissions,
     ];
 
     /// <summary>Every permission registered in the catalog, including feature permissions.</summary>
@@ -120,10 +124,10 @@ public static class BuiltInRoles
 
     /// <summary>Reads conversations and works with private notes only.</summary>
     public static AccessRole LightAgent { get; } = AccessRole.BuiltIn("light-agent", "Light agent",
-        [AccessPermissions.ConversationRead, AccessPermissions.NoteRead, AccessPermissions.NoteWrite]);
+        [AccessPermissions.ConversationRead, AccessPermissions.NoteRead, AccessPermissions.NoteWrite, .. StructureReadPermissions]);
 
     public static AccessRole Viewer { get; } = AccessRole.BuiltIn("viewer", "Viewer",
-        [AccessPermissions.ConversationRead, AccessPermissions.NoteRead, AccessPermissions.ContactRead, AccessPermissions.ReportView]);
+        [AccessPermissions.ConversationRead, AccessPermissions.NoteRead, AccessPermissions.ContactRead, AccessPermissions.ReportView, .. StructureReadPermissions]);
 
     public static IReadOnlyList<AccessRole> All { get; } = [Owner, Admin, Supervisor, Agent, LightAgent, Viewer];
 

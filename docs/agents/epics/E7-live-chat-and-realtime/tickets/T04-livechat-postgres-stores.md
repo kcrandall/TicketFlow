@@ -37,4 +37,7 @@ Implemented `TicketFlow.Channels.LiveChat.Stores.Postgres` (`PostgresLiveChatSto
   `TICKETFLOW_TEST_POSTGRES="Host=127.0.0.1;Port=55707;Username=postgres;Password=pw;Database=postgres" TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/Channels/TicketFlow.Channels.LiveChat.Stores.Postgres.Tests -c Release`
   — 4 passed, 0 failed (widget and session contracts, concurrent links and CAS, token-hash-only storage and idempotent migrations).
 
+Review fixes (2026-11-22): rerun against an isolated `postgres:18` on port 55717 with `TICKETFLOW_REQUIRE_POSTGRES=1` — 4 passed
+(`tests/Channels/TicketFlow.Channels.Stores.Postgres.Tests` 6 passed).
+
 Post-ticket parallel reviews (docs/agents/prompts/post-ticket-*.md) have not been run yet.

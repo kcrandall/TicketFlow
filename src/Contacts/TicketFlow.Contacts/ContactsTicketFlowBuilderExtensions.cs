@@ -8,7 +8,8 @@ public static class ContactsTicketFlowBuilderExtensions
 {
     /// <summary>
     /// Registers the contact feature: its permissions (<see cref="ContactPermissions.Definitions"/>), options and scoped
-    /// <see cref="IContactService"/> and <see cref="IContactAttributeDefinitionService"/>. Requires the access engine
+    /// <see cref="IContactService"/>, <see cref="IContactAttributeDefinitionService"/> and <see cref="IContactLinkingService"/> (which needs an
+    /// <see cref="IContactLinkingStore"/>). Requires the access engine
     /// (<c>AddAccessControl()</c>) and a store; uses TryAdd so application registrations win. Register
     /// <see cref="IContactChangeObserver"/> implementations to follow merges and other changes in process.
     /// </summary>
@@ -26,12 +27,13 @@ public static class ContactsTicketFlowBuilderExtensions
         }
         services.TryAddScoped<IContactService, ContactService>();
         services.TryAddScoped<IContactAttributeDefinitionService, ContactAttributeDefinitionService>();
+        services.TryAddScoped<IContactLinkingService, ContactLinkingService>();
         return builder;
     }
 
     /// <summary>
     /// Registers the development-only in-memory contact stores (process-local, bounded, not durable) as <see cref="IContactStore"/>,
-    /// <see cref="IContactAuditSink"/> and <see cref="IContactAttributeDefinitionStore"/>.
+    /// <see cref="IContactAuditSink"/>, <see cref="IContactAttributeDefinitionStore"/> and <see cref="IContactLinkingStore"/>.
     /// </summary>
     public static TicketFlowBuilder AddInMemoryContactStores(this TicketFlowBuilder builder)
     {
@@ -41,6 +43,7 @@ public static class ContactsTicketFlowBuilderExtensions
         services.TryAddSingleton<IContactStore>(provider => provider.GetRequiredService<InMemoryContactStore>());
         services.TryAddSingleton<IContactAuditSink>(provider => provider.GetRequiredService<InMemoryContactStore>());
         services.TryAddSingleton<IContactAttributeDefinitionStore, InMemoryContactAttributeDefinitionStore>();
+        services.TryAddSingleton<IContactLinkingStore>(provider => new InMemoryContactLinkingStore(provider.GetRequiredService<IContactStore>()));
         return builder;
     }
 

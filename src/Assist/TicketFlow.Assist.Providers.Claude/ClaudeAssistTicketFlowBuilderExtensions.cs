@@ -2,10 +2,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
-using TicketFlow.Assist;
-using TicketFlow.Assist.Providers.Claude;
 
-namespace TicketFlow;
+namespace TicketFlow.Assist.Providers.Claude;
 
 public static class ClaudeAssistTicketFlowBuilderExtensions
 {

@@ -15,6 +15,9 @@ The TicketFlow contact service.
   grant-holding principal (for example an API client with `contact:read` and `contact:create`).
 - Merge/unmerge (`ContactMerger` documents the conflict rules) are single atomic store batches with a merge record, audit event
   (`IContactAuditSink`) and outbox change events; `IContactChangeObserver`s are notified after commit.
+- `ContactLinkingService` (`IContactLinkingService`): link verified external accounts (merging anonymous/email-only contacts into
+  the account contact through `MergeAsync`), unlink, the `ResolveCustomerAsync` login helper, the workspace linking policy and
+  link suggestions (list/accept/reject). `InMemoryContactLinkingStore` is the development store.
 - Export requires `contact:export` and a justification, is audited before streaming, and is bounded by
   `ContactsOptions.MaximumExportContacts`.
 

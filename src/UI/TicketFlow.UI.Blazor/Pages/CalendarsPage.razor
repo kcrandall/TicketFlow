@@ -1,0 +1,91 @@
+@inherits UiPageBase
+@using TicketFlow.Workspaces
+
+<PageHeader Title="Business hours" Description="Calendars used by SLA business-time clocks, reports and automation conditions." />
+
+<div class="tf-grid tf-grid--2">
+    @foreach (var stored in calendars)
+    {
+        var calendar = stored.Calendar;
+        <div class="tf-card">
+            <div class="tf-card__header">
+                <div><div class="tf-card__title">@calendar.Name</div><div class="tf-card__description">@calendar.TimeZoneId · @calendar.Id.Value</div></div>
+                @if (Session.Can(AccessPermissions.CalendarManage))
+                {
+                    <TfForm Action="calendar.delete" Revision="stored.Revision" Class="tf-inline-form">
+                        <input type="hidden" name="id" value="@calendar.Id.Value" />
+                        <button class="tf-icon-button" type="submit" title="Delete calendar"><LucideIcon Name="trash-2" Size="14" /></button>
+                    </TfForm>
+                }
+            </div>
+            <div class="tf-card__content tf-stack tf-stack--sm">
+                @foreach (var day in Days)
+                {
+                    var hours = calendar.WeeklyHours.Where(entry => entry.Day == day).Select(entry => entry.Hours).ToList();
+                    <div class="tf-row" style="flex-wrap:nowrap">
+                        <span style="width:44px" class="tf-small tf-muted">@day.ToString()[..3]</span>
+                        <div style="position:relative;flex:1;height:10px;border-radius:999px;background:var(--muted)">
+                            @foreach (var span in hours)
+                            {
+                                <span style="position:absolute;top:0;bottom:0;border-radius:999px;background:var(--chart-2);left:@Pct(span.Start);width:@Pct(span.End - span.Start)" title="@Format(span)"></span>
+                            }
+                        </div>
+                        <span style="width:110px;text-align:right" class="tf-small">@(hours.Count == 0 ? "Closed" : string.Join(", ", hours.Select(Format)))</span>
+                    </div>
+                }
+                @if (calendar.Overrides.Count > 0)
+                {
+                    <div class="tf-divider" style="margin:6px 0"></div>
+                    @foreach (var entry in calendar.Overrides.Take(5))
+                    {
+                        <div class="tf-row tf-row--between tf-small"><span>@entry.Date.ToString("MMM d, yyyy", CultureInfo.InvariantCulture) · @(entry.Name ?? "Override")</span><span class="tf-muted">@(entry.Hours.Count == 0 ? "Closed" : string.Join(", ", entry.Hours.Select(Format)))</span></div>
+                    }
+                }
+            </div>
+        </div>
+    }
+</div>
+@if (calendars.Count == 0)
+{
+    <div class="tf-card"><EmptyState Icon="calendar-clock" Title="No calendars" Message="Inboxes without a calendar are treated as always open." /></div>
+}
+
+@if (Session.Can(AccessPermissions.CalendarManage))
+{
+    <div class="tf-card">
+        <div class="tf-card__header"><div><div class="tf-card__title">New calendar</div><div class="tf-card__description">Same hours on every selected weekday. Use the API for split shifts and holiday overrides.</div></div></div>
+        <div class="tf-card__content">
+            <TfForm Action="calendar.create" Class="tf-form">
+                <div class="tf-form-grid">
+                    <div class="tf-field"><label class="tf-label" for="tf-cal-name">Name</label><input id="tf-cal-name" name="name" class="tf-input" required maxlength="128" value="@Session.FormValue("name", null)" /></div>
+                    <div class="tf-field"><label class="tf-label" for="tf-cal-tz">Time zone</label><input id="tf-cal-tz" name="timezone" class="tf-input" required maxlength="64" value="@Session.FormValue("timezone", "UTC")" /></div>
+                    <div class="tf-field"><label class="tf-label" for="tf-cal-start">Opens</label><input id="tf-cal-start" name="start" type="time" class="tf-input" value="@Session.FormValue("start", "09:00")" /></div>
+                    <div class="tf-field"><label class="tf-label" for="tf-cal-end">Closes</label><input id="tf-cal-end" name="end" type="time" class="tf-input" value="@Session.FormValue("end", "17:00")" /></div>
+                </div>
+                <div class="tf-row">
+                    @foreach (var day in Days)
+                    {
+                        <label class="tf-check"><input type="checkbox" name="days" value="@((int)day)" checked="@(day is not (DayOfWeek.Saturday or DayOfWeek.Sunday))" />@day.ToString()[..3]</label>
+                    }
+                </div>
+                <div class="tf-form-actions"><BbButton Type="ButtonType.Submit"><LucideIcon Name="plus" Size="14" />Create calendar</BbButton></div>
+            </TfForm>
+        </div>
+    </div>
+}
+
+@code {
+    private static readonly DayOfWeek[] Days = [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday, DayOfWeek.Saturday, DayOfWeek.Sunday];
+    private IReadOnlyList<StoredBusinessCalendar> calendars = [];
+
+    private static string Pct(TimeSpan value) => (value.TotalMinutes / 1440 * 100).ToString("0.##", CultureInfo.InvariantCulture) + "%";
+
+    private static string Format(BusinessHours hours) => hours.End == BusinessHours.EndOfDay && hours.Start == TimeSpan.Zero ? "24h"
+        : $"{hours.Start:hh\\:mm}–{(hours.End == BusinessHours.EndOfDay ? "24:00" : hours.End.ToString("hh\\:mm", CultureInfo.InvariantCulture))}";
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<IBusinessCalendarService>() is { } service && await service.ListAsync(Actor, Aborted) is WorkspaceSucceeded<IReadOnlyList<StoredBusinessCalendar>> list)
+            calendars = list.Value;
+    }
+}

@@ -1,0 +1,38 @@
+@* Renders a form outcome (success, forbidden, conflict, validation) as a shadcn alert. *@
+<div class="tf-alert tf-alert--@Variant" role="@(Outcome.Succeeded ? "status" : "alert")" data-outcome="@Outcome.Kind.ToString().ToLowerInvariant()">
+    <LucideIcon Name="@Icon" Size="16" Class="tf-alert__icon" />
+    <div class="tf-alert__body">
+        <div class="tf-alert__title">@Outcome.Title</div>
+        @if (Outcome.Messages.Count > 0)
+        {
+            <ul class="tf-alert__messages">
+                @foreach (var message in Outcome.Messages)
+                {
+                    <li>@message</li>
+                }
+            </ul>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public UiOutcome Outcome { get; set; } = default!;
+
+    private string Variant => Outcome.Kind switch
+    {
+        UiOutcomeKind.Success => "success",
+        UiOutcomeKind.Info => "info",
+        UiOutcomeKind.Conflict or UiOutcomeKind.Rejected => "warning",
+        _ => "destructive",
+    };
+
+    private string Icon => Outcome.Kind switch
+    {
+        UiOutcomeKind.Success => "circle-check",
+        UiOutcomeKind.Info => "info",
+        UiOutcomeKind.Forbidden => "shield-x",
+        UiOutcomeKind.Conflict => "git-compare-arrows",
+        UiOutcomeKind.NotFound => "search-x",
+        _ => "circle-alert",
+    };
+}

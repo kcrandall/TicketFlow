@@ -1,0 +1,89 @@
+@* Server-rendered SVG area/line chart (no JavaScript). Series colors come from the theme's chart tokens; each point carries a native tooltip. *@
+<div class="tf-chart" role="img" aria-label="@AriaLabel">
+    @if (Series.Count > 1)
+    {
+        <div class="tf-chart__legend">
+            @foreach (var (series, index) in Series.Select((series, index) => (series, index)))
+            {
+                <span class="tf-chart__key"><span class="tf-chart__swatch" style="background:var(--chart-@(index + 1))"></span>@series.Name</span>
+            }
+        </div>
+    }
+    <svg viewBox="0 0 @Width @Height" preserveAspectRatio="none" class="tf-chart__svg" style="height:@(Height)px">
+        <defs>
+            @for (var index = 0; index < Series.Count; index++)
+            {
+                <linearGradient id="@($"{Id}-fill-{index}")" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stop-color="var(--chart-@(index + 1))" stop-opacity="0.28" />
+                    <stop offset="95%" stop-color="var(--chart-@(index + 1))" stop-opacity="0" />
+                </linearGradient>
+            }
+        </defs>
+        @for (var line = 0; line <= 3; line++)
+        {
+            var y = Top + (PlotHeight * line / 3.0);
+            <line x1="0" x2="@Width" y1="@F(y)" y2="@F(y)" class="tf-chart__grid" />
+        }
+        @for (var index = Series.Count - 1; index >= 0; index--)
+        {
+            var points = Points(Series[index].Values);
+            if (points.Count == 0)
+                continue;
+            <path d="@Area(points)" fill="url(#@($"{Id}-fill-{index}"))" />
+            <path d="@Line(points)" fill="none" stroke="var(--chart-@(index + 1))" stroke-width="2" vector-effect="non-scaling-stroke" />
+        }
+        @for (var bucket = 0; bucket < Labels.Count; bucket++)
+        {
+            var x = X(bucket);
+            <rect x="@F(x - Step / 2)" y="0" width="@F(Step)" height="@Height" class="tf-chart__hit">
+                <title>@Labels[bucket]: @string.Join(", ", Series.Select(series => $"{series.Name} {(bucket < series.Values.Count ? series.Values[bucket] : 0)}"))</title>
+            </rect>
+        }
+    </svg>
+    <div class="tf-chart__axis">
+        @for (var bucket = 0; bucket < Labels.Count; bucket++)
+        {
+            <span class="@(bucket % LabelEvery == 0 ? null : "is-hidden")">@Labels[bucket]</span>
+        }
+    </div>
+</div>
+
+@code {
+    public sealed record ChartSeries(string Name, IReadOnlyList<double> Values);
+
+    [Parameter, EditorRequired] public IReadOnlyList<string> Labels { get; set; } = [];
+    [Parameter, EditorRequired] public IReadOnlyList<ChartSeries> Series { get; set; } = [];
+    [Parameter] public int Height { get; set; } = 240;
+    [Parameter] public string AriaLabel { get; set; } = "Chart";
+    [Parameter] public string Id { get; set; } = "tf-area";
+
+    private const double Width = 1000;
+    private const double Top = 8;
+    private double PlotHeight => Height - Top - 4;
+    private double Max => Math.Max(1, Series.SelectMany(series => series.Values).DefaultIfEmpty(0).Max() * 1.15);
+    private double Step => Labels.Count > 1 ? Width / (Labels.Count - 1) : Width;
+    private int LabelEvery => Math.Max(1, (int)Math.Ceiling(Labels.Count / 8.0));
+
+    private double X(int index) => Labels.Count > 1 ? index * Width / (Labels.Count - 1) : Width / 2;
+
+    private List<(double X, double Y)> Points(IReadOnlyList<double> values) =>
+        [.. values.Take(Labels.Count).Select((value, index) => (X(index), Top + PlotHeight - (value / Max * PlotHeight)))];
+
+    private static string F(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
+
+    private string Line(List<(double X, double Y)> points)
+    {
+        var path = new System.Text.StringBuilder($"M{F(points[0].X)},{F(points[0].Y)}");
+        for (var index = 1; index < points.Count; index++)
+        {
+            var (x0, y0) = points[index - 1];
+            var (x1, y1) = points[index];
+            var mid = (x0 + x1) / 2;
+            path.Append($" C{F(mid)},{F(y0)} {F(mid)},{F(y1)} {F(x1)},{F(y1)}");
+        }
+        return path.ToString();
+    }
+
+    private string Area(List<(double X, double Y)> points) =>
+        $"{Line(points)} L{F(points[^1].X)},{F(Height)} L{F(points[0].X)},{F(Height)} Z";
+}

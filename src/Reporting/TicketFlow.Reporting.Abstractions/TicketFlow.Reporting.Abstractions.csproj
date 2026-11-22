@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Support reporting contracts for TicketFlow: immutable report facts and metrics, 15-minute rollup cells, time-zone buckets, histogram percentiles, Access-filtered report queries, permissions and store contracts.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

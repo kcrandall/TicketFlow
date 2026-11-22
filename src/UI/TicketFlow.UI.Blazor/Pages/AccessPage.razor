@@ -1,0 +1,66 @@
+@inherits UiPageBase
+
+<PageHeader Title="Access" Description="Roles bundle permissions; grants give users, teams and API clients a role on the workspace, a team or an inbox. Deny always wins.">
+    <Actions><BbButton Href="@Url("access/roles/new")" Size="ButtonSize.Small"><LucideIcon Name="plus" Size="14" />New role</BbButton></Actions>
+</PageHeader>
+<AccessTabs Active="roles" />
+
+<div class="tf-card">
+    <div class="tf-table-wrap">
+        <table class="tf-table">
+            <thead><tr><th>Role</th><th>Type</th><th>Permissions</th><th class="tf-num">Members</th><th></th></tr></thead>
+            <tbody>
+                @foreach (var role in roles)
+                {
+                    <tr>
+                        <td><a class="tf-row-link" href="@Url($"access/roles/{role.Role.Id.Value}")">@role.Role.Name</a><div class="tf-list__meta tf-mono">@role.Role.Id.Value</div></td>
+                        <td>@if (role.BuiltIn) { <span class="tf-badge tf-badge--muted"><LucideIcon Name="lock" Size="12" />Built-in</span> } else { <span class="tf-badge tf-badge--info">Custom</span> }</td>
+                        <td style="max-width:520px">
+                            <div class="tf-row" style="gap:4px">
+                                @if (role.BuiltIn && role.Role.Id == BuiltInRoles.Owner.Id)
+                                {
+                                    <span class="tf-badge tf-badge--info">Every catalog permission</span>
+                                }
+                                @foreach (var permission in role.Role.Permissions.OrderBy(permission => permission.Value, StringComparer.Ordinal).Take(6))
+                                {
+                                    <span class="tf-code">@permission.Value</span>
+                                }
+                                @if (role.Role.Permissions.Count > 6)
+                                {
+                                    <span class="tf-small tf-muted">+@(role.Role.Permissions.Count - 6) more</span>
+                                }
+                            </div>
+                        </td>
+                        <td class="tf-num">@members.GetValueOrDefault(role.Role.Id.Value)</td>
+                        <td class="tf-num"><a class="tf-button tf-button--ghost tf-button--xs" href="@Url($"access/roles/{role.Role.Id.Value}")">@(role.BuiltIn ? "View" : "Edit")</a></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="tf-alert tf-alert--info">
+    <LucideIcon Name="scroll-text" Size="16" Class="tf-alert__icon" />
+    <div class="tf-alert__body">
+        <div class="tf-alert__title">Audit</div>
+        <div class="tf-alert__messages" style="list-style:none;padding:0">Every administrative change, reveal, break-glass activation and sensitive decision is recorded by the registered <span class="tf-code">IAccessAuditSink</span> — never with message bodies or masked values. Browse it in your audit store.</div>
+    </div>
+</div>
+
+@code {
+    private sealed record RoleRow(AccessRole Role, bool BuiltIn, long? Revision);
+
+    private readonly List<RoleRow> roles = [];
+    private readonly Dictionary<string, int> members = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        roles.AddRange(BuiltInRoles.All.Select(role => new RoleRow(role, true, null)));
+        if (Service<IAccessRoleStore>() is { } store)
+            roles.AddRange((await store.ListAsync(Session.Scope, Aborted)).Select(stored => new RoleRow(stored.Role, false, stored.Revision)));
+        if (Service<IAccessGrantStore>() is { } grants)
+            foreach (var grant in await grants.ListForTargetAsync(AccessPartition.From(Session.Scope), new WorkspaceGrantScope(Session.Scope.WorkspaceId), 1000, null, Aborted))
+                members[grant.Grant.Role.Value] = members.GetValueOrDefault(grant.Grant.Role.Value) + 1;
+    }
+}

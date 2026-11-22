@@ -1,0 +1,7 @@
+<TabLinks Tabs="@([new TabLinks.Tab("Roles", Session.Url("access"), Active == "roles"), new TabLinks.Tab("Grants", Session.Url("access/grants"), Active == "grants"),
+                  new TabLinks.Tab("Field policies", Session.Url("access/field-policies"), Active == "fields"), new TabLinks.Tab("Break-glass", Session.Url("access/break-glass"), Active == "break-glass")])" />
+
+@code {
+    [CascadingParameter] public TicketFlowUISession Session { get; set; } = default!;
+    [Parameter] public string Active { get; set; } = "roles";
+}

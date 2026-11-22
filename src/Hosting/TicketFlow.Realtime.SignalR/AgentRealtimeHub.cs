@@ -8,19 +8,25 @@ namespace TicketFlow.Realtime.SignalR;
 /// user to a <see cref="PrincipalRef"/> once per connection (connections without a principal are aborted). Subscriptions and actions
 /// are authorized by the realtime registry and agent actions; every delivery is re-authorized per event.
 /// </summary>
-public sealed class AgentRealtimeHub(IRealtimeSubscriptions subscriptions, IRealtimePrincipalResolver principals, IRealtimeAgentActions actions, IHubContext<AgentRealtimeHub> hub) : Hub
+public sealed class AgentRealtimeHub(IRealtimeSubscriptions subscriptions, IRealtimePrincipalResolver principals, IRealtimeAgentActions actions, IHubContext<AgentRealtimeHub> hub,
+    Microsoft.Extensions.Options.IOptions<TicketFlowSignalROptions> options, RealtimeTypingThrottle throttle) : Hub
 {
     private const string PrincipalKey = "tf.principal";
 
     public override async Task OnConnectedAsync()
     {
+        if (!OriginAllowed(Context.GetHttpContext()?.Request.Headers.Origin.ToString(), options.Value))
+        {
+            Context.Abort();
+            return;
+        }
         var principal = await principals.ResolveAsync(Context.User ?? new System.Security.Claims.ClaimsPrincipal(), Context.GetHttpContext(), Context.ConnectionAborted).ConfigureAwait(false);
         if (principal is not { } resolved || resolved.Value is null)
         {
             Context.Abort();
             return;
         }
-        if (subscriptions.Connect(new SignalRRealtimeConnection(Context.ConnectionId, new AgentSubscriber(resolved), hub.Clients.Client(Context.ConnectionId))).Value is not RealtimeConnected)
+        if (subscriptions.Connect(new SignalRRealtimeConnection(Context.ConnectionId, new AgentSubscriber(resolved), hub.Clients.Client(Context.ConnectionId), Context.Abort)).Value is not RealtimeConnected)
         {
             Context.Abort();
             return;
@@ -32,6 +38,7 @@ public sealed class AgentRealtimeHub(IRealtimeSubscriptions subscriptions, IReal
     public override Task OnDisconnectedAsync(Exception? exception)
     {
         subscriptions.Disconnect(Context.ConnectionId);
+        throttle.Forget(Context.ConnectionId);
         return base.OnDisconnectedAsync(exception);
     }
 
@@ -62,6 +69,8 @@ public sealed class AgentRealtimeHub(IRealtimeSubscriptions subscriptions, IReal
             return HubResult.Failure("unauthenticated");
         if (Conversation(conversation) is not { } id)
             return HubResult.Failure("invalid");
+        if (!throttle.Allow(Context.ConnectionId, id.Value, typing))
+            return HubResult.Success();
         return Map(await actions.SetTypingAsync(principal, id, typing, Context.ConnectionAborted).ConfigureAwait(false));
     }
 
@@ -72,6 +81,17 @@ public sealed class AgentRealtimeHub(IRealtimeSubscriptions subscriptions, IReal
         if (Conversation(conversation) is not { } id)
             return HubResult.Failure("invalid");
         return Map(await actions.MarkReadAsync(principal, id, upToSequence, Context.ConnectionAborted).ConfigureAwait(false));
+    }
+
+    /// <summary>True when the agent hub accepts a connection with this Origin header under <paramref name="options"/>.</summary>
+    public static bool OriginAllowed(string? origin, TicketFlowSignalROptions options)
+    {
+        if (string.IsNullOrEmpty(origin))
+            return !options.RequireAgentOrigin;
+        if (options.AgentAllowedOrigins.Count == 0)
+            return true;
+        var normalized = TicketFlow.Channels.LiveChat.LiveChatOrigin.Normalize(origin);
+        return normalized is not null && options.AgentAllowedOrigins.Any(allowed => string.Equals(TicketFlow.Channels.LiveChat.LiveChatOrigin.Normalize(allowed), normalized, StringComparison.Ordinal));
     }
 
     private PrincipalRef? Principal() => Context.Items.TryGetValue(PrincipalKey, out var value) && value is PrincipalRef principal ? principal : (PrincipalRef?)null;

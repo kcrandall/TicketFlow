@@ -7,7 +7,7 @@ namespace TicketFlow.Workspaces;
 /// Development-only workspace settings store. State is process-local, lost on restart and never shared between processes; it is an
 /// example of the <see cref="IWorkspaceSettingsStore"/> contract, not durable storage. Writes are serialized under one lock.
 /// </summary>
-public sealed class InMemoryWorkspaceSettingsStore(int maximumEntries = 10_000) : IWorkspaceSettingsStore
+public sealed class InMemoryWorkspaceSettingsStore(int maximumEntries = 10_000) : IWorkspaceSettingsStore, IWorkspaceDirectory
 {
     private const string Key = "settings";
     private readonly InMemoryWorkspaceTable<WorkspaceSettings> table = new(maximumEntries, 1);
@@ -31,6 +31,17 @@ public sealed class InMemoryWorkspaceSettingsStore(int maximumEntries = 10_000) 
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         return Task.FromResult(table.Update(scope, Key, expectedRevision, settings, entry => Project(scope, entry)));
+    }
+
+    /// <summary>Scopes ordered by their unit-separated identifiers (ordinal); the token is the last key of the page.</summary>
+    public Task<WorkspaceScopePage> ListWorkspacesAsync(string? after, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IWorkspaceDirectory.MaximumPage);
+        var ordered = table.Scopes().Select(scope => (Key: string.Join('\u001f', scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value), Scope: scope))
+            .Where(item => after is null || string.CompareOrdinal(item.Key, after) > 0).OrderBy(item => item.Key, StringComparer.Ordinal).Take(limit + 1).ToList();
+        var page = ordered.Take(limit).ToList();
+        return Task.FromResult(new WorkspaceScopePage([.. page.Select(item => item.Scope)], ordered.Count > limit ? page[^1].Key : null));
     }
 
     private static StoredWorkspaceSettings Project(TicketScope scope, InMemoryWorkspaceTable<WorkspaceSettings>.Entry entry) => new(scope, entry.Value, entry.Revision);
@@ -225,6 +236,13 @@ internal sealed class InMemoryWorkspaceTable<TValue>
     {
         lock (gate)
             return scopes.TryGetValue(scope, out var entries) ? entries.GetValueOrDefault(key) : null;
+    }
+
+    /// <summary>Every scope holding at least one entry.</summary>
+    public List<TicketScope> Scopes()
+    {
+        lock (gate)
+            return [.. scopes.Where(pair => pair.Value.Count > 0).Select(pair => pair.Key)];
     }
 
     public List<Entry> All(TicketScope scope)

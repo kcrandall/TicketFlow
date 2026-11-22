@@ -1,0 +1,145 @@
+@inherits UiPageBase
+@using TicketFlow.Routing
+@using TicketFlow.Workspaces
+
+<PageHeader Title="Routing" Description="Agent availability, the routing queue and the policies that assign conversations automatically.">
+    <Actions>
+        @if (Session.UserId is not null && Session.Can(AccessPermissions.AgentStatusUpdate))
+        {
+            <TfForm Action="routing.status" Class="tf-row" style="flex-wrap:nowrap">
+                <input type="hidden" name="agent" value="@Session.UserId?.Value" />
+                <span class="tf-small tf-muted">My status</span>
+                <select name="status" class="tf-select tf-select--sm" style="width:auto" aria-label="My status">
+                    @foreach (var status in Enum.GetValues<AgentStatus>())
+                    {
+                        <option value="@status" selected="@(myStatus == status)">@status</option>
+                    }
+                </select>
+                <button class="tf-button tf-button--outline tf-button--sm" type="submit">Set</button>
+            </TfForm>
+        }
+    </Actions>
+</PageHeader>
+
+<div class="tf-grid tf-grid--stats">
+    <StatCard Label="Online agents" Value="@agents.Count(agent => agent.Presence.EffectiveStatus(Now) == AgentStatus.Online).ToString(CultureInfo.InvariantCulture)" Hint="@($"{agents.Count} agents with routing profiles")" />
+    <StatCard Label="Queued conversations" Value="@queue.Count.ToString(CultureInfo.InvariantCulture)" Hint="Waiting for an available agent" />
+    <StatCard Label="Longest wait" Value="@(queue.Count == 0 ? "—" : UiFormat.Duration(Now - queue.Min(item => item.WaitingSince)))" Hint="Oldest unanswered queued conversation" />
+    <StatCard Label="Routing policies" Value="@policies.Count.ToString(CultureInfo.InvariantCulture)" Hint="Attached to inboxes" />
+</div>
+
+<div class="tf-grid tf-grid--2">
+    <div class="tf-card">
+        <div class="tf-card__header"><div><div class="tf-card__title">Agent availability</div><div class="tf-card__description">Status, capacity and skills used by the routing engine</div></div></div>
+        <div class="tf-table-wrap" style="margin-top:12px">
+            <table class="tf-table">
+                <thead><tr><th>Agent</th><th>Status</th><th class="tf-num">Capacity</th><th>Skills</th></tr></thead>
+                <tbody>
+                    @foreach (var agent in agents)
+                    {
+                        var status = agent.Presence.EffectiveStatus(Now);
+                        <tr>
+                            <td><UserChip Name="@Session.UserName(agent.Agent)" /></td>
+                            <td><span class="tf-badge"><span class="tf-dot" style="background:@StatusColor(status)"></span>@status</span><div class="tf-list__meta">since @UiFormat.Relative(agent.Presence.ChangedAt, Now)</div></td>
+                            <td class="tf-num">@agent.Settings.DefaultCapacity</td>
+                            <td>@(agent.Settings.Skills.Count == 0 ? "—" : string.Join(", ", agent.Settings.Skills.Select(skill => $"{skill.Name} ({skill.Level})")))</td>
+                        </tr>
+                    }
+                    @if (agents.Count == 0)
+                    {
+                        <tr><td colspan="4" class="tf-muted">No agent has set a status yet.</td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <div class="tf-card">
+        <div class="tf-card__header"><div><div class="tf-card__title">Queue</div><div class="tf-card__description">Conversations waiting for routing, oldest first</div></div></div>
+        <div class="tf-card__content--flush">
+            @if (queue.Count == 0)
+            {
+                <EmptyState Icon="list-checks" Title="The queue is empty" Message="Every routed conversation has an agent." />
+            }
+            else
+            {
+                <ul class="tf-list">
+                    @foreach (var item in queue)
+                    {
+                        <li>
+                            <div class="tf-list__main">
+                                <a class="tf-list__title" href="@Url($"conversations/{item.Conversation.Value}")">@ContactLabel(item.Conversation)</a>
+                                <span class="tf-list__meta">@InboxName(item.Inbox) · @TeamName(item.Team) · queued @UiFormat.Relative(item.QueuedAt, Now)</span>
+                            </div>
+                            @if (item.WaitExceeded)
+                            {
+                                <span class="tf-badge tf-badge--destructive">Wait exceeded</span>
+                            }
+                            <span class="tf-badge">@UiFormat.Duration(Now - item.WaitingSince)</span>
+                        </li>
+                    }
+                </ul>
+            }
+        </div>
+    </div>
+</div>
+
+<div class="tf-card">
+    <div class="tf-card__header"><div><div class="tf-card__title">Routing policies</div><div class="tf-card__description">Strategy, team, overflow and maximum wait per policy (versioned JSON definitions)</div></div></div>
+    <div class="tf-card__content tf-stack">
+        @foreach (var policy in policies)
+        {
+            <div class="tf-stack tf-stack--sm" style="border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px">
+                <div class="tf-row tf-row--between">
+                    <div class="tf-row"><strong>@policy.Policy.Name</strong><span class="tf-badge">@UiFormat.Token(policy.Policy.Strategy.Kind)</span><span class="tf-badge tf-badge--muted">@TeamName(policy.Policy.Team)</span></div>
+                    <span class="tf-small tf-muted tf-mono">@policy.Policy.Id.Value · rev @policy.Revision</span>
+                </div>
+                @if (Session.Can(AccessPermissions.RoutingManage))
+                {
+                    <DefinitionEditor Id="@policy.Policy.Id.Value" Revision="policy.Revision" Json="@DefinitionEditor.Pretty(RoutingPolicyCodec.Serialize(policy.Policy))" SaveAction="routing.policy.save" DeleteAction="routing.policy.delete" />
+                }
+            </div>
+        }
+        @if (Session.Can(AccessPermissions.RoutingManage))
+        {
+            <DefinitionEditor Json="@NewPolicy" SaveAction="routing.policy.save" />
+        }
+    </div>
+</div>
+
+@code {
+    private List<StoredAgentProfile> agents = [];
+    private List<RoutingQueueItem> queue = [];
+    private List<StoredRoutingPolicy> policies = [];
+    private AgentStatus? myStatus;
+    private readonly Dictionary<ConversationId, ContactId> contacts = [];
+
+    private static string NewPolicy => DefinitionEditor.Pretty(RoutingPolicyCodec.Serialize(new RoutingPolicy(new RoutingPolicyId("new"), "New policy", RoutingStrategy.RoundRobin)));
+
+    private static string StatusColor(AgentStatus status) => status switch
+    {
+        AgentStatus.Online => "var(--success)",
+        AgentStatus.Busy => "var(--destructive)",
+        AgentStatus.Away => "var(--warning)",
+        _ => "var(--muted-foreground)",
+    };
+
+    private string ContactLabel(ConversationId conversation) => contacts.TryGetValue(conversation, out var contact) ? ContactName(contact) : "#" + conversation.Value;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadWorkspaceAsync();
+        if (Service<IAgentAvailabilityService>() is { } availability && await availability.ListAsync(Actor, null, 100, Aborted) is RoutingValue<IReadOnlyList<StoredAgentProfile>> profiles)
+            agents = [.. profiles.Value];
+        myStatus = agents.FirstOrDefault(agent => agent.Agent == Session.UserId)?.Presence.EffectiveStatus(Now);
+        if (Service<IRoutingQueueService>() is { } queueService && await queueService.ListAsync(Actor, new RoutingQueueQuery(limit: 25), Aborted) is RoutingValue<RoutingQueueListPage> page)
+            queue = [.. page.Value.Items];
+        if (Service<IRoutingPolicyService>() is { } policyService && await policyService.ListAsync(Actor, Aborted) is RoutingValue<IReadOnlyList<StoredRoutingPolicy>> list)
+            policies = [.. list.Value];
+        if (Service<TicketFlow.Conversations.IConversationService>() is { } conversations)
+            foreach (var item in queue)
+                if (await conversations.GetAsync(Actor, item.Conversation, Aborted) is TicketFlow.Conversations.ConversationView view)
+                    contacts[item.Conversation] = view.Contact;
+        await LoadContactsAsync(contacts.Values);
+        await Session.LoadUsersAsync(agents.Select(agent => (UserId?)agent.Agent));
+    }
+}

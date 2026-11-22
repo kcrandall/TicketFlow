@@ -70,6 +70,9 @@ public sealed class ModelAndCompositionTests
         await AssistStoreContract.VerifyReservationsAsync(store, store);
         await AssistStoreContract.VerifyConcurrentReservationsAsync(store, store);
         await AssistStoreContract.VerifySummaryAndPurgeAsync(store, store);
+        await AssistStoreContract.VerifyEstimatedSettlementAsync(store, store);
+        await AssistStoreContract.VerifySweepAsync(store, store);
+        await AssistStoreContract.VerifyConcurrentReserveAndSettleAsync(store, store);
     }
 
     [TestMethod]
@@ -101,7 +104,7 @@ public sealed class ModelAndCompositionTests
         options.Models.Add(new AssistModelDefinition("orphan", "nobody", "x", AssistModelCapabilities.None));
         options.FeatureModels[AssistFeature.Triage] = "m";
         var registry = new AssistModelRegistry(Options.Create(options));
-        var factory = new AssistChatClientFactory(registry, [scripted]);
+        using var factory = new AssistChatClientFactory(registry, [scripted]);
 
         Assert.ThrowsExactly<ArgumentException>(() => factory.GetChatClient(new AssistChatRequest("missing", AssistFeature.Triage)));
         Assert.ThrowsExactly<InvalidOperationException>(() => factory.GetChatClient(new AssistChatRequest("orphan", AssistFeature.Triage)));
@@ -120,12 +123,71 @@ public sealed class ModelAndCompositionTests
     }
 
     [TestMethod]
+    public void PipelinesAreCachedPerModelFeatureAndThinkingAndDisposedWithTheContainer()
+    {
+        var model = new CountingChatClient();
+        var services = new ServiceCollection();
+        services.AddTicketFlow().AddAccessControl().AddInMemoryAccessStores().AddAssist(options =>
+        {
+            options.Models.Add(new AssistModelDefinition("m", ScriptedChatProvider.ProviderName, "m-v1", AssistModelCapabilities.None));
+            options.Models.Add(new AssistModelDefinition("n", ScriptedChatProvider.ProviderName, "n-v1", AssistModelCapabilities.None));
+        }).AddInMemoryAssistStores();
+        services.AddSingleton<IAssistChatProvider>(new ScriptedChatProvider(model));
+        var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        var factory = provider.GetRequiredService<IAssistChatClientFactory>();
+
+        var first = factory.GetChatClient(new AssistChatRequest("m", AssistFeature.Triage, AssistThinkingLevel.Low));
+        Assert.AreSame(first, factory.GetChatClient(new AssistChatRequest("m", AssistFeature.Triage, AssistThinkingLevel.Low)));
+        var other = factory.GetChatClient(new AssistChatRequest("m", AssistFeature.ReplyDraft));
+        Assert.AreNotSame(first, other);
+        Assert.AreNotSame(first, factory.GetChatClient(new AssistChatRequest("m", AssistFeature.Triage, AssistThinkingLevel.High)));
+        _ = factory.GetChatClient(new AssistChatRequest("n", AssistFeature.Triage));
+        Assert.AreEqual(2, model.Created, "one provider client per provider model");
+        Assert.AreEqual(0, model.Disposed);
+
+        provider.Dispose();
+        Assert.AreEqual(2, model.Disposed, "each provider-created client is disposed once, with the container");
+        Assert.ThrowsExactly<ObjectDisposedException>(() => factory.GetChatClient(new AssistChatRequest("m", AssistFeature.Triage)));
+    }
+
+    [TestMethod]
+    public async Task HostsCanSupplyKeyedClientsAndPipelineMiddleware()
+    {
+        var hosted = new ScriptedChatClient();
+        var providerClient = new CountingChatClient();
+        var seen = new List<string?>();
+        var services = new ServiceCollection();
+        services.AddTicketFlow().AddAccessControl().AddInMemoryAccessStores().AddAssist(options =>
+        {
+            options.Models.Add(new AssistModelDefinition("m", ScriptedChatProvider.ProviderName, "m-v1", AssistModelCapabilities.None));
+            options.Pipeline.Add((builder, model, request) => builder.Use((messages, chatOptions, inner, cancellationToken) =>
+            {
+                seen.Add(chatOptions?.ModelId + "|" + request.Feature);
+                return inner.GetResponseAsync(messages, chatOptions, cancellationToken);
+            }, null));
+        }).AddInMemoryAssistStores();
+        services.AddSingleton<IAssistChatProvider>(new ScriptedChatProvider(providerClient));
+        services.AddKeyedSingleton<IChatClient>(AssistChatClients.ServiceKey(ScriptedChatProvider.ProviderName), hosted);
+        await using (var provider = services.BuildServiceProvider())
+        {
+            hosted.Reply("{}");
+            var client = provider.GetRequiredService<IAssistChatClientFactory>().GetChatClient(new AssistChatRequest("m", AssistFeature.Translate));
+            await client.GetResponseAsync([new ChatMessage(ChatRole.User, "hi")]);
+            Assert.HasCount(1, hosted.Requests);
+            Assert.AreEqual("m-v1", hosted.Requests.Single().Options!.ModelId);
+            CollectionAssert.AreEqual(new[] { "m-v1|Translate" }, seen);
+            Assert.AreEqual(0, providerClient.Created, "the keyed host client replaces the provider client");
+        }
+        Assert.AreEqual(0, hosted.Disposals, "the host owns its keyed client");
+    }
+
+    [TestMethod]
     public async Task ToolInvocationIsTracedWithoutArgumentsOrResults()
     {
         var model = new ScriptedChatClient();
         var options = new AssistOptions();
         options.Models.Add(new AssistModelDefinition("m", ScriptedChatProvider.ProviderName, "m", AssistModelCapabilities.Tools));
-        var factory = new AssistChatClientFactory(new AssistModelRegistry(Options.Create(options)), [new ScriptedChatProvider(model)]);
+        using var factory = new AssistChatClientFactory(new AssistModelRegistry(Options.Create(options)), [new ScriptedChatProvider(model)]);
         var invoked = 0;
         var tool = AIFunctionFactory.Create((string query) => { invoked++; return "result for " + query; }, "lookup");
         model.Enqueue(new ScriptedTurn(Calls: [new FunctionCallContent("call-1", "lookup", new Dictionary<string, object?> { ["query"] = "secret query" })]));

@@ -11,8 +11,11 @@ namespace TicketFlow.Assist;
 /// the UTC day of <c>record.CreatedAt</c> and counts records created in <c>(CreatedAt - 60 s, CreatedAt]</c>; when adding the record
 /// would exceed <see cref="AssistSettings.DailyTokenLimit"/> or reach more than <see cref="AssistSettings.RequestsPerMinute"/>, nothing is
 /// written and <see cref="AssistQuotaExceeded"/> is returned. Concurrent reservations serialize so limits cannot be raced.</item>
-/// <item><see cref="SettleAsync"/> moves a Reserved record to Completed or Failed with actual usage exactly once; settling a missing or
-/// already settled record returns <see langword="null"/> and writes nothing.</item>
+/// <item><see cref="SettleAsync"/> moves a Reserved record to Completed or Failed exactly once, with actual usage or — when
+/// <c>estimated</c> — charged at its reserved estimate; settling a missing or already settled record returns <see langword="null"/> and
+/// writes nothing. <see cref="SweepReservationsAsync"/> settles abandoned reservations (any scope) as Failed at their estimate.</item>
+/// <item>Quota checks must not scan the whole day: durable stores keep a per-workspace, per-UTC-day counter of counted tokens that
+/// reservations, settlements and sweeps adjust atomically.</item>
 /// <item>Records hold identifiers and counts only, never prompts or outputs.</item>
 /// </list>
 /// </summary>
@@ -24,7 +27,14 @@ public interface IAssistStore
 
     Task<AssistReservationResult> ReserveAsync(TicketScope scope, AssistUsageRecord reservation, long dailyTokenLimit, int requestsPerMinute, CancellationToken cancellationToken = default);
 
-    Task<AssistUsageRecord?> SettleAsync(TicketScope scope, Guid id, AssistUsageState state, AssistUsage usage, DateTimeOffset completedAt, CancellationToken cancellationToken = default);
+    Task<AssistUsageRecord?> SettleAsync(TicketScope scope, Guid id, AssistUsageState state, AssistUsage usage, DateTimeOffset completedAt, bool estimated = false,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Maintenance (no principal; across scopes): settles at most <paramref name="limit"/> (1-10000) Reserved records created before
+    /// <paramref name="createdBefore"/> as Failed and estimated, oldest first; returns the count.
+    /// </summary>
+    Task<int> SweepReservationsAsync(DateTimeOffset createdBefore, DateTimeOffset completedAt, int limit, CancellationToken cancellationToken = default);
 
     Task<AssistUsageRecord?> GetUsageAsync(TicketScope scope, Guid id, CancellationToken cancellationToken = default);
 

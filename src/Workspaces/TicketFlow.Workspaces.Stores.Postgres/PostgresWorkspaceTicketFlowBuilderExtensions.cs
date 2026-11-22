@@ -21,6 +21,7 @@ public static class PostgresWorkspaceTicketFlowBuilderExtensions
         services.TryAddSingleton<IInboxStore>(provider => provider.GetRequiredService<PostgresWorkspaceStore>());
         services.TryAddSingleton<ITeamStore>(provider => provider.GetRequiredService<PostgresWorkspaceStore>());
         services.TryAddSingleton<IBusinessCalendarStore>(provider => provider.GetRequiredService<PostgresWorkspaceStore>());
+        services.TryAddSingleton<IWorkspaceDirectory>(provider => provider.GetRequiredService<PostgresWorkspaceStore>());
         return builder;
     }
 }

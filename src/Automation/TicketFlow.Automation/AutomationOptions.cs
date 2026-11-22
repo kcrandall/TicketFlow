@@ -15,6 +15,13 @@ public sealed class AutomationOptions
     /// </summary>
     public ApiClientId ClientId { get; set; } = new("automation-worker");
 
+    /// <summary>
+    /// The API client the SLA tracker appends <c>sla.*</c> events as. Only extension events whose timeline actor is this client are treated as
+    /// SLA events (anyone with <c>conversation:manage</c> can append extension events, so others could forge escalations). Must match
+    /// <c>SlaOptions.WorkerClientId</c>; default <c>sla-worker</c> (the SLA default).
+    /// </summary>
+    public ApiClientId SlaWorkerClientId { get; set; } = new("sla-worker");
+
     /// <summary>Longest automation chain: an execution triggered by an event an automation caused at depth n runs at depth n+1 (1-8, default 3).</summary>
     public int MaximumChainDepth { get; set; } = 3;
 
@@ -53,7 +60,7 @@ public sealed class AutomationOptions
 
     internal void Validate()
     {
-        if (ClientId == default || MaximumChainDepth is < 1 or > 8 || RateLimit is < 1 or > 1000 || RateWindow < TimeSpan.FromMinutes(1) || RateWindow > TimeSpan.FromDays(1)
+        if (ClientId == default || SlaWorkerClientId == default || MaximumChainDepth is < 1 or > 8 || RateLimit is < 1 or > 1000 || RateWindow < TimeSpan.FromMinutes(1) || RateWindow > TimeSpan.FromDays(1)
             || ScheduleBatchSize is < 1 or > IAutomationRuleStore.MaximumClaim || ScheduleLease <= TimeSpan.Zero || ScheduleLease > IAutomationRuleStore.MaximumLease
             || ScheduleRetryDelay <= TimeSpan.Zero || MaximumContactConversations is < 1 or > 100 || WebhookTimeout < TimeSpan.FromSeconds(1)
             || WebhookTimeout > TimeSpan.FromMinutes(2))

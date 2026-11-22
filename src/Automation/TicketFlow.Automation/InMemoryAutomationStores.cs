@@ -53,7 +53,16 @@ public sealed class InMemoryAutomationRuleStore(TimeProvider? time = null) : IAu
 {
     private readonly InMemoryRevisioned<AutomationRule> rules = new(IAutomationRuleStore.MaximumRulesPerWorkspace);
     private readonly Dictionary<(TicketScope Scope, string Id), (DateTimeOffset? DueAt, DateTimeOffset? LeaseUntil, long Fence)> timers = [];
+    private readonly Dictionary<TicketScope, long> versions = [];
     private readonly TimeProvider time = time ?? TimeProvider.System;
+
+    public Task<long> GetRuleSetVersionAsync(TicketScope scope, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (rules.Gate)
+            return Task.FromResult(versions.GetValueOrDefault(scope));
+    }
 
     public Task<StoredAutomationRule?> GetAsync(TicketScope scope, AutomationRuleId id, CancellationToken cancellationToken = default)
     {
@@ -81,7 +90,10 @@ public sealed class InMemoryAutomationRuleStore(TimeProvider? time = null) : IAu
         {
             var result = rules.Create(scope, rule.Id.Value, rule, (value, revision) => new StoredAutomationRule(scope, value, revision));
             if (result.Value is AutomationWriteApplied<StoredAutomationRule>)
+            {
                 SetTimer(scope, rule.Id.Value, nextRunAt);
+                versions[scope] = versions.GetValueOrDefault(scope) + 1;
+            }
             return Task.FromResult(result);
         }
     }
@@ -96,7 +108,10 @@ public sealed class InMemoryAutomationRuleStore(TimeProvider? time = null) : IAu
         {
             var result = rules.Update(scope, rule.Id.Value, rule, expectedRevision, (value, revision) => new StoredAutomationRule(scope, value, revision));
             if (result.Value is AutomationWriteApplied<StoredAutomationRule>)
+            {
                 SetTimer(scope, rule.Id.Value, nextRunAt);
+                versions[scope] = versions.GetValueOrDefault(scope) + 1;
+            }
             return Task.FromResult(result);
         }
     }
@@ -109,7 +124,10 @@ public sealed class InMemoryAutomationRuleStore(TimeProvider? time = null) : IAu
         {
             var result = rules.Delete(scope, id.Value, expectedRevision, (value, revision) => new StoredAutomationRule(scope, value, revision));
             if (result.Value is AutomationWriteApplied<StoredAutomationRule>)
+            {
                 timers.Remove((scope, id.Value));
+                versions[scope] = versions.GetValueOrDefault(scope) + 1;
+            }
             return Task.FromResult(result);
         }
     }
@@ -237,6 +255,39 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
             return Task.FromResult(keys.TryGetValue(Key(scope, rule, conversation, triggerKey), out var id) ? executions[(scope, id)] : null);
     }
 
+    public Task<IReadOnlyDictionary<AutomationRuleId, StoredAutomationExecution>> FindManyAsync(TicketScope scope, ConversationId? conversation, string triggerKey,
+        IReadOnlyCollection<AutomationRuleId> rules, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(rules);
+        if (rules.Count > IAutomationExecutionStore.MaximumFindMany)
+            throw new ArgumentException($"At most {IAutomationExecutionStore.MaximumFindMany} rules.", nameof(rules));
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            var found = new Dictionary<AutomationRuleId, StoredAutomationExecution>();
+            foreach (var rule in rules)
+                if (keys.TryGetValue(Key(scope, rule, conversation, triggerKey), out var id))
+                    found[rule] = executions[(scope, id)];
+            return Task.FromResult<IReadOnlyDictionary<AutomationRuleId, StoredAutomationExecution>>(found);
+        }
+    }
+
+    public Task<int> PurgeAsync(DateTimeOffset before, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IAutomationExecutionStore.MaximumPurge);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            var victims = executions.Values.Where(stored => stored.Execution.Status != AutomationExecutionStatus.Running && stored.Execution.StartedAt < before)
+                .OrderBy(stored => stored.Execution.StartedAt).Take(limit).ToList();
+            foreach (var stored in victims)
+                Remove(stored);
+            return Task.FromResult(victims.Count);
+        }
+    }
+
     public Task<AutomationCause?> FindCauseAsync(TicketScope scope, ConversationId conversation, long sequence, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -318,8 +369,17 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
             return;
         var oldest = inScope.Where(stored => stored.Execution.Status != AutomationExecutionStatus.Running).OrderBy(stored => stored.Execution.StartedAt).FirstOrDefault()
             ?? throw new InvalidOperationException("The in-memory execution store is full.");
-        executions.Remove((scope, oldest.Id));
-        keys.Remove(Key(scope, oldest.Execution.Rule, oldest.Execution.Conversation, oldest.Execution.TriggerKey));
+        Remove(oldest);
+    }
+
+    private void Remove(StoredAutomationExecution stored)
+    {
+        executions.Remove((stored.Scope, stored.Id));
+        keys.Remove(Key(stored.Scope, stored.Execution.Rule, stored.Execution.Conversation, stored.Execution.TriggerKey));
+        if (stored.Execution.Conversation is { } conversation)
+            foreach (var sequence in stored.Execution.ProducedSequences)
+                if (causes.TryGetValue((stored.Scope, conversation.Value, sequence), out var cause) && cause.Execution == stored.Id)
+                    causes.Remove((stored.Scope, conversation.Value, sequence));
     }
 
     private static (TicketScope, string, string, string) Key(TicketScope scope, AutomationRuleId rule, ConversationId? conversation, string triggerKey) =>

@@ -26,7 +26,7 @@ internal static class RealtimeTestSupport
 
     public static RecordingConnection Connect(this ChannelHost host, string id, RealtimeSubscriber subscriber)
     {
-        var connection = new RecordingConnection(id, subscriber);
+        var connection = new RecordingConnection(id, subscriber, () => host.Services.GetRequiredService<RealtimeSubscriptionRegistry>().IdleAsync());
         Assert.IsInstanceOfType<RealtimeConnected>(host.Registry().Connect(connection).Value);
         return connection;
     }

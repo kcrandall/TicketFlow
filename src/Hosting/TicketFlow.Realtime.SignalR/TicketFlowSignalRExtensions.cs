@@ -30,6 +30,8 @@ public static class TicketFlowSignalRExtensions
         services.AddSignalR();
         services.TryAddSingleton<IRealtimePrincipalResolver, OptionsPrincipalResolver>();
         services.TryAddSingleton<IVisitorPartitionResolver, OptionsPartitionResolver>();
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddSingleton<RealtimeTypingThrottle>();
         return builder;
     }
 

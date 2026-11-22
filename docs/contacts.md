@@ -5,8 +5,8 @@ Contacts unify channel identities without treating addresses as authentication. 
 | Package | Contents |
 | --- | --- |
 | `TicketFlow.Contacts.Abstractions` | `Contact`, identities and normalisation, typed attributes, merge records, change events, audit events, views, union results, service and store contracts, `ContactJsonCodec`. |
-| `TicketFlow.Contacts` | `ContactService`, `ContactAttributeDefinitionService`, `ContactMerger`, DI (`AddContacts`, `AddInMemoryContactStores`) and development in-memory stores. |
-| `TicketFlow.Contacts.Stores.Postgres` | `PostgresContactStore`, `PostgresContactMigrations`, `AddPostgresContactStores`. |
+| `TicketFlow.Contacts` | `ContactService`, `ContactAttributeDefinitionService`, `ContactLinkingService`, `ContactMerger`, DI (`AddContacts`, `AddInMemoryContactStores`) and development in-memory stores (including `InMemoryContactLinkingStore`). |
+| `TicketFlow.Contacts.Stores.Postgres` | `PostgresContactStore` (also `IContactLinkingStore`), `PostgresContactMigrations`, `AddPostgresContactStores`. |
 
 ```csharp
 services.AddTicketFlow()
@@ -59,6 +59,15 @@ and never echoes the input in errors or `ToString`.
   (moved identities always return to the source). Chains unmerge newest first.
 - Merge, unmerge and delete are one atomic store batch each, including the `ContactAuditEvent` and outbox change events.
 
+## Account linking
+
+Verified application accounts (`ExternalAccountRef(namespace, externalId)` → verified `ExternalUser` identity) are linked through
+`IContactLinkingService` (E16): `LinkAccountAsync` attaches the account or merges the anonymous/email-only contact into the contact
+already holding it (`ContactLinked | ContactMergedInto | ContactAlreadyLinked | ContactLinkConflict | ContactRefused`, idempotent,
+concurrent links converge on one contact), `UnlinkAccountAsync`, the `ResolveCustomerAsync` login helper, the per-workspace
+`ContactLinkingPolicy` (`LinkingOff | LinkingSuggest | LinkingAutoMerge`) and link suggestions (Access-filtered list, accept, reject).
+Merges reuse `MergeAsync` (audited, conversations follow, undo with `UnmergeAsync`). Details: [identity-linking.md](identity-linking.md).
+
 ## Access
 
 | Permission | Owner | Use |
@@ -67,6 +76,8 @@ and never echoes the input in errors or `ToString`.
 | `contact:create` | Contacts | Create and resolve-create. |
 | `contact:delete` (sensitive) | Contacts | Delete a contact and its merge history. |
 | `contact-attribute:manage` (sensitive) | Contacts | Define attributes and their sensitivity. |
+| `contact:link` (sensitive) | Contacts | Link/unlink verified accounts, resolve signed-in customers, review link suggestions. |
+| `contact-linking:manage` (sensitive) | Contacts | Change the workspace linking policy. |
 
 - The contact resource is `ContactAccess.Resource`: scope, contact id and labels; no team, inbox, assignee or condition attributes,
   so team/inbox grants never apply and attribute conditions fail closed. Mutations authorize against the current and resulting labels.
@@ -88,6 +99,9 @@ and never echoes the input in errors or `ToString`.
 
 ## Change events
 
+Audit kinds: `Merged`, `Unmerged`, `Exported`, `Deleted`, `ExportCompleted`, `Linked`, `Unlinked`, `LinkSuggested`,
+`LinkSuggestionAccepted`, `LinkSuggestionRejected`, `LinkingPolicyChanged` (`ContactAuditEvent.Suggestion` names the suggestion).
+
 Every write appends `ContactChange`s (`Created`, `Updated`, `Deleted`, `Merged`, `Unmerged`; identifiers only) in the write
 transaction with a gapless sequence per scope. Durable consumers (for example E5 conversations following merges) poll
 `IContactStore.ReadChangesAsync(scope, afterSequence, limit)`. `IContactChangeObserver`s are notified in process after commit; an
@@ -100,8 +114,12 @@ observer failure propagates but the change stays applied.
 | `IContactStore` | Scope-confined; atomic `ContactWriteBatch` (≤ 8 contacts, ≤ 16 changes) fenced per contact revision; creates at revision 1; verified identity uniqueness; recursive tombstone cascade on delete; merge record create/delete; gapless per-scope outbox; filtered keyset search. |
 | `IContactAttributeDefinitionStore` | Compare-and-set; type immutable; ≤ 256 definitions per workspace, checked atomically. |
 | `IContactAuditSink` | Durable before returning; failures throw. |
+| `IContactLinkingStore` | Scope-confined; CAS policy; one pending suggestion per (candidate, account) pair, atomically; CAS suggestion decisions; Access-filtered bounded listing over both contacts. |
 
 `tests/Contacts/TicketFlow.Contacts.StoreContracts` verifies these against the in-memory stores and PostgreSQL. In-memory stores are
 bounded, process-local development examples. `PostgresContactStore` uses `tf_key_v1` keys, a partial unique index for verified
 identities, `"C"`-collated `(scope_key, name_folded, contact_id)` and `(scope_key, kind, value, contact_id)` search indexes, explicit
-`format_version` columns and parameterized SQL.
+`format_version` columns and parameterized SQL. Migration 3 (`account-linking`) widens the audit kind check, adds
+`tf_contact_audit.suggestion_id`, `tf_contact_linking_policies` and `tf_contact_link_suggestions` (partial unique pending-pair index).
+Custom `IContactStore` implementations must also register an `IContactLinkingStore`, because `AddContacts` registers
+`IContactLinkingService`.

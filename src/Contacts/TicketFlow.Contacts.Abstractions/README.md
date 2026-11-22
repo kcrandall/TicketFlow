@@ -19,3 +19,8 @@ Contracts for TicketFlow contacts and their identity graph.
   `AccessFilter`-filtered keyset search, merge records, per-scope change outbox), `IContactAttributeDefinitionStore`,
   `IContactAuditSink`, and `IContactChangeObserver` for in-process change notification.
 - `ContactJsonCodec`: versioned persisted JSON with explicit discriminators for attributes, snapshots and merge contributions.
+- Account linking: `ExternalAccountRef`, `ContactLinkRequest` and `ContactLinkResult` (`ContactLinked | ContactMergedInto |
+  ContactAlreadyLinked | ContactLinkConflict | ContactRefused`), `CustomerResolveRequest`/`CustomerResolution`, the workspace
+  `ContactLinkingPolicy` union (`LinkingOff | LinkingSuggest | LinkingAutoMerge(ContactAutoMergeRules)`, persisted via
+  `ContactLinkingCodec`), `ContactLinkSuggestion`, `IContactLinkingService` and `IContactLinkingStore`; permissions `contact:link`
+  and `contact-linking:manage`. See `docs/identity-linking.md`.

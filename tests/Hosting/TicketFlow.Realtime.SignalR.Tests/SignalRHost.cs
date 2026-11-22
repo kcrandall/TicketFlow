@@ -41,7 +41,7 @@ internal sealed class SignalRHost : IAsyncDisposable
     public TestServer Server { get; }
     public TicketScope Scope { get; }
 
-    public static async Task<SignalRHost> CreateAsync()
+    public static async Task<SignalRHost> CreateAsync(Action<TicketFlowSignalROptions>? configure = null)
     {
         var scope = TestScopes.Create();
         var builder = WebApplication.CreateBuilder();
@@ -59,6 +59,7 @@ internal sealed class SignalRHost : IAsyncDisposable
                 options.VisitorPartition = AccessPartition.From(scope);
                 options.ResolvePrincipal = (_, http) => ValueTask.FromResult(
                     http?.Request.Headers["X-Test-User"].ToString() is { Length: > 0 } user ? (PrincipalRef?)new UserPrincipal(scope, new UserId(user)) : null);
+                configure?.Invoke(options);
             });
         builder.Services.AddSingleton<IAttachmentStore, InMemoryAttachmentStore>();
         var app = builder.Build();
@@ -129,6 +130,8 @@ internal sealed class SignalRHost : IAsyncDisposable
                 return payload;
         }
     }
+
+    public T Service<T>() where T : notnull => App.Services.GetRequiredService<T>();
 
     public async Task DispatchAsync()
     {

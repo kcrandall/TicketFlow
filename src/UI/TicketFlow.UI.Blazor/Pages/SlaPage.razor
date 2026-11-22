@@ -1,0 +1,114 @@
+@inherits UiPageBase
+@using TicketFlow.Conversations
+@using TicketFlow.Sla
+@using TicketFlow.Workspaces
+
+<PageHeader Title="SLA policies" Description="Response and resolution targets per priority and label, measured in calendar or business time." />
+
+<div class="tf-grid tf-grid--stats">
+    <StatCard Label="At risk" Value="@risk.Count(item => item.AtRisk && !item.Breached).ToString(CultureInfo.InvariantCulture)" Hint="Running clocks past their risk threshold" />
+    <StatCard Label="Breached" Value="@risk.Count(item => item.Breached).ToString(CultureInfo.InvariantCulture)" Hint="Open conversations past a target" />
+    <StatCard Label="Policies" Value="@policies.Count.ToString(CultureInfo.InvariantCulture)" Hint="Attached to inboxes" />
+</div>
+
+<div class="tf-card">
+    <div class="tf-card__header">
+        <div><div class="tf-card__title">Risk list</div><div class="tf-card__description">Most urgent first</div></div>
+        <TabLinks Tabs="@([new TabLinks.Tab("At risk or breached", Url("sla"), Query("filter") is null), new TabLinks.Tab("At risk", Url("sla", ("filter", "at-risk")), Query("filter") == "at-risk"), new TabLinks.Tab("Breached", Url("sla", ("filter", "breached")), Query("filter") == "breached")])" />
+    </div>
+    <div class="tf-table-wrap" style="margin-top:12px">
+        <table class="tf-table">
+            <thead><tr><th>Conversation</th><th>Inbox</th><th>Rule</th><th>Clock</th><th>Assignee</th><th class="tf-num">Due</th></tr></thead>
+            <tbody>
+                @foreach (var item in risk)
+                {
+                    var conversation = conversations.GetValueOrDefault(item.Conversation);
+                    var clock = item.Clocks.Where(value => value.Breached || value.AtRisk).OrderBy(value => value.DueAt ?? DateTimeOffset.MaxValue).FirstOrDefault();
+                    <tr>
+                        <td><a class="tf-row-link" href="@Url($"conversations/{item.Conversation.Value}")">@(conversation is null ? "#" + item.Conversation.Value : ContactName(conversation.Contact))</a></td>
+                        <td>@InboxName(item.Inbox)</td>
+                        <td class="tf-muted">@(item.RuleName ?? "—")</td>
+                        <td>@(clock is null ? "—" : UiFormat.Token(clock.Metric))</td>
+                        <td>@Session.UserName(conversation?.Assignee)</td>
+                        <td class="tf-num"><SlaBadge Status="item" Now="Now" /></td>
+                    </tr>
+                }
+                @if (risk.Count == 0)
+                {
+                    <tr><td colspan="6" class="tf-muted">Nothing is at risk. Nice work.</td></tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>
+
+@foreach (var stored in policies)
+{
+    var policy = stored.Policy;
+    <div class="tf-card">
+        <div class="tf-card__header">
+            <div><div class="tf-card__title">@policy.Name</div><div class="tf-card__description">At risk at @policy.AtRiskPercent% of a target · pauses when @(policy.Pause.PauseWhenPending ? "pending" : "")@(policy.Pause.PauseWhenPending && policy.Pause.PauseWhenSnoozed ? " or " : "")@(policy.Pause.PauseWhenSnoozed ? "snoozed" : "") · used by @string.Join(", ", Inboxes.Where(inbox => inbox.Inbox.SlaPolicy == policy.Id).Select(inbox => inbox.Inbox.Name).DefaultIfEmpty("no inbox"))</div></div>
+            <span class="tf-small tf-muted tf-mono">rev @stored.Revision</span>
+        </div>
+        <div class="tf-table-wrap" style="margin-top:12px">
+            <table class="tf-table">
+                <thead><tr><th>Rule</th><th>Applies to</th><th class="tf-num">First response</th><th class="tf-num">Next response</th><th class="tf-num">Resolution</th><th>Clock</th></tr></thead>
+                <tbody>
+                    @foreach (var rule in policy.Rules)
+                    {
+                        <tr>
+                            <td style="font-weight:500">@rule.Name</td>
+                            <td class="tf-muted">@Applies(rule.Condition)</td>
+                            <td class="tf-num">@UiFormat.Duration(rule.Targets.FirstResponse)</td>
+                            <td class="tf-num">@UiFormat.Duration(rule.Targets.NextResponse)</td>
+                            <td class="tf-num">@UiFormat.Duration(rule.Targets.Resolution)</td>
+                            <td><span class="tf-badge">@UiFormat.Token(rule.Basis)</span></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        @if (Session.Can(SlaPermissions.Manage))
+        {
+            <div class="tf-card__content"><DefinitionEditor Id="@policy.Id.Value" Revision="stored.Revision" Json="@DefinitionEditor.Pretty(SlaPolicyCodec.Serialize(policy))" SaveAction="sla.policy.save" DeleteAction="sla.policy.delete" /></div>
+        }
+    </div>
+}
+@if (Session.Can(SlaPermissions.Manage))
+{
+    <div class="tf-card"><div class="tf-card__header"><div class="tf-card__title">New SLA policy</div></div><div class="tf-card__content">
+        <DefinitionEditor Json="@DefinitionEditor.Pretty(SlaPolicyCodec.Serialize(new SlaPolicy(new SlaPolicyId("new"), "New policy", [new SlaRule("Default", new SlaCondition(), new SlaTargets(TimeSpan.FromHours(1), null, TimeSpan.FromHours(24)))])))" SaveAction="sla.policy.save" />
+    </div></div>
+}
+
+@code {
+    private List<StoredSlaPolicy> policies = [];
+    private List<SlaStatusView> risk = [];
+    private readonly Dictionary<ConversationId, ConversationView> conversations = [];
+
+    private static string Applies(SlaCondition condition)
+    {
+        var parts = new List<string>();
+        if (condition.Priorities.Count > 0)
+            parts.Add(string.Join(", ", condition.Priorities.Select(priority => priority.ToString().ToLowerInvariant())) + " priority");
+        if (condition.Labels.Count > 0)
+            parts.Add("labels " + string.Join(", ", condition.Labels.Select(label => label.Value)));
+        return parts.Count == 0 ? "Every conversation" : string.Join(" · ", parts);
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadWorkspaceAsync();
+        if (Service<ISlaPolicyService>() is { } policyService && await policyService.ListAsync(Actor, Aborted) is SlaValue<IReadOnlyList<StoredSlaPolicy>> list)
+            policies = [.. list.Value];
+        var filter = Query("filter") switch { "at-risk" => SlaRiskFilter.AtRisk, "breached" => SlaRiskFilter.Breached, _ => SlaRiskFilter.AtRiskOrBreached };
+        if (Service<ISlaService>() is { } sla && await sla.ListAsync(Actor, new SlaRiskQuery(filter, limit: 50), null, Aborted) is SlaValue<SlaRiskPage> page)
+            risk = [.. page.Value.Items];
+        if (Service<IConversationService>() is { } service)
+            foreach (var item in risk)
+                if (await service.GetAsync(Actor, item.Conversation, Aborted) is ConversationView view)
+                    conversations[item.Conversation] = view;
+        await LoadContactsAsync(conversations.Values.Select(view => view.Contact));
+        await Session.LoadUsersAsync(conversations.Values.Select(view => view.Assignee));
+    }
+}

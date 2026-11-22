@@ -74,7 +74,7 @@ internal sealed class LiveChatHost : IAsyncDisposable
 
     public RecordingConnection ConnectVisitor(VisitorSessionContext context, string id)
     {
-        var connection = new RecordingConnection(id, new VisitorSubscriber(context.Scope, context.Session.Session.Id));
+        var connection = new RecordingConnection(id, new VisitorSubscriber(context.Scope, context.Session.Session.Id), Idle);
         Assert.IsInstanceOfType<RealtimeConnected>(Registry.Connect(connection).Value);
         Assert.IsInstanceOfType<RealtimeSubscribed>(Registry.SubscribeAsync(id, new VisitorSessionTopic(context.Scope, context.Session.Session.Id)).GetAwaiter().GetResult().Value);
         return connection;
@@ -82,11 +82,13 @@ internal sealed class LiveChatHost : IAsyncDisposable
 
     public async Task<RecordingConnection> ConnectAgentAsync(PrincipalRef principal, ConversationId conversation, string id)
     {
-        var connection = new RecordingConnection(id, new AgentSubscriber(principal));
+        var connection = new RecordingConnection(id, new AgentSubscriber(principal), Idle);
         Assert.IsInstanceOfType<RealtimeConnected>(Registry.Connect(connection).Value);
         Assert.IsInstanceOfType<RealtimeSubscribed>((await Registry.SubscribeAsync(id, new ConversationTopic(Scope, conversation))).Value);
         return connection;
     }
+
+    public Task Idle() => Host.Services.GetRequiredService<RealtimeSubscriptionRegistry>().IdleAsync();
 
     public static T Value<T>(LiveChatResult<T> result)
     {

@@ -32,6 +32,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
     private readonly IHelpCenterSearch? helpCenter;
     private readonly ILiveChatIdentitySecretResolver? secrets;
     private readonly IVisitorTokenValidator? tokenValidator;
+    private readonly IContactLinkingService? linking;
     private readonly LiveChatOptions options;
     private readonly ChannelsOptions channelOptions;
     private readonly ChannelKind kind;
@@ -54,7 +55,8 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         IHelpCenterSearch? helpCenter = null,
         ILiveChatIdentitySecretResolver? secrets = null,
         IVisitorTokenValidator? tokenValidator = null,
-        ILogger<LiveChatVisitorService>? logger = null)
+        ILogger<LiveChatVisitorService>? logger = null,
+        IContactLinkingService? linking = null)
     {
         this.endpoints = endpoints ?? throw new ArgumentNullException(nameof(endpoints));
         this.widgets = widgets ?? throw new ArgumentNullException(nameof(widgets));
@@ -76,6 +78,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         this.secrets = secrets;
         this.tokenValidator = tokenValidator;
         this.logger = logger ?? NullLogger<LiveChatVisitorService>.Instance;
+        this.linking = linking;
     }
 
     // ---- Widgets and sessions ----
@@ -156,6 +159,8 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
             return Refused<VisitorTokenRotated>(LiveChatRefusal.Unauthenticated);
         var now = time.GetUtcNow();
+        if (context.RotationRecommended && session.Session.TokenIssuedAt > now - options.TokenRotationInterval)
+            return Value(new VisitorTokenRotated(new VisitorSessionContext(session, false), null));
         var token = VisitorSessionTokens.Issue(session.Session.Id);
         var rotated = session.Session.With(tokenHash: token.Hash, tokenIssuedAt: now, expiresAt: now + options.SessionLifetime,
             previous: (session.Session.TokenHash, now + options.TokenRotationGrace));
@@ -214,11 +219,51 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
                 return Refused<VisitorSessionContext>(LiveChatRefusal.Invalid, "The session is already verified as another identity; start a new session.");
             return Value(new VisitorSessionContext(session, context.RotationRecommended));
         }
-        return await UpdateAsync(session, session.Session.With(identity: identity, displayName: session.Session.DisplayName ?? displayName), cancellationToken).ConfigureAwait(false) switch
+        switch (await UpdateAsync(session, session.Session.With(identity: identity, displayName: session.Session.DisplayName ?? displayName), cancellationToken).ConfigureAwait(false))
         {
-            LiveChatValue<StoredVisitorSession> updated => Value(new VisitorSessionContext(updated.Value, context.RotationRecommended)),
-            LiveChatRefused refused => refused,
-        };
+            case LiveChatValue<StoredVisitorSession> updated:
+                await LinkVisitorContactAsync(updated.Value, identity, cancellationToken).ConfigureAwait(false);
+                return Value(new VisitorSessionContext(updated.Value, context.RotationRecommended));
+            case LiveChatRefused refused:
+                return refused;
+        }
+        throw new InvalidOperationException("Unknown session update outcome.");
+    }
+
+    /// <summary>
+    /// E16 hook: after a session is verified, links the anonymous visitor contact (the claimed <c>WidgetVisitor</c> identity of this
+    /// session's earlier messages) to the verified account through <see cref="IContactLinkingService"/> as the channel worker, so it
+    /// is merged into an existing account contact (its conversations follow the merge) or becomes the account contact. Best effort:
+    /// failures are logged without identifiers and never fail the identification.
+    /// </summary>
+    private async Task LinkVisitorContactAsync(StoredVisitorSession session, VerifiedVisitorIdentity identity, CancellationToken cancellationToken)
+    {
+        if (linking is null || !options.LinkVisitorContactOnIdentify
+            || ContactIdentityAddress.Normalize(ContactIdentityKind.WidgetVisitor, session.Session.VisitorId) is not { Value: ContactIdentityAddress visitor })
+            return;
+        try
+        {
+            var source = identity.Method == VisitorVerificationMethod.Hmac ? "livechat-hmac" : "livechat-token";
+            var request = new ContactLinkRequest(new ExternalAccountRef(identity.Namespace, identity.Value), source, evidence: visitor);
+            switch (await linking.LinkAccountAsync(channelOptions.ResolveWorker(session.Scope), request, cancellationToken).ConfigureAwait(false))
+            {
+                case ContactRefused { Reason: ContactRefusal.Forbidden }:
+                    logger.LogWarning("The channel worker principal was refused while linking a verified visitor contact; grant contact:link and contact:merge to enable it.");
+                    break;
+                case ContactLinkConflict conflict:
+                    logger.LogInformation("A verified visitor contact was not linked ({Reason}).", conflict.Reason);
+                    break;
+                case ContactLinked:
+                case ContactMergedInto:
+                case ContactAlreadyLinked:
+                case ContactRefused:
+                    break;
+            }
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            logger.LogWarning("Linking a verified visitor contact failed ({Error}).", error.GetType().Name);
+        }
     }
 
     public async Task<LiveChatResult<VisitorSessionContext>> SubmitPrechatAsync(VisitorSessionContext context, IReadOnlyDictionary<string, string> answers, CancellationToken cancellationToken = default)

@@ -22,6 +22,18 @@
     <PackageVersion Include="Anthropic" Version="13.6.0" />
     <PackageVersion Include="Microsoft.Extensions.AI" Version="11.0.0" />
     <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="11.0.0" />
+    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="11.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="11.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="11.0.0" />
+    <PackageVersion Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.23.0" />
+    <PackageVersion Include="Microsoft.IdentityModel.Protocols.OpenIdConnect" Version="8.23.0" />
+    <PackageVersion Include="ModelContextProtocol" Version="2.4.0" />
+    <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="2.4.0" />
+    <PackageVersion Include="BlazorBlueprint.Components" Version="4.2.0" />
+    <PackageVersion Include="BlazorBlueprint.Icons.Lucide" Version="2.0.2" />
+    <PackageVersion Include="bunit" Version="2.14.0" />
+    <!-- IdentityFlow packages are lockstep-versioned; keep every entry on the same pinned version. -->
+    <PackageVersion Include="IdentityFlow.Hosting.AspNetCore.Authentication" Version="0.1.0-alpha.20260826115343" />
     <!-- EnvelopeFlow packages are lockstep-versioned; keep every entry on the same pinned version. -->
     <PackageVersion Include="EnvelopeFlow.Core" Version="0.1.0-alpha.3.1" />
     <PackageVersion Include="EnvelopeFlow.Inbound.Abstractions" Version="0.1.0-alpha.3.1" />
@@ -29,5 +41,7 @@
     <PackageVersion Include="EnvelopeFlow.Sms.Abstractions" Version="0.1.0-alpha.3.1" />
     <PackageVersion Include="EnvelopeFlow.WhatsApp.Abstractions" Version="0.1.0-alpha.3.1" />
     <PackageVersion Include="EnvelopeFlow.Chat.Abstractions" Version="0.1.0-alpha.3.1" />
+    <!-- WalFlow sink contract for the event broker adapter (users add the specific WalFlow.Sinks.* package at the same version). -->
+    <PackageVersion Include="WalFlow.Abstractions" Version="0.1.0-alpha.alpha.20260708090623" />
   </ItemGroup>
 </Project>

@@ -1,0 +1,47 @@
+@inherits UiPageBase
+@using TicketFlow.Automation
+
+<PageHeader Title="Automation" Description="Macros bundle actions agents run on a conversation in one click." />
+<AutomationTabs Active="macros" />
+
+<div class="tf-grid tf-grid--2">
+    @foreach (var macro in macros)
+    {
+        <div class="tf-card">
+            <div class="tf-card__header">
+                <div><div class="tf-card__title">@macro.Macro.Name</div><div class="tf-card__description">@(macro.Macro.Description ?? "No description")</div></div>
+                <span class="tf-badge">@macro.Macro.Visibility</span>
+            </div>
+            <div class="tf-card__content tf-stack tf-stack--sm">
+                @foreach (var action in macro.Macro.Actions.Select(UiAutomationText.Action))
+                {
+                    <span class="tf-row tf-small" style="flex-wrap:nowrap"><LucideIcon Name="@action.Icon" Size="14" />@action.Text</span>
+                }
+                @if (Session.Can(AutomationPermissions.MacroManage))
+                {
+                    <DefinitionEditor Id="@macro.Id.Value" Revision="macro.Revision" Json="@DefinitionEditor.Pretty(AutomationCodec.SerializeMacro(macro.Macro))" SaveAction="automation.macro.save" DeleteAction="automation.macro.delete" />
+                }
+            </div>
+        </div>
+    }
+</div>
+@if (macros.Count == 0)
+{
+    <div class="tf-card"><EmptyState Icon="zap" Title="No macros" /></div>
+}
+@if (Session.Can(AutomationPermissions.MacroManage))
+{
+    <div class="tf-card"><div class="tf-card__header"><div class="tf-card__title">New macro</div></div><div class="tf-card__content">
+        <DefinitionEditor Json="@DefinitionEditor.Pretty(AutomationCodec.SerializeMacro(new Macro(new MacroId("new"), "New macro", MacroVisibility.Shared, null, [new AddLabelsAction(new LabelId("follow-up"))])))" SaveAction="automation.macro.save" />
+    </div></div>
+}
+
+@code {
+    private List<StoredMacro> macros = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<IMacroService>() is { } service && await service.ListAsync(Actor, Aborted) is AutomationValue<IReadOnlyList<StoredMacro>> list)
+            macros = [.. list.Value];
+    }
+}

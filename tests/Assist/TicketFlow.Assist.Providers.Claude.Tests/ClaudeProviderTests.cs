@@ -107,6 +107,7 @@ public sealed class ClaudeProviderTests
         Assert.AreEqual(status, error.StatusCode);
         Assert.HasCount(1, handler.Requests);
         Assert.DoesNotContain("secret-detail", error.Message);
+        Assert.IsFalse(error.TokensMayHaveBeenConsumed, "an error status means nothing was generated");
     }
 
     [TestMethod]
@@ -121,6 +122,7 @@ public sealed class ClaudeProviderTests
         var error = await Assert.ThrowsExactlyAsync<AssistProviderException>(() => SendAsync(provider));
         Assert.AreEqual(failure, error.Failure);
         Assert.IsTrue(error.Retryable);
+        Assert.IsFalse(error.TokensMayHaveBeenConsumed);
         Assert.HasCount(3, handler.Requests);
         var delays = time.Fired.ToArray();
         Assert.HasCount(2, delays);
@@ -167,6 +169,7 @@ public sealed class ClaudeProviderTests
         var network = await Assert.ThrowsExactlyAsync<AssistProviderException>(() => SendAsync(provider));
         Assert.AreEqual(AssistProviderFailure.Network, network.Failure);
         Assert.IsTrue(network.Retryable);
+        Assert.IsTrue(network.TokensMayHaveBeenConsumed, "a transport failure may happen after the request was sent");
 
         var (slow, slowHandler, _) = Create(options =>
         {
@@ -179,6 +182,7 @@ public sealed class ClaudeProviderTests
         var timeout = await Assert.ThrowsExactlyAsync<AssistProviderException>(() => SendAsync(slow));
         Assert.AreEqual(AssistProviderFailure.Timeout, timeout.Failure);
         Assert.IsTrue(timeout.Retryable);
+        Assert.IsTrue(timeout.TokensMayHaveBeenConsumed, "a timeout after sending is ambiguous");
         Assert.HasCount(2, slowHandler.Requests, "requests: " + slowHandler.Requests.Count);
     }
 
@@ -204,6 +208,7 @@ public sealed class ClaudeProviderTests
         var error = await Assert.ThrowsExactlyAsync<AssistProviderException>(() => SendAsync(missing));
         Assert.AreEqual(AssistProviderFailure.NotConfigured, error.Failure);
         Assert.IsFalse(error.Retryable);
+        Assert.IsFalse(error.TokensMayHaveBeenConsumed, "nothing was sent");
         Assert.IsEmpty(handler.Requests);
 
         using var configured = new ClaudeAssistProvider(new ClaudeAssistOptions(), handler, new InstantTimeProvider(TimeSpan.Zero),

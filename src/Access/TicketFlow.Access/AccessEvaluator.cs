@@ -143,8 +143,8 @@ public sealed class AccessEvaluator : IAccessEvaluator
     }
 
     /// <summary>
-    /// Loads grants, roles and field policies once. Each decision then evaluates in memory; sensitive permissions are still audited
-    /// per decision and break-glass use once per permission per context.
+    /// Loads grants, roles and field policies once. Each decision then evaluates in memory; sensitive permissions and every decision
+    /// that relies on break-glass are still audited per decision, exactly like <see cref="AuthorizeAsync"/>.
     /// </summary>
     public async Task<IAccessDecisionContext> LoadDecisionContextAsync(PrincipalRef principal, TicketScope scope, IEnumerable<Permission> permissions, CancellationToken cancellationToken = default)
     {
@@ -163,9 +163,6 @@ public sealed class AccessEvaluator : IAccessEvaluator
     private sealed class BatchContext(AccessEvaluator owner, PrincipalRef principal, TicketScope scope, IReadOnlySet<Permission> permissions,
         IReadOnlyDictionary<Permission, AccessDenialReason?> prechecks, AccessContext? context, IReadOnlyList<StoredAccessFieldPolicy> policies) : IAccessDecisionContext
     {
-        private readonly Lock gate = new();
-        private readonly HashSet<Permission> breakGlassAudited = [];
-
         public PrincipalRef Principal { get; } = principal;
         public TicketScope Scope { get; } = scope;
         public IReadOnlySet<Permission> Permissions { get; } = permissions;
@@ -185,11 +182,9 @@ public sealed class AccessEvaluator : IAccessEvaluator
                 var result = AccessEngine.Evaluate(context!, permission, resource, includeBreakGlass: true);
                 decision = result.Denial is { } denial ? new AccessDenied(permission, denial) : owner.Mask(context!, permission, resource, result, policies);
             }
-            var audit = sensitive;
-            if (!audit && UsedBreakGlass(decision))
-                lock (gate)
-                    audit = breakGlassAudited.Add(permission);
-            if (!audit)
+            // Same audit semantics as AuthorizeAsync: sensitive permissions and every decision relying on break-glass are recorded
+            // per resource; standard-grant decisions of non-sensitive permissions stay on the synchronous fast path.
+            if (!sensitive && !UsedBreakGlass(decision))
                 return ValueTask.FromResult(decision);
             return RecordAsync(permission, resource, decision, cancellationToken);
         }

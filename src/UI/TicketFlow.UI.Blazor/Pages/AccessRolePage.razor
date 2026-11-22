@@ -1,0 +1,79 @@
+@inherits UiPageBase
+
+@if (role is null && Id != "new")
+{
+    <StatePanel Icon="search-x" Title="Role not found" />
+}
+else
+{
+    <PageHeader Title="@(role?.Name ?? "New role")" Description="@(builtIn ? "Built-in roles are immutable." : "You can only include permissions you hold yourself (no escalation).")">
+        <Actions><BbButton Href="@Url("access")" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="arrow-left" Size="14" />Roles</BbButton></Actions>
+    </PageHeader>
+    <TfForm Action="access.role.save" Revision="revision" Class="tf-stack">
+        <input type="hidden" name="id" value="@(role?.Id.Value)" />
+        <div class="tf-card">
+            <div class="tf-card__content tf-form-grid">
+                <div class="tf-field"><label class="tf-label" for="tf-r-name">Name</label><input id="tf-r-name" name="name" class="tf-input" required maxlength="128" value="@Session.FormValue("name", role?.Name)" disabled="@builtIn" /></div>
+                @if (role is null)
+                {
+                    <div class="tf-field"><label class="tf-label" for="tf-r-id">Identifier</label><input id="tf-r-id" name="newid" class="tf-input tf-mono" maxlength="64" placeholder="billing-specialist" value="@Session.FormValue("newid", null)" /></div>
+                }
+            </div>
+        </div>
+        @foreach (var group in catalog.GroupBy(definition => definition.Permission.Value.Split(':')[0]).OrderBy(group => group.Key, StringComparer.Ordinal))
+        {
+            <div class="tf-card">
+                <div class="tf-card__header"><div class="tf-card__title" style="text-transform:capitalize">@group.Key.Replace('-', ' ')</div></div>
+                <div class="tf-card__content tf-perm-grid">
+                    @foreach (var definition in group)
+                    {
+                        <label class="tf-check" title="@definition.Description">
+                            <input type="checkbox" name="permission" value="@definition.Permission.Value" checked="@(role?.Permissions.Contains(definition.Permission) == true)" disabled="@builtIn" />
+                            <span class="tf-mono">@definition.Permission.Value</span>
+                            @if (definition.IsSensitive)
+                            {
+                                <span class="tf-badge tf-badge--warning" style="height:18px">sensitive</span>
+                            }
+                        </label>
+                    }
+                </div>
+            </div>
+        }
+        @if (!builtIn)
+        {
+            <div class="tf-form-actions">
+                @if (role is not null)
+                {
+                    <button type="submit" name="_action" value="access.role.delete" class="tf-button tf-button--ghost" style="color:var(--destructive)" formnovalidate><LucideIcon Name="trash-2" Size="14" />Delete role</button>
+                }
+                <BbButton Type="ButtonType.Submit">@(role is null ? "Create role" : "Save role")</BbButton>
+            </div>
+        }
+    </TfForm>
+}
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private AccessRole? role;
+    private long? revision;
+    private bool builtIn;
+    private IReadOnlyList<PermissionDefinition> catalog = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        catalog = Service<IPermissionCatalog>()?.Definitions ?? [];
+        if (Id is null || Id == "new")
+            return;
+        if (BuiltInRoles.All.FirstOrDefault(item => item.Id.Value == Id) is { } builtInRole)
+        {
+            role = builtInRole;
+            builtIn = true;
+        }
+        else if (Service<IAccessRoleStore>() is { } store && await store.GetAsync(Session.Scope, new RoleId(Id), Aborted) is { } stored)
+        {
+            role = stored.Role;
+            revision = stored.Revision;
+        }
+    }
+}

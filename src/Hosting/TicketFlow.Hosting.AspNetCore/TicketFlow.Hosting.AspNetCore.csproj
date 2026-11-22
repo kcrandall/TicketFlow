@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Optional ASP.NET Core minimal-API endpoints for TicketFlow: workspaces, access administration, contacts, conversations, routing, SLA, live chat, automation, help center, surveys and assist, with ProblemDetails mapping, ETag/If-Match revision fencing, host-supplied principal and partition resolution and OpenAPI generation.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Access/TicketFlow.Access.Abstractions/TicketFlow.Access.Abstractions.csproj" />
+    <ProjectReference Include="../../Workspaces/TicketFlow.Workspaces.Abstractions/TicketFlow.Workspaces.Abstractions.csproj" />
+    <ProjectReference Include="../../Contacts/TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj" />
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
+    <ProjectReference Include="../../Routing/TicketFlow.Routing.Abstractions/TicketFlow.Routing.Abstractions.csproj" />
+    <ProjectReference Include="../../Sla/TicketFlow.Sla.Abstractions/TicketFlow.Sla.Abstractions.csproj" />
+    <ProjectReference Include="../../Automation/TicketFlow.Automation.Abstractions/TicketFlow.Automation.Abstractions.csproj" />
+    <ProjectReference Include="../../HelpCenter/TicketFlow.HelpCenter.Abstractions/TicketFlow.HelpCenter.Abstractions.csproj" />
+    <ProjectReference Include="../../Surveys/TicketFlow.Surveys.Abstractions/TicketFlow.Surveys.Abstractions.csproj" />
+    <ProjectReference Include="../../Assist/TicketFlow.Assist.Abstractions/TicketFlow.Assist.Abstractions.csproj" />
+    <ProjectReference Include="../../Channels/TicketFlow.Channels.Abstractions/TicketFlow.Channels.Abstractions.csproj" />
+    <ProjectReference Include="../../Channels/TicketFlow.Channels.LiveChat/TicketFlow.Channels.LiveChat.csproj" />
+  </ItemGroup>
+</Project>

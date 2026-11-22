@@ -1,0 +1,16 @@
+<div class="tf-empty">
+    <LucideIcon Name="@Icon" Size="20" />
+    <div class="tf-empty__title">@Title</div>
+    @if (Message is not null)
+    {
+        <div class="tf-empty__message">@Message</div>
+    }
+    @ChildContent
+</div>
+
+@code {
+    [Parameter] public string Icon { get; set; } = "inbox";
+    [Parameter] public string Title { get; set; } = "Nothing here yet";
+    [Parameter] public string? Message { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+}

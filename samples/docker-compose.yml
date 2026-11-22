@@ -1,0 +1,22 @@
+# Local PostgreSQL for samples/TicketFlow.SampleHost (development only).
+#   docker compose -f samples/docker-compose.yml up -d
+#   dotnet run --project samples/TicketFlow.SampleHost -- seed
+#   dotnet run --project samples/TicketFlow.SampleHost
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: ticketflow
+      POSTGRES_PASSWORD: ticketflow-dev
+      POSTGRES_DB: ticketflow
+    ports:
+      - "127.0.0.1:5439:5432"
+    volumes:
+      - ticketflow-pg:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticketflow -d ticketflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  ticketflow-pg:

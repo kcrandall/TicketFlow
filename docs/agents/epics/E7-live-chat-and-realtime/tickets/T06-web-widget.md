@@ -35,4 +35,8 @@ README and `demo/index.html`.
 - `cd clients/widget && npm install && npx tsc --noEmit && npx vitest run && npm run build` — typecheck clean, 3 files / 12 tests passed,
   bundle `dist/ticketflow-chat.js` 66.8 KB.
 
+Review fixes (2026-11-22): build uses `--sources-content=false`; `test/bundle.test.ts` enforces an 80 KB budget and no embedded sources;
+`tokenStorage: "memory"` option and README section on token storage and XSS exposure.
+- `npx tsc --noEmit && npx vitest run && npm run build` — 4 files / 14 tests passed.
+
 Post-ticket parallel reviews (docs/agents/prompts/post-ticket-*.md) have not been run yet.

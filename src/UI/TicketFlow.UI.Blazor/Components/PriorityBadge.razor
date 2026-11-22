@@ -1,0 +1,21 @@
+@using TicketFlow.Conversations
+@if (Priority != ConversationPriority.None || ShowNone)
+{
+    <span class="tf-priority tf-priority--@Priority.ToString().ToLowerInvariant()" title="Priority">
+        <LucideIcon Name="@Icon" Size="12" />@(Priority == ConversationPriority.None ? "No priority" : Priority.ToString())
+    </span>
+}
+
+@code {
+    [Parameter] public ConversationPriority Priority { get; set; }
+    [Parameter] public bool ShowNone { get; set; }
+
+    private string Icon => Priority switch
+    {
+        ConversationPriority.Urgent => "triangle-alert",
+        ConversationPriority.High => "signal-high",
+        ConversationPriority.Medium => "signal-medium",
+        ConversationPriority.Low => "signal-low",
+        _ => "minus",
+    };
+}

@@ -1,0 +1,224 @@
+@inherits UiPageBase
+@using TicketFlow.Contacts
+@using TicketFlow.Conversations
+
+@if (contact is null)
+{
+    <StatePanel Icon="search-x" Title="Contact not available" Message="It may have been deleted or merged, or you no longer have access to it.">
+        <BbButton Href="@Url("contacts")" Variant="ButtonVariant.Outline">Back to contacts</BbButton>
+    </StatePanel>
+}
+else
+{
+    var name = UiText.ContactName(contact);
+    <div class="tf-page-header">
+        <div class="tf-row" style="gap:14px">
+            <BbAvatar Class="tf-avatar-lg"><BbAvatarFallback>@TicketFlowUISession.Initials(name)</BbAvatarFallback></BbAvatar>
+            <div>
+                <h1 class="tf-page-title">@name</h1>
+                <div class="tf-row tf-muted tf-small" style="margin-top:4px">
+                    <span>@(contact.Profile.Company ?? "No company")</span><span>·</span><span>Contact since @UiFormat.Date(contact.CreatedAt)</span>
+                    @if (contact.Blocked)
+                    {
+                        <span class="tf-badge tf-badge--destructive">Blocked</span>
+                    }
+                </div>
+            </div>
+        </div>
+        <div class="tf-page-header__actions">
+            <div class="tf-row"><LabelChips Labels="contact.Labels.Select(label => label.Value)" /></div>
+            @if (Session.Can(AccessPermissions.ContactUpdate))
+            {
+                <TfForm Action="contact.block" Revision="contact.Revision" Class="tf-inline-form">
+                    <input type="hidden" name="blocked" value="@(contact.Blocked ? "false" : "true")" />
+                    <BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="@(contact.Blocked ? "unlock" : "ban")" Size="14" />@(contact.Blocked ? "Unblock" : "Block")</BbButton>
+                </TfForm>
+            }
+        </div>
+    </div>
+
+    @if (revealed is not null)
+    {
+        <div class="tf-revealed">
+            <div class="tf-row"><LucideIcon Name="eye" Size="14" /><strong>Revealed @revealed.Field.Value</strong><span class="tf-muted tf-small">· audit event @revealed.AuditEventId.ToString("N")[..12]… · shown once, not stored</span></div>
+            <div class="tf-mono" style="margin-top:6px">@string.Join(", ", revealed.Identities.Select(identity => identity.Value))@(revealed.Attribute is { } value ? UiText.Attribute(value) : null)</div>
+        </div>
+    }
+
+    <div class="tf-grid tf-grid--wide-narrow">
+        <div class="tf-stack">
+            <div class="tf-card">
+                <div class="tf-card__header"><div><div class="tf-card__title">Identities</div><div class="tf-card__description">Channel addresses used to recognize this contact. Masked values can be revealed with a justification; every reveal is audited.</div></div></div>
+                <div class="tf-table-wrap" style="margin-top:12px">
+                    <table class="tf-table">
+                        <thead><tr><th>Type</th><th>Value</th><th>Verification</th><th class="tf-num"></th></tr></thead>
+                        <tbody>
+                            @foreach (var identity in contact.Identities)
+                            {
+                                <tr>
+                                    <td class="tf-nowrap"><span class="tf-row" style="flex-wrap:nowrap"><LucideIcon Name="@(identity.Kind == ContactIdentityKind.Email ? "mail" : identity.Kind == ContactIdentityKind.WidgetVisitor ? "globe" : "phone")" Size="14" />@identity.Kind</span></td>
+                                    <td>@if (identity.Masked) { <span class="tf-masked">•••• •••• ••••</span> } else { <span class="tf-mono">@identity.Value</span> }</td>
+                                    <td>
+                                        @if (identity.Verification.IsVerified)
+                                        {
+                                            <span class="tf-badge tf-badge--success"><LucideIcon Name="badge-check" Size="12" />Verified</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="tf-badge tf-badge--muted">Claimed</span>
+                                        }
+                                    </td>
+                                    <td class="tf-num">
+                                        @if (identity.Masked && identity.Revealable)
+                                        {
+                                            <TfForm Action="contact.reveal" Class="tf-row" style="justify-content:flex-end;flex-wrap:nowrap">
+                                                <input type="hidden" name="field" value="@ContactFieldPaths.ForIdentity(identity.Kind).Value" />
+                                                <input name="justification" class="tf-input tf-input--sm" style="width:200px" placeholder="Reason (audited)" required minlength="5" maxlength="512" />
+                                                <button class="tf-button tf-button--outline tf-button--xs" type="submit"><LucideIcon Name="eye" Size="12" />Reveal</button>
+                                            </TfForm>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="tf-card">
+                <div class="tf-card__header"><div><div class="tf-card__title">Conversations</div><div class="tf-card__description">Recent conversations with @name</div></div></div>
+                <div class="tf-card__content--flush">
+                    @if (conversations.Count == 0)
+                    {
+                        <EmptyState Icon="messages-square" Title="No conversations yet" />
+                    }
+                    else
+                    {
+                        <ul class="tf-list">
+                            @foreach (var conversation in conversations)
+                            {
+                                <li>
+                                    <ChannelBadge Kind="@InboxChannel(conversation.Inbox)" Label="@InboxName(conversation.Inbox)" />
+                                    <div class="tf-list__main">
+                                        <a class="tf-list__title" href="@Url($"conversations/{conversation.Id.Value}")">#@conversation.Id.Value</a>
+                                        <span class="tf-list__meta">@Session.UserName(conversation.Assignee) · @UiFormat.Relative(conversation.LastActivityAt, Now)</span>
+                                    </div>
+                                    <PriorityBadge Priority="conversation.Priority" />
+                                    <StatusBadge Kind="conversation.Status.Kind" />
+                                </li>
+                            }
+                        </ul>
+                    }
+                </div>
+            </div>
+        </div>
+
+        <div class="tf-stack">
+            <div class="tf-card">
+                <div class="tf-card__header"><div class="tf-card__title">Profile</div></div>
+                <div class="tf-card__content">
+                    @if (Session.Can(AccessPermissions.ContactUpdate))
+                    {
+                        <TfForm Action="contact.profile" Revision="contact.Revision" Class="tf-form">
+                            <div class="tf-field"><label class="tf-label" for="tf-p-name">Name</label><input id="tf-p-name" name="name" class="tf-input" maxlength="256" value="@Session.FormValue("name", contact.Profile.DisplayName)" /></div>
+                            <div class="tf-field"><label class="tf-label" for="tf-p-company">Company</label><input id="tf-p-company" name="company" class="tf-input" maxlength="256" value="@Session.FormValue("company", contact.Profile.Company)" /></div>
+                            <div class="tf-form-grid">
+                                <div class="tf-field"><label class="tf-label" for="tf-p-locale">Locale</label><input id="tf-p-locale" name="locale" class="tf-input" maxlength="35" value="@Session.FormValue("locale", contact.Profile.Locale)" /></div>
+                                <div class="tf-field"><label class="tf-label" for="tf-p-tz">Time zone</label><input id="tf-p-tz" name="timezone" class="tf-input" maxlength="64" value="@Session.FormValue("timezone", contact.Profile.TimeZone)" /></div>
+                            </div>
+                            <div class="tf-form-actions"><BbButton Type="ButtonType.Submit" Size="ButtonSize.Small">Save profile</BbButton></div>
+                        </TfForm>
+                    }
+                    else
+                    {
+                        <dl class="tf-dl"><dt>Company</dt><dd>@(contact.Profile.Company ?? "—")</dd><dt>Locale</dt><dd>@(contact.Profile.Locale ?? "—")</dd></dl>
+                    }
+                </div>
+            </div>
+            <div class="tf-card">
+                <div class="tf-card__header"><div class="tf-card__title">Attributes</div></div>
+                <div class="tf-card__content">
+                    <dl class="tf-dl">
+                        @foreach (var field in contact.Attributes)
+                        {
+                            <dt>@field.Key</dt>
+                            <dd>@(field.Masked ? "••••••" : UiText.Attribute(field.Value))</dd>
+                        }
+                        @if (contact.Attributes.Count == 0)
+                        {
+                            <dt>—</dt><dd class="tf-muted">No attributes</dd>
+                        }
+                    </dl>
+                </div>
+            </div>
+            @if (Session.Can(AccessPermissions.ContactUpdate))
+            {
+                <div class="tf-card">
+                    <div class="tf-card__header"><div class="tf-card__title">Labels</div></div>
+                    <div class="tf-card__content tf-stack tf-stack--sm">
+                        <div class="tf-row">
+                            @foreach (var label in contact.Labels)
+                            {
+                                <TfForm Action="contact.labels.remove" Revision="contact.Revision" Class="tf-inline-form">
+                                    <input type="hidden" name="label" value="@label.Value" />
+                                    <button type="submit" class="tf-label-chip" style="--tf-label-hue:@Hue(label.Value);cursor:pointer" title="Remove label">@label.Value ✕</button>
+                                </TfForm>
+                            }
+                        </div>
+                        <TfForm Action="contact.labels.add" Revision="contact.Revision" Class="tf-side-form">
+                            <input name="label" class="tf-input tf-input--sm" placeholder="Add label" maxlength="64" aria-label="Add label" />
+                            <button class="tf-button tf-button--outline tf-button--sm" type="submit">Add</button>
+                        </TfForm>
+                    </div>
+                </div>
+            }
+            @if (Session.Can(AccessPermissions.ContactMerge))
+            {
+                <div class="tf-card">
+                    <div class="tf-card__header"><div><div class="tf-card__title">Merge a duplicate</div><div class="tf-card__description">Moves identities, labels and conversations of another contact into this one. Audited; can be undone.</div></div></div>
+                    <div class="tf-card__content">
+                        <TfForm Action="contact.merge" Revision="contact.Revision" Class="tf-form">
+                            <div class="tf-field"><label class="tf-label" for="tf-m-source">Duplicate contact ID</label><input id="tf-m-source" name="source" class="tf-input" required maxlength="256" placeholder="c-…" /></div>
+                            <div class="tf-field"><label class="tf-label" for="tf-m-reason">Justification</label><input id="tf-m-reason" name="justification" class="tf-input" maxlength="512" placeholder="Same person, second email address" /></div>
+                            <div class="tf-form-actions"><BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="merge" Size="14" />Merge into @name</BbButton></div>
+                        </TfForm>
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private ContactView? contact;
+    private ContactFieldRevealed? revealed;
+    private readonly List<ConversationView> conversations = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<IContactService>() is not { } service || Id is null)
+            return;
+        ContactId id;
+        try
+        {
+            id = new ContactId(Id);
+        }
+        catch (ArgumentException)
+        {
+            return;
+        }
+        if (await service.GetAsync(Actor, id, Aborted) is not ContactApplied<ContactView> found)
+            return;
+        contact = found.Value;
+        revealed = Session.PageStateAs<ContactFieldRevealed>();
+        await LoadWorkspaceAsync();
+        if (Service<IConversationService>() is { } conversationService && Session.Can(AccessPermissions.ConversationRead)
+            && await conversationService.ListAsync(Actor, new ConversationListQuery(contact: id, limit: 10), null, Aborted) is ConversationListPage page)
+            conversations.AddRange(page.Conversations);
+        await Session.LoadUsersAsync(conversations.Select(conversation => conversation.Assignee));
+    }
+
+    private static int Hue(string label) => (int)((uint)label.Aggregate(17, (hash, character) => hash * 31 + character) % 360);
+}

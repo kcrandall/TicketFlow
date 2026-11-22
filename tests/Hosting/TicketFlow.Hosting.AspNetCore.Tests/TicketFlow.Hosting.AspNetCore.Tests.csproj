@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Hosting/TicketFlow.Hosting.AspNetCore/TicketFlow.Hosting.AspNetCore.csproj" />
+    <ProjectReference Include="../../../src/TicketFlow/TicketFlow.csproj" />
+    <ProjectReference Include="../../../src/Access/TicketFlow.Access/TicketFlow.Access.csproj" />
+    <ProjectReference Include="../../../src/Workspaces/TicketFlow.Workspaces/TicketFlow.Workspaces.csproj" />
+    <ProjectReference Include="../../../src/Contacts/TicketFlow.Contacts/TicketFlow.Contacts.csproj" />
+    <ProjectReference Include="../../../src/Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
+    <ProjectReference Include="../../../src/Routing/TicketFlow.Routing/TicketFlow.Routing.csproj" />
+    <ProjectReference Include="../../../src/Sla/TicketFlow.Sla/TicketFlow.Sla.csproj" />
+    <ProjectReference Include="../../../src/Automation/TicketFlow.Automation/TicketFlow.Automation.csproj" />
+    <ProjectReference Include="../../../src/HelpCenter/TicketFlow.HelpCenter/TicketFlow.HelpCenter.csproj" />
+    <ProjectReference Include="../../../src/Surveys/TicketFlow.Surveys/TicketFlow.Surveys.csproj" />
+    <ProjectReference Include="../../../src/Realtime/TicketFlow.Realtime/TicketFlow.Realtime.csproj" />
+    <ProjectReference Include="../../../src/Channels/TicketFlow.Channels.LiveChat/TicketFlow.Channels.LiveChat.csproj" />
+    <ProjectReference Include="../../../src/Assist/TicketFlow.Assist.Abstractions/TicketFlow.Assist.Abstractions.csproj" />
+    <ProjectReference Include="../../TicketFlow.Testing/TicketFlow.Testing.csproj" />
+  </ItemGroup>
+</Project>

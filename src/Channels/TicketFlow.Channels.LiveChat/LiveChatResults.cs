@@ -95,8 +95,11 @@ public sealed record VisitorSessionGrant(VisitorSessionContext Context, string T
     public override string ToString() => "VisitorSessionGrant { <redacted> }";
 }
 
-/// <summary>A rotated token (the previous one stays valid for the grace window).</summary>
-public sealed record VisitorTokenRotated(VisitorSessionContext Context, string Token)
+/// <summary>
+/// A rotated token (the previous one stays valid for the grace window). <see cref="Token"/> is <see langword="null"/> when rotation was
+/// skipped because the session's token had already been rotated recently (for example by another tab); keep the current token.
+/// </summary>
+public sealed record VisitorTokenRotated(VisitorSessionContext Context, string? Token)
 {
     public override string ToString() => "VisitorTokenRotated { <redacted> }";
 }

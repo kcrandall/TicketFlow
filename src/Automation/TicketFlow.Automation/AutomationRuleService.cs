@@ -123,7 +123,7 @@ public sealed class AutomationRuleService(IAutomationRuleStore rules, IAutomatio
                 var timelineEvent = view.Event;
                 if (timelineEvent.OccurredAt < request.From || timelineEvent.OccurredAt >= request.To)
                     continue;
-                var (derived, message) = AutomationEventDerivation.Derive(timelineEvent);
+                var (derived, message) = AutomationEventDerivation.Derive(timelineEvent, options.SlaWorkerClientId);
                 if (derived.Count == 0)
                     continue;
                 var cause = AutomationEventDerivation.IsAutomationActor(timelineEvent.Actor, options.ClientId)

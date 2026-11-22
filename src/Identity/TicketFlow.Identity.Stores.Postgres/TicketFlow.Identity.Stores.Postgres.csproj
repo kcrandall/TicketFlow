@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Optional durable PostgreSQL staff identity mapping, agent profile and audit storage for TicketFlow.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Identity.Abstractions/TicketFlow.Identity.Abstractions.csproj" />
+    <ProjectReference Include="../../Stores/TicketFlow.Stores.Migrations.Postgres/TicketFlow.Stores.Migrations.Postgres.csproj" />
+    <PackageReference Include="Npgsql" />
+    <InternalsVisibleTo Include="TicketFlow.Identity.Stores.Postgres.Tests" />
+  </ItemGroup>
+</Project>

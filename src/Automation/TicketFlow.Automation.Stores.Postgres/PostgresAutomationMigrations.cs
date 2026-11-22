@@ -72,5 +72,17 @@ public static class PostgresAutomationMigrations
             PRIMARY KEY (response_key),
             CONSTRAINT tf_automation_canned_responses_shortcut UNIQUE (shortcut_key));
         CREATE INDEX tf_automation_canned_responses_scope ON tf_automation_canned_responses (scope_key, shortcut);
+        """), new(2, "rule-set-versions-retention-and-rule-log", $"""
+        CREATE TABLE tf_automation_rule_sets (
+            {Scope}, version bigint NOT NULL CHECK (version > 0),
+            rule_set_key bytea GENERATED ALWAYS AS (tf_key_v1({ScopeParts})) STORED NOT NULL,
+            PRIMARY KEY (rule_set_key));
+        INSERT INTO tf_automation_rule_sets({ScopeParts}, version) SELECT DISTINCT {ScopeParts}, 1 FROM tf_automation_rules;
+
+        ALTER TABLE tf_automation_executions ADD COLUMN finished boolean NOT NULL DEFAULT false;
+        UPDATE tf_automation_executions SET finished = (state::jsonb->>'status') <> 'running';
+        CREATE INDEX tf_automation_executions_rule ON tf_automation_executions (scope_key, rule_id, started_at DESC, execution_id DESC);
+        CREATE INDEX tf_automation_executions_purge ON tf_automation_executions (started_at, execution_key) WHERE finished;
+        CREATE INDEX tf_automation_causes_execution ON tf_automation_causes (execution_id);
         """)]);
 }

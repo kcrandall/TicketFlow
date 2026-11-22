@@ -81,3 +81,19 @@ public interface IBusinessCalendarStore
 
     Task<WorkspaceWriteResult<StoredBusinessCalendar>> DeleteAsync(TicketScope scope, BusinessCalendarId id, long expectedRevision, CancellationToken cancellationToken = default);
 }
+
+/// <summary>One page of workspace scopes; <see cref="Next"/> is an opaque continuation token (<see langword="null"/> at the end).</summary>
+public sealed record WorkspaceScopePage(IReadOnlyList<TicketScope> Scopes, string? Next);
+
+/// <summary>
+/// Store-wide enumeration of the workspaces that have settings, for trusted hosted workers that run per-workspace loops (survey dispatch,
+/// change-log followers). Unauthorized: never expose it to end users. Contract: every scope with stored settings appears exactly once in
+/// a full enumeration taken while no workspace is created or removed; the order is stable but store-defined and <c>after</c> is a token
+/// returned by the previous page; at most <c>limit</c> (1-<see cref="MaximumPage"/>) scopes per page.
+/// </summary>
+public interface IWorkspaceDirectory
+{
+    public const int MaximumPage = 1000;
+
+    Task<WorkspaceScopePage> ListWorkspacesAsync(string? after, int limit, CancellationToken cancellationToken = default);
+}

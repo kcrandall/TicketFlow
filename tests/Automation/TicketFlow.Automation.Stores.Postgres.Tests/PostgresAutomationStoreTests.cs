@@ -64,6 +64,13 @@ public sealed class PostgresAutomationStoreTests
     }
 
     [TestMethod]
+    public async Task PurgeContractUsesIndependentClients()
+    {
+        await using var database = await Database.CreateAsync();
+        await AutomationStoreContract.VerifyPurgeAsync(database.Store, database.Competing);
+    }
+
+    [TestMethod]
     public async Task ConcurrentBeginsHaveOneWinner()
     {
         await using var database = await Database.CreateAsync();
@@ -110,12 +117,50 @@ public sealed class PostgresAutomationStoreTests
     }
 
     [TestMethod]
+    public async Task UpgradeFromVersionOneBackfillsRuleSetsAndRetentionFlags()
+    {
+        await using var storage = await PostgresTestDatabase.CreateAsync("tf_automation_upgrade_");
+        var clock = TestClock.Create();
+        await new PostgresMigrationRunner(storage.First, PostgresAutomationMigrations.Catalog).ApplyAsync(targetVersion: 1);
+        var scope = TestScopes.Create();
+        var old = new DateTimeOffset(2001, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var finished = AutomationStoreContract.Execution(rule: "u1", startedAt: old).Complete(old.AddSeconds(1), null);
+        var running = AutomationStoreContract.Execution(rule: "u2", startedAt: old);
+        await using (var insert = storage.First.CreateCommand("""
+            INSERT INTO tf_automation_rules(tenant_id, project_id, environment_id, app_id, workspace_id, rule_id, priority, format_version, definition, revision, fence)
+            VALUES(@t, @p, @e, @a, @w, 'legacy', 100, 1, @definition, 1, 0);
+            INSERT INTO tf_automation_executions(tenant_id, project_id, environment_id, app_id, workspace_id, execution_id, rule_id, conversation_id, trigger_key, started_at,
+                format_version, state, revision)
+            VALUES(@t, @p, @e, @a, @w, @f, 'u1', 'c1', 'evt:1', @old, 1, @fstate, 1), (@t, @p, @e, @a, @w, @r, 'u2', 'c1', 'evt:1', @old, 1, @rstate, 1);
+            """))
+        {
+            insert.Parameters.AddWithValue("t", scope.TenantId);
+            insert.Parameters.AddWithValue("p", scope.ProjectId);
+            insert.Parameters.AddWithValue("e", scope.EnvironmentId);
+            insert.Parameters.AddWithValue("a", scope.AppId);
+            insert.Parameters.AddWithValue("w", scope.WorkspaceId.Value);
+            insert.Parameters.AddWithValue("definition", AutomationCodec.SerializeRule(AutomationStoreContract.Rule("legacy")));
+            insert.Parameters.AddWithValue("f", finished.Id);
+            insert.Parameters.AddWithValue("r", running.Id);
+            insert.Parameters.AddWithValue("old", old);
+            insert.Parameters.AddWithValue("fstate", AutomationCodec.SerializeExecution(finished));
+            insert.Parameters.AddWithValue("rstate", AutomationCodec.SerializeExecution(running));
+            await insert.ExecuteNonQueryAsync();
+        }
+        var store = new PostgresAutomationStore(storage.First, clock);
+        await store.InitializeAsync();
+        Assert.AreEqual(1, await store.GetRuleSetVersionAsync(scope));
+        Assert.AreEqual(1, await store.PurgeAsync(old.AddDays(1), 100), "Only the finished legacy record is purged.");
+        Assert.IsNotNull(await store.GetAsync(scope, running.Id));
+    }
+
+    [TestMethod]
     public async Task InitializationIsIdempotentAndVersioned()
     {
         await using var database = await Database.CreateAsync();
         await database.Competing.InitializeAsync();
         var inspection = await new PostgresMigrationRunner(database.Storage.First, PostgresAutomationMigrations.Catalog).InspectAsync();
-        Assert.AreEqual(1, inspection.CurrentVersion);
+        Assert.AreEqual(2, inspection.CurrentVersion);
         Assert.AreEqual("ticketflow.automation", inspection.Component);
     }
 }

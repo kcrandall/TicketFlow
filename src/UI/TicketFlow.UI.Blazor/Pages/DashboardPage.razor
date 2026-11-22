@@ -1,0 +1,224 @@
+@inherits UiPageBase
+@using TicketFlow.Conversations
+@using TicketFlow.Reporting
+@using TicketFlow.Sla
+
+<PageHeader Title="@($"Good {DayPart}, {FirstName}")" Description="Here's what's happening across your support workspace.">
+    <Actions>
+        @if (Session.Has<IConversationService>() && Session.Can(AccessPermissions.ConversationRead))
+        {
+            <BbButton Href="@Url("conversations", ("assignee", "me"))" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="user-check" Size="14" />My conversations</BbButton>
+            <BbButton Href="@Url("conversations")" Size="ButtonSize.Small"><LucideIcon Name="messages-square" Size="14" />Open inbox</BbButton>
+        }
+    </Actions>
+</PageHeader>
+
+@if (overview is not null)
+{
+    <div class="tf-grid tf-grid--stats">
+        <StatCard Label="Open conversations" Value="@UiFormat.Number(overview.OpenBacklog)" Note="@($"{UiFormat.Number(overview.Created)} new in the last 14 days")" NoteIcon="inbox" Hint="Current backlog matching your access" />
+        <StatCard Label="New conversations" Value="@UiFormat.Number(overview.Created)" Trend="@Change(overview.Created, previous?.Created)" TrendPositive="@(overview.Created <= (previous?.Created ?? 0) || previous is null)"
+                  Note="@($"{UiFormat.Number(overview.MessagesReceived)} customer messages")" NoteIcon="message-circle" Hint="Last 14 days vs previous 14" />
+        <StatCard Label="Median first response" Value="@UiFormat.Duration(overview.FirstResponse.Median)" Trend="@DurationChange(overview.FirstResponse.Median, previous?.FirstResponse.Median)"
+                  TrendPositive="@(overview.FirstResponse.Median <= previous?.FirstResponse.Median || previous?.FirstResponse.Median is null)"
+                  Note="@($"p90 {UiFormat.Duration(overview.FirstResponse.P90)}")" NoteIcon="timer" Hint="Business replies by agents" />
+        <StatCard Label="SLA compliance" Value="@UiFormat.Percent(overview.SlaCompliancePercent)" Trend="@PointChange(overview.SlaCompliancePercent, previous?.SlaCompliancePercent)"
+                  TrendPositive="@(overview.SlaCompliancePercent >= previous?.SlaCompliancePercent || previous?.SlaCompliancePercent is null)"
+                  Note="@($"{UiFormat.Number(overview.SlaBreached)} breached · {UiFormat.Number(overview.SlaAchieved)} met")" NoteIcon="shield-check"
+                  Hint="@(overview.Satisfaction?.CsatPercent is { } csat ? $"CSAT {UiFormat.Percent(csat)} from {overview.Satisfaction.CsatResponses} responses" : "Targets from SLA policies")" />
+    </div>
+}
+else if (stats is not null)
+{
+    <div class="tf-grid tf-grid--stats">
+        <StatCard Label="Open" Value="@stats.Open.ToString(CultureInfo.InvariantCulture)" Hint="Conversations waiting on your team" />
+        <StatCard Label="Pending" Value="@stats.Pending.ToString(CultureInfo.InvariantCulture)" Hint="Waiting on the customer" />
+        <StatCard Label="Assigned to me" Value="@stats.Mine.ToString(CultureInfo.InvariantCulture)" Hint="Open conversations you own" />
+        <StatCard Label="Unassigned" Value="@stats.Unassigned.ToString(CultureInfo.InvariantCulture)" Hint="Needs an owner" />
+    </div>
+}
+
+<div class="tf-grid tf-grid--wide-narrow">
+    @if (trend is not null)
+    {
+        <div class="tf-card">
+            <div class="tf-card__header">
+                <div>
+                    <div class="tf-card__title">Conversation volume</div>
+                    <div class="tf-card__description">Created and resolved per day · last 14 days</div>
+                </div>
+                <BbButton Href="@Url("reports")" Variant="ButtonVariant.Ghost" Size="ButtonSize.Small">View reports<LucideIcon Name="arrow-right" Size="14" /></BbButton>
+            </div>
+            <div class="tf-card__content">
+                <AreaChart Id="tf-volume" Labels="trend.Value.Labels" Series="trend.Value.Series" Height="250" AriaLabel="Conversations created and resolved per day" />
+            </div>
+        </div>
+    }
+    @if (stats is not null)
+    {
+        <div class="tf-card">
+            <div class="tf-card__header">
+                <div>
+                    <div class="tf-card__title">Workload</div>
+                    <div class="tf-card__description">Live conversation status</div>
+                </div>
+            </div>
+            <div class="tf-card__content tf-stack">
+                <StackedBar Segments="@([new("Open", stats.Open, "var(--success)"), new("Pending", stats.Pending, "var(--warning)"), new("Snoozed", stats.Snoozed, "var(--info)")])" />
+                <div class="tf-grid tf-grid--2" style="gap:12px">
+                    <div class="tf-kv"><span class="tf-kv__label">Assigned to me</span><span class="tf-kv__value">@stats.Mine</span></div>
+                    <div class="tf-kv"><span class="tf-kv__label">Unassigned</span><span class="tf-kv__value">@stats.Unassigned</span></div>
+                    <div class="tf-kv"><span class="tf-kv__label">Urgent / high</span><span class="tf-kv__value">@stats.Urgent</span></div>
+                    <div class="tf-kv"><span class="tf-kv__label">SLA at risk</span><span class="tf-kv__value">@(risk?.Count ?? 0)</span></div>
+                </div>
+                @if (channels.Count > 0)
+                {
+                    <div class="tf-divider"></div>
+                    <div class="tf-small tf-muted">New conversations by channel</div>
+                    <BarList Items="channels" />
+                }
+            </div>
+        </div>
+    }
+</div>
+
+<div class="tf-grid tf-grid--2">
+    @if (risk is not null)
+    {
+        <div class="tf-card">
+            <div class="tf-card__header">
+                <div>
+                    <div class="tf-card__title">SLA at risk</div>
+                    <div class="tf-card__description">Conversations closest to breaching their targets</div>
+                </div>
+                <BbButton Href="@Url("sla")" Variant="ButtonVariant.Ghost" Size="ButtonSize.Small">All<LucideIcon Name="arrow-right" Size="14" /></BbButton>
+            </div>
+            <div class="tf-card__content--flush">
+                @if (risk.Count == 0)
+                {
+                    <EmptyState Icon="shield-check" Title="Everything is on track" Message="No conversation is at risk of breaching its SLA." />
+                }
+                else
+                {
+                    <ul class="tf-list">
+                        @foreach (var item in risk)
+                        {
+                            var conversation = conversations.GetValueOrDefault(item.Conversation);
+                            <li>
+                                <div class="tf-list__main">
+                                    <a class="tf-list__title" href="@Url($"conversations/{item.Conversation.Value}")">@(conversation is null ? "Conversation" : ContactName(conversation.Contact))</a>
+                                    <span class="tf-list__meta">@(item.RuleName ?? "SLA") · @MetricLabel(item) · @(conversation is null ? "" : Session.UserName(conversation.Assignee))</span>
+                                </div>
+                                <SlaBadge Status="item" Now="Now" />
+                            </li>
+                        }
+                    </ul>
+                }
+            </div>
+        </div>
+    }
+    @if (recent is not null)
+    {
+        <div class="tf-card">
+            <div class="tf-card__header">
+                <div>
+                    <div class="tf-card__title">Recent activity</div>
+                    <div class="tf-card__description">Latest open conversations</div>
+                </div>
+                <BbButton Href="@Url("conversations")" Variant="ButtonVariant.Ghost" Size="ButtonSize.Small">Inbox<LucideIcon Name="arrow-right" Size="14" /></BbButton>
+            </div>
+            <div class="tf-card__content--flush">
+                @if (recent.Count == 0)
+                {
+                    <EmptyState Icon="inbox" Title="Inbox zero" Message="There are no open conversations right now." />
+                }
+                else
+                {
+                    <ul class="tf-list">
+                        @foreach (var conversation in recent)
+                        {
+                            <li>
+                                <BbAvatar Size="AvatarSize.Small"><BbAvatarFallback>@TicketFlowUISession.Initials(ContactName(conversation.Contact))</BbAvatarFallback></BbAvatar>
+                                <div class="tf-list__main">
+                                    <a class="tf-list__title" href="@Url($"conversations/{conversation.Id.Value}")">@ContactName(conversation.Contact)</a>
+                                    <span class="tf-list__meta">@Session.UserName(conversation.Assignee) · @UiFormat.Relative(conversation.LastActivityAt, Now)</span>
+                                </div>
+                                <PriorityBadge Priority="conversation.Priority" />
+                                <StatusBadge Kind="conversation.Status.Kind" />
+                            </li>
+                        }
+                    </ul>
+                }
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private sealed record Stats(int Open, int Pending, int Snoozed, int Mine, int Unassigned, int Urgent);
+
+    private ReportOverview? overview;
+    private ReportOverview? previous;
+    private (IReadOnlyList<string> Labels, IReadOnlyList<AreaChart.ChartSeries> Series)? trend;
+    private List<BarList.Item> channels = [];
+    private Stats? stats;
+    private List<SlaStatusView>? risk;
+    private List<ConversationView>? recent;
+    private readonly Dictionary<ConversationId, ConversationView> conversations = [];
+
+    private string FirstName => Session.DisplayName.Split(' ')[0];
+
+    private string DayPart => Now.Hour switch { < 12 => "morning", < 18 => "afternoon", _ => "evening" };
+
+    protected override async Task OnInitializedAsync()
+    {
+        var (from, to) = UiFormat.Range(null, null, Now);
+        if (Service<IReportingService>() is { } reporting && Session.CanAny(AccessPermissions.ReportView, ReportPermissions.ViewOwn))
+        {
+            if (await reporting.GetOverviewAsync(Actor, new ReportQuery(from, to), Aborted) is ReportSucceeded<ReportOverview> current)
+                overview = current.Value;
+            if (await reporting.GetOverviewAsync(Actor, new ReportQuery(from.AddDays(-14), from), Aborted) is ReportSucceeded<ReportOverview> before)
+                previous = before.Value;
+            if (await reporting.GetTrendsAsync(Actor, new ReportTrendQuery(new ReportQuery(from, to), [ReportMetric.ConversationCreated, ReportMetric.ConversationResolved], ReportGranularity.Day), Aborted)
+                is ReportSucceeded<ReportTrend> series)
+                trend = UiCharts.Daily(series.Value, [(ReportMetric.ConversationCreated, "Created"), (ReportMetric.ConversationResolved, "Resolved")]);
+            if (await reporting.GetTrendsAsync(Actor, new ReportTrendQuery(new ReportQuery(from, to), [ReportMetric.ConversationCreated], ReportGranularity.Month, ReportDimension.Channel), Aborted)
+                is ReportSucceeded<ReportTrend> byChannel)
+                channels = [.. byChannel.Value.Points.GroupBy(point => point.Group ?? "other").Select(group => (group.Key, Count: group.Sum(point => point.Count)))
+                    .OrderByDescending(pair => pair.Count).Take(5).Select((pair, index) => new BarList.Item(UiFormat.Channel(pair.Key), pair.Count, pair.Count.ToString(CultureInfo.InvariantCulture), $"var(--chart-{index + 1})"))];
+        }
+
+        if (Service<IConversationService>() is { } service && Session.Can(AccessPermissions.ConversationRead))
+        {
+            async Task<List<ConversationView>> ListAsync(ConversationListQuery query) =>
+                await service.ListAsync(Actor, query, null, Aborted) is ConversationListPage page ? [.. page.Conversations] : [];
+            var open = await ListAsync(new ConversationListQuery(status: ConversationStatusKind.Open, limit: ConversationListQuery.MaximumLimit));
+            var pending = await ListAsync(new ConversationListQuery(status: ConversationStatusKind.Pending, limit: ConversationListQuery.MaximumLimit));
+            var snoozed = await ListAsync(new ConversationListQuery(status: ConversationStatusKind.Snoozed, limit: ConversationListQuery.MaximumLimit));
+            stats = new Stats(open.Count, pending.Count, snoozed.Count, open.Count(item => item.Assignee == Session.UserId), open.Count(item => item.Assignee is null),
+                open.Count(item => item.Priority is ConversationPriority.Urgent or ConversationPriority.High));
+            recent = [.. open.Concat(pending).OrderByDescending(item => item.LastActivityAt).Take(6)];
+            foreach (var item in open.Concat(pending).Concat(snoozed))
+                conversations[item.Id] = item;
+        }
+
+        if (Service<ISlaService>() is { } sla && Session.CanAny(SlaPermissions.Read, AccessPermissions.ConversationRead))
+            if (await sla.ListAsync(Actor, new SlaRiskQuery(SlaRiskFilter.AtRiskOrBreached, limit: 6), null, Aborted) is SlaValue<SlaRiskPage> page)
+                risk = [.. page.Value.Items];
+
+        await LoadContactsAsync(conversations.Values.Select(item => item.Contact));
+        await Session.LoadUsersAsync(conversations.Values.Select(item => item.Assignee));
+    }
+
+    private static string MetricLabel(SlaStatusView status) =>
+        status.Clocks.Where(clock => clock.Breached || clock.AtRisk).Select(clock => UiFormat.Token(clock.Metric)).FirstOrDefault() ?? "Running";
+
+    private static string? Change(long current, long? before) =>
+        before is not { } value || value == 0 ? null : ((current - value) * 100.0 / value).ToString("+0;-0", CultureInfo.InvariantCulture) + "%";
+
+    private static string? DurationChange(TimeSpan? current, TimeSpan? before) =>
+        current is { } now && before is { } then && then > TimeSpan.Zero ? ((now - then) / then * 100).ToString("+0;-0", CultureInfo.InvariantCulture) + "%" : null;
+
+    private static string? PointChange(double? current, double? before) =>
+        current is { } now && before is { } then ? (now - then).ToString("+0.#;-0.#;0", CultureInfo.InvariantCulture) + " pt" : null;
+}

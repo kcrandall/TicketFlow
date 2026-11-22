@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Public integration event stream contracts for TicketFlow: the CloudEvents-compatible, versioned event envelope and typed payloads, privacy levels, subscriptions, sink and subscriber contracts, permissions, codecs and event log/subscription store contracts.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Access/TicketFlow.Access.Abstractions/TicketFlow.Access.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

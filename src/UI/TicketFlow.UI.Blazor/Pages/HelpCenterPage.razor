@@ -1,0 +1,132 @@
+@inherits UiPageBase
+@using TicketFlow.HelpCenter
+
+<PageHeader Title="Help center" Description="Knowledge-base portals, collections and articles. Published revisions are what customers and the assistant see.">
+    <Actions>
+        @if (portal is not null && Session.Can(HelpCenterPermissions.Write))
+        {
+            <BbButton Href="@Url("help-center/articles/new", ("portal", portal.Portal.Id.Value))" Size="ButtonSize.Small"><LucideIcon Name="file-plus" Size="14" />New article</BbButton>
+        }
+    </Actions>
+</PageHeader>
+
+@if (portals.Count > 1)
+{
+    <TabLinks Tabs="@([.. portals.Select(item => new TabLinks.Tab(item.Portal.Name, Url("help-center", ("portal", item.Portal.Id.Value)), item.Portal.Id == portal?.Portal.Id))])" />
+}
+
+@if (portal is null)
+{
+    <div class="tf-card"><EmptyState Icon="book-open" Title="No portals yet" Message="Create a portal to start writing help articles." /></div>
+}
+else
+{
+    <div class="tf-grid tf-grid--stats">
+        <StatCard Label="Published articles" Value="@articles.Count(article => article.Record.State == ArticleState.Published).ToString(CultureInfo.InvariantCulture)" Hint="@($"{portal.Portal.Name} · /{portal.Portal.Slug.Value}")" />
+        <StatCard Label="Drafts" Value="@articles.Count(article => article.Record.State == ArticleState.Draft).ToString(CultureInfo.InvariantCulture)" Hint="Not visible to customers" />
+        <StatCard Label="Collections" Value="@collections.Count.ToString(CultureInfo.InvariantCulture)" Hint="Top-level sections of the portal" />
+        <StatCard Label="Visibility" Value="@portal.Portal.Visibility.ToString()" Hint="@($"Locales: {string.Join(", ", portal.Portal.SupportedLocales.Select(locale => locale.Value))}")" />
+    </div>
+
+    <div class="tf-grid tf-grid--wide-narrow">
+        <div class="tf-card">
+            <div class="tf-card__header">
+                <div><div class="tf-card__title">Articles</div><div class="tf-card__description">@articles.Count articles in @portal.Portal.Name</div></div>
+                <TabLinks Tabs="@([new TabLinks.Tab("All", Url("help-center", ("portal", Query("portal"))), Query("state") is null), new TabLinks.Tab("Published", Url("help-center", ("portal", Query("portal")), ("state", "published")), Query("state") == "published"), new TabLinks.Tab("Drafts", Url("help-center", ("portal", Query("portal")), ("state", "draft")), Query("state") == "draft"), new TabLinks.Tab("Archived", Url("help-center", ("portal", Query("portal")), ("state", "archived")), Query("state") == "archived")])" />
+            </div>
+            <div class="tf-table-wrap" style="margin-top:12px">
+                <table class="tf-table">
+                    <thead><tr><th>Title</th><th>Collection</th><th>Status</th><th class="tf-num">Updated</th></tr></thead>
+                    <tbody>
+                        @foreach (var article in Visible)
+                        {
+                            var translation = article.Record.Article.Translations.FirstOrDefault(item => item.Locale == portal.Portal.DefaultLocale) ?? article.Record.Article.Translations[0];
+                            <tr>
+                                <td><a class="tf-row-link" href="@Url($"help-center/articles/{article.Id.Value}")">@translation.Title</a><div class="tf-list__meta">@(translation.Excerpt ?? "")</div></td>
+                                <td>@CollectionName(article.Record.Article.Collection)</td>
+                                <td><span class="tf-badge @(article.Record.State switch { ArticleState.Published => "tf-badge--success", ArticleState.Draft => "tf-badge--warning", _ => "tf-badge--muted" })">@article.Record.State</span></td>
+                                <td class="tf-num tf-muted">@UiFormat.Relative(article.Record.UpdatedAt, Now)</td>
+                            </tr>
+                        }
+                        @if (!Visible.Any())
+                        {
+                            <tr><td colspan="4" class="tf-muted">No articles in this view.</td></tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="tf-stack">
+            <div class="tf-card">
+                <div class="tf-card__header"><div class="tf-card__title">Collections</div></div>
+                <div class="tf-card__content--flush">
+                    <ul class="tf-list">
+                        @foreach (var collection in collections)
+                        {
+                            var translation = collection.Collection.Translations[0];
+                            <li>
+                                <LucideIcon Name="folder" Size="16" />
+                                <div class="tf-list__main"><span class="tf-list__title">@translation.Name</span><span class="tf-list__meta">@(translation.Description ?? "")</span></div>
+                                <span class="tf-badge">@articles.Count(article => article.Record.Article.Collection == collection.Collection.Id)</span>
+                            </li>
+                        }
+                    </ul>
+                </div>
+                @if (Session.Can(HelpCenterPermissions.Manage))
+                {
+                    <div class="tf-card__footer">
+                        <TfForm Action="helpcenter.collection.create" Class="tf-side-form" style="width:100%">
+                            <input type="hidden" name="portal" value="@portal.Portal.Id.Value" />
+                            <input type="hidden" name="locale" value="@portal.Portal.DefaultLocale.Value" />
+                            <input name="name" class="tf-input tf-input--sm" placeholder="New collection" required maxlength="128" aria-label="Collection name" />
+                            <button class="tf-button tf-button--outline tf-button--sm" type="submit">Add</button>
+                        </TfForm>
+                    </div>
+                }
+            </div>
+            <div class="tf-card">
+                <div class="tf-card__header"><div class="tf-card__title">Portal</div></div>
+                <div class="tf-card__content">
+                    <dl class="tf-dl">
+                        <dt>Slug</dt><dd class="tf-mono">/@portal.Portal.Slug.Value</dd>
+                        <dt>Default locale</dt><dd>@portal.Portal.DefaultLocale.Value</dd>
+                        <dt>Custom domain</dt><dd>@(portal.Portal.CustomDomain ?? "—")</dd>
+                        <dt>Public URL</dt><dd class="tf-mono tf-small">/ticketflow/public/workspaces/@Session.Scope.WorkspaceId.Value/portals/@portal.Portal.Slug.Value</dd>
+                    </dl>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private List<StoredPortal> portals = [];
+    private StoredPortal? portal;
+    private List<StoredCollection> collections = [];
+    private List<StoredArticle> articles = [];
+
+    private IEnumerable<StoredArticle> Visible => Query("state") switch
+    {
+        "published" => articles.Where(article => article.Record.State == ArticleState.Published),
+        "draft" => articles.Where(article => article.Record.State == ArticleState.Draft),
+        "archived" => articles.Where(article => article.Record.State == ArticleState.Archived),
+        _ => articles,
+    };
+
+    private string CollectionName(CollectionId? id) => id is { } value ? collections.FirstOrDefault(item => item.Collection.Id == value)?.Collection.Translations[0].Name ?? value.Value : "—";
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<IHelpCenterService>() is not { } service)
+            return;
+        if (await service.ListPortalsAsync(Actor, Aborted) is HelpCenterSucceeded<IReadOnlyList<StoredPortal>> list)
+            portals = [.. list.Value];
+        portal = portals.FirstOrDefault(item => item.Portal.Id.Value == Query("portal")) ?? portals.FirstOrDefault();
+        if (portal is null)
+            return;
+        if (await service.ListCollectionsAsync(Actor, portal.Portal.Id, Aborted) is HelpCenterSucceeded<IReadOnlyList<StoredCollection>> collectionList)
+            collections = [.. collectionList.Value.OrderBy(item => item.Collection.Position)];
+        if (await service.ListArticlesAsync(Actor, new ArticleListQuery(portal.Portal.Id, limit: 100), Aborted) is HelpCenterSucceeded<HelpCenterPage<StoredArticle>> page)
+            articles = [.. page.Value.Items.OrderByDescending(article => article.Record.UpdatedAt)];
+    }
+}

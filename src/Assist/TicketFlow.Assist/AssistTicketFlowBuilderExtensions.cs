@@ -1,16 +1,16 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using TicketFlow.Access;
-using TicketFlow.Assist;
 
-namespace TicketFlow;
+namespace TicketFlow.Assist;
 
 public static class AssistTicketFlowBuilderExtensions
 {
     /// <summary>
     /// Registers the assistant: permissions (<see cref="AssistPermissions.Definitions"/>), <see cref="AssistOptions"/>, the singleton
     /// <see cref="IAssistModelRegistry"/> and <see cref="IAssistChatClientFactory"/>, and scoped <see cref="AssistContextBuilder"/>,
-    /// <see cref="IAssistService"/> and <see cref="IAssistAdministration"/>. Requires access control, conversations, contacts, the help
+    /// <see cref="IAssistService"/>, <see cref="IAssistAdministration"/> and
+    /// <see cref="AssistMaintenance"/> (host its <c>RunOnceAsync</c> in a worker). Requires access control, conversations, contacts, the help
     /// center, an <see cref="IAssistStore"/> (<see cref="AddInMemoryAssistStores"/> for development) and at least one
     /// <see cref="IAssistChatProvider"/> (for example <c>AddClaudeAssist()</c>). Uses TryAdd; repeated calls are safe.
     /// </summary>
@@ -32,6 +32,7 @@ public static class AssistTicketFlowBuilderExtensions
         services.TryAddScoped<AssistContextBuilder>();
         services.TryAddScoped<IAssistService, AssistService>();
         services.TryAddScoped<IAssistAdministration, AssistAdministration>();
+        services.TryAddScoped<AssistMaintenance>();
         return builder;
     }
 

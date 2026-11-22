@@ -1,0 +1,86 @@
+@inherits UiPageBase
+@using TicketFlow.Workspaces
+
+<PageHeader Title="Settings" Description="Workspace defaults and your personal preferences." />
+
+<div class="tf-grid tf-grid--wide-narrow">
+    <div class="tf-stack">
+        <div class="tf-card">
+            <div class="tf-card__header"><div><div class="tf-card__title">Workspace</div><div class="tf-card__description">Name, default locale and the time zone used for reports and schedules.</div></div></div>
+            <div class="tf-card__content">
+                @if (settings is null && !Session.Can(AccessPermissions.WorkspaceManage))
+                {
+                    <div class="tf-muted tf-small">Workspace settings are not configured.</div>
+                }
+                else
+                {
+                    <TfForm Action="settings.save" Revision="settings?.Revision" Class="tf-form">
+                        <fieldset disabled="@(!Session.Can(AccessPermissions.WorkspaceManage))" style="border:0;padding:0;margin:0" class="tf-form">
+                            <div class="tf-field"><label class="tf-label" for="tf-s-name">Workspace name</label><input id="tf-s-name" name="name" class="tf-input" required maxlength="128" value="@Session.FormValue("name", settings?.Settings.Name)" /></div>
+                            <div class="tf-form-grid">
+                                <div class="tf-field"><label class="tf-label" for="tf-s-locale">Default locale</label><input id="tf-s-locale" name="locale" class="tf-input" required maxlength="35" value="@Session.FormValue("locale", settings?.Settings.DefaultLocale ?? "en")" /></div>
+                                <div class="tf-field"><label class="tf-label" for="tf-s-tz">Time zone</label><input id="tf-s-tz" name="timezone" class="tf-input" required maxlength="64" value="@Session.FormValue("timezone", settings?.Settings.TimeZoneId ?? "UTC")" /><span class="tf-hint">IANA or Windows identifier, e.g. America/New_York</span></div>
+                            </div>
+                            @if (settings is not null && settings.Settings.FeatureToggles.Count > 0)
+                            {
+                                <div class="tf-field"><span class="tf-label">Feature toggles</span>
+                                    <div class="tf-row">@foreach (var toggle in settings.Settings.FeatureToggles) { <label class="tf-check"><input type="checkbox" name="toggle" value="@toggle.Key" checked="@toggle.Value" />@toggle.Key</label> }</div>
+                                </div>
+                            }
+                        </fieldset>
+                        @if (Session.Can(AccessPermissions.WorkspaceManage))
+                        {
+                            <div class="tf-form-actions"><BbButton Type="ButtonType.Submit">Save settings</BbButton></div>
+                        }
+                    </TfForm>
+                }
+            </div>
+        </div>
+        <div class="tf-card">
+            <div class="tf-card__header"><div><div class="tf-card__title">Appearance</div><div class="tf-card__description">Theme and color mode are saved in a cookie on this browser.</div></div>
+                <BbButton Href="@Url("settings/theme")" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="palette" Size="14" />Customize</BbButton></div>
+            <div class="tf-card__content tf-row">
+                <span class="tf-swatch__color" style="background:@(Session.Options.Themes.FirstOrDefault(theme => theme.Id == Session.Theme.Theme)?.Swatch)"></span>
+                <span>@(Session.Options.Themes.FirstOrDefault(theme => theme.Id == Session.Theme.Theme)?.Name) · @Session.Theme.ModeToken</span>
+            </div>
+        </div>
+    </div>
+    <div class="tf-card">
+        <div class="tf-card__header"><div><div class="tf-card__title">Your access</div><div class="tf-card__description">How the host's sign-in maps to TicketFlow</div></div></div>
+        <div class="tf-card__content tf-stack">
+            <dl class="tf-dl">
+                <dt>Signed in as</dt><dd>@Session.DisplayName</dd>
+                <dt>Principal</dt><dd class="tf-mono">@PrincipalLabel</dd>
+                <dt>Workspace</dt><dd class="tf-mono">@Session.Scope.WorkspaceId.Value</dd>
+                <dt>Teams</dt><dd>@(Session.Principal.Value is UserPrincipal user && user.Teams.Count > 0 ? string.Join(", ", user.Teams.Select(team => team.Value)) : "—")</dd>
+            </dl>
+            <div class="tf-divider"></div>
+            <div class="tf-small tf-muted">Workspace-level permissions (@Session.Permissions.Count)</div>
+            <div class="tf-row" style="gap:4px">
+                @foreach (var permission in Session.Permissions.OrderBy(permission => permission.Value, StringComparer.Ordinal))
+                {
+                    <span class="tf-code">@permission.Value</span>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private StoredWorkspaceSettings? settings;
+
+    private string PrincipalLabel => Session.Principal.Value switch
+    {
+        UserPrincipal user => "user:" + user.UserId.Value,
+        ApiClientPrincipal client => "client:" + client.ClientId.Value,
+        AutomationPrincipal automation => "automation:" + automation.AutomationId,
+        SystemPrincipal system => "system:" + system.Component,
+        _ => "—",
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<IWorkspaceSettingsService>() is { } service && await service.GetAsync(Actor, Aborted) is WorkspaceSucceeded<StoredWorkspaceSettings> found)
+            settings = found.Value;
+    }
+}

@@ -1,6 +1,5 @@
 using TicketFlow.Conversations;
 using TicketFlow.Core;
-using TicketFlow.Routing;
 
 namespace TicketFlow.Realtime;
 
@@ -87,14 +86,30 @@ public sealed record ConversationChangedEvent
     public override string ToString() => $"ConversationChangedEvent {{ Conversation = {Conversation}, Revision = {Revision}, Kind = {Kind} }}";
 }
 
+/// <summary>An agent's activity on a conversation (mirrors routing collision activities without depending on routing).</summary>
+public enum RealtimeActivity
+{
+    Viewing = 1,
+    Composing = 2,
+}
+
+/// <summary>An agent's availability (mirrors routing agent status without depending on routing).</summary>
+public enum RealtimeAgentStatus
+{
+    Online = 1,
+    Busy = 2,
+    Away = 3,
+    Offline = 4,
+}
+
 /// <summary>An agent started, changed or ended (<see cref="Activity"/> <see langword="null"/>) presence on a conversation (E8).</summary>
-public sealed record PresenceChangedEvent(TicketScope Scope, ConversationId Conversation, UserId User, ConversationActivity? Activity, DateTimeOffset At);
+public sealed record PresenceChangedEvent(TicketScope Scope, ConversationId Conversation, UserId User, RealtimeActivity? Activity, DateTimeOffset At);
 
 /// <summary>A soft reply lock was acquired, renewed or released (<see cref="Holder"/> <see langword="null"/>) (E8).</summary>
 public sealed record ReplyLockChangedEvent(TicketScope Scope, ConversationId Conversation, UserId? Holder, DateTimeOffset? ExpiresAt, DateTimeOffset At);
 
 /// <summary>An agent's routing status changed (E8). Delivered on the agent's own topic only.</summary>
-public sealed record AgentStatusChangedEvent(TicketScope Scope, UserId Agent, AgentStatus Status, DateTimeOffset At);
+public sealed record AgentStatusChangedEvent(TicketScope Scope, UserId Agent, RealtimeAgentStatus Status, DateTimeOffset At);
 
 /// <summary>The routing engine assigned a conversation to <see cref="Agent"/> at <see cref="Revision"/> (E8).</summary>
 public sealed record ConversationAssignedEvent(TicketScope Scope, ConversationId Conversation, UserId Agent, long Revision, DateTimeOffset At);

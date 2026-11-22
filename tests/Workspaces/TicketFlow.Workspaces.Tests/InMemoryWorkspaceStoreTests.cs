@@ -13,6 +13,13 @@ public sealed class InMemoryWorkspaceStoreTests
     }
 
     [TestMethod]
+    public async Task SettingsStoreEnumeratesWorkspaces()
+    {
+        var store = new InMemoryWorkspaceSettingsStore();
+        await WorkspaceStoreContract.VerifyDirectoryAsync(store, store);
+    }
+
+    [TestMethod]
     public async Task InboxStoreSatisfiesTheContract()
     {
         var store = new InMemoryInboxStore();

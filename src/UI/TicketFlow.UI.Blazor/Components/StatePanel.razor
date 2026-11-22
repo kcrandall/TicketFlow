@@ -1,0 +1,13 @@
+<div class="tf-state">
+    <div class="tf-state__icon"><LucideIcon Name="@Icon" Size="22" /></div>
+    <h2 class="tf-state__title">@Title</h2>
+    <p class="tf-state__message">@Message</p>
+    @ChildContent
+</div>
+
+@code {
+    [Parameter] public string Icon { get; set; } = "info";
+    [Parameter] public string Title { get; set; } = "";
+    [Parameter] public string? Message { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+}

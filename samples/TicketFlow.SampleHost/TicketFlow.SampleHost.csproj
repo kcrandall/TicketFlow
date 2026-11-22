@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <Description>Runnable TicketFlow sample host (development example; not packable).</Description>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- Serves _framework/blazor.web.js (enhanced navigation for the support UI) although this host has no .razor files of its own. -->
+    <RequiresAspNetWebAssets>true</RequiresAspNetWebAssets>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Npgsql" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/TicketFlow/TicketFlow.csproj" />
+    <ProjectReference Include="../../src/Access/TicketFlow.Access/TicketFlow.Access.csproj" />
+    <ProjectReference Include="../../src/Workspaces/TicketFlow.Workspaces/TicketFlow.Workspaces.csproj" />
+    <ProjectReference Include="../../src/Contacts/TicketFlow.Contacts/TicketFlow.Contacts.csproj" />
+    <ProjectReference Include="../../src/Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
+    <ProjectReference Include="../../src/Routing/TicketFlow.Routing/TicketFlow.Routing.csproj" />
+    <ProjectReference Include="../../src/Sla/TicketFlow.Sla/TicketFlow.Sla.csproj" />
+    <ProjectReference Include="../../src/Automation/TicketFlow.Automation/TicketFlow.Automation.csproj" />
+    <ProjectReference Include="../../src/HelpCenter/TicketFlow.HelpCenter/TicketFlow.HelpCenter.csproj" />
+    <ProjectReference Include="../../src/Surveys/TicketFlow.Surveys/TicketFlow.Surveys.csproj" />
+    <ProjectReference Include="../../src/Channels/TicketFlow.Channels/TicketFlow.Channels.csproj" />
+    <ProjectReference Include="../../src/Channels/TicketFlow.Channels.LiveChat/TicketFlow.Channels.LiveChat.csproj" />
+    <ProjectReference Include="../../src/Hosting/TicketFlow.Hosting.AspNetCore/TicketFlow.Hosting.AspNetCore.csproj" />
+    <ProjectReference Include="../../src/Hosting/TicketFlow.Realtime.SignalR/TicketFlow.Realtime.SignalR.csproj" />
+    <ProjectReference Include="../../src/Hosting/TicketFlow.Hosting.Worker/TicketFlow.Hosting.Worker.csproj" />
+    <ProjectReference Include="../../src/Access/TicketFlow.Access.Stores.Postgres/TicketFlow.Access.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/Workspaces/TicketFlow.Workspaces.Stores.Postgres/TicketFlow.Workspaces.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/Contacts/TicketFlow.Contacts.Stores.Postgres/TicketFlow.Contacts.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/Conversations/TicketFlow.Conversations.Stores.Postgres/TicketFlow.Conversations.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/Routing/TicketFlow.Routing.Stores.Postgres/TicketFlow.Routing.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/Sla/TicketFlow.Sla.Stores.Postgres/TicketFlow.Sla.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/Automation/TicketFlow.Automation.Stores.Postgres/TicketFlow.Automation.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/HelpCenter/TicketFlow.HelpCenter.Stores.Postgres/TicketFlow.HelpCenter.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/Surveys/TicketFlow.Surveys.Stores.Postgres/TicketFlow.Surveys.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/Channels/TicketFlow.Channels.Stores.Postgres/TicketFlow.Channels.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/Channels/TicketFlow.Channels.LiveChat.Stores.Postgres/TicketFlow.Channels.LiveChat.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/Realtime/TicketFlow.Realtime/TicketFlow.Realtime.csproj" />
+    <ProjectReference Include="../../src/Integrations/TicketFlow.Integrations.Surveys/TicketFlow.Integrations.Surveys.csproj" />
+    <ProjectReference Include="../../src/Hosting/TicketFlow.Hosting.Worker.Stores.Postgres/TicketFlow.Hosting.Worker.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/Integrations/TicketFlow.Integrations.IdentityFlow/TicketFlow.Integrations.IdentityFlow.csproj" />
+    <ProjectReference Include="../../src/Mcp/TicketFlow.Mcp.AspNetCore/TicketFlow.Mcp.AspNetCore.csproj" />
+    <ProjectReference Include="../../src/Reporting/TicketFlow.Reporting/TicketFlow.Reporting.csproj" />
+    <ProjectReference Include="../../src/Reporting/TicketFlow.Reporting.Stores.Postgres/TicketFlow.Reporting.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../src/UI/TicketFlow.UI.Blazor/TicketFlow.UI.Blazor.csproj" />
+  </ItemGroup>
+</Project>

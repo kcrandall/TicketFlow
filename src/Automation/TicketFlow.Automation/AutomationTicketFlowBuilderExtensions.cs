@@ -30,6 +30,7 @@ public static class AutomationTicketFlowBuilderExtensions
         }
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton<IAutomationWebhookSender, SignedAutomationWebhookSender>();
+        services.TryAddSingleton<AutomationRuleCache>();
         services.TryAddScoped<AutomationContextBuilder>();
         services.TryAddScoped<AutomationActionExecutor>();
         services.TryAddScoped<AutomationRunner>();

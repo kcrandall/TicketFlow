@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Message broker sink for the TicketFlow integration event stream through WalFlow sink packages (Kafka, RabbitMQ, SQS, SNS, Azure Service Bus, Google Pub/Sub, Kinesis, Redis Streams): adapts CloudEvents to the WalFlow ISink contract with per-conversation keys.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Events/TicketFlow.Events.Abstractions/TicketFlow.Events.Abstractions.csproj" />
+    <PackageReference Include="WalFlow.Abstractions" />
+  </ItemGroup>
+</Project>

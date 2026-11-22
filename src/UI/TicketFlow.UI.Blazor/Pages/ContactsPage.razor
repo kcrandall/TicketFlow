@@ -1,0 +1,134 @@
+@inherits UiPageBase
+@using TicketFlow.Contacts
+
+<PageHeader Title="Contacts" Description="People and organizations who reach your support team. Sensitive fields stay masked unless your role allows them.">
+    <Actions>
+        @if (Session.Can(ContactPermissions.Create))
+        {
+            <BbButton Href="#tf-new-contact" Size="ButtonSize.Small"><LucideIcon Name="user-plus" Size="14" />New contact</BbButton>
+        }
+    </Actions>
+</PageHeader>
+
+<form method="get" action="@Url("contacts")" class="tf-filters">
+    <div class="tf-search">
+        <LucideIcon Name="search" Size="14" />
+        <input name="q" class="tf-input" placeholder="@(Kind == "email" ? "Search by email prefix…" : "Search by name…")" value="@Query("q")" aria-label="Search contacts" />
+    </div>
+    <select name="by" class="tf-select" style="width:auto" aria-label="Search by" data-autosubmit>
+        <option value="name" selected="@(Kind != "email")">Name</option>
+        <option value="email" selected="@(Kind == "email")">Email</option>
+    </select>
+    <BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Outline">Search</BbButton>
+</form>
+
+<div class="tf-card">
+    @if (error is not null)
+    {
+        <div class="tf-card__content"><OutcomeAlert Outcome="error" /></div>
+    }
+    else if (contacts.Count == 0)
+    {
+        <EmptyState Icon="contact" Title="No contacts found" Message="Try a different search, or create a contact." />
+    }
+    else
+    {
+        <div class="tf-table-wrap">
+            <table class="tf-table">
+                <thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>Plan</th><th>Labels</th><th class="tf-num">Updated</th></tr></thead>
+                <tbody>
+                    @foreach (var contact in contacts)
+                    {
+                        var name = UiText.ContactName(contact);
+                        var email = contact.Identities.FirstOrDefault(identity => identity.Kind == ContactIdentityKind.Email);
+                        var phone = contact.Identities.FirstOrDefault(identity => identity.Kind is ContactIdentityKind.Phone or ContactIdentityKind.WhatsApp);
+                        var plan = contact.Attributes.FirstOrDefault(attribute => attribute.Key == "plan");
+                        <tr>
+                            <td>
+                                <div class="tf-row" style="flex-wrap:nowrap">
+                                    <BbAvatar Size="AvatarSize.Small"><BbAvatarFallback>@TicketFlowUISession.Initials(name)</BbAvatarFallback></BbAvatar>
+                                    <div class="tf-list__main">
+                                        <a class="tf-row-link" href="@Url($"contacts/{contact.Id.Value}")">@name</a>
+                                        <span class="tf-list__meta">@(contact.Profile.Company ?? "—")</span>
+                                    </div>
+                                    @if (contact.Blocked)
+                                    {
+                                        <span class="tf-badge tf-badge--destructive">Blocked</span>
+                                    }
+                                </div>
+                            </td>
+                            <td class="tf-muted">@IdentityText(email)</td>
+                            <td class="tf-muted">@IdentityText(phone)</td>
+                            <td>@(plan is null ? "—" : plan.Masked ? "••••" : UiText.Attribute(plan.Value))</td>
+                            <td><div class="tf-row"><LabelChips Labels="contact.Labels.Select(label => label.Value)" /></div></td>
+                            <td class="tf-num tf-muted">@UiFormat.Relative(contact.UpdatedAt, Now)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <div class="tf-pager">
+            <span>@contacts.Count contact@(contacts.Count == 1 ? "" : "s") on this page</span>
+            @if (next is not null)
+            {
+                <BbButton Href="@Url("contacts", ("q", Query("q")), ("by", Query("by")), ("cursor", next))" Variant="ButtonVariant.Outline" Size="ButtonSize.Small">Next<LucideIcon Name="chevron-right" Size="14" /></BbButton>
+            }
+        </div>
+    }
+</div>
+
+@if (Session.Can(ContactPermissions.Create))
+{
+    <div class="tf-card" id="tf-new-contact">
+        <div class="tf-card__header"><div><div class="tf-card__title">New contact</div><div class="tf-card__description">Contacts created here are claimed identities until a channel verifies them.</div></div></div>
+        <div class="tf-card__content">
+            <TfForm Action="contact.create" Class="tf-form">
+                <div class="tf-form-grid">
+                    <div class="tf-field"><label class="tf-label" for="tf-c-name">Name</label><input id="tf-c-name" name="name" class="tf-input" required maxlength="256" value="@Session.FormValue("name", null)" /></div>
+                    <div class="tf-field"><label class="tf-label" for="tf-c-company">Company</label><input id="tf-c-company" name="company" class="tf-input" maxlength="256" value="@Session.FormValue("company", null)" /></div>
+                    <div class="tf-field"><label class="tf-label" for="tf-c-email">Email</label><input id="tf-c-email" name="email" type="email" class="tf-input" maxlength="256" value="@Session.FormValue("email", null)" /></div>
+                    <div class="tf-field"><label class="tf-label" for="tf-c-phone">Phone</label><input id="tf-c-phone" name="phone" class="tf-input" maxlength="64" placeholder="+1 555 0100" value="@Session.FormValue("phone", null)" /></div>
+                </div>
+                <div class="tf-form-actions"><BbButton Type="ButtonType.Submit"><LucideIcon Name="user-plus" Size="14" />Create contact</BbButton></div>
+            </TfForm>
+        </div>
+    </div>
+}
+
+@code {
+    private readonly List<ContactView> contacts = [];
+    private string? next;
+    private UiOutcome? error;
+
+    private string? Kind => Query("by");
+
+    private static string IdentityText(ContactIdentityView? identity) => identity is null ? "—" : identity.Masked ? "•••• ••••" : identity.Value ?? "—";
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<IContactService>() is not { } service)
+            return;
+        ContactSearch search;
+        try
+        {
+            search = Kind == "email" && Query("q") is { } prefix
+                ? ContactSearch.ByIdentity(ContactIdentityKind.Email, prefix, limit: Session.Options.PageSize)
+                : ContactSearch.ByName(Query("q"), Session.Options.PageSize);
+        }
+        catch (ArgumentException)
+        {
+            error = UiOutcome.Invalid("The search text is not valid.");
+            return;
+        }
+        switch (await service.SearchAsync(Actor, search, Query("cursor"), Aborted))
+        {
+            case ContactSearchPage page:
+                contacts.AddRange(page.Contacts);
+                next = page.NextCursor;
+                break;
+            case ContactRefused refused:
+                error = UiOutcome.Refused(refused.Reason, refused.Errors, refused.CurrentRevision);
+                break;
+        }
+    }
+}

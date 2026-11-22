@@ -1,0 +1,79 @@
+@inherits UiPageBase
+@using TicketFlow.Workspaces
+
+<PageHeader Title="Teams" Description="Groups of agents. Team grants and team conditions in Access apply to their members.">
+    <Actions>
+        @if (Session.Can(AccessPermissions.TeamManage))
+        {
+            <BbButton Href="#tf-new-team" Size="ButtonSize.Small"><LucideIcon Name="plus" Size="14" />New team</BbButton>
+        }
+    </Actions>
+</PageHeader>
+
+<div class="tf-grid tf-grid--3">
+    @foreach (var team in details)
+    {
+        <a class="tf-card" href="@Url($"teams/{team.Team.Id.Value}")" style="text-decoration:none">
+            <div class="tf-card__header">
+                <div>
+                    <div class="tf-card__title">@team.Team.Name</div>
+                    <div class="tf-card__description">@(team.Team.Description ?? "No description")</div>
+                </div>
+                <span class="tf-badge">@team.Team.Members.Count member@(team.Team.Members.Count == 1 ? "" : "s")</span>
+            </div>
+            <div class="tf-card__content tf-row">
+                @foreach (var member in team.Team.Members.Take(6))
+                {
+                    <UserChip Name="@Session.UserName(member)" />
+                }
+                @if (team.Team.Members.Count == 0)
+                {
+                    <span class="tf-small tf-muted">No members yet</span>
+                }
+            </div>
+            <div class="tf-card__footer"><LucideIcon Name="messages-square" Size="14" />@open.GetValueOrDefault(team.Team.Id.Value) open conversations</div>
+        </a>
+    }
+</div>
+@if (details.Count == 0)
+{
+    <div class="tf-card"><EmptyState Icon="users" Title="No teams yet" /></div>
+}
+
+@if (Session.Can(AccessPermissions.TeamManage))
+{
+    <div class="tf-card" id="tf-new-team">
+        <div class="tf-card__header"><div class="tf-card__title">New team</div></div>
+        <div class="tf-card__content">
+            <TfForm Action="team.create" Class="tf-form">
+                <div class="tf-form-grid">
+                    <div class="tf-field"><label class="tf-label" for="tf-t-name">Name</label><input id="tf-t-name" name="name" class="tf-input" required maxlength="128" value="@Session.FormValue("name", null)" /></div>
+                    <div class="tf-field"><label class="tf-label" for="tf-t-id">Identifier</label><input id="tf-t-id" name="id" class="tf-input tf-mono" maxlength="64" placeholder="optional" value="@Session.FormValue("id", null)" /></div>
+                    <div class="tf-field tf-field--full"><label class="tf-label" for="tf-t-desc">Description</label><input id="tf-t-desc" name="description" class="tf-input" maxlength="512" value="@Session.FormValue("description", null)" /></div>
+                </div>
+                <div class="tf-form-actions"><BbButton Type="ButtonType.Submit"><LucideIcon Name="plus" Size="14" />Create team</BbButton></div>
+            </TfForm>
+        </div>
+    </div>
+}
+
+@code {
+    private readonly List<StoredTeam> details = [];
+    private readonly Dictionary<string, int> open = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadWorkspaceAsync();
+        if (Service<ITeamService>() is not { } service)
+            return;
+        foreach (var team in Teams)
+            if (await service.GetAsync(Actor, team.Id, Aborted) is WorkspaceSucceeded<StoredTeam> stored)
+                details.Add(stored.Value);
+        if (Service<TicketFlow.Conversations.IConversationService>() is { } conversations)
+            foreach (var team in Teams)
+                if (await conversations.ListAsync(Actor, new TicketFlow.Conversations.ConversationListQuery(status: TicketFlow.Conversations.ConversationStatusKind.Open, team: team.Id, limit: 100), null, Aborted)
+                    is TicketFlow.Conversations.ConversationListPage page)
+                    open[team.Id.Value] = page.Conversations.Count;
+        await Session.LoadUsersAsync(details.SelectMany(team => team.Team.Members).Select(member => (UserId?)member));
+    }
+}

@@ -32,7 +32,10 @@ public sealed record AutomationRunResult(int Executed, int Suppressed, int Skipp
 /// actions through <see cref="AutomationActionExecutor"/>, persisting each outcome (and the produced sequences into the cause index)
 /// before the next action, appends the <c>automation.applied</c> marker and completes the record.</item>
 /// </list>
-/// The conversation is re-read before each rule, so later rules see earlier rules' changes. A finished record is never re-run.
+/// Execution records of every firing rule are fetched in one query and the evaluation context is built once per occurrence, rebuilt
+/// only after a rule ran actions (so later rules see earlier rules' changes). A finished record is never re-run; a record left
+/// <see cref="AutomationExecutionStatus.Running"/> is taken over compare-and-set before it is resumed, and a record a concurrent runner just
+/// created is left to that runner, so two runners never execute the same record.
 /// </summary>
 public sealed class AutomationRunner
 {
@@ -71,12 +74,19 @@ public sealed class AutomationRunner
         int executed = 0, suppressed = 0, skipped = 0;
         var actor = Principal(occurrence.Scope);
         var depth = occurrence.CausedByAutomation ? (occurrence.Cause?.Depth ?? options.MaximumChainDepth) + 1 : 1;
-        foreach (var rule in Order(rules))
+        var firing = Order(rules)
+            .Where(rule => rule.Enabled && occurrence.Event.Fires(rule.Trigger) && (!occurrence.CausedByAutomation || rule.RunOnAutomationEvents))
+            .ToList();
+        if (firing.Count == 0)
+            return new AutomationRunResult(0, 0, 0);
+        // One query for every firing rule's execution record and one context per occurrence (rebuilt only after a rule ran actions).
+        var records = await executions.FindManyAsync(occurrence.Scope, occurrence.Conversation, occurrence.TriggerKey, [.. firing.Select(rule => rule.Id)], cancellationToken)
+            .ConfigureAwait(false);
+        AutomationContext? context = null;
+        foreach (var rule in firing)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!rule.Enabled || !occurrence.Event.Fires(rule.Trigger) || (occurrence.CausedByAutomation && !rule.RunOnAutomationEvents))
-                continue;
-            var existing = await executions.FindAsync(occurrence.Scope, rule.Id, occurrence.Conversation, occurrence.TriggerKey, cancellationToken).ConfigureAwait(false);
+            var existing = records.GetValueOrDefault(rule.Id);
             if (existing is { Execution.Status: not AutomationExecutionStatus.Running })
             {
                 skipped++;
@@ -84,17 +94,29 @@ public sealed class AutomationRunner
                     break;
                 continue;
             }
-            var (context, failure) = await contexts.BuildAsync(actor, occurrence.Conversation, occurrence.Event, occurrence.Message, cancellationToken).ConfigureAwait(false);
             if (context is null)
-                return new AutomationRunResult(executed, suppressed, skipped + (failure is null ? 0 : 1));
-            if (existing is null && !AutomationConditionEvaluator.Matches(rule.Condition, context))
-                continue;
-
+            {
+                var (built, failure) = await contexts.BuildAsync(actor, occurrence.Conversation, occurrence.Event, occurrence.Message, cancellationToken).ConfigureAwait(false);
+                if (built is null)
+                    return new AutomationRunResult(executed, suppressed, skipped + (failure is null ? 0 : 1));
+                context = built;
+            }
             StoredAutomationExecution record;
             if (existing is not null)
-                record = existing;
+            {
+                // A record left Running (crash, or a lost race): take it over compare-and-set so only one runner resumes it.
+                var claimed = await SaveAsync(occurrence.Scope, existing.Execution, existing.Revision, cancellationToken).ConfigureAwait(false);
+                if (claimed is null)
+                {
+                    skipped++;
+                    continue;
+                }
+                record = existing with { Revision = claimed.Value };
+            }
             else
             {
+                if (!AutomationConditionEvaluator.Matches(rule.Condition, context))
+                    continue;
                 var now = time.GetUtcNow();
                 AutomationSuppression? suppression = depth > options.MaximumChainDepth ? AutomationSuppression.DepthExceeded
                     : await executions.CountSinceAsync(occurrence.Scope, occurrence.Conversation, now - options.RateWindow, options.RateLimit, cancellationToken).ConfigureAwait(false) >= options.RateLimit
@@ -110,9 +132,12 @@ public sealed class AutomationRunner
                     AutomationExecutionStarted started => (started.Stored, true),
                     AutomationExecutionExists exists => (exists.Stored, false),
                 };
-                if (!created && record.Execution.Status != AutomationExecutionStatus.Running)
+                if (!created)
                 {
+                    // A concurrent runner created the record and owns it; it is not resumed concurrently.
                     skipped++;
+                    if (rule.StopProcessing && record.Execution.Status == AutomationExecutionStatus.Completed)
+                        break;
                     continue;
                 }
                 if (record.Execution.Status == AutomationExecutionStatus.Suppressed)
@@ -123,6 +148,7 @@ public sealed class AutomationRunner
             }
             if (await ExecuteAsync(actor, rule, record, context, cancellationToken).ConfigureAwait(false))
                 executed++;
+            context = null;
             if (rule.StopProcessing)
                 break;
         }

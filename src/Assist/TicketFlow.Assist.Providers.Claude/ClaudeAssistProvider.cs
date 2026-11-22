@@ -117,7 +117,7 @@ public sealed class ClaudeAssistProvider : IAssistChatProvider, IDisposable
             if (string.IsNullOrWhiteSpace(key))
                 key = configuration?["ANTHROPIC_API_KEY"];
             if (string.IsNullOrWhiteSpace(key))
-                throw new AssistProviderException(AssistProviderFailure.NotConfigured, false);
+                throw new AssistProviderException(AssistProviderFailure.NotConfigured, false, tokensMayHaveBeenConsumed: false);
             client = options.BaseUrl is { } baseUrl
                 ? new AnthropicClient { ApiKey = key, HttpClient = http, MaxRetries = 0, Timeout = options.TotalTimeout, BaseUrl = baseUrl.ToString().TrimEnd('/') }
                 : new AnthropicClient { ApiKey = key, HttpClient = http, MaxRetries = 0, Timeout = options.TotalTimeout };
@@ -137,19 +137,24 @@ public sealed class ClaudeAssistProvider : IAssistChatProvider, IDisposable
         _ => new(AssistProviderFailure.InvalidResponse, false),
     };
 
-    private static AssistProviderException Status(int status, Exception _) => status switch
+    /// <summary>An error status means the API rejected the request without generating output, so nothing was consumed.</summary>
+    private static AssistProviderException Status(int status, Exception error)
     {
-        400 or 422 => new(AssistProviderFailure.InvalidRequest, false, status),
-        401 => new(AssistProviderFailure.Authentication, false, status),
-        403 => new(AssistProviderFailure.PermissionDenied, false, status),
-        404 => new(AssistProviderFailure.NotFound, false, status),
-        413 => new(AssistProviderFailure.RequestTooLarge, false, status),
-        408 => new(AssistProviderFailure.Timeout, true, status),
-        429 => new(AssistProviderFailure.RateLimited, true, status),
-        529 or 503 => new(AssistProviderFailure.Overloaded, true, status),
-        >= 500 => new(AssistProviderFailure.ServerError, true, status),
-        _ => new(AssistProviderFailure.InvalidRequest, false, status),
-    };
+        var (failure, retryable) = status switch
+        {
+            400 or 422 => (AssistProviderFailure.InvalidRequest, false),
+            401 => (AssistProviderFailure.Authentication, false),
+            403 => (AssistProviderFailure.PermissionDenied, false),
+            404 => (AssistProviderFailure.NotFound, false),
+            413 => (AssistProviderFailure.RequestTooLarge, false),
+            408 => (AssistProviderFailure.Timeout, true),
+            429 => (AssistProviderFailure.RateLimited, true),
+            529 or 503 => (AssistProviderFailure.Overloaded, true),
+            >= 500 => (AssistProviderFailure.ServerError, true),
+            _ => (AssistProviderFailure.InvalidRequest, false),
+        };
+        return new(failure, retryable, status, innerException: null, tokensMayHaveBeenConsumed: false);
+    }
 }
 
 /// <summary>

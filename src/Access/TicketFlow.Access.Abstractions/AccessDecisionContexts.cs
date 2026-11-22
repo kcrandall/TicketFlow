@@ -6,8 +6,8 @@ namespace TicketFlow.Access;
 /// A batch of point decisions for one principal, one scope and a fixed set of permissions, evaluated against a snapshot (grants,
 /// roles and field policies loaded once, validity evaluated at load time). <see cref="DecideAsync"/> equals
 /// <see cref="IAccessEvaluator.AuthorizeAsync"/> at the load instant and completes synchronously unless an audit event must be
-/// persisted: decisions for sensitive permissions are audited per resource (as with point checks); break-glass use for
-/// non-sensitive permissions is audited once per permission per context. Contexts are short-lived (one request); do not cache them.
+/// persisted: decisions for sensitive permissions and every decision that relies on a break-glass grant are audited per resource,
+/// exactly as with point checks. Contexts are short-lived (one request); do not cache them.
 /// </summary>
 public interface IAccessDecisionContext
 {

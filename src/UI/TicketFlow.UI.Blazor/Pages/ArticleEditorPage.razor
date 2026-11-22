@@ -1,0 +1,135 @@
+@inherits UiPageBase
+@using TicketFlow.HelpCenter
+
+@if (Id != "new" && stored is null)
+{
+    <StatePanel Icon="search-x" Title="Article not available" Message="It may have been deleted, or you no longer have access to it." />
+}
+else
+{
+    var translation = stored?.Record.Article.Translations.FirstOrDefault();
+    <PageHeader Title="@(translation?.Title ?? "New article")" Description="@(stored is null ? "Write in Markdown. Articles start as drafts." : $"{stored.Record.State} · revision {stored.Revision}{(stored.Record.PublishedRevision is { } published ? $" · published revision {published}" : "")} · updated {UiFormat.Relative(stored.Record.UpdatedAt, Now)}")">
+        <Actions>
+            <BbButton Href="@Url("help-center")" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="arrow-left" Size="14" />Articles</BbButton>
+            @if (stored is not null && Session.Can(HelpCenterPermissions.Publish))
+            {
+                @if (stored.Record.State != ArticleState.Published)
+                {
+                    <TfForm Action="helpcenter.article.publish" Revision="stored.Revision" Class="tf-inline-form"><BbButton Type="ButtonType.Submit" Size="ButtonSize.Small"><LucideIcon Name="globe" Size="14" />Publish</BbButton></TfForm>
+                }
+                else
+                {
+                    <TfForm Action="helpcenter.article.unpublish" Revision="stored.Revision" Class="tf-inline-form"><BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="eye-off" Size="14" />Unpublish</BbButton></TfForm>
+                }
+            }
+        </Actions>
+    </PageHeader>
+
+    <div class="tf-grid tf-grid--2" style="align-items:start">
+        <div class="tf-card">
+            <div class="tf-card__header"><div><div class="tf-card__title">Editor</div><div class="tf-card__description">Markdown is rendered and sanitized server-side.</div></div></div>
+            <div class="tf-card__content">
+                <TfForm Action="helpcenter.article.save" Revision="stored?.Revision" Class="tf-form" Id="tf-article-form">
+                    <input type="hidden" name="portal" value="@(stored?.Record.Article.Portal.Value ?? Query("portal") ?? portals.FirstOrDefault()?.Portal.Id.Value)" />
+                    <input type="hidden" name="locale" value="@(translation?.Locale.Value ?? "en")" />
+                    <div class="tf-field"><label class="tf-label" for="tf-a-title">Title</label><input id="tf-a-title" name="title" class="tf-input" required maxlength="256" value="@Session.FormValue("title", translation?.Title)" /></div>
+                    <div class="tf-form-grid">
+                        <div class="tf-field"><label class="tf-label" for="tf-a-slug">Slug</label><input id="tf-a-slug" name="slug" class="tf-input tf-mono" required maxlength="128" value="@Session.FormValue("slug", translation?.Slug.Value)" /></div>
+                        <div class="tf-field">
+                            <label class="tf-label" for="tf-a-collection">Collection</label>
+                            <select id="tf-a-collection" name="collection" class="tf-select">
+                                <option value="">None</option>
+                                @foreach (var collection in collections)
+                                {
+                                    <option value="@collection.Collection.Id.Value" selected="@(Session.FormValue("collection", stored?.Record.Article.Collection?.Value) == collection.Collection.Id.Value)">@collection.Collection.Translations[0].Name</option>
+                                }
+                            </select>
+                        </div>
+                    </div>
+                    <div class="tf-field"><label class="tf-label" for="tf-a-excerpt">Excerpt</label><input id="tf-a-excerpt" name="excerpt" class="tf-input" maxlength="512" value="@Session.FormValue("excerpt", translation?.Excerpt)" /></div>
+                    <div class="tf-field"><label class="tf-label" for="tf-a-tags">Tags</label><input id="tf-a-tags" name="tags" class="tf-input" maxlength="512" placeholder="billing, refunds" value="@Session.FormValue("tags", translation is null ? null : string.Join(", ", translation.Tags))" /></div>
+                    <div class="tf-field"><label class="tf-label" for="tf-a-body">Body</label><textarea id="tf-a-body" name="body" class="tf-textarea tf-textarea--code" style="min-height:360px" required>@Session.FormValue("body", translation?.Body)</textarea></div>
+                    <div class="tf-form-actions">
+                        @if (stored is not null && Session.Can(HelpCenterPermissions.Publish) && stored.Record.State != ArticleState.Archived)
+                        {
+                            <button type="submit" name="_action" value="helpcenter.article.archive" class="tf-button tf-button--ghost tf-button--sm" formnovalidate><LucideIcon Name="archive" Size="14" />Archive</button>
+                        }
+                        @if (Session.Can(HelpCenterPermissions.Write))
+                        {
+                            <BbButton Type="ButtonType.Submit" Size="ButtonSize.Small">@(stored is null ? "Create draft" : "Save draft")</BbButton>
+                        }
+                    </div>
+                </TfForm>
+            </div>
+        </div>
+        <div class="tf-stack">
+            <div class="tf-card">
+                <div class="tf-card__header"><div><div class="tf-card__title">Preview</div><div class="tf-card__description">How the current draft renders on the portal</div></div><span class="tf-badge"><LucideIcon Name="eye" Size="12" />Live draft</span></div>
+                <div class="tf-card__content">
+                    @if (preview is not null)
+                    {
+                        <h2 style="font-size:22px;font-weight:600;letter-spacing:-0.02em;margin-bottom:12px">@preview.Title</h2>
+                        <div class="tf-prose">@((MarkupString)preview.Html)</div>
+                    }
+                    else
+                    {
+                        <div class="tf-muted tf-small">Save the draft to see a preview.</div>
+                    }
+                </div>
+            </div>
+            @if (stored is not null)
+            {
+                <div class="tf-card">
+                    <div class="tf-card__header"><div class="tf-card__title">Feedback & history</div></div>
+                    <div class="tf-card__content tf-stack tf-stack--sm">
+                        @if (feedback is not null)
+                        {
+                            <div class="tf-grid tf-grid--3" style="gap:8px">
+                                <div class="tf-kv"><span class="tf-kv__label">Views</span><span class="tf-kv__value">@feedback.Views</span></div>
+                                <div class="tf-kv"><span class="tf-kv__label">Helpful</span><span class="tf-kv__value">@feedback.Helpful</span></div>
+                                <div class="tf-kv"><span class="tf-kv__label">Not helpful</span><span class="tf-kv__value">@feedback.NotHelpful</span></div>
+                            </div>
+                        }
+                        @foreach (var revision in revisions)
+                        {
+                            <div class="tf-row tf-row--between tf-small"><span>Revision @revision.Number</span><span class="tf-muted">published @UiFormat.Relative(revision.PublishedAt, Now)</span></div>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private StoredArticle? stored;
+    private ArticlePreview? preview;
+    private ArticleFeedbackCounts? feedback;
+    private List<ArticleRevision> revisions = [];
+    private List<StoredCollection> collections = [];
+    private List<StoredPortal> portals = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<IHelpCenterService>() is not { } service || Id is null)
+            return;
+        if (Id != "new" && await service.GetArticleAsync(Actor, new ArticleId(Id), Aborted) is HelpCenterSucceeded<StoredArticle> found)
+            stored = found.Value;
+        if (await service.ListPortalsAsync(Actor, Aborted) is HelpCenterSucceeded<IReadOnlyList<StoredPortal>> list)
+            portals = [.. list.Value];
+        var portal = stored?.Record.Article.Portal ?? portals.FirstOrDefault(item => item.Portal.Id.Value == Query("portal"))?.Portal.Id ?? portals.FirstOrDefault()?.Portal.Id;
+        if (portal is { } portalId && await service.ListCollectionsAsync(Actor, portalId, Aborted) is HelpCenterSucceeded<IReadOnlyList<StoredCollection>> collectionList)
+            collections = [.. collectionList.Value];
+        if (stored is null)
+            return;
+        var locale = stored.Record.Article.Translations[0].Locale;
+        if (await service.PreviewArticleAsync(Actor, stored.Id, locale, Aborted) is HelpCenterSucceeded<ArticlePreview> rendered)
+            preview = rendered.Value;
+        if (await service.GetFeedbackAsync(Actor, stored.Id, Aborted) is HelpCenterSucceeded<ArticleFeedbackCounts> counts)
+            feedback = counts.Value;
+        if (await service.ListRevisionsAsync(Actor, stored.Id, 5, null, Aborted) is HelpCenterSucceeded<HelpCenterPage<ArticleRevision>> history)
+            revisions = [.. history.Value.Items];
+    }
+}

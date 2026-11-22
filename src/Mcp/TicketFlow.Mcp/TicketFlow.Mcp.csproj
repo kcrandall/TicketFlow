@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Model Context Protocol tools for TicketFlow: role-oriented toolsets (conversations, contacts, routing, SLA, automation, help center, surveys, reports, administration, access, assist) plus self-awareness tools, for hosts to plug into their own MCP server behind their own authentication. Every call runs as the caller's principal through the feature services, so Access rules, masking and audit apply unchanged.</Description>
+    <PackageTags>$(PackageTags);mcp;model-context-protocol;ai;agents</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Access/TicketFlow.Access.Abstractions/TicketFlow.Access.Abstractions.csproj" />
+    <ProjectReference Include="../../Workspaces/TicketFlow.Workspaces.Abstractions/TicketFlow.Workspaces.Abstractions.csproj" />
+    <ProjectReference Include="../../Contacts/TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj" />
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
+    <ProjectReference Include="../../Routing/TicketFlow.Routing.Abstractions/TicketFlow.Routing.Abstractions.csproj" />
+    <ProjectReference Include="../../Sla/TicketFlow.Sla.Abstractions/TicketFlow.Sla.Abstractions.csproj" />
+    <ProjectReference Include="../../Automation/TicketFlow.Automation.Abstractions/TicketFlow.Automation.Abstractions.csproj" />
+    <ProjectReference Include="../../HelpCenter/TicketFlow.HelpCenter.Abstractions/TicketFlow.HelpCenter.Abstractions.csproj" />
+    <ProjectReference Include="../../Surveys/TicketFlow.Surveys.Abstractions/TicketFlow.Surveys.Abstractions.csproj" />
+    <ProjectReference Include="../../Reporting/TicketFlow.Reporting.Abstractions/TicketFlow.Reporting.Abstractions.csproj" />
+    <ProjectReference Include="../../Assist/TicketFlow.Assist.Abstractions/TicketFlow.Assist.Abstractions.csproj" />
+    <ProjectReference Include="../../Channels/TicketFlow.Channels.Abstractions/TicketFlow.Channels.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

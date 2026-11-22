@@ -49,6 +49,8 @@ public sealed record AutomationScheduleClaim(TicketScope Scope, AutomationRuleId
 /// <item>Scope-confined; creates start at revision 1 (conflict when present); updates and deletes are compare-and-set on revision; at
 /// most <see cref="MaximumRulesPerWorkspace"/> rules per scope, checked atomically with the insert.</item>
 /// <item><see cref="ListAsync"/> orders by <see cref="AutomationRule.Priority"/>, then identifier (ordinal).</item>
+/// <item><see cref="GetRuleSetVersionAsync"/> returns a per-scope version that increases with every applied create, update and delete
+/// (0 before the first write), so callers can cache the decoded rule set and revalidate it with one cheap read.</item>
 /// <item>Create and update atomically set the rule's schedule timer to <c>nextRunAt</c> (<see langword="null"/> = none), clear its lease
 /// and increment its fence; delete removes it.</item>
 /// <item><see cref="ClaimDueSchedulesAsync"/> leases timers due at or before the store clock's now, earliest first, whose lease is free or
@@ -66,6 +68,8 @@ public interface IAutomationRuleStore
     Task<StoredAutomationRule?> GetAsync(TicketScope scope, AutomationRuleId id, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<StoredAutomationRule>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default);
+
+    Task<long> GetRuleSetVersionAsync(TicketScope scope, CancellationToken cancellationToken = default);
 
     Task<AutomationWriteResult<StoredAutomationRule>> CreateAsync(TicketScope scope, AutomationRule rule, DateTimeOffset? nextRunAt, CancellationToken cancellationToken = default);
 
@@ -152,10 +156,23 @@ public sealed record AutomationExecutionPage(IReadOnlyList<StoredAutomationExecu
 /// <item><see cref="CountSinceAsync"/> counts records of a conversation started at or after an instant, up to <c>limit</c>.</item>
 /// <item><see cref="ListAsync"/> pages the log with the query applied inside the bounded keyset scan.</item>
 /// <item>Checkpoints are named, scope-confined counters written compare-and-set (<see langword="null"/> expected = absent).</item>
+/// <item><see cref="FindManyAsync"/> returns, in one round trip, the records of up to <see cref="MaximumFindMany"/> rules for one
+/// (conversation, trigger key).</item>
+/// <item><see cref="PurgeAsync"/> (retention) deletes, store-wide, up to <c>limit</c> finished (completed or suppressed) records started
+/// before a cutoff together with their cause-index rows; concurrent purgers never block on each other (skip locked rows). Running
+/// records are kept.</item>
 /// </list>
 /// </summary>
 public interface IAutomationExecutionStore
 {
+    public const int MaximumFindMany = IAutomationRuleStore.MaximumRulesPerWorkspace;
+    public const int MaximumPurge = 10_000;
+
+    Task<IReadOnlyDictionary<AutomationRuleId, StoredAutomationExecution>> FindManyAsync(TicketScope scope, ConversationId? conversation, string triggerKey,
+        IReadOnlyCollection<AutomationRuleId> rules, CancellationToken cancellationToken = default);
+
+    Task<int> PurgeAsync(DateTimeOffset before, int limit, CancellationToken cancellationToken = default);
+
     Task<AutomationBeginResult> BeginAsync(TicketScope scope, AutomationExecution execution, CancellationToken cancellationToken = default);
 
     Task<AutomationWriteResult<StoredAutomationExecution>> UpdateAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,

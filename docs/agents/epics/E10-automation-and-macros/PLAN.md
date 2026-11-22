@@ -23,3 +23,5 @@ Outcome: Durable trigger/condition/action rules, dry-run, macros, canned respons
 ## Verification record
 
 T01–T05 (2026-11-22): `dotnet build TicketFlow.slnx -c Release` (0 warnings, 0 errors); `dotnet test tests/Automation/TicketFlow.Automation.Tests -c Release` (35 passed); `TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/Automation/TicketFlow.Automation.Stores.Postgres.Tests -c Release` against an isolated `postgres:18` container (10 passed; inconclusive without PostgreSQL); `bash scripts/verify-package-metadata.sh` (47 package projects validated). Parallel post-ticket reviews are still outstanding before commit. See [docs/automation.md](../../../automation.md).
+
+Review fixes (2026-11-22): forged SLA events ignored, constant store calls per occurrence (rule-set cache, batched records, single context and timeline read), execution retention (`PurgeAsync`, migration v2), one-at-a-time schedule claims, race/resume regression tests. Automation tests 42 passed; PostgreSQL tests 12 passed against an isolated container.

@@ -1,0 +1,191 @@
+using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Routing;
+using TicketFlow.Access;
+using TicketFlow.Core;
+using TicketFlow.Hosting.AspNetCore.Contracts;
+using TicketFlow.Workspaces;
+
+namespace TicketFlow.Hosting.AspNetCore.Endpoints;
+
+internal static class WorkspaceEndpoints
+{
+    public static RouteGroupBuilder Map(RouteGroupBuilder group)
+    {
+        group.MapGet("/settings", async (TicketFlowActor actor, [FromServices] IWorkspaceSettingsService service, HttpContext http) =>
+            Map(http, await service.GetAsync(actor.Principal, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision)))
+            .WithName("GetWorkspaceSettings").Produces<WorkspaceSettingsDto>();
+        group.MapPost("/settings", async (TicketFlowActor actor, WorkspaceSettingsRequest request, [FromServices] IWorkspaceSettingsService service, HttpContext http) =>
+            Map(http, await service.CreateAsync(actor.Principal, Settings(request), http.RequestAborted), stored => TicketFlowHttp.Created(http, "settings", Dto(stored), stored.Revision)))
+            .WithName("CreateWorkspaceSettings").Produces<WorkspaceSettingsDto>(StatusCodes.Status201Created);
+        group.MapPut("/settings", async (TicketFlowActor actor, WorkspaceSettingsRequest request, [FromServices] IWorkspaceSettingsService service, HttpContext http) =>
+        {
+            if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
+                return failure;
+            return Map(http, await service.UpdateAsync(actor.Principal, Settings(request), revision, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision));
+        }).WithName("UpdateWorkspaceSettings").Produces<WorkspaceSettingsDto>();
+
+        group.MapGet("/inboxes", async (TicketFlowActor actor, [FromServices] IInboxService service, HttpContext http, int? limit, string? after) =>
+            Map(http, await service.ListAsync(actor.Principal, new WorkspacePageRequest(limit ?? 50, after), http.RequestAborted),
+                page => TicketFlowHttp.Ok(http, new PageDto<InboxDto>([.. page.Items.Select(Dto)], page.HasMore ? page.Items[^1].Inbox.Id.Value : null))))
+            .WithName("ListInboxes").Produces<PageDto<InboxDto>>();
+        group.MapGet("/inboxes/{inboxId}", async (TicketFlowActor actor, string inboxId, [FromServices] IInboxService service, HttpContext http) =>
+            Map(http, await service.GetAsync(actor.Principal, new InboxId(inboxId), http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision)))
+            .WithName("GetInbox").Produces<InboxDto>();
+        group.MapPost("/inboxes", async (TicketFlowActor actor, InboxRequest request, [FromServices] IInboxService service, HttpContext http) =>
+            Map(http, await service.CreateAsync(actor.Principal, Inbox(request.Id ?? Ids.New(), request), http.RequestAborted),
+                stored => TicketFlowHttp.Created(http, $"inboxes/{stored.Inbox.Id.Value}", Dto(stored), stored.Revision)))
+            .WithName("CreateInbox").Produces<InboxDto>(StatusCodes.Status201Created);
+        group.MapPut("/inboxes/{inboxId}", async (TicketFlowActor actor, string inboxId, InboxRequest request, [FromServices] IInboxService service, HttpContext http) =>
+        {
+            if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
+                return failure;
+            return Map(http, await service.UpdateAsync(actor.Principal, Inbox(inboxId, request), revision, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision));
+        }).WithName("UpdateInbox").Produces<InboxDto>();
+        group.MapDelete("/inboxes/{inboxId}", async (TicketFlowActor actor, string inboxId, [FromServices] IInboxService service, HttpContext http) =>
+        {
+            if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
+                return failure;
+            return Map(http, await service.DeleteAsync(actor.Principal, new InboxId(inboxId), revision, http.RequestAborted), _ => TypedResults.NoContent());
+        }).WithName("DeleteInbox").Produces(StatusCodes.Status204NoContent);
+        group.MapPost("/inboxes/{inboxId}/agents", async (TicketFlowActor actor, string inboxId, InboxAgentRequest request, [FromServices] IInboxService service, HttpContext http) =>
+            Map(http, await service.AddAgentAsync(actor.Principal, new InboxId(inboxId), new UserId(request.UserId), request.Role is null ? null : new RoleId(request.Role), http.RequestAborted),
+                stored => TicketFlowHttp.Ok(http, AccessDtos.Grant(stored), stored.Revision)))
+            .WithName("AddInboxAgent").Produces<GrantDto>();
+        group.MapDelete("/inboxes/{inboxId}/agents/{userId}", async (TicketFlowActor actor, string inboxId, string userId, string? role, [FromServices] IInboxService service, HttpContext http) =>
+            Map(http, await service.RemoveAgentAsync(actor.Principal, new InboxId(inboxId), new UserId(userId), role is null ? null : new RoleId(role), http.RequestAborted), _ => TypedResults.NoContent()))
+            .WithName("RemoveInboxAgent").Produces(StatusCodes.Status204NoContent);
+
+        group.MapGet("/teams", async (TicketFlowActor actor, [FromServices] ITeamService service, HttpContext http, int? limit, string? after) =>
+            Map(http, await service.ListAsync(actor.Principal, new WorkspacePageRequest(limit ?? 50, after), http.RequestAborted),
+                page => TicketFlowHttp.Ok(http, new PageDto<TeamSummaryDto>([.. page.Items.Select(team => new TeamSummaryDto(team.Id.Value, team.Name, team.Description, team.MemberCount, team.Revision))],
+                    page.HasMore ? page.Items[^1].Id.Value : null))))
+            .WithName("ListTeams").Produces<PageDto<TeamSummaryDto>>();
+        group.MapGet("/teams/{teamId}", async (TicketFlowActor actor, string teamId, [FromServices] ITeamService service, HttpContext http) =>
+            Map(http, await service.GetAsync(actor.Principal, new TeamId(teamId), http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision)))
+            .WithName("GetTeam").Produces<TeamDto>();
+        group.MapPost("/teams", async (TicketFlowActor actor, TeamRequest request, [FromServices] ITeamService service, HttpContext http) =>
+            Map(http, await service.CreateAsync(actor.Principal, Team(request.Id ?? Ids.New(), request), http.RequestAborted),
+                stored => TicketFlowHttp.Created(http, $"teams/{stored.Team.Id.Value}", Dto(stored), stored.Revision)))
+            .WithName("CreateTeam").Produces<TeamDto>(StatusCodes.Status201Created);
+        group.MapPut("/teams/{teamId}", async (TicketFlowActor actor, string teamId, TeamRequest request, [FromServices] ITeamService service, HttpContext http) =>
+        {
+            if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
+                return failure;
+            return Map(http, await service.UpdateAsync(actor.Principal, Team(teamId, request), revision, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision));
+        }).WithName("UpdateTeam").Produces<TeamDto>();
+        group.MapDelete("/teams/{teamId}", async (TicketFlowActor actor, string teamId, [FromServices] ITeamService service, HttpContext http) =>
+        {
+            if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
+                return failure;
+            return Map(http, await service.DeleteAsync(actor.Principal, new TeamId(teamId), revision, http.RequestAborted), _ => TypedResults.NoContent());
+        }).WithName("DeleteTeam").Produces(StatusCodes.Status204NoContent);
+        group.MapPost("/teams/{teamId}/members", async (TicketFlowActor actor, string teamId, TeamMemberRequest request, [FromServices] ITeamService service, HttpContext http) =>
+        {
+            if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
+                return failure;
+            return Map(http, await service.AddMemberAsync(actor.Principal, new TeamId(teamId), new UserId(request.UserId), revision, http.RequestAborted),
+                stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision));
+        }).WithName("AddTeamMember").Produces<TeamDto>();
+        group.MapDelete("/teams/{teamId}/members/{userId}", async (TicketFlowActor actor, string teamId, string userId, [FromServices] ITeamService service, HttpContext http) =>
+        {
+            if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
+                return failure;
+            return Map(http, await service.RemoveMemberAsync(actor.Principal, new TeamId(teamId), new UserId(userId), revision, http.RequestAborted),
+                stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision));
+        }).WithName("RemoveTeamMember").Produces<TeamDto>();
+
+        group.MapGet("/calendars", async (TicketFlowActor actor, [FromServices] IBusinessCalendarService service, HttpContext http) =>
+            Map(http, await service.ListAsync(actor.Principal, http.RequestAborted), list => TicketFlowHttp.Ok(http, list.Select(Dto).ToList())))
+            .WithName("ListCalendars").Produces<List<CalendarDto>>();
+        group.MapGet("/calendars/{calendarId}", async (TicketFlowActor actor, string calendarId, [FromServices] IBusinessCalendarService service, HttpContext http) =>
+            Map(http, await service.GetAsync(actor.Principal, new BusinessCalendarId(calendarId), http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision)))
+            .WithName("GetCalendar").Produces<CalendarDto>();
+        group.MapPost("/calendars", async (TicketFlowActor actor, CalendarRequest request, [FromServices] IBusinessCalendarService service, HttpContext http) =>
+            Map(http, await service.CreateAsync(actor.Principal, Calendar(request.Id ?? Ids.New(), request), http.RequestAborted),
+                stored => TicketFlowHttp.Created(http, $"calendars/{stored.Calendar.Id.Value}", Dto(stored), stored.Revision)))
+            .WithName("CreateCalendar").Produces<CalendarDto>(StatusCodes.Status201Created);
+        group.MapPut("/calendars/{calendarId}", async (TicketFlowActor actor, string calendarId, CalendarRequest request, [FromServices] IBusinessCalendarService service, HttpContext http) =>
+        {
+            if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
+                return failure;
+            return Map(http, await service.UpdateAsync(actor.Principal, Calendar(calendarId, request), revision, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision));
+        }).WithName("UpdateCalendar").Produces<CalendarDto>();
+        group.MapDelete("/calendars/{calendarId}", async (TicketFlowActor actor, string calendarId, [FromServices] IBusinessCalendarService service, HttpContext http) =>
+        {
+            if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
+                return failure;
+            return Map(http, await service.DeleteAsync(actor.Principal, new BusinessCalendarId(calendarId), revision, http.RequestAborted), _ => TypedResults.NoContent());
+        }).WithName("DeleteCalendar").Produces(StatusCodes.Status204NoContent);
+        return group;
+    }
+
+    internal static IResult Map<T>(HttpContext http, WorkspaceResult<T> result, Func<T, IResult> success) => result switch
+    {
+        WorkspaceSucceeded<T> succeeded => success(succeeded.Value),
+        WorkspaceRefused refused => TicketFlowHttp.Refused(http, refused.Reason switch
+        {
+            WorkspaceRefusal.Forbidden => RefusalKind.Forbidden,
+            WorkspaceRefusal.Invalid => RefusalKind.Invalid,
+            WorkspaceRefusal.NotFound => RefusalKind.NotFound,
+            WorkspaceRefusal.Conflict => RefusalKind.Conflict,
+            _ => RefusalKind.Rejected,
+        }, refused.Errors, refused.CurrentRevision),
+    };
+
+    private static WorkspaceSettings Settings(WorkspaceSettingsRequest request) =>
+        new(request.Name, request.DefaultLocale, request.TimeZoneId, request.FeatureToggles);
+
+    private static WorkspaceSettingsDto Dto(StoredWorkspaceSettings stored) =>
+        new(stored.Settings.Name, stored.Settings.DefaultLocale, stored.Settings.TimeZoneId, stored.Settings.FeatureToggles, stored.Revision);
+
+    private static Inbox Inbox(string id, InboxRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request.Channel, nameof(request.Channel));
+        return new Inbox(new InboxId(id), request.Name, new ChannelBinding(new ChannelKind(request.Channel.Kind), request.Channel.ConfigurationId),
+            request.CalendarId is null ? null : new BusinessCalendarId(request.CalendarId),
+            request.SlaPolicyId is null ? null : new SlaPolicyId(request.SlaPolicyId),
+            request.RoutingPolicyId is null ? null : new RoutingPolicyId(request.RoutingPolicyId),
+            request.Enabled, request.GreetingMessage, request.AwayMessage);
+    }
+
+    internal static InboxDto Dto(StoredInbox stored)
+    {
+        var inbox = stored.Inbox;
+        return new InboxDto(inbox.Id.Value, inbox.Name, new ChannelBindingDto(inbox.Channel.Kind.Value, inbox.Channel.ConfigurationId), inbox.Calendar?.Value,
+            inbox.SlaPolicy?.Value, inbox.RoutingPolicy?.Value, inbox.Enabled, inbox.GreetingMessage, inbox.AwayMessage, stored.Revision);
+    }
+
+    private static Team Team(string id, TeamRequest request) =>
+        new(new TeamId(id), request.Name, request.Description, request.Members?.Select(member => new UserId(member)));
+
+    private static TeamDto Dto(StoredTeam stored) =>
+        new(stored.Team.Id.Value, stored.Team.Name, stored.Team.Description, [.. stored.Team.Members.Select(member => member.Value).Order(StringComparer.Ordinal)], stored.Revision);
+
+    private static BusinessCalendar Calendar(string id, CalendarRequest request) =>
+        BusinessCalendarCodec.DecodeSchedule(new BusinessCalendarId(id), request.Name, request.TimeZoneId, Json.Raw(request.Schedule, "schedule"));
+
+    private static CalendarDto Dto(StoredBusinessCalendar stored) =>
+        new(stored.Calendar.Id.Value, stored.Calendar.Name, stored.Calendar.TimeZoneId, Json.Parse(BusinessCalendarCodec.EncodeSchedule(stored.Calendar)), stored.Revision);
+}
+
+internal static class Ids
+{
+    /// <summary>A generated identifier: a version 7 GUID in "N" format.</summary>
+    public static string New() => Guid.CreateVersion7().ToString("N");
+}
+
+internal static class Json
+{
+    public static JsonElement Parse(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.Clone();
+    }
+
+    /// <summary>The raw JSON of a request definition; <c>undefined</c>/<c>null</c> definitions are invalid.</summary>
+    public static string Raw(JsonElement element, string name) =>
+        element.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null ? throw new ArgumentException($"'{name}' is required.", name) : element.GetRawText();
+}

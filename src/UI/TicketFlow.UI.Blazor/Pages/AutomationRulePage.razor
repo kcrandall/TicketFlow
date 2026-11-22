@@ -1,0 +1,138 @@
+@inherits UiPageBase
+@using TicketFlow.Automation
+@using TicketFlow.Conversations
+
+@if (Id != "new" && stored is null)
+{
+    <StatePanel Icon="search-x" Title="Rule not available" Message="It may have been deleted, or you no longer have access to it." />
+}
+else
+{
+    <PageHeader Title="@(stored?.Rule.Name ?? "New rule")" Description="@(stored is null ? "Define the trigger, conditions and actions as a versioned JSON definition, then dry-run it against a real conversation." : $"Revision {stored.Revision} · priority {stored.Rule.Priority}")">
+        <Actions><BbButton Href="@Url("automation")" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="arrow-left" Size="14" />All rules</BbButton></Actions>
+    </PageHeader>
+
+    @if (stored is not null)
+    {
+        var rule = stored.Rule;
+        var trigger = UiAutomationText.Trigger(rule.Trigger);
+        <div class="tf-grid tf-grid--3">
+            <div class="tf-card"><div class="tf-card__header"><div class="tf-card__title">When</div></div><div class="tf-card__content"><span class="tf-row"><LucideIcon Name="@trigger.Icon" Size="16" />@trigger.Text</span></div></div>
+            <div class="tf-card"><div class="tf-card__header"><div class="tf-card__title">If</div></div><div class="tf-card__content">@UiAutomationText.Condition(rule.Condition)</div></div>
+            <div class="tf-card"><div class="tf-card__header"><div class="tf-card__title">Then</div></div>
+                <div class="tf-card__content tf-stack tf-stack--sm">
+                    @foreach (var (action, index) in rule.Actions.Select((action, index) => (UiAutomationText.Action(action), index)))
+                    {
+                        <span class="tf-row" style="flex-wrap:nowrap"><span class="tf-kbd">@(index + 1)</span><LucideIcon Name="@action.Icon" Size="14" />@action.Text</span>
+                    }
+                </div>
+            </div>
+        </div>
+    }
+
+    <div class="tf-grid tf-grid--wide-narrow">
+        <div class="tf-card">
+            <div class="tf-card__header"><div><div class="tf-card__title">Definition</div><div class="tf-card__description">Decoded with <span class="tf-code">AutomationCodec</span>; unknown properties and versions are rejected.</div></div></div>
+            <div class="tf-card__content">
+                <TfForm Action="automation.rule.save" Revision="stored?.Revision" Class="tf-form" Id="tf-rule-form">
+                    <input type="hidden" name="id" value="@(stored?.Id.Value)" />
+                    @if (stored is null)
+                    {
+                        <div class="tf-field"><label class="tf-label" for="tf-rule-id">Identifier</label><input id="tf-rule-id" name="newid" class="tf-input tf-mono" maxlength="128" placeholder="optional" value="@Session.FormValue("newid", null)" /></div>
+                    }
+                    <textarea name="definition" class="tf-textarea tf-textarea--code" spellcheck="false" aria-label="Rule definition JSON" style="min-height:420px">@Session.FormValue("definition", json)</textarea>
+                    <div class="tf-form-actions">
+                        @if (stored is not null && Session.Can(AutomationPermissions.Manage))
+                        {
+                            <button type="submit" name="_action" value="automation.rule.delete" class="tf-button tf-button--ghost tf-button--sm" style="color:var(--destructive)" formnovalidate><LucideIcon Name="trash-2" Size="14" />Delete</button>
+                        }
+                        @if (Session.Can(AutomationPermissions.Manage))
+                        {
+                            <BbButton Type="ButtonType.Submit" Size="ButtonSize.Small">@(stored is null ? "Create rule" : "Save rule")</BbButton>
+                        }
+                    </div>
+                </TfForm>
+            </div>
+        </div>
+        <div class="tf-stack">
+            <div class="tf-card">
+                <div class="tf-card__header"><div><div class="tf-card__title">Dry run</div><div class="tf-card__description">Evaluates the definition in the editor against a conversation. Nothing is written.</div></div></div>
+                <div class="tf-card__content tf-form">
+                    <div class="tf-field">
+                        <label class="tf-label" for="tf-dry-conversation">Conversation</label>
+                        <select id="tf-dry-conversation" name="conversation" form="tf-rule-form" class="tf-select">
+                            @foreach (var (conversation, label) in conversations)
+                            {
+                                <option value="@conversation" selected="@(Session.FormValue("conversation", null) == conversation)">@label</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="tf-field">
+                        <label class="tf-label" for="tf-dry-event">Event</label>
+                        <select id="tf-dry-event" name="event" form="tf-rule-form" class="tf-select">
+                            @foreach (var (value, label) in Events)
+                            {
+                                <option value="@value" selected="@(Session.FormValue("event", "message-received") == value)">@label</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="tf-field"><label class="tf-label" for="tf-dry-body">Message body (optional)</label><input id="tf-dry-body" name="message" form="tf-rule-form" class="tf-input" maxlength="4000" placeholder="I'd like a refund for my order" value="@Session.FormValue("message", null)" /></div>
+                    <button type="submit" form="tf-rule-form" name="_action" value="automation.rule.dryrun" class="tf-button tf-button--outline" formnovalidate><LucideIcon Name="flask-conical" Size="14" />Run dry run</button>
+                </div>
+            </div>
+            @if (result is not null)
+            {
+                <div class="tf-card">
+                    <div class="tf-card__header"><div><div class="tf-card__title">Result</div><div class="tf-card__description">Evaluated @UiFormat.Short(result.EvaluatedAt)</div></div></div>
+                    <div class="tf-card__content tf-stack tf-stack--sm">
+                        @foreach (var preview in result.Rules)
+                        {
+                            <div class="tf-row tf-row--between"><strong>@preview.Name</strong><span class="tf-badge @(preview.Match == AutomationMatch.Matched ? "tf-badge--success" : "tf-badge--muted")">@UiFormat.Token(preview.Match)</span></div>
+                            @foreach (var action in preview.Actions)
+                            {
+                                var text = UiAutomationText.Action(action.Action);
+                                <div class="tf-row tf-small" style="flex-wrap:nowrap"><LucideIcon Name="@text.Icon" Size="12" />@text.Text@(action.RenderedText is { } rendered ? $" — “{UiText.Excerpt(rendered, 80)}”" : "")@(action.Note is { } note ? $" ({note})" : "")</div>
+                            }
+                        }
+                        @if (result.Rules.Count == 0)
+                        {
+                            <div class="tf-small tf-muted">The rule's trigger does not fire for this event.</div>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private StoredAutomationRule? stored;
+    private string json = "";
+    private AutomationDryRunResult? result;
+    private readonly List<(string Id, string Label)> conversations = [];
+
+    private static readonly (string Value, string Label)[] Events =
+    [
+        ("conversation-created", "Conversation created"), ("message-received", "Message received"), ("message-sent", "Message sent"),
+        ("assignment-changed", "Assignment changed"), ("contact-updated", "Contact updated"),
+    ];
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<IAutomationRuleService>() is not { } service || Id is null)
+            return;
+        if (Id != "new" && await service.GetAsync(Actor, new AutomationRuleId(Id), Aborted) is AutomationValue<StoredAutomationRule> found)
+            stored = found.Value;
+        json = DefinitionEditor.Pretty(AutomationCodec.SerializeRule(stored?.Rule ?? new AutomationRule(new AutomationRuleId("new"), "New rule", MessageReceivedTrigger.Instance,
+            new MessageContentCondition(MessageTextOperator.Contains, "urgent"), [new SetPriorityAction(ConversationPriority.High)])));
+        result = Session.PageStateAs<AutomationDryRunResult>();
+        if (Service<IConversationService>() is { } conversationService && await conversationService.ListAsync(Actor, new ConversationListQuery(limit: 15), null, Aborted) is ConversationListPage page)
+        {
+            await LoadContactsAsync(page.Conversations.Select(conversation => conversation.Contact));
+            foreach (var conversation in page.Conversations)
+                conversations.Add((conversation.Id.Value, $"{ContactName(conversation.Contact)} · #{conversation.Id.Value}"));
+        }
+    }
+}

@@ -1,0 +1,87 @@
+@inherits UiPageBase
+@using TicketFlow.Workspaces
+
+@if (team is null)
+{
+    <StatePanel Icon="search-x" Title="Team not available" Message="It may have been deleted, or you no longer have access to it." />
+}
+else
+{
+    <PageHeader Title="@team.Team.Name" Description="@(team.Team.Description ?? "Team")" />
+    <div class="tf-grid tf-grid--wide-narrow">
+        <div class="tf-card">
+            <div class="tf-card__header"><div><div class="tf-card__title">Members</div><div class="tf-card__description">Adding members never grants more than you hold yourself.</div></div></div>
+            <div class="tf-card__content--flush">
+                <ul class="tf-list">
+                    @foreach (var member in team.Team.Members)
+                    {
+                        <li>
+                            <UserChip Name="@Session.UserName(member)" />
+                            <span class="tf-list__meta tf-mono">@member.Value</span>
+                            <span class="tf-spacer"></span>
+                            @if (Session.Can(AccessPermissions.TeamManage))
+                            {
+                                <TfForm Action="team.member.remove" Revision="team.Revision" Class="tf-inline-form">
+                                    <input type="hidden" name="user" value="@member.Value" />
+                                    <button class="tf-button tf-button--ghost tf-button--xs" type="submit"><LucideIcon Name="user-minus" Size="12" />Remove</button>
+                                </TfForm>
+                            }
+                        </li>
+                    }
+                </ul>
+                @if (team.Team.Members.Count == 0)
+                {
+                    <EmptyState Icon="users" Title="No members" />
+                }
+            </div>
+            @if (Session.Can(AccessPermissions.TeamManage))
+            {
+                <div class="tf-card__footer">
+                    <TfForm Action="team.member.add" Revision="team.Revision" Class="tf-side-form" style="width:100%">
+                        <input name="user" class="tf-input tf-input--sm" placeholder="User ID to add" required maxlength="256" aria-label="User ID" />
+                        <button class="tf-button tf-button--sm" type="submit"><LucideIcon Name="user-plus" Size="14" />Add member</button>
+                    </TfForm>
+                </div>
+            }
+        </div>
+        @if (Session.Can(AccessPermissions.TeamManage))
+        {
+            <div class="tf-stack">
+                <div class="tf-card">
+                    <div class="tf-card__header"><div class="tf-card__title">Details</div></div>
+                    <div class="tf-card__content">
+                        <TfForm Action="team.update" Revision="team.Revision" Class="tf-form">
+                            <div class="tf-field"><label class="tf-label" for="tf-t-name">Name</label><input id="tf-t-name" name="name" class="tf-input" required maxlength="128" value="@Session.FormValue("name", team.Team.Name)" /></div>
+                            <div class="tf-field"><label class="tf-label" for="tf-t-desc">Description</label><input id="tf-t-desc" name="description" class="tf-input" maxlength="512" value="@Session.FormValue("description", team.Team.Description)" /></div>
+                            <div class="tf-form-actions"><BbButton Type="ButtonType.Submit" Size="ButtonSize.Small">Save</BbButton></div>
+                        </TfForm>
+                    </div>
+                </div>
+                <div class="tf-card">
+                    <div class="tf-card__content">
+                        <TfForm Action="team.delete" Revision="team.Revision">
+                            <BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Destructive" Size="ButtonSize.Small"><LucideIcon Name="trash-2" Size="14" />Delete team</BbButton>
+                        </TfForm>
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private StoredTeam? team;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<ITeamService>() is not { } service || Id is null)
+            return;
+        if (await service.GetAsync(Actor, new TeamId(Id), Aborted) is WorkspaceSucceeded<StoredTeam> found)
+        {
+            team = found.Value;
+            await Session.LoadUsersAsync(team.Team.Members.Select(member => (UserId?)member));
+        }
+    }
+}

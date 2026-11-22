@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+  <PropertyGroup>
+    <Description>Optional Blazor (static SSR) management UI for TicketFlow: a shadcn-style, themeable dashboard (dark by default) for conversations, contacts, inboxes, teams, calendars, channels, routing, SLAs, automation, help center, surveys, reports, access and settings. Inherits the host's authentication, maps users through ITicketFlowPrincipalResolver and gates every section with TicketFlow Access.</Description>
+    <AddRazorSupportForMvc>false</AddRazorSupportForMvc>
+    <StaticWebAssetBasePath>_content/TicketFlow.UI.Blazor</StaticWebAssetBasePath>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="BlazorBlueprint.Components" />
+    <PackageReference Include="BlazorBlueprint.Icons.Lucide" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Hosting/TicketFlow.Hosting.AspNetCore/TicketFlow.Hosting.AspNetCore.csproj" />
+    <ProjectReference Include="../../Reporting/TicketFlow.Reporting.Abstractions/TicketFlow.Reporting.Abstractions.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="TicketFlow.UI.Blazor.Tests" />
+  </ItemGroup>
+</Project>

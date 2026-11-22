@@ -51,3 +51,12 @@ describe("clientMessageId", () => {
     expect(clientMessageId()).toMatch(/^[a-z0-9]{2,64}$/);
   });
 });
+
+describe("memory-only token storage", () => {
+  it("never touches localStorage", () => {
+    const store = tokenStore("wk-memory", undefined);
+    store.set("tfvs1.x.y");
+    expect(store.get()).toBe("tfvs1.x.y");
+    expect(globalThis.localStorage?.getItem("ticketflow.chat.wk-memory") ?? null).toBeNull();
+  });
+});

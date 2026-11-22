@@ -1,0 +1,51 @@
+@using Microsoft.AspNetCore.Antiforgery
+@using Microsoft.Extensions.DependencyInjection
+@* Embeds the TicketFlow UI inside a host Blazor app's own layout (static SSR), for example from a host page
+   @page "/support/{*path}" → <TicketFlowUI Path="@path" />. Form posts still go to MapTicketFlowBlazorUI(pages: false). *@
+@if (session is not null)
+{
+    <link rel="stylesheet" href="_content/BlazorBlueprint.Components/blazorblueprint.css" />
+    <link rel="stylesheet" href="_content/TicketFlow.UI.Blazor/tf-themes.css" />
+    <link rel="stylesheet" href="_content/TicketFlow.UI.Blazor/tf-ui.css" />
+    <div class="tf-scope @(session.Theme.Mode == TicketFlowThemeMode.Dark ? "dark" : null)" data-tf-theme="@session.Theme.Theme" data-tf-mode="@session.Theme.ModeToken">
+        <CascadingValue Value="session" IsFixed="true">
+            @if (session.State == UiSessionState.Unauthenticated)
+            {
+                <StatePanel Icon="log-in" Title="Sign in required" Message="Sign in to manage support.">
+                    @if (session.Options.LoginPath is { Length: > 0 } login)
+                    {
+                        <BbButton Href="@login">Sign in</BbButton>
+                    }
+                </StatePanel>
+            }
+            else
+            {
+                <TicketFlowShell Route="route" StatusCode="status" />
+            }
+        </CascadingValue>
+    </div>
+}
+
+@code {
+    [CascadingParameter] public HttpContext? HttpContext { get; set; }
+
+    /// <summary>The page path relative to <see cref="TicketFlowBlazorUIOptions.BasePath"/> (the host route's catch-all value).</summary>
+    [Parameter] public string? Path { get; set; }
+
+    private TicketFlowUISession? session;
+    private UiRoute? route;
+    private int status = 200;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (HttpContext is null)
+            throw new InvalidOperationException("TicketFlowUI renders with static server-side rendering only.");
+        session = await TicketFlowUISession.ResolveAsync(HttpContext);
+        session.Path = (Path ?? string.Empty).Trim('/');
+        session.Flash = UiFlash.Take(HttpContext, session.Options);
+        var tokens = HttpContext.RequestServices.GetRequiredService<IAntiforgery>().GetAndStoreTokens(HttpContext);
+        session.Antiforgery = (tokens.FormFieldName, tokens.RequestToken ?? string.Empty);
+        route = UiRoutes.Match(session.Path);
+        status = route is null ? 404 : session.State != UiSessionState.Ready || UiNavigation.Section(route.Section) is var section && !section.IsVisible(session) ? 403 : 200;
+    }
+}

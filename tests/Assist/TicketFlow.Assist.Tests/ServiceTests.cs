@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.AI;
 using TicketFlow.Conversations;
 using TicketFlow.Core;
@@ -161,19 +162,86 @@ public sealed class ServiceTests
     }
 
     [TestMethod]
-    public async Task FailedCallsReleaseTheirReservation()
+    public async Task ProvablyUnsentOrRejectedCallsReleaseTheirReservation()
     {
         using var fixture = await AssistFixture.CreateAsync(options => options.DefaultDailyTokenLimit = 30_000);
         var agent = await fixture.AgentAsync();
         for (var index = 0; index < 5; index++)
-            fixture.Model.Enqueue(new ScriptedTurn(Error: new AssistProviderException(AssistProviderFailure.Overloaded, true, 529)));
+            fixture.Model.Enqueue(new ScriptedTurn(Error: new AssistProviderException(AssistProviderFailure.Overloaded, true, 529, tokensMayHaveBeenConsumed: false)));
         for (var index = 0; index < 5; index++)
             Assert.AreEqual("failed:Overloaded:retryable", AssistFixture.Describe(await fixture.Assist.SummarizeAsync(agent, new AssistSummaryRequest(AssistFixture.C1))));
+        fixture.Model.Enqueue(new ScriptedTurn(Error: new AssistProviderException(AssistProviderFailure.NotConfigured, false, tokensMayHaveBeenConsumed: false)));
+        Assert.AreEqual("failed:NotConfigured:final", AssistFixture.Describe(await fixture.Assist.SummarizeAsync(agent, new AssistSummaryRequest(AssistFixture.C1))));
         var summary = await fixture.Store.SummarizeAsync(fixture.Scope, fixture.Clock.GetUtcNow().AddHours(-1), fixture.Clock.GetUtcNow().AddHours(1));
-        Assert.AreEqual(5, summary.Totals.Single().Failed);
+        Assert.AreEqual(6, summary.Totals.Single().Failed);
         Assert.AreEqual(0, summary.Totals.Single().ReservedTokens);
+        Assert.AreEqual(0, summary.Totals.Single().EstimatedTokens);
         fixture.Model.Reply(SummaryJson);
         Assert.AreEqual("ok:Recorded", AssistFixture.Describe(await fixture.Assist.SummarizeAsync(agent, new AssistSummaryRequest(AssistFixture.C1))));
+    }
+
+    [TestMethod]
+    public async Task AmbiguousFailuresAndMissingUsageAreChargedAtTheEstimate()
+    {
+        using var fixture = await AssistFixture.CreateAsync(options => options.DefaultDailyTokenLimit = 30_000);
+        var agent = await fixture.AgentAsync();
+        var request = new AssistSummaryRequest(AssistFixture.C1);
+
+        // A timeout after the request was sent: the provider may have generated (and billed) output.
+        fixture.Model.Enqueue(new ScriptedTurn(Error: new AssistProviderException(AssistProviderFailure.Timeout, true)));
+        Assert.AreEqual("failed:Timeout:retryable", AssistFixture.Describe(await fixture.Assist.SummarizeAsync(agent, request)));
+        // A transport error and a provider-internal cancellation: ambiguous too.
+        fixture.Model.Enqueue(new ScriptedTurn(Error: new HttpRequestException("reset after send")));
+        Assert.AreEqual("failed:Network:retryable", AssistFixture.Describe(await fixture.Assist.SummarizeAsync(agent, request)));
+        // A success without usage counts at the estimate rather than zero.
+        fixture.Model.Enqueue(new ScriptedTurn(SummaryJson, ChatFinishReason.Stop, Usage: null));
+        var noUsage = AssistFixture.Succeeded(await fixture.Assist.SummarizeAsync(agent, request));
+
+        var record = (await fixture.Store.GetUsageAsync(fixture.Scope, noUsage.UsageId))!;
+        Assert.AreEqual(AssistUsageState.Completed, record.State);
+        Assert.IsTrue(record.Estimated);
+        Assert.AreEqual(record.ReservedTokens, record.CountedTokens);
+        Assert.AreEqual(record.ReservedTokens, noUsage.Usage.TotalTokens, "the result reports the estimate");
+        var summary = await fixture.Store.SummarizeAsync(fixture.Scope, fixture.Clock.GetUtcNow().AddHours(-1), fixture.Clock.GetUtcNow().AddHours(1));
+        Assert.AreEqual(2, summary.Totals.Single().Failed);
+        var afterThree = summary.Totals.Single().EstimatedTokens;
+        Assert.AreEqual(3 * record.ReservedTokens, afterThree, "the three calls saw the same prompt, so the same estimate");
+        Assert.AreEqual(0, summary.Totals.Single().ReservedTokens);
+
+        // Caller cancellation while the request is in flight is ambiguous as well: settled at the estimate, then rethrown.
+        using var cancellation = new CancellationTokenSource();
+        fixture.Model.Enqueue(new ScriptedTurn(Error: new OperationCanceledException(cancellation.Token), OnCall: cancellation.Cancel));
+        await Assert.ThrowsAsync<OperationCanceledException>(() => fixture.Assist.SummarizeAsync(agent, request, cancellation.Token));
+        summary = await fixture.Store.SummarizeAsync(fixture.Scope, fixture.Clock.GetUtcNow().AddHours(-1), fixture.Clock.GetUtcNow().AddHours(1));
+        Assert.IsGreaterThanOrEqualTo(afterThree + 4096, summary.Totals.Single().EstimatedTokens, "the cancelled call is charged its estimate (prompt plus 4,096 output tokens)");
+        Assert.AreEqual(0, summary.Totals.Single().ReservedTokens);
+
+        // The estimates count against the quota: leave less room than one more estimate and the next call is refused.
+        var charged = summary.Totals.Single().EstimatedTokens;
+        Assert.AreEqual("ok", AssistFixture.Describe(await fixture.Administration.UpdateSettingsAsync(fixture.Owner, new AssistSettings(true, charged + 4096, 60), 0)));
+        Assert.AreEqual("refused:QuotaExceeded", AssistFixture.Describe(await fixture.Assist.SummarizeAsync(agent, request)));
+    }
+
+    [TestMethod]
+    public async Task MaintenanceSweepsAbandonedReservations()
+    {
+        using var fixture = await AssistFixture.CreateAsync();
+        // A process that crashed between reserving and settling leaves a Reserved record behind.
+        var crashed = new AssistUsageRecord(Guid.NewGuid(), AssistFeature.ReplyDraft, "scripted-large", new Access.AccessActor(Access.AccessActorKind.User, "agent"),
+            AssistFixture.C1, AssistUsageState.Reserved, 7_000, AssistUsage.Zero, fixture.Clock.GetUtcNow(), null);
+        Assert.IsInstanceOfType<AssistUsageReserved>((await fixture.Store.ReserveAsync(fixture.Scope, crashed, 1_000_000, 100)).Value);
+        using var scope = fixture.Provider.CreateScope();
+        var maintenance = scope.ServiceProvider.GetRequiredService<AssistMaintenance>();
+
+        fixture.Clock.Advance(TimeSpan.FromMinutes(14));
+        Assert.AreEqual(0, await maintenance.RunOnceAsync());
+        fixture.Clock.Advance(TimeSpan.FromMinutes(2));
+        Assert.AreEqual(1, await maintenance.RunOnceAsync());
+        Assert.AreEqual(0, await maintenance.RunOnceAsync());
+        var swept = (await fixture.Store.GetUsageAsync(fixture.Scope, crashed.Id))!;
+        Assert.AreEqual(AssistUsageState.Failed, swept.State);
+        Assert.IsTrue(swept.Estimated);
+        Assert.AreEqual(7_000, swept.CountedTokens, "still charged at the estimate");
     }
 
     [TestMethod]

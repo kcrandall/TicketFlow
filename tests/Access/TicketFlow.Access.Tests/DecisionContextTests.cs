@@ -38,7 +38,7 @@ public sealed class DecisionContextTests
     }
 
     [TestMethod]
-    public async Task SensitiveDecisionsAreAuditedPerResourceAndBreakGlassOncePerPermission()
+    public async Task SensitiveAndBreakGlassDecisionsAreAuditedPerResource()
     {
         using var fixture = AccessFixture.Create();
         var user = fixture.User("sam");
@@ -63,11 +63,13 @@ public sealed class DecisionContextTests
             new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("ops")), justification: "incident 43 response", kind: GrantKind.BreakGlass,
             validFrom: fixture.Clock.GetUtcNow(), validUntil: fixture.Clock.GetUtcNow().AddHours(1)));
         var glass = await fixture.Evaluator.LoadDecisionContextAsync(responder, fixture.Scope, [AccessPermissions.ConversationReply]);
-        for (var index = 0; index < 4; index++)
+        for (var index = 0; index < 5; index++)
             Assert.AreEqual("allowed:break-glass", AccessFixture.Describe(await glass.DecideAsync(AccessPermissions.ConversationReply, fixture.Resource(team: "ops", id: $"g{index}"))));
-        var audit = fixture.Audit.Snapshot();
-        Assert.HasCount(4, audit);
-        Assert.IsTrue(audit[^1].UsedBreakGlass);
+        Assert.AreEqual("denied:NoMatchingGrant", AccessFixture.Describe(await glass.DecideAsync(AccessPermissions.ConversationReply, fixture.Resource(team: "sales", id: "s0"))));
+        var breakGlass = fixture.Audit.Snapshot().Skip(3).ToList();
+        CollectionAssert.AreEqual(new[] { "g0", "g1", "g2", "g3", "g4" }, breakGlass.Select(item => item.ResourceId).ToArray(),
+            "every row relying on break-glass is audited with its own resource id");
+        Assert.IsTrue(breakGlass.All(item => item.UsedBreakGlass && item.Kind == AccessAuditKind.Decision));
     }
 
     [TestMethod]

@@ -43,4 +43,13 @@ connection, subscription, agent-action and visitor-directory contracts) and `Tic
   deny-grant re-authorization of live subscriptions, queue filter semantics, self-only agent topics, routing observer mapping, visitor
   isolation and anonymization, agent actions, limits).
 
+Review fixes (2026-11-22): bounded publication queue with one background fan-out worker (publishers and the outbox handler no longer
+wait for delivery); one conversation read per change; agents grouped by principal with a cached `IAccessDecisionContext`
+(`conversation:read`, `note:read`) reloaded after `DecisionContextLifetime`; bounded per-connection queues (drop-oldest) with
+per-connection senders and `SendTimeout`; queue subscriptions re-check `inbox:read` at every re-plan and are removed when revoked;
+`VisitorSessionEndedEvent` closes the session's connections (`IRealtimeConnectionLifetime`); `Realtime.Abstractions` no longer
+references `Routing.Abstractions` (`RealtimeAgentStatus`, `RealtimeActivity`; the observer maps routing enums in `TicketFlow.Realtime`).
+- `dotnet test tests/Realtime/TicketFlow.Realtime.Tests -c Release` — 12 passed (new: slow/throwing connections do not block others and
+  publishing only queues; concurrent subscribe/disconnect; `inbox:read` revocation after `QueueFilterLifetime`; one read per change).
+
 Post-ticket parallel reviews (docs/agents/prompts/post-ticket-*.md) have not been run yet.

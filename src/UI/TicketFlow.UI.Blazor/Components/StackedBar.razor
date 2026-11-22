@@ -1,0 +1,21 @@
+@* A single stacked bar with legend (composition of a whole, e.g. conversations by status). *@
+<div class="tf-stacked">
+    <div class="tf-stacked__bar">
+        @foreach (var segment in Segments.Where(segment => segment.Value > 0))
+        {
+            <span style="flex:@segment.Value.ToString(CultureInfo.InvariantCulture);background:@segment.Color" title="@segment.Label: @segment.Value"></span>
+        }
+    </div>
+    <div class="tf-stacked__legend">
+        @foreach (var segment in Segments)
+        {
+            <span class="tf-chart__key"><span class="tf-chart__swatch" style="background:@segment.Color"></span>@segment.Label <strong>@segment.Value</strong></span>
+        }
+    </div>
+</div>
+
+@code {
+    public sealed record Segment(string Label, long Value, string Color);
+
+    [Parameter, EditorRequired] public IReadOnlyList<Segment> Segments { get; set; } = [];
+}

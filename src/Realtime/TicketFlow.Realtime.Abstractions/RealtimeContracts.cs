@@ -116,3 +116,12 @@ public interface IVisitorSessionDirectory
 
     Task<IReadOnlyList<VisitorSessionId>> ListSessionsAsync(TicketScope scope, ConversationId conversation, CancellationToken cancellationToken = default);
 }
+
+/// <summary>
+/// Optionally implemented by an <see cref="IRealtimeConnection"/> whose transport can be closed by the server (for example when the
+/// visitor session it belongs to ends).
+/// </summary>
+public interface IRealtimeConnectionLifetime
+{
+    ValueTask CloseAsync();
+}

@@ -42,4 +42,24 @@ Verification commands (run from the repository root, 2026-11-22):
 - `dotnet pack` of the four Assist packages succeeded; `bash scripts/verify-package-metadata.sh` currently stops on an unrelated
   in-progress E10 project (`src/Automation/TicketFlow.Automation` not yet in the solution).
 
-Post-ticket parallel reviews have not been run yet.
+
+Review fixes (2026-11-22, after commit 1742cba):
+
+- P1: `AssistChatClientFactory` (singleton, `IDisposable`) caches pipelines per (model, feature, thinking level) and provider clients
+  per provider model, and disposes both with the container; hosts can supply a keyed `IChatClient` per provider
+  (`AssistChatClients.ServiceKey`) and add middleware through `AssistOptions.Pipeline`.
+- P2 accounting: `AssistProviderException.TokensMayHaveBeenConsumed`; reservations are released only when nothing was provably
+  consumed (client not built, not configured, provider error status) and every ambiguous outcome or missing usage is settled at the
+  estimate (`AssistUsageRecord.Estimated`, `AssistUsageTotal.EstimatedTokens`); `IAssistStore.SweepReservationsAsync` +
+  `AssistMaintenance.RunOnceAsync` (with `AssistOptions.ReservationTimeout`) settle abandoned reservations.
+- P2 quota: PostgreSQL migration 2 adds `tf_assist_usage_days` (backfilled) and the `estimated` column; reservations charge the day
+  counter with a conditional UPSERT and read only the last minute's rows; settlement adjusts the counter by actual − reserved.
+- P3: registration extensions moved to `TicketFlow.Assist`, `TicketFlow.Assist.Providers.Claude` and `TicketFlow.Assist.Stores.Postgres`.
+- Regression tests: pipeline reuse and disposal, keyed host client and middleware, timeout/network/cancellation after send and null
+  usage charged at the estimate, provably-unsent releases, maintenance sweep, contract tests for estimated settlement, sweep and mixed
+  concurrent reserve/settle, day-counter authority and v1→v2 backfill on PostgreSQL, Claude `TokensMayHaveBeenConsumed` mapping.
+- `dotnet test tests/Assist/TicketFlow.Assist.Tests -c Release` — 28 passed; `dotnet test tests/Assist/TicketFlow.Assist.Providers.Claude.Tests -c Release` —
+  17 passed; `TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/Assist/TicketFlow.Assist.Stores.Postgres.Tests -c Release` — 9 passed (isolated
+  `postgres:18` container on port 55917).
+
+Post-ticket parallel reviews ran; the findings above are fixed.

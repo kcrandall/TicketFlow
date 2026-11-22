@@ -1,21 +1,29 @@
 using System.Collections.Concurrent;
+using System.Threading.Channels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using TicketFlow.Access;
 using TicketFlow.Conversations;
+using TicketFlow.Core;
 
 namespace TicketFlow.Realtime;
 
 /// <summary>
-/// The node-local <see cref="IRealtimeSubscriptions"/>: bounded connections and subscriptions, authorization of every subscription
-/// and per-subscriber filtering of every delivery (inside a DI scope per publication, so scoped Access services and current data are
-/// used). It receives publications from the <see cref="IRealtimeBus"/>. Connection sinks that throw are skipped; payloads are never
-/// logged.
+/// The node-local <see cref="IRealtimeSubscriptions"/>. Subscriptions are authorized when made (point checks against current data).
+/// Publications from the <see cref="IRealtimeBus"/> are queued (bounded, oldest dropped) and fanned out by one background worker, so
+/// publishers never wait for delivery. The worker reads each conversation once per change, groups subscribers by principal, decides
+/// in memory with a per-principal <see cref="IAccessDecisionContext"/> reloaded after <see cref="RealtimeOptions.DecisionContextLifetime"/>,
+/// and hands filtered events to a bounded per-connection queue (oldest dropped) drained by a per-connection sender, so a slow or
+/// failing client cannot delay others. Queue subscriptions re-check <c>inbox:read</c> whenever their filter is re-planned and are
+/// removed when it is revoked. A delivered <see cref="VisitorSessionEndedEvent"/> disconnects (and, when supported, closes) each
+/// connection of that session. Payloads are never logged.
 /// </summary>
 public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisposable
 {
+    private const int MaximumCachedConversations = 4096;
+
     private readonly ConcurrentDictionary<string, ConnectionEntry> connections = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<object, ConcurrentDictionary<string, SubscriptionEntry>> topics = new();
     private readonly IServiceScopeFactory scopes;
@@ -24,6 +32,15 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
     private readonly ILogger logger;
     private readonly IDisposable busSubscription;
     private readonly Lock gate = new();
+    private readonly Channel<RealtimePublication> publications;
+    private readonly Task worker;
+
+    // Owned by the worker only.
+    private readonly Dictionary<object, PrincipalAuthorization> principals = [];
+    private readonly Dictionary<(TicketScope Scope, ConversationId Conversation), (StoredConversation? Value, long Revision)> conversationCache = [];
+
+    private long pending;
+    private long dropped;
 
     public RealtimeSubscriptionRegistry(IRealtimeBus bus, IServiceScopeFactory scopes, IOptions<RealtimeOptions> options, TimeProvider time, ILogger<RealtimeSubscriptionRegistry>? logger = null)
     {
@@ -34,11 +51,18 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
         this.options.Validate();
         this.time = time ?? throw new ArgumentNullException(nameof(time));
         this.logger = logger ?? NullLogger<RealtimeSubscriptionRegistry>.Instance;
+        publications = Channel.CreateBounded<RealtimePublication>(
+            new BoundedChannelOptions(this.options.MaximumPendingPublications) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true },
+            _ => Dropped());
+        worker = Task.Run(RunWorkerAsync);
         busSubscription = bus.Subscribe(DeliverAsync);
     }
 
     /// <summary>Connections currently registered on this node.</summary>
     public int ConnectionCount => connections.Count;
+
+    /// <summary>Publications and connection events dropped because a queue was full (diagnostics).</summary>
+    public long DroppedCount => Interlocked.Read(ref dropped);
 
     public RealtimeConnectResult Connect(IRealtimeConnection connection)
     {
@@ -47,9 +71,12 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
             return new RealtimeSubscriptionRefused(RealtimeRefusal.Invalid);
         if (connections.Count >= options.MaximumConnections)
             return new RealtimeSubscriptionRefused(RealtimeRefusal.LimitReached);
-        return connections.TryAdd(connection.Id, new ConnectionEntry(connection))
-            ? new RealtimeConnected(connection.Id)
-            : new RealtimeSubscriptionRefused(RealtimeRefusal.Invalid);
+        var entry = new ConnectionEntry(connection, Channel.CreateBounded<(RealtimeTopic, RealtimeEvent)>(
+            new BoundedChannelOptions(options.ConnectionQueueCapacity) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true }, _ => Dropped()));
+        if (!connections.TryAdd(connection.Id, entry))
+            return new RealtimeSubscriptionRefused(RealtimeRefusal.Invalid);
+        entry.Sender = Task.Run(() => RunSenderAsync(entry));
+        return new RealtimeConnected(connection.Id);
     }
 
     public async Task<RealtimeSubscribeResult> SubscribeAsync(string connectionId, RealtimeTopic topic, CancellationToken cancellationToken = default)
@@ -70,7 +97,11 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
         SubscriptionGrant? grant;
         RealtimeRefusal refusal;
         await using (var scope = scopes.CreateAsyncScope())
-            (grant, refusal) = await Policy(scope.ServiceProvider).AuthorizeAsync(connection.Connection.Subscriber, topic, cancellationToken).ConfigureAwait(false);
+        {
+            var services = scope.ServiceProvider;
+            (grant, refusal) = await RealtimeDeliveryPolicy.AuthorizeAsync(connection.Connection.Subscriber, topic, services.GetRequiredService<IConversationStore>(),
+                services.GetRequiredService<IAccessEvaluator>(), services.GetRequiredService<IAccessQueryPlanner>(), time, cancellationToken).ConfigureAwait(false);
+        }
         if (grant is null)
             return new RealtimeSubscriptionRefused(refusal);
 
@@ -115,6 +146,7 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
                 RemoveFromTopic(key, connectionId);
             connection.Topics.Clear();
         }
+        connection.Queue.Writer.TryComplete();
     }
 
     public IReadOnlyList<RealtimeTopic> Topics(string connectionId)
@@ -126,51 +158,245 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
             return [.. connection.Topics.Values.Select(entry => entry.Topic)];
     }
 
-    /// <summary>Delivers one publication to this node's subscribers of its topic, filtered per subscriber.</summary>
-    public async Task DeliverAsync(RealtimePublication publication, CancellationToken cancellationToken = default)
+    /// <summary>Queues one publication for this node's fan-out worker. Returns without waiting for delivery.</summary>
+    public Task DeliverAsync(RealtimePublication publication, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(publication);
-        if (!topics.TryGetValue(publication.Topic.Value!, out var subscribers) || subscribers.IsEmpty)
-            return;
-        var targets = subscribers.Values.ToList();
-        await using var scope = scopes.CreateAsyncScope();
-        var policy = Policy(scope.ServiceProvider);
-        foreach (var target in targets)
+        if (!topics.ContainsKey(publication.Topic.Value!))
+            return Task.CompletedTask;
+        Interlocked.Increment(ref pending);
+        if (!publications.Writer.TryWrite(publication))
+            Interlocked.Decrement(ref pending);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Completes when every queued publication has been fanned out and every queued connection event sent or dropped (tests, diagnostics).</summary>
+    public async Task IdleAsync(TimeSpan? timeout = null)
+    {
+        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(10));
+        while (Interlocked.Read(ref pending) > 0)
         {
-            if (target.Connection.Closed)
-                continue;
-            RealtimeEvent? filtered;
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException("Realtime fan-out did not become idle.");
+            await Task.Delay(1).ConfigureAwait(false);
+        }
+    }
+
+    public void Dispose()
+    {
+        busSubscription.Dispose();
+        publications.Writer.TryComplete();
+        foreach (var connection in connections.Values)
+            connection.Queue.Writer.TryComplete();
+    }
+
+    private void Dropped()
+    {
+        Interlocked.Decrement(ref pending);
+        Interlocked.Increment(ref dropped);
+    }
+
+    private async Task RunWorkerAsync()
+    {
+        await foreach (var publication in publications.Reader.ReadAllAsync().ConfigureAwait(false))
+        {
             try
             {
-                filtered = await policy.FilterAsync(target.Connection.Connection.Subscriber, target.Topic, target.Grant, publication.Event, cancellationToken).ConfigureAwait(false);
+                await FanOutAsync(publication).ConfigureAwait(false);
             }
-            catch (Exception error) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception error)
             {
-                // Fail closed: a subscriber whose delivery cannot be authorized receives nothing.
-                logger.LogWarning("Realtime delivery authorization failed ({Error}); the event was not delivered.", error.GetType().Name);
-                continue;
+                // Fail closed: a publication that cannot be authorized is not delivered.
+                logger.LogWarning("Realtime fan-out failed ({Error}); the event was not delivered.", error.GetType().Name);
             }
-            if (filtered is not { } delivered)
-                continue;
-            try
+            finally
             {
-                await target.Connection.Connection.SendAsync(target.Topic, delivered, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception error) when (!cancellationToken.IsCancellationRequested)
-            {
-                logger.LogDebug("A realtime connection send failed ({Error}).", error.GetType().Name);
+                Interlocked.Decrement(ref pending);
             }
         }
     }
 
-    public void Dispose() => busSubscription.Dispose();
+    private async Task FanOutAsync(RealtimePublication publication)
+    {
+        if (!topics.TryGetValue(publication.Topic.Value!, out var subscribers) || subscribers.IsEmpty)
+            return;
+        var targets = subscribers.Values.Where(target => !target.Connection.Closed).ToList();
+        if (targets.Count == 0)
+            return;
+        var realtimeEvent = publication.Event;
 
-    private RealtimeDeliveryPolicy Policy(IServiceProvider services) => new(
-        services.GetRequiredService<IConversationStore>(),
-        services.GetRequiredService<IAccessEvaluator>(),
-        services.GetRequiredService<IAccessQueryPlanner>(),
-        time,
-        options);
+        foreach (var target in targets)
+            if (target.Connection.Connection.Subscriber.Value is VisitorSubscriber visitor && RealtimeDeliveryPolicy.ForVisitor(visitor, realtimeEvent) is { } visible)
+                Enqueue(target.Connection, target.Topic, visible);
+
+        var agents = targets.Where(target => target.Connection.Connection.Subscriber.Value is AgentSubscriber).ToList();
+        if (agents.Count == 0)
+            return;
+        var (decided, plain) = RealtimeDeliveryPolicy.WithoutConversation(publication.Topic, realtimeEvent);
+        if (decided)
+        {
+            if (plain is { } direct)
+                foreach (var target in agents)
+                    Enqueue(target.Connection, target.Topic, direct);
+            return;
+        }
+
+        await using var scope = scopes.CreateAsyncScope();
+        var services = scope.ServiceProvider;
+        var evaluator = services.GetRequiredService<IAccessEvaluator>();
+        var conversation = await ConversationAsync(services.GetRequiredService<IConversationStore>(), realtimeEvent).ConfigureAwait(false);
+        if (conversation is null)
+        {
+            // A deleted conversation can no longer be authorized: only subscribers already granted the conversation topic learn that it was deleted.
+            if (realtimeEvent.Value is ConversationChangedEvent { Kind: ConversationChangeKind.Deleted } && publication.Topic.Value is ConversationTopic)
+                foreach (var target in agents)
+                    Enqueue(target.Connection, target.Topic, realtimeEvent);
+            return;
+        }
+
+        var resource = ConversationAccess.Resource(conversation);
+        foreach (var group in agents.GroupBy(target => ((AgentSubscriber)target.Connection.Connection.Subscriber.Value!).Principal.Value!))
+        {
+            var principal = ((AgentSubscriber)group.First().Connection.Connection.Subscriber.Value!).Principal;
+            var authorization = Authorization(principal);
+            RealtimeEvent? shared = null;
+            var sharedDecided = false;
+            foreach (var target in group)
+            {
+                RealtimeEvent? filtered;
+                if (target.Topic.Value is InboxQueueTopic queue)
+                {
+                    if (!await QueueAllowsAsync(target, queue, principal, resource, evaluator, services.GetRequiredService<IAccessQueryPlanner>()).ConfigureAwait(false))
+                        continue;
+                    filtered = await RealtimeDeliveryPolicy.StripNotesAsync(realtimeEvent,
+                        () => authorization.PermittedAsync(ConversationPermissions.NoteRead, conversation, evaluator, time, options.DecisionContextLifetime, CancellationToken.None))
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    if (!sharedDecided)
+                    {
+                        sharedDecided = true;
+                        shared = await authorization.PermittedAsync(ConversationPermissions.Read, conversation, evaluator, time, options.DecisionContextLifetime, CancellationToken.None)
+                            .ConfigureAwait(false)
+                            ? await RealtimeDeliveryPolicy.StripNotesAsync(realtimeEvent,
+                                () => authorization.PermittedAsync(ConversationPermissions.NoteRead, conversation, evaluator, time, options.DecisionContextLifetime, CancellationToken.None))
+                                .ConfigureAwait(false)
+                            : null;
+                    }
+                    filtered = shared;
+                }
+                if (filtered is { } delivered)
+                    Enqueue(target.Connection, target.Topic, delivered);
+            }
+        }
+        PruneAuthorizations();
+    }
+
+    private async Task<bool> QueueAllowsAsync(SubscriptionEntry target, InboxQueueTopic queue, PrincipalRef principal, AccessResource resource, IAccessEvaluator evaluator,
+        IAccessQueryPlanner planner)
+    {
+        var grant = target.Grant;
+        if (grant.Filter is null || time.GetUtcNow() - grant.PlannedAt >= options.QueueFilterLifetime)
+        {
+            if (!await RealtimeDeliveryPolicy.InboxReadableAsync(principal, queue, evaluator, CancellationToken.None).ConfigureAwait(false))
+            {
+                // inbox:read was revoked: the queue subscription ends.
+                lock (gate)
+                    if (target.Connection.Topics.Remove(target.Topic.Value!))
+                        RemoveFromTopic(target.Topic.Value!, target.Connection.Connection.Id);
+                return false;
+            }
+            grant.Filter = await planner.PlanAsync(new AccessQuery(principal, ConversationPermissions.Read, queue.Scope), CancellationToken.None).ConfigureAwait(false);
+            grant.PlannedAt = time.GetUtcNow();
+        }
+        return AccessFilterEvaluator.Matches(grant.Filter, resource);
+    }
+
+    /// <summary>The conversation, read once per change: consecutive publications of the same change (or older ones) reuse the snapshot.</summary>
+    private async Task<StoredConversation?> ConversationAsync(IConversationStore store, RealtimeEvent realtimeEvent)
+    {
+        var key = (realtimeEvent.Scope, realtimeEvent.Conversation!.Value);
+        if (realtimeEvent.Value is ConversationChangedEvent changed && conversationCache.TryGetValue(key, out var cached) && cached.Revision >= changed.Revision)
+            return cached.Value;
+        var conversation = await store.GetAsync(key.Scope, key.Value, CancellationToken.None).ConfigureAwait(false);
+        if (conversationCache.Count >= MaximumCachedConversations)
+            conversationCache.Clear();
+        var revision = conversation?.Revision ?? (realtimeEvent.Value is ConversationChangedEvent deleted ? deleted.Revision : 0);
+        conversationCache[key] = (conversation, revision);
+        return conversation;
+    }
+
+    private PrincipalAuthorization Authorization(PrincipalRef principal)
+    {
+        if (!principals.TryGetValue(principal.Value!, out var authorization))
+            principals[principal.Value!] = authorization = new PrincipalAuthorization(principal);
+        return authorization;
+    }
+
+    private void PruneAuthorizations()
+    {
+        if (principals.Count < 1024)
+            return;
+        var cutoff = time.GetUtcNow() - options.DecisionContextLifetime;
+        foreach (var key in principals.Where(pair => pair.Value.LoadedAt < cutoff).Select(pair => pair.Key).ToList())
+            principals.Remove(key);
+    }
+
+    private void Enqueue(ConnectionEntry connection, RealtimeTopic topic, RealtimeEvent realtimeEvent)
+    {
+        if (connection.Closed)
+            return;
+        Interlocked.Increment(ref pending);
+        if (!connection.Queue.Writer.TryWrite((topic, realtimeEvent)))
+            Interlocked.Decrement(ref pending);
+    }
+
+    private async Task RunSenderAsync(ConnectionEntry entry)
+    {
+        await foreach (var (topic, realtimeEvent) in entry.Queue.Reader.ReadAllAsync().ConfigureAwait(false))
+        {
+            try
+            {
+                if (entry.Closed)
+                    continue;
+                try
+                {
+                    using var timeout = new CancellationTokenSource(options.SendTimeout);
+                    await entry.Connection.SendAsync(topic, realtimeEvent, timeout.Token).ConfigureAwait(false);
+                }
+                catch (Exception error)
+                {
+                    logger.LogDebug("A realtime connection send failed ({Error}).", error.GetType().Name);
+                }
+                if (realtimeEvent.Value is VisitorSessionEndedEvent)
+                    await CloseAsync(entry).ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref pending);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Disconnects (and closes when supported) a connection after it received its session's end. Every connection of the session is
+    /// subscribed to the session topic, so each one receives the event and closes itself.
+    /// </summary>
+    private async Task CloseAsync(ConnectionEntry entry)
+    {
+        Disconnect(entry.Connection.Id);
+        if (entry.Connection is not IRealtimeConnectionLifetime lifetime)
+            return;
+        try
+        {
+            await lifetime.CloseAsync().ConfigureAwait(false);
+        }
+        catch (Exception error)
+        {
+            logger.LogDebug("Closing a realtime connection failed ({Error}).", error.GetType().Name);
+        }
+    }
 
     private void RemoveFromTopic(object key, string connectionId)
     {
@@ -181,13 +407,15 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
             topics.TryRemove(key, out _);
     }
 
-    private sealed class ConnectionEntry(IRealtimeConnection connection)
+    private sealed class ConnectionEntry(IRealtimeConnection connection, Channel<(RealtimeTopic, RealtimeEvent)> queue)
     {
         public IRealtimeConnection Connection { get; } = connection;
-        public Dictionary<object, SubscriptionEntry> Topics { get; } = [];
-        public volatile bool Closed;
+        public Channel<(RealtimeTopic, RealtimeEvent)> Queue { get; } = queue;
+        public Task? Sender { get; set; }
 
         // Topics is mutated only under the registry gate.
+        public Dictionary<object, SubscriptionEntry> Topics { get; } = [];
+        public volatile bool Closed;
     }
 
     private sealed class SubscriptionEntry(ConnectionEntry connection, RealtimeTopic topic, SubscriptionGrant grant)

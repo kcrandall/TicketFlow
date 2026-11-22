@@ -174,7 +174,9 @@ public sealed class AssistService : IAssistService
             .Append(extra)
             .Append("</support_data>")
             .ToString();
-        var estimate = (long)Math.Ceiling((system.Length + user.Length + call.Schema.Length) / 3.0) + call.MaxOutputTokens;
+        var estimatedInput = (long)Math.Ceiling((system.Length + user.Length + call.Schema.Length) / 3.0);
+        var estimate = estimatedInput + call.MaxOutputTokens;
+        var estimatedUsage = new AssistUsage(estimatedInput, call.MaxOutputTokens);
 
         var now = time.GetUtcNow();
         var reservation = new AssistUsageRecord(Guid.CreateVersion7(now), call.Feature, modelId, AccessActor.From(actor), conversation, AssistUsageState.Reserved,
@@ -193,10 +195,22 @@ public sealed class AssistService : IAssistService
                 };
         }
 
+        // Accounting rule: release the reservation only when the provider provably consumed nothing (never sent, or answered with an
+        // error status). Every ambiguous outcome — timeouts, cancellation or network errors after sending, unknown exceptions, or a
+        // response without usage — is charged at the reserved estimate.
+        IChatClient client;
+        try
+        {
+            client = clients.GetChatClient(new AssistChatRequest(modelId, call.Feature, call.Thinking));
+        }
+        catch
+        {
+            await SettleAsync(actor.Scope, reservation.Id, AssistUsageState.Failed, AssistUsage.Zero, estimated: false).ConfigureAwait(false);
+            throw;
+        }
         ChatResponse response;
         try
         {
-            var client = clients.GetChatClient(new AssistChatRequest(modelId, call.Feature, call.Thinking));
             var chatOptions = new ChatOptions
             {
                 Instructions = system,
@@ -207,22 +221,23 @@ public sealed class AssistService : IAssistService
         }
         catch (AssistProviderException error)
         {
-            await SettleAsync(actor.Scope, reservation.Id, AssistUsageState.Failed, AssistUsage.Zero).ConfigureAwait(false);
+            await SettleAsync(actor.Scope, reservation.Id, AssistUsageState.Failed, AssistUsage.Zero, estimated: error.TokensMayHaveBeenConsumed).ConfigureAwait(false);
             return new AssistProviderFailed(error.Failure, error.Retryable, error.RetryAfter);
         }
         catch (Exception error) when (error is HttpRequestException or TimeoutException || (error is OperationCanceledException && !cancellationToken.IsCancellationRequested))
         {
-            await SettleAsync(actor.Scope, reservation.Id, AssistUsageState.Failed, AssistUsage.Zero).ConfigureAwait(false);
+            await SettleAsync(actor.Scope, reservation.Id, AssistUsageState.Failed, AssistUsage.Zero, estimated: true).ConfigureAwait(false);
             return new AssistProviderFailed(error is HttpRequestException ? AssistProviderFailure.Network : AssistProviderFailure.Timeout, true);
         }
         catch
         {
-            await SettleAsync(actor.Scope, reservation.Id, AssistUsageState.Failed, AssistUsage.Zero).ConfigureAwait(false);
+            await SettleAsync(actor.Scope, reservation.Id, AssistUsageState.Failed, AssistUsage.Zero, estimated: true).ConfigureAwait(false);
             throw;
         }
 
-        var usage = AssistUsage.From(response.Usage);
-        await SettleAsync(actor.Scope, reservation.Id, AssistUsageState.Completed, usage).ConfigureAwait(false);
+        var reported = response.Usage is { InputTokenCount: not null } or { OutputTokenCount: not null };
+        var usage = reported ? AssistUsage.From(response.Usage) : estimatedUsage;
+        await SettleAsync(actor.Scope, reservation.Id, AssistUsageState.Completed, reported ? usage : AssistUsage.Zero, estimated: !reported).ConfigureAwait(false);
         if (response.FinishReason == ChatFinishReason.ContentFilter)
             return new AssistRefused(AssistRefusal.ModelRefused, ["The model declined the request."]);
         if (response.FinishReason == ChatFinishReason.Length)
@@ -252,9 +267,9 @@ public sealed class AssistService : IAssistService
         }
     }
 
-    private Task SettleAsync(TicketScope scope, Guid id, AssistUsageState state, AssistUsage usage) =>
-        // Settlement must happen even when the caller cancelled, so the reservation does not hold quota until the day ends.
-        store.SettleAsync(scope, id, state, usage, time.GetUtcNow(), CancellationToken.None);
+    private Task SettleAsync(TicketScope scope, Guid id, AssistUsageState state, AssistUsage usage, bool estimated) =>
+        // Settlement must happen even when the caller cancelled, so the reservation does not stay unsettled.
+        store.SettleAsync(scope, id, state, usage, time.GetUtcNow(), estimated, CancellationToken.None);
 
     private async Task<AssistRecording> RecordAsync(PrincipalRef actor, ConversationId conversation, AssistFeature feature, string model, Guid usageId, AssistUsage usage,
         IReadOnlyList<ArticleId> citations, CancellationToken cancellationToken)

@@ -11,8 +11,10 @@ public static class AutomationEventDerivation
     /// <summary>
     /// The automation events one timeline event raises (at most one fires any given trigger, so a rule runs at most once per timeline
     /// event), plus the triggering message for message events. Notes, system events, contact changes and non-SLA extensions raise none.
+    /// <c>sla.warning</c>/<c>sla.breached</c> extensions count only when their actor is <paramref name="slaWorker"/> (the SLA tracker's API
+    /// client); the same payload appended by anyone else is ignored, so escalations cannot be forged.
     /// </summary>
-    public static (IReadOnlyList<AutomationEvent> Events, AutomationMessageFacts? Message) Derive(TimelineEvent timelineEvent)
+    public static (IReadOnlyList<AutomationEvent> Events, AutomationMessageFacts? Message) Derive(TimelineEvent timelineEvent, ApiClientId slaWorker)
     {
         ArgumentNullException.ThrowIfNull(timelineEvent);
         var sequence = timelineEvent.Sequence;
@@ -27,13 +29,16 @@ public static class AutomationEventDerivation
             LabelsChanged => ([AutomationEvent.ConversationUpdated(ConversationUpdateField.Labels, sequence)], null),
             AttributeChanged => ([AutomationEvent.ConversationUpdated(ConversationUpdateField.Attributes, sequence)], null),
             ParticipantChanged => ([AutomationEvent.ConversationUpdated(ConversationUpdateField.Participants, sequence)], null),
-            ExtensionEvent extension => (Sla(extension, sequence), null),
+            ExtensionEvent extension => (IsApiClient(timelineEvent.Actor, slaWorker) ? Sla(extension, sequence) : [], null),
             NoteEvent or ContactChanged or SystemEvent => ([], null),
         };
     }
 
     /// <summary>True when the actor is the automation API client (the event was caused by a rule execution).</summary>
-    public static bool IsAutomationActor(AccessActor actor, ApiClientId client) => actor.Kind == AccessActorKind.ApiClient && actor.Id == client.Value;
+    public static bool IsAutomationActor(AccessActor actor, ApiClientId client) => IsApiClient(actor, client);
+
+    private static bool IsApiClient(AccessActor actor, ApiClientId client) =>
+        actor.Kind == AccessActorKind.ApiClient && client != default && actor.Id == client.Value;
 
     private static IReadOnlyList<AutomationEvent> Sla(ExtensionEvent extension, long sequence)
     {

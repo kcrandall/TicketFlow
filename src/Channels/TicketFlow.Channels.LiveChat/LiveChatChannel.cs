@@ -46,7 +46,7 @@ public sealed class LiveChatChannel : ITicketChannel
         var row = await conversations.GetMessageAsync(message.Scope, message.Conversation, messageId, cancellationToken).ConfigureAwait(false);
         if (row is null)
             return new ChannelSendRejected("message-not-found", retryable: false);
-        var linked = await sessions.FindSessionsAsync(message.Scope, message.Conversation, IVisitorSessionDirectory.MaximumSessions, cancellationToken).ConfigureAwait(false);
+        var linked = await LiveChatSessionDirectory.LiveSessionsAsync(sessions, message.Scope, message.Conversation, time.GetUtcNow(), cancellationToken).ConfigureAwait(false);
         foreach (var session in linked)
         {
             var push = new VisitorMessageEvent(message.Scope, session, message.Conversation, messageId, row.Sequence, MessageDirection.Outgoing, message.Body,
@@ -64,11 +64,24 @@ public sealed class LiveChatChannel : ITicketChannel
     }
 }
 
-/// <summary><see cref="IVisitorSessionDirectory"/> over the live-chat session links.</summary>
-public sealed class LiveChatSessionDirectory(ILiveChatSessionStore sessions) : IVisitorSessionDirectory
+/// <summary><see cref="IVisitorSessionDirectory"/> over the live-chat session links; revoked and expired sessions are skipped.</summary>
+public sealed class LiveChatSessionDirectory(ILiveChatSessionStore sessions, TimeProvider time) : IVisitorSessionDirectory
 {
     private readonly ILiveChatSessionStore sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
+    private readonly TimeProvider time = time ?? throw new ArgumentNullException(nameof(time));
 
     public Task<IReadOnlyList<VisitorSessionId>> ListSessionsAsync(TicketFlow.Core.TicketScope scope, TicketFlow.Core.ConversationId conversation, CancellationToken cancellationToken = default) =>
-        sessions.FindSessionsAsync(scope, conversation, IVisitorSessionDirectory.MaximumSessions, cancellationToken);
+        LiveSessionsAsync(sessions, scope, conversation, time.GetUtcNow(), cancellationToken);
+
+    /// <summary>Linked sessions that are still live (not revoked, not expired) at <paramref name="now"/>.</summary>
+    internal static async Task<IReadOnlyList<VisitorSessionId>> LiveSessionsAsync(ILiveChatSessionStore sessions, TicketFlow.Core.TicketScope scope,
+        TicketFlow.Core.ConversationId conversation, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var live = new List<VisitorSessionId>();
+        var partition = TicketFlow.Access.AccessPartition.From(scope);
+        foreach (var id in await sessions.FindSessionsAsync(scope, conversation, IVisitorSessionDirectory.MaximumSessions, cancellationToken).ConfigureAwait(false))
+            if (await sessions.GetAsync(partition, id, cancellationToken).ConfigureAwait(false) is { } stored && stored.Scope == scope && stored.Session.IsLive(now))
+                live.Add(id);
+        return live;
+    }
 }

@@ -4,6 +4,5 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
-    <ProjectReference Include="../../Routing/TicketFlow.Routing.Abstractions/TicketFlow.Routing.Abstractions.csproj" />
   </ItemGroup>
 </Project>

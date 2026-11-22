@@ -1,10 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
-using TicketFlow.Assist;
-using TicketFlow.Assist.Stores.Postgres;
 
-namespace TicketFlow;
+namespace TicketFlow.Assist.Stores.Postgres;
 
 public static class PostgresAssistTicketFlowBuilderExtensions
 {

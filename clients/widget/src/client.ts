@@ -30,6 +30,12 @@ export interface ChatClientOptions {
   widgetKey: string;
   /** Optional attachment upload URL (MapLiveChatAttachmentUpload). */
   uploadUrl?: string;
+  /**
+   * Where the session token lives: `"local"` (default, `localStorage`, survives reloads) or `"memory"` (this page only; a reload
+   * starts a new session). Any script running on the page (for example through XSS) can read a `localStorage` token and act as the
+   * visitor until it expires or is revoked; choose `"memory"` where that matters more than continuity.
+   */
+  tokenStorage?: "local" | "memory";
   tokens?: TokenStore;
   connect?: (url: string) => HubLike;
   fetch?: typeof fetch;
@@ -63,7 +69,7 @@ export class ChatClient {
   private readonly listeners = new Set<(event: ChatEvent) => void>();
 
   constructor(private readonly options: ChatClientOptions) {
-    this.tokens = options.tokens ?? tokenStore(options.widgetKey);
+    this.tokens = options.tokens ?? tokenStore(options.widgetKey, options.tokenStorage === "memory" ? undefined : globalThis.localStorage);
     this.hub = (options.connect ?? defaultConnect)(options.hubUrl);
     this.hub.on(EVENT_METHOD, (payload: never) => this.onEvent(payload as WireEvent));
     this.hub.onreconnected(() => void this.handshake().then(() => this.catchUp()).catch((error) => this.emit({ type: "error", error: code(error) })));

@@ -37,6 +37,13 @@ public sealed class InMemoryAutomationStoreTests
     }
 
     [TestMethod]
+    public Task PurgeContract()
+    {
+        var store = new InMemoryAutomationExecutionStore();
+        return AutomationStoreContract.VerifyPurgeAsync(store, store);
+    }
+
+    [TestMethod]
     public Task ConcurrentBegin()
     {
         var store = new InMemoryAutomationExecutionStore();

@@ -1,0 +1,74 @@
+@inherits UiPageBase
+@using TicketFlow.Sla
+@using TicketFlow.Routing
+@using TicketFlow.Workspaces
+
+<PageHeader Title="Inboxes" Description="Where conversations arrive. Each inbox is bound to one channel and can carry business hours, an SLA policy and a routing policy.">
+    <Actions>
+        @if (Session.Can(AccessPermissions.InboxManage))
+        {
+            <BbButton Href="#tf-new-inbox" Size="ButtonSize.Small"><LucideIcon Name="plus" Size="14" />New inbox</BbButton>
+        }
+    </Actions>
+</PageHeader>
+
+<div class="tf-card">
+    @if (Inboxes.Count == 0)
+    {
+        <EmptyState Icon="inbox" Title="No inboxes yet" Message="Create an inbox to start receiving conversations." />
+    }
+    else
+    {
+        <div class="tf-table-wrap">
+            <table class="tf-table">
+                <thead><tr><th>Inbox</th><th>Channel</th><th>Business hours</th><th>SLA policy</th><th>Routing</th><th>Status</th><th class="tf-num">Open</th></tr></thead>
+                <tbody>
+                    @foreach (var stored in Inboxes)
+                    {
+                        var inbox = stored.Inbox;
+                        <tr>
+                            <td><a class="tf-row-link" href="@Url($"inboxes/{inbox.Id.Value}")">@inbox.Name</a><div class="tf-list__meta tf-mono">@inbox.Id.Value</div></td>
+                            <td><ChannelBadge Kind="@inbox.Channel.Kind.Value" /><div class="tf-list__meta tf-mono">@inbox.Channel.ConfigurationId</div></td>
+                            <td>@(inbox.Calendar is { } calendar ? calendars.GetValueOrDefault(calendar.Value, calendar.Value) : "Always open")</td>
+                            <td>@(inbox.SlaPolicy is { } sla ? slaNames.GetValueOrDefault(sla.Value, sla.Value) : "—")</td>
+                            <td>@(inbox.RoutingPolicy is { } routing ? routingNames.GetValueOrDefault(routing.Value, routing.Value) : "Manual")</td>
+                            <td>@if (inbox.Enabled) { <span class="tf-badge tf-badge--success">Enabled</span> } else { <span class="tf-badge tf-badge--muted">Disabled</span> }</td>
+                            <td class="tf-num">@open.GetValueOrDefault(inbox.Id.Value)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+@if (Session.Can(AccessPermissions.InboxManage))
+{
+    <div class="tf-card" id="tf-new-inbox">
+        <div class="tf-card__header"><div><div class="tf-card__title">New inbox</div><div class="tf-card__description">The channel configuration ID links the inbox to a channel endpoint or live-chat widget.</div></div></div>
+        <div class="tf-card__content">
+            <TfForm Action="inbox.create" Class="tf-form">
+                <InboxFields Calendars="calendars" SlaPolicies="slaNames" RoutingPolicies="routingNames" />
+                <div class="tf-form-actions"><BbButton Type="ButtonType.Submit"><LucideIcon Name="plus" Size="14" />Create inbox</BbButton></div>
+            </TfForm>
+        </div>
+    </div>
+}
+
+@code {
+    private Dictionary<string, string> calendars = [];
+    private Dictionary<string, string> slaNames = [];
+    private Dictionary<string, string> routingNames = [];
+    private readonly Dictionary<string, int> open = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadWorkspaceAsync();
+        (calendars, slaNames, routingNames) = await InboxFields.LoadOptionsAsync(Session);
+        if (Service<TicketFlow.Conversations.IConversationService>() is { } conversations)
+            foreach (var inbox in Inboxes)
+                if (await conversations.ListAsync(Actor, new TicketFlow.Conversations.ConversationListQuery(inbox.Inbox.Id, TicketFlow.Conversations.ConversationStatusKind.Open, limit: 100), null, Aborted)
+                    is TicketFlow.Conversations.ConversationListPage page)
+                    open[inbox.Inbox.Id.Value] = page.Conversations.Count;
+    }
+}

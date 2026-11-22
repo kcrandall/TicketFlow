@@ -31,4 +31,4 @@ T01–T05 (2026-11-22): `dotnet build TicketFlow.slnx -c Release` (0 warnings, 0
 (24 passed); `dotnet test tests/Assist/TicketFlow.Assist.Providers.Claude.Tests -c Release` (17 passed, fake `HttpMessageHandler` only, no real
 API calls); `TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/Assist/TicketFlow.Assist.Stores.Postgres.Tests -c Release` (6 passed) against an
 isolated `postgres:18` container; `dotnet pack` for the four packages. `scripts/verify-package-metadata.sh` is blocked by the concurrent E10
-work (Automation project not yet in the solution). Parallel post-ticket reviews are still outstanding before commit.
+work (Automation project not yet in the solution). Parallel post-ticket reviews ran after commit 1742cba; their P1–P3 findings (pipeline caching/disposal and host clients, ambiguous-failure accounting and reservation sweep, PostgreSQL day counters, feature namespaces) are fixed with regression tests: Assist 28, Claude 17, PostgreSQL 9 passed.

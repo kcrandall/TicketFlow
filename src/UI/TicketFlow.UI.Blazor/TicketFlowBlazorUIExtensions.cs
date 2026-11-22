@@ -1,0 +1,191 @@
+using BlazorBlueprint.Components;
+using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
+using TicketFlow.Core;
+using TicketFlow.Reporting;
+using TicketFlow.UI.Blazor.Components;
+using TicketFlow.UI.Blazor.Infrastructure;
+using TicketFlow.UI.Blazor.Theming;
+
+namespace TicketFlow.UI.Blazor;
+
+public static class TicketFlowBlazorUIServiceCollectionExtensions
+{
+    /// <summary>
+    /// Registers the TicketFlow Blazor UI: options, Razor components (static SSR), antiforgery and BlazorBlueprint components. The host
+    /// keeps its own authentication; principals come from the registered <c>ITicketFlowPrincipalResolver</c> and
+    /// <c>ITicketFlowPartitionResolver</c> (for example <c>AddTicketFlowEndpoints()</c> plus <c>AddIdentityFlowPrincipals()</c>).
+    /// </summary>
+    public static IServiceCollection AddTicketFlowBlazorUI(this IServiceCollection services, Action<TicketFlowBlazorUIOptions>? configure = null)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        services.AddOptions<TicketFlowBlazorUIOptions>().Validate(options =>
+        {
+            options.Validate();
+            return true;
+        });
+        if (configure is not null)
+            services.Configure(configure);
+        services.AddRazorComponents();
+        services.AddAntiforgery();
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddSingleton<UiSensitivePermissionCache>();
+        if (!services.Any(descriptor => descriptor.ServiceType == typeof(BlazorBlueprintMarker)))
+        {
+            services.AddSingleton<BlazorBlueprintMarker>();
+            services.AddBlazorBlueprintComponents();
+        }
+        return services;
+    }
+
+    /// <inheritdoc cref="AddTicketFlowBlazorUI(IServiceCollection, Action{TicketFlowBlazorUIOptions}?)"/>
+    public static TicketFlowBuilder AddTicketFlowBlazorUI(this TicketFlowBuilder builder, Action<TicketFlowBlazorUIOptions>? configure = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        builder.Services.AddTicketFlowBlazorUI(configure);
+        return builder;
+    }
+
+    private sealed class BlazorBlueprintMarker;
+}
+
+public static class TicketFlowBlazorUIEndpointExtensions
+{
+    /// <summary>
+    /// Maps the UI under <see cref="TicketFlowBlazorUIOptions.BasePath"/>: <c>GET</c> pages rendered with static SSR (unless
+    /// <paramref name="pages"/> is false because the host renders <c>TicketFlowUI</c> inside its own Blazor layout), <c>POST</c> form
+    /// actions (antiforgery-validated, post/redirect/get) and the report CSV export. Endpoints use order -1 so they win over a host's
+    /// catch-all Razor component route at the same path. Returns the group so hosts can add conventions (for example
+    /// <c>RequireAuthorization()</c> or rate limiting).
+    /// </summary>
+    public static RouteGroupBuilder MapTicketFlowBlazorUI(this IEndpointRouteBuilder endpoints, bool pages = true)
+    {
+        ArgumentNullException.ThrowIfNull(endpoints);
+        var options = endpoints.ServiceProvider.GetRequiredService<IOptions<TicketFlowBlazorUIOptions>>().Value;
+        options.Validate();
+        var group = endpoints.MapGroup(options.BasePath).ExcludeFromDescription();
+        group.MapGet("/reports/export.csv", (Delegate)ExportAsync).WithOrder(-1);
+        if (pages)
+        {
+            group.MapGet("/", (Delegate)RenderAsync).WithOrder(-1);
+            group.MapGet("/{**path}", (Delegate)RenderAsync).WithOrder(-1);
+        }
+        group.MapPost("/", (Delegate)PostAsync).DisableAntiforgery().WithOrder(-1);
+        group.MapPost("/{**path}", (Delegate)PostAsync).DisableAntiforgery().WithOrder(-1);
+        return group;
+    }
+
+    private static async Task<IResult> RenderAsync(HttpContext http)
+    {
+        var session = await TicketFlowUISession.ResolveAsync(http);
+        if (session.State == UiSessionState.Unauthenticated)
+            return SignIn(http, session.Options);
+        session.Flash = UiFlash.Take(http, session.Options);
+        return Render(session, UiRoutes.Match(session.Path), pageState: null);
+    }
+
+    private static async Task<IResult> PostAsync(HttpContext http)
+    {
+        var antiforgery = http.RequestServices.GetRequiredService<IAntiforgery>();
+        if (!await antiforgery.IsRequestValidAsync(http))
+            return TypedResults.Problem(statusCode: StatusCodes.Status400BadRequest, title: "The form expired. Reload the page and try again.");
+        var session = await TicketFlowUISession.ResolveAsync(http);
+        if (session.State == UiSessionState.Unauthenticated)
+            return TypedResults.Unauthorized();
+        var form = await http.Request.ReadFormAsync(http.RequestAborted);
+        var route = UiRoutes.Match(session.Path);
+        var returnTo = UiUrls.SafeReturn(session.Options.BasePath, form["_return"].ToString() is { Length: > 0 } posted ? posted : http.Request.Path + http.Request.QueryString);
+
+        if (form["_action"].ToString() == "theme.set")
+        {
+            var theme = TicketFlowThemePreference.Parse($"{form["theme"]}.{form["mode"]}", session.Options.Themes);
+            if (theme is not null)
+                UiTheme.Write(http, session.Options, theme);
+            return TypedResults.Redirect(returnTo);
+        }
+        if (session.State != UiSessionState.Ready)
+            return Render(session, route, pageState: null);
+        if (UiActions.Find(form["_action"].ToString()) is not { } handler)
+            return TypedResults.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Unknown action.");
+
+        var result = await UiActions.RunAsync(handler, new UiActionContext(session, form));
+        if (result.Outcome.Succeeded && result.PageState is null)
+        {
+            UiFlash.Write(http, session.Options, result.Outcome);
+            var target = result.Outcome.Redirect is { } redirect ? session.Url(redirect) : returnTo;
+            return TypedResults.Redirect(UiUrls.SafeReturn(session.Options.BasePath, target));
+        }
+        session.Flash = result.Outcome;
+        session.Form = form;
+        return Render(session, route, result.PageState, result.Outcome.Succeeded ? StatusCodes.Status200OK : StatusFor(result.Outcome.Kind));
+    }
+
+    private static IResult Render(TicketFlowUISession session, UiRoute? route, object? pageState, int? status = null)
+    {
+        var http = session.Http;
+        http.Response.Headers.CacheControl = "no-store";
+        session.PageState = pageState;
+        var tokens = http.RequestServices.GetRequiredService<IAntiforgery>().GetAndStoreTokens(http);
+        session.Antiforgery = (tokens.FormFieldName, tokens.RequestToken ?? string.Empty);
+        var code = status ?? (route is null ? StatusCodes.Status404NotFound
+            : session.State != UiSessionState.Ready ? StatusCodes.Status403Forbidden
+            : UiNavigation.Section(route.Section) is var section && (!section.IsAvailable(session) || !section.IsPermitted(session)) ? StatusCodes.Status403Forbidden
+            : StatusCodes.Status200OK);
+        return new RazorComponentResult<TicketFlowDocument>(new Dictionary<string, object?>
+        {
+            [nameof(TicketFlowDocument.Session)] = session,
+            [nameof(TicketFlowDocument.Route)] = route,
+            [nameof(TicketFlowDocument.StatusCode)] = code,
+        })
+        {
+            StatusCode = code,
+        };
+    }
+
+    private static int StatusFor(UiOutcomeKind kind) => kind switch
+    {
+        UiOutcomeKind.Forbidden => StatusCodes.Status403Forbidden,
+        UiOutcomeKind.NotFound => StatusCodes.Status404NotFound,
+        UiOutcomeKind.Conflict => StatusCodes.Status409Conflict,
+        UiOutcomeKind.Invalid => StatusCodes.Status422UnprocessableEntity,
+        UiOutcomeKind.Rejected => StatusCodes.Status409Conflict,
+        UiOutcomeKind.Success or UiOutcomeKind.Info => StatusCodes.Status200OK,
+        _ => StatusCodes.Status400BadRequest,
+    };
+
+    private static IResult SignIn(HttpContext http, TicketFlowBlazorUIOptions options)
+    {
+        if (options.LoginPath is not { Length: > 0 } login)
+            return TypedResults.Challenge();
+        var returnUrl = http.Request.PathBase + http.Request.Path + http.Request.QueryString;
+        return TypedResults.Redirect(UiUrls.Combine(login, string.Empty, (options.ReturnUrlParameter, returnUrl)));
+    }
+
+    private static async Task<IResult> ExportAsync(HttpContext http, string? from, string? to)
+    {
+        var session = await TicketFlowUISession.ResolveAsync(http);
+        if (session.State == UiSessionState.Unauthenticated)
+            return SignIn(http, session.Options);
+        if (session.State != UiSessionState.Ready || session.Service<IReportingService>() is not { } reporting)
+            return TypedResults.Forbid();
+        var (start, end) = UiFormat.Range(from, to, TimeProvider.System.GetUtcNow());
+        var buffer = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
+        return await reporting.ExportAsync(session.Principal, new ReportExportQuery(new ReportQuery(start, end), 100_000), buffer, http.RequestAborted) switch
+        {
+            ReportSucceeded<ReportExportSummary> => Csv(http, buffer.ToString(), start, end),
+            ReportRefused => TypedResults.Forbid(),
+        };
+    }
+
+    private static IResult Csv(HttpContext http, string csv, DateTimeOffset from, DateTimeOffset to)
+    {
+        http.Response.Headers.CacheControl = "no-store";
+        return TypedResults.File(System.Text.Encoding.UTF8.GetBytes(csv), "text/csv", $"ticketflow-report-{from:yyyyMMdd}-{to:yyyyMMdd}.csv");
+    }
+}

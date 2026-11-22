@@ -101,8 +101,9 @@ Masking is applied server-side by feature packages in reads, exports, search and
 
 `IAccessEvaluator.LoadDecisionContextAsync(principal, scope, permissions)` (1-32 permissions) returns an `IAccessDecisionContext`
 whose `DecideAsync(permission, resource)` equals `AuthorizeAsync` at the load instant but evaluates against grants, roles and field
-policies loaded once. It completes synchronously unless an audit event must be persisted: sensitive permissions are still audited
-per decision, and break-glass use of a non-sensitive permission is audited once per permission per context. Evaluators that do not
+policies loaded once. It completes synchronously unless an audit event must be persisted. Audit semantics are identical to point
+checks: every decision for a sensitive permission and every decision that relies on a break-glass grant records one audit event
+for that resource. Evaluators that do not
 implement it fall back to `PointAccessDecisionContext` (one `AuthorizeAsync` per decision).
 
 ## Query filters

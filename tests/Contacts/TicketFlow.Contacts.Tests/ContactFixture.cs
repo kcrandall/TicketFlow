@@ -37,6 +37,8 @@ internal sealed class ContactFixture : IDisposable
         requestScope = provider.CreateScope();
         Contacts = requestScope.ServiceProvider.GetRequiredService<IContactService>();
         Definitions = requestScope.ServiceProvider.GetRequiredService<IContactAttributeDefinitionService>();
+        Linking = requestScope.ServiceProvider.GetRequiredService<IContactLinkingService>();
+        LinkingStore = provider.GetRequiredService<IContactLinkingStore>();
         Store = provider.GetRequiredService<InMemoryContactStore>();
         AccessAudit = provider.GetRequiredService<InMemoryAccessAuditSink>();
         Grants = provider.GetRequiredService<IAccessGrantStore>();
@@ -50,6 +52,8 @@ internal sealed class ContactFixture : IDisposable
     public RecordingObserver Observer { get; }
     public IContactService Contacts { get; }
     public IContactAttributeDefinitionService Definitions { get; }
+    public IContactLinkingService Linking { get; }
+    public IContactLinkingStore LinkingStore { get; }
     public InMemoryContactStore Store { get; }
     public InMemoryAccessAuditSink AccessAudit { get; }
     public IAccessGrantStore Grants { get; }
@@ -62,6 +66,9 @@ internal sealed class ContactFixture : IDisposable
     public UserPrincipal Agent => TestPrincipals.User(Scope, "agent");
     public UserPrincipal Supervisor => TestPrincipals.User(Scope, "supervisor");
     public ApiClientPrincipal Crm => TestPrincipals.ApiClient(Scope, "crm");
+
+    /// <summary>The application login client: read, create, link and merge.</summary>
+    public ApiClientPrincipal Portal => TestPrincipals.ApiClient(Scope, "portal");
 
     public static async Task<ContactFixture> CreateAsync(Action<ContactsOptions>? options = null)
     {
@@ -82,6 +89,8 @@ internal sealed class ContactFixture : IDisposable
         await fixture.GrantAsync(new UserId("supervisor"), BuiltInRoles.Supervisor);
         var ingest = await fixture.CustomRoleAsync("ingest", ContactPermissions.Read, ContactPermissions.Create);
         await fixture.GrantAsync(new ApiClientId("crm"), ingest);
+        var login = await fixture.CustomRoleAsync("login", ContactPermissions.Read, ContactPermissions.Create, ContactPermissions.Link, ContactPermissions.Merge);
+        await fixture.GrantAsync(new ApiClientId("portal"), login);
         return fixture;
     }
 

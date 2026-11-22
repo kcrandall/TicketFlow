@@ -51,6 +51,14 @@ public sealed partial class PostgresAutomationStore : IAutomationRuleStore, IAut
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadRule(reader, scope) : null;
     }
 
+    public async Task<long> GetRuleSetVersionAsync(TicketScope scope, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        await using var command = source.CreateCommand($"SELECT version FROM tf_automation_rule_sets WHERE rule_set_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace) AND {ScopeWhere}");
+        AddScope(command, scope);
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as long? ?? 0;
+    }
+
     public async Task<IReadOnlyList<StoredAutomationRule>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -90,6 +98,7 @@ public sealed partial class PostgresAutomationStore : IAutomationRuleStore, IAut
             AddInstant(insert, "next", nextRunAt);
             await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
+        await BumpRuleSetAsync(connection, transaction, scope, cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return new AutomationWriteApplied<StoredAutomationRule>(new StoredAutomationRule(scope, rule, 1));
     }
@@ -100,19 +109,26 @@ public sealed partial class PostgresAutomationStore : IAutomationRuleStore, IAut
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(rule);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = new NpgsqlCommand($"""
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var command = new NpgsqlCommand($"""
             UPDATE tf_automation_rules SET priority=@priority, definition=@definition, revision=revision+1, next_run_at=@next, lease_until=NULL, fence=fence+1
             WHERE {RuleWhere} AND revision=@expected RETURNING revision
-            """, connection);
-        AddScope(command, scope);
-        AddText(command, "rule", rule.Id.Value);
-        command.Parameters.AddWithValue("priority", rule.Priority);
-        AddText(command, "definition", AutomationCodec.SerializeRule(rule));
-        AddInstant(command, "next", nextRunAt);
-        command.Parameters.AddWithValue("expected", expectedRevision);
-        if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-            return new AutomationWriteApplied<StoredAutomationRule>(new StoredAutomationRule(scope, rule, revision));
-        return await RevisionAsync(connection, null, $"SELECT revision FROM tf_automation_rules WHERE {RuleWhere}", scope, "rule", rule.Id.Value, cancellationToken).ConfigureAwait(false) is { } current
+            """, connection, transaction))
+        {
+            AddScope(command, scope);
+            AddText(command, "rule", rule.Id.Value);
+            command.Parameters.AddWithValue("priority", rule.Priority);
+            AddText(command, "definition", AutomationCodec.SerializeRule(rule));
+            AddInstant(command, "next", nextRunAt);
+            command.Parameters.AddWithValue("expected", expectedRevision);
+            if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
+            {
+                await BumpRuleSetAsync(connection, transaction, scope, cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new AutomationWriteApplied<StoredAutomationRule>(new StoredAutomationRule(scope, rule, revision));
+            }
+        }
+        return await RevisionAsync(connection, transaction, $"SELECT revision FROM tf_automation_rules WHERE {RuleWhere}", scope, "rule", rule.Id.Value, cancellationToken).ConfigureAwait(false) is { } current
             ? new AutomationWriteConflict(current)
             : AutomationWriteNotFound.Instance;
     }
@@ -122,16 +138,25 @@ public sealed partial class PostgresAutomationStore : IAutomationRuleStore, IAut
         ArgumentNullException.ThrowIfNull(scope);
         RequireInitialized(id.IsInitialized, nameof(id));
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using (var command = new NpgsqlCommand($"DELETE FROM tf_automation_rules WHERE {RuleWhere} AND revision=@expected RETURNING rule_id, format_version, definition, revision", connection))
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        StoredAutomationRule? deleted = null;
+        await using (var command = new NpgsqlCommand($"DELETE FROM tf_automation_rules WHERE {RuleWhere} AND revision=@expected RETURNING rule_id, format_version, definition, revision",
+            connection, transaction))
         {
             AddScope(command, scope);
             AddText(command, "rule", id.Value);
             command.Parameters.AddWithValue("expected", expectedRevision);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new AutomationWriteApplied<StoredAutomationRule>(ReadRule(reader, scope));
+                deleted = ReadRule(reader, scope);
         }
-        return await RevisionAsync(connection, null, $"SELECT revision FROM tf_automation_rules WHERE {RuleWhere}", scope, "rule", id.Value, cancellationToken).ConfigureAwait(false) is { } current
+        if (deleted is not null)
+        {
+            await BumpRuleSetAsync(connection, transaction, scope, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new AutomationWriteApplied<StoredAutomationRule>(deleted);
+        }
+        return await RevisionAsync(connection, transaction, $"SELECT revision FROM tf_automation_rules WHERE {RuleWhere}", scope, "rule", id.Value, cancellationToken).ConfigureAwait(false) is { } current
             ? new AutomationWriteConflict(current)
             : AutomationWriteNotFound.Instance;
     }
@@ -190,6 +215,16 @@ public sealed partial class PostgresAutomationStore : IAutomationRuleStore, IAut
         {
             Value = new[] { "ticketflow.automation", table, scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value },
         });
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task BumpRuleSetAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, TicketScope scope, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand($"""
+            INSERT INTO tf_automation_rule_sets({ScopeColumns}, version) VALUES({ScopeValues}, 1)
+            ON CONFLICT (rule_set_key) DO UPDATE SET version=tf_automation_rule_sets.version+1
+            """, connection, transaction);
+        AddScope(command, scope);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 

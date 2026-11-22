@@ -68,10 +68,28 @@ public sealed class SessionSecurityTests
         var rotated = Value(await host.Visitors.RotateTokenAsync(context));
         Assert.AreNotEqual(grant.Token, rotated.Token);
         Assert.AreEqual(host.Host.Clock.GetUtcNow() + TimeSpan.FromDays(30), rotated.Context.Session.Session.ExpiresAt, "Rotation extends the session.");
-        Assert.IsFalse(Value(await host.Visitors.AuthenticateAsync(host.Partition, rotated.Token, Origin)).RotationRecommended);
+        Assert.IsFalse(Value(await host.Visitors.AuthenticateAsync(host.Partition, rotated.Token!, Origin)).RotationRecommended);
         Assert.IsNotNull(Value(await host.Visitors.AuthenticateAsync(host.Partition, grant.Token, Origin)), "The previous token works during the grace window.");
         host.Host.Clock.Advance(TimeSpan.FromMinutes(3));
         Assert.AreEqual(LiveChatRefusal.Unauthenticated, Refusal(await host.Visitors.AuthenticateAsync(host.Partition, grant.Token, Origin)));
+        Assert.IsNotNull(Value(await host.Visitors.AuthenticateAsync(host.Partition, rotated.Token!, Origin)));
+    }
+
+    [TestMethod]
+    public async Task ConcurrentTabsDoNotRotateTwice()
+    {
+        await using var host = await CreateAsync(options: options => options.TokenRotationInterval = TimeSpan.FromHours(1));
+        var grant = Value(await host.Visitors.StartSessionAsync(host.Partition, WidgetKey, Origin));
+        host.Host.Clock.Advance(TimeSpan.FromHours(2));
+        var firstTab = Value(await host.Visitors.AuthenticateAsync(host.Partition, grant.Token, Origin));
+        var secondTab = Value(await host.Visitors.AuthenticateAsync(host.Partition, grant.Token, Origin));
+        Assert.IsTrue(firstTab.RotationRecommended && secondTab.RotationRecommended);
+
+        var rotated = Value(await host.Visitors.RotateTokenAsync(firstTab));
+        Assert.IsNotNull(rotated.Token);
+        var skipped = Value(await host.Visitors.RotateTokenAsync(secondTab));
+        Assert.IsNull(skipped.Token, "The reloaded session was rotated moments ago by the other tab.");
+        Assert.AreEqual(rotated.Context.Session.Revision, skipped.Context.Session.Revision, "Skipping writes nothing.");
         Assert.IsNotNull(Value(await host.Visitors.AuthenticateAsync(host.Partition, rotated.Token, Origin)));
     }
 

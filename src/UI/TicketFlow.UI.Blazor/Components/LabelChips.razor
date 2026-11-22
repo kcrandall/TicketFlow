@@ -1,0 +1,10 @@
+@foreach (var label in Labels)
+{
+    <span class="tf-label-chip" style="--tf-label-hue:@Hue(label)">@label</span>
+}
+
+@code {
+    [Parameter] public IEnumerable<string> Labels { get; set; } = [];
+
+    private static int Hue(string label) => (int)((uint)label.Aggregate(17, (hash, character) => hash * 31 + character) % 360);
+}

@@ -18,11 +18,11 @@ public sealed class RealtimeRoutingEventObserver(IRealtimePublisher publisher, I
         switch (routingEvent)
         {
             case AgentStatusChanged status:
-                await PublishAsync(new AgentTopic(status.Scope, status.Agent), new AgentStatusChangedEvent(status.Scope, status.Agent, status.Status, status.At), cancellationToken).ConfigureAwait(false);
+                await PublishAsync(new AgentTopic(status.Scope, status.Agent), new AgentStatusChangedEvent(status.Scope, status.Agent, Map(status.Status), status.At), cancellationToken).ConfigureAwait(false);
                 break;
             case ConversationPresenceChanged presence:
                 await PublishAsync(new ConversationTopic(presence.Scope, presence.Conversation),
-                    new PresenceChangedEvent(presence.Scope, presence.Conversation, presence.User, presence.Activity, presence.At), cancellationToken).ConfigureAwait(false);
+                    new PresenceChangedEvent(presence.Scope, presence.Conversation, presence.User, presence.Activity is { } activity ? Map(activity) : null, presence.At), cancellationToken).ConfigureAwait(false);
                 break;
             case ReplyLockChanged replyLock:
                 await PublishAsync(new ConversationTopic(replyLock.Scope, replyLock.Conversation),
@@ -53,6 +53,22 @@ public sealed class RealtimeRoutingEventObserver(IRealtimePublisher publisher, I
         await PublishAsync(new ConversationTopic(queue.Scope, queue.Conversation), queue, cancellationToken).ConfigureAwait(false);
         await PublishAsync(new InboxQueueTopic(queue.Scope, queue.Inbox), queue, cancellationToken).ConfigureAwait(false);
     }
+
+    internal static RealtimeAgentStatus Map(AgentStatus status) => status switch
+    {
+        AgentStatus.Online => RealtimeAgentStatus.Online,
+        AgentStatus.Busy => RealtimeAgentStatus.Busy,
+        AgentStatus.Away => RealtimeAgentStatus.Away,
+        AgentStatus.Offline => RealtimeAgentStatus.Offline,
+        _ => throw new ArgumentOutOfRangeException(nameof(status)),
+    };
+
+    internal static RealtimeActivity Map(ConversationActivity activity) => activity switch
+    {
+        ConversationActivity.Viewing => RealtimeActivity.Viewing,
+        ConversationActivity.Composing => RealtimeActivity.Composing,
+        _ => throw new ArgumentOutOfRangeException(nameof(activity)),
+    };
 
     private Task PublishAsync(RealtimeTopic topic, RealtimeEvent realtimeEvent, CancellationToken cancellationToken) =>
         publisher.PublishAsync(new RealtimePublication(topic, realtimeEvent), cancellationToken);

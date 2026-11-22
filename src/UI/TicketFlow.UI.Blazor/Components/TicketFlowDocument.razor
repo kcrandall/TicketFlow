@@ -1,0 +1,53 @@
+@* The full HTML document rendered by MapTicketFlowBlazorUI (static SSR). The theme comes from the theme cookie, so the first paint is already correct. *@
+<!DOCTYPE html>
+<html lang="en" data-tf-theme="@Session.Theme.Theme" data-tf-mode="@Session.Theme.ModeToken" class="@(Session.Theme.Mode == TicketFlowThemeMode.Dark ? "dark" : null)">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="@(Session.Theme.Mode switch { TicketFlowThemeMode.Dark => "dark", TicketFlowThemeMode.Light => "light", _ => "light dark" })" />
+    <base href="@(Session.Http.Request.PathBase)/" />
+    <title>@Title — @Session.Options.ProductName</title>
+    @if (Session.Theme.Mode == TicketFlowThemeMode.System)
+    {
+        <script>document.documentElement.classList.toggle('dark', matchMedia('(prefers-color-scheme: dark)').matches)</script>
+    }
+    <link rel="stylesheet" href="_content/BlazorBlueprint.Components/blazorblueprint.css" />
+    <link rel="stylesheet" href="_content/TicketFlow.UI.Blazor/tf-themes.css" />
+    <link rel="stylesheet" href="_content/TicketFlow.UI.Blazor/tf-ui.css" />
+    @foreach (var stylesheet in Session.Options.Stylesheets)
+    {
+        <link rel="stylesheet" href="@stylesheet" />
+    }
+    @if (Session.Options.Themes.Any(theme => theme.HasOverrides))
+    {
+        <style>@((MarkupString)string.Concat(Session.Options.Themes.Where(theme => theme.HasOverrides).Select(theme => theme.ToCss())))</style>
+    }
+</head>
+<body class="tf-body">
+    <CascadingValue Value="Session" IsFixed="true">
+        <TicketFlowShell Route="Route" StatusCode="StatusCode" />
+    </CascadingValue>
+    @if (Session.Options.EnhancedNavigation)
+    {
+        <script src="_framework/blazor.web.js"></script>
+    }
+    <script src="_content/TicketFlow.UI.Blazor/tf-ui.js" defer></script>
+    @if (Session.Options.EnableRealtime)
+    {
+        <script src="_content/TicketFlow.UI.Blazor/tf-live.js" defer></script>
+    }
+</body>
+</html>
+
+@code {
+    [Parameter, EditorRequired] public TicketFlowUISession Session { get; set; } = default!;
+    [Parameter] public UiRoute? Route { get; set; }
+    [Parameter] public int StatusCode { get; set; } = 200;
+
+    private string Title => StatusCode switch
+    {
+        403 => "Access denied",
+        404 => "Not found",
+        _ => Route is null ? "Not found" : UiNavigation.Section(Route.Section).Title,
+    };
+}

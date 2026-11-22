@@ -6,8 +6,8 @@ an optional hosting package.
 
 | Package | Contents |
 | --- | --- |
-| `TicketFlow.Realtime.Abstractions` | `RealtimeTopic` union (`ConversationTopic`, `InboxQueueTopic`, `AgentTopic`, `VisitorSessionTopic`), `RealtimeSubscriber` union (`AgentSubscriber`, `VisitorSubscriber`), `RealtimeEvent` union, `RealtimePublication`, `IRealtimePublisher`, `IRealtimeBus`, `IRealtimeConnection`, `IRealtimeSubscriptions`, `IRealtimeAgentActions`, `IVisitorSessionDirectory`, `VisitorSessionId`. |
-| `TicketFlow.Realtime` | `RealtimeSubscriptionRegistry`, `InProcessRealtimeBus`, `BusRealtimePublisher`, `RealtimeOutboxHandler` (consumer `realtime`), `RealtimeRoutingEventObserver`, `RealtimeAgentActions`, `AddRealtime`. |
+| `TicketFlow.Realtime.Abstractions` | `RealtimeTopic` union (`ConversationTopic`, `InboxQueueTopic`, `AgentTopic`, `VisitorSessionTopic`), `RealtimeSubscriber` union (`AgentSubscriber`, `VisitorSubscriber`), `RealtimeEvent` union, `RealtimePublication`, `IRealtimePublisher`, `IRealtimeBus`, `IRealtimeConnection`, `IRealtimeConnectionLifetime`, `IRealtimeSubscriptions`, `IRealtimeAgentActions`, `IVisitorSessionDirectory`, `VisitorSessionId`, `RealtimeAgentStatus`, `RealtimeActivity`. No routing dependency: status and activity are realtime-owned enums. |
+| `TicketFlow.Realtime` | `RealtimeSubscriptionRegistry`, `InProcessRealtimeBus`, `BusRealtimePublisher`, `RealtimeOutboxHandler` (consumer `realtime`), `RealtimeRoutingEventObserver` (the only routing-aware part, mapping routing enums), `RealtimeAgentActions`, `AddRealtime`. |
 | `TicketFlow.Realtime.SignalR` | `AgentRealtimeHub`, `VisitorRealtimeHub`, `MapTicketFlowRealtime`, `MapLiveChatAttachmentUpload`, `IRealtimePrincipalResolver`, `IVisitorPartitionResolver`, `RealtimeWireFormat`, `AddTicketFlowSignalR`. The only package with a `Microsoft.AspNetCore.App` framework reference. |
 
 ```csharp
@@ -31,13 +31,32 @@ await scope.ServiceProvider.GetRequiredService<ConversationOutboxDispatcher>().R
 Subscriptions are bounded (`MaximumSubscriptionsPerConnection`, default 256; `MaximumConnections` per node, default 100 000) and
 must be in the subscriber's scope.
 
-## Delivery filtering
+## Delivery pipeline and filtering
 
-Every delivery is filtered per subscriber inside a DI scope per publication, against **current** data:
+- **Publishers never wait for delivery.** `RealtimeSubscriptionRegistry.DeliverAsync` (the bus handler) only queues the publication
+  in a bounded queue (`MaximumPendingPublications`, default 10 000, oldest dropped) drained by one background fan-out worker per node.
+  The outbox handler, routing observer and agent actions therefore return immediately.
+- **One conversation read per change.** The worker reads each conversation once per change (the outbox handler publishes the same
+  change to three topics; later publications of that revision reuse the snapshot) plus one read in the outbox handler for the
+  assignee.
+- **In-memory decisions per principal.** Agent subscribers are grouped by principal. Each principal has an
+  `IAccessDecisionContext` (`IAccessEvaluator.LoadDecisionContextAsync` for `conversation:read` and `note:read`) cached on the node and
+  reloaded after `DecisionContextLifetime` (default 30 s); decisions are made in memory against the current conversation snapshot.
+  So a revoked or denied grant stops deliveries on existing subscriptions within that lifetime (new subscriptions are point-checked
+  immediately). A context that fails is reloaded once in the current scope; failures fail closed.
+- **Queue topics** match the subscriber's planned `conversation:read` filter. Whenever the filter is re-planned (every
+  `QueueFilterLifetime`, default 30 s) `inbox:read` is re-authorized with a point check; when it was revoked the subscription is
+  removed and nothing is delivered.
+- **Bounded per-connection sending.** Filtered events go to a per-connection queue (`ConnectionQueueCapacity`, default 256, oldest
+  dropped — payloads are identifiers, clients refetch) drained by a per-connection sender with `SendTimeout` (default 10 s). A slow,
+  stalled or throwing client affects only its own queue. `DroppedCount` reports drops.
+- **Visitor session end.** A delivered `VisitorSessionEndedEvent` disconnects each connection of that session after sending it and
+  closes the transport when the connection implements `IRealtimeConnectionLifetime` (the SignalR connection aborts).
 
-- Agent deliveries of conversation events re-check `conversation:read` (or the queue filter) against the conversation as stored now,
-  so revoked or denied grants, reassignment away from a team-scoped agent and label/attribute conditions apply to live connections.
-  Decisions are cached only within one publication.
+Filtering rules:
+
+- Agent deliveries of conversation events need `conversation:read` (or the queue filter) on the conversation as stored now, so
+  reassignment away from a team-scoped agent and label/attribute conditions apply to live connections.
 - Note summaries in change notifications are removed unless the subscriber holds `note:read`; a change that only added notes is
   dropped for them.
 - A deleted conversation can no longer be authorized: its `Deleted` notice reaches only subscribers already granted the conversation
@@ -45,7 +64,7 @@ Every delivery is filtered per subscriber inside a DI scope per publication, aga
 - Agents never receive `VisitorMessageEvent` or `VisitorSessionEndedEvent`. Visitors receive only their own session's messages and
   session events plus typing/read receipts from the support side, with the agent's identity replaced by an anonymous `SupportActor`;
   the visitor's own typing is not echoed.
-- Authorization failures fail closed (nothing is delivered); sink failures are swallowed. Payloads are never logged.
+- Payloads are never logged.
 
 ### Payload choice: notifications with identifiers, then refetch
 
@@ -77,7 +96,13 @@ never dispatched to channels).
 
 - **Agent hub** (`/ticketflow/realtime/agent` by default): the host authenticates the HTTP connection; `IRealtimePrincipalResolver`
   (or `TicketFlowSignalROptions.ResolvePrincipal`) maps the `ClaimsPrincipal` to a `PrincipalRef` once per connection, otherwise the
-  connection is aborted. Methods: `Subscribe(kind, id)` with kind `conversation`, `queue` or `agent`, `Unsubscribe`, `Typing`,
+  connection is aborted. **Cross-site WebSocket hijacking:** browsers attach cookies to cross-site WebSocket handshakes and CORS does
+  not apply to WebSockets, so cookie-authenticated hosts must set `TicketFlowSignalROptions.AgentAllowedOrigins` (connections with a
+  foreign `Origin` are aborted in `OnConnectedAsync`; `RequireAgentOrigin` also rejects missing origins), use `SameSite=Lax` or
+  `Strict` auth cookies, and keep CORS for the hub limited to the console origins (`AllowCredentials` only for those). Bearer-token
+  hosts are not exposed to this attack.
+- **Typing throttle** (both hubs): at most one typing event per connection and conversation per `TypingThrottleInterval` (default
+  2 s); one stop after a start always passes. Throttled calls succeed without publishing. Methods: `Subscribe(kind, id)` with kind `conversation`, `queue` or `agent`, `Unsubscribe`, `Typing`,
   `MarkRead`. The team snapshot in a `UserPrincipal` is taken at connect time; reconnect to refresh it.
 - **Visitor hub** (`/ticketflow/realtime/visitor`): see [live-chat.md](live-chat.md).
 - Events arrive as `tf.event` with `{"v":1,"type":...,"topic":...,"data":{...}}`. Types: `conversation.changed`,

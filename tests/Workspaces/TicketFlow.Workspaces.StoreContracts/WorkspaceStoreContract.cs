@@ -36,6 +36,31 @@ public static class WorkspaceStoreContract
          new WeeklyBusinessHours(DayOfWeek.Sunday, BusinessHours.From(0, 0, 6, 30))],
         [CalendarDateOverride.Holiday(new(2026, 12, 25), "Christmas"), new CalendarDateOverride(new(2026, 12, 24), [BusinessHours.From(9, 0, 12, 0)])]);
 
+    /// <summary>Full enumerations list every scope with settings exactly once, across pages, and nothing else.</summary>
+    public static async Task VerifyDirectoryAsync(IWorkspaceSettingsStore store, IWorkspaceDirectory directory)
+    {
+        var settings = new WorkspaceSettings("Directory", "en", "UTC");
+        var scopes = Enumerable.Range(0, 7).Select(index => TestScopes.Create(tenantId: $"dir-tenant-{index % 2}", workspaceId: $"dir-ws-{index}")).ToList();
+        foreach (var scope in scopes)
+            Assert.AreEqual("applied:1", S(await store.CreateAsync(scope, settings)));
+        var seen = new List<TicketScope>();
+        string? after = null;
+        var pages = 0;
+        do
+        {
+            var page = await directory.ListWorkspacesAsync(after, 3);
+            Assert.IsLessThanOrEqualTo(3, page.Scopes.Count);
+            seen.AddRange(page.Scopes);
+            after = page.Next;
+            Assert.IsLessThan(10, ++pages);
+        }
+        while (after is not null);
+        var listed = seen.Where(scope => scope.TenantId.StartsWith("dir-tenant-", StringComparison.Ordinal)).ToList();
+        CollectionAssert.AreEquivalent(scopes, listed);
+        Assert.AreEqual(seen.Count, seen.Distinct().Count());
+        await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(() => directory.ListWorkspacesAsync(null, 0));
+    }
+
     public static async Task VerifySettingsAsync(IWorkspaceSettingsStore primary, IWorkspaceSettingsStore competing)
     {
         var scope = TestScopes.Create();

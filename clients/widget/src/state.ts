@@ -46,7 +46,9 @@ export interface TokenStore {
   set(token: string | null): void;
 }
 
-export function tokenStore(widgetKey: string, storage: Storage | undefined = globalThis.localStorage): TokenStore {
+/** Pass `storage: undefined` explicitly for memory-only storage. */
+export function tokenStore(widgetKey: string, ...args: [storage?: Storage | undefined]): TokenStore {
+  const storage = args.length > 0 ? args[0] : globalThis.localStorage;
   const key = `ticketflow.chat.${widgetKey}`;
   let memory: string | null = null;
   return {

@@ -17,6 +17,12 @@ public sealed class LiveChatOptions
     /// <summary>Accept connections without an Origin (non-browser clients). Default <see langword="false"/>.</summary>
     public bool AllowMissingOrigin { get; set; }
 
+    /// <summary>
+    /// When an <c>IContactLinkingService</c> is registered, link the anonymous visitor contact to the verified account after
+    /// <c>IdentifyAsync</c> (merging it into an existing account contact). Default <see langword="true"/>.
+    /// </summary>
+    public bool LinkVisitorContactOnIdentify { get; set; } = true;
+
     /// <summary>Messages returned per read (1-200, default 100).</summary>
     public int MaximumMessagesPerRead { get; set; } = 100;
 

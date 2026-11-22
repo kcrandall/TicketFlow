@@ -1,0 +1,153 @@
+@* Application shell in the style of shadcn's dashboard-01: inset sidebar with grouped navigation, header bar and content area. Works without JavaScript (the mobile drawer is a checkbox). *@
+<div class="tf-app @(Session.Options.ShowSidebar ? null : "tf-app--bare")">
+    @if (Session.Options.ShowSidebar)
+    {
+        <input type="checkbox" id="tf-nav-toggle" class="tf-nav-toggle" aria-hidden="true" />
+        <aside class="tf-sidebar" aria-label="Main navigation">
+            <div class="tf-sidebar__header">
+                <a class="tf-brand" href="@Session.Url("")">
+                    <span class="tf-brand__mark"><LucideIcon Name="life-buoy" Size="16" /></span>
+                    <span class="tf-brand__text">
+                        <span class="tf-brand__name">@Session.Options.ProductName</span>
+                        <span class="tf-brand__meta">@WorkspaceLabel</span>
+                    </span>
+                </a>
+            </div>
+            <nav class="tf-sidebar__content">
+                @if (Session.State == UiSessionState.Ready)
+                {
+                    @foreach (var group in UiNavigation.Visible(Session).GroupBy(section => section.Group))
+                    {
+                        <div class="tf-nav-group">
+                            <div class="tf-nav-group__label">@group.Key</div>
+                            <ul class="tf-nav">
+                                @foreach (var section in group)
+                                {
+                                    var active = Route?.Section == section.Key;
+                                    <li>
+                                        @if (section.IsPermitted(Session))
+                                        {
+                                            <a class="tf-nav__link @(active ? "is-active" : null)" href="@Session.Url(section.Path)" aria-current="@(active ? "page" : null)">
+                                                <LucideIcon Name="@section.Icon" Size="16" />
+                                                <span>@section.Title</span>
+                                            </a>
+                                        }
+                                        else
+                                        {
+                                            <span class="tf-nav__link is-disabled" title="You don't have access to this section">
+                                                <LucideIcon Name="@section.Icon" Size="16" />
+                                                <span>@section.Title</span>
+                                                <LucideIcon Name="lock" Size="12" Class="tf-nav__lock" />
+                                            </span>
+                                        }
+                                    </li>
+                                }
+                            </ul>
+                        </div>
+                    }
+                }
+            </nav>
+            <div class="tf-sidebar__footer">
+                <details class="tf-menu tf-menu--up">
+                    <summary class="tf-user">
+                        <BbAvatar Size="AvatarSize.Small" Class="tf-user__avatar"><BbAvatarFallback>@TicketFlowUISession.Initials(Session.DisplayName)</BbAvatarFallback></BbAvatar>
+                        <span class="tf-user__text">
+                            <span class="tf-user__name">@Session.DisplayName</span>
+                            <span class="tf-user__meta">@(Session.Email ?? RoleLabel)</span>
+                        </span>
+                        <LucideIcon Name="chevrons-up-down" Size="16" Class="tf-user__chevron" />
+                    </summary>
+                    <div class="tf-menu__content">
+                        <div class="tf-menu__label">Signed in as @Session.DisplayName</div>
+                        <a class="tf-menu__item" href="@Session.Url("settings/theme")"><LucideIcon Name="palette" Size="16" />Theme</a>
+                        <a class="tf-menu__item" href="@Session.Url("settings")"><LucideIcon Name="settings" Size="16" />Settings</a>
+                        @if (Session.Options.LogoutPath is { Length: > 0 } logout)
+                        {
+                            <div class="tf-menu__separator"></div>
+                            <a class="tf-menu__item" href="@logout" data-enhance-nav="false"><LucideIcon Name="log-out" Size="16" />Sign out</a>
+                        }
+                    </div>
+                </details>
+            </div>
+        </aside>
+        <label for="tf-nav-toggle" class="tf-scrim" aria-hidden="true"></label>
+    }
+    <div class="tf-inset">
+        <header class="tf-header">
+            @if (Session.Options.ShowSidebar)
+            {
+                <label for="tf-nav-toggle" class="tf-icon-button tf-header__trigger" title="Toggle navigation"><LucideIcon Name="panel-left" Size="16" /></label>
+                <span class="tf-header__divider"></span>
+            }
+            <nav class="tf-breadcrumb" aria-label="Breadcrumb">
+                <a href="@Session.Url("")">@Session.Options.ProductName</a>
+                @if (Route is not null && Route.Section != "dashboard")
+                {
+                    <LucideIcon Name="chevron-right" Size="14" />
+                    <a href="@Session.Url(UiNavigation.Section(Route.Section).Path)">@UiNavigation.Section(Route.Section).Title</a>
+                }
+                @if (Route?.Parameters.ContainsKey("Id") == true || Route?.Pattern.Count(character => character == '/') > 0)
+                {
+                    <LucideIcon Name="chevron-right" Size="14" />
+                    <span class="tf-breadcrumb__current">@Crumb</span>
+                }
+            </nav>
+            <div class="tf-header__actions">
+                <TfForm Action="theme.set" Class="tf-inline-form">
+                    <input type="hidden" name="theme" value="@Session.Theme.Theme" />
+                    <input type="hidden" name="mode" value="@(Session.Theme.Mode == TicketFlowThemeMode.Dark ? "light" : "dark")" />
+                    <button type="submit" class="tf-icon-button" title="@(Session.Theme.Mode == TicketFlowThemeMode.Dark ? "Switch to light mode" : "Switch to dark mode")">
+                        <LucideIcon Name="@(Session.Theme.Mode == TicketFlowThemeMode.Dark ? "sun" : "moon")" Size="16" />
+                    </button>
+                </TfForm>
+            </div>
+        </header>
+        <main class="tf-main" id="tf-main">
+            @if (Session.Flash is { } flash)
+            {
+                <OutcomeAlert Outcome="flash" />
+            }
+            @if (StatusCode == 404 || Route is null)
+            {
+                <StatePanel Icon="search-x" Title="Page not found" Message="The page you are looking for does not exist in this workspace." />
+            }
+            else if (Session.State != UiSessionState.Ready)
+            {
+                <StatePanel Icon="shield-alert" Title="No support workspace access" Message="You are signed in, but your account is not mapped to this support workspace. Ask an administrator to grant you a role." />
+            }
+            else if (StatusCode == 403 && !Session.Form.HasValue())
+            {
+                <StatePanel Icon="lock" Title="Access denied" Message="Your role does not include access to this section. Ask a workspace administrator if you need it." />
+            }
+            else
+            {
+                <DynamicComponent Type="Route.Component" Parameters="Parameters" />
+            }
+        </main>
+    </div>
+</div>
+
+@code {
+    [CascadingParameter] public TicketFlowUISession Session { get; set; } = default!;
+    [Parameter] public UiRoute? Route { get; set; }
+    [Parameter] public int StatusCode { get; set; } = 200;
+
+    private IDictionary<string, object> Parameters => Route!.Parameters.Where(pair => pair.Value is not null).ToDictionary(pair => pair.Key, pair => pair.Value!);
+
+    private string WorkspaceLabel => Session.State == UiSessionState.Ready ? $"Workspace · {Session.Scope.WorkspaceId.Value}" : "Support workspace";
+
+    private string RoleLabel => Session.Can(AccessPermissions.AccessManage) ? "Administrator" : Session.Can(AccessPermissions.ConversationAssign) ? "Agent" : "Member";
+
+    private string Crumb => Route?.Parameters.TryGetValue("Id", out var id) == true && id is string value
+        ? value == "new" ? "New" : value
+        : Route?.Pattern.Split('/').Last() switch
+        {
+            "macros" => "Macros",
+            "canned" => "Canned responses",
+            "grants" => "Grants",
+            "field-policies" => "Field policies",
+            "break-glass" => "Break-glass",
+            "theme" => "Theme",
+            var other => other ?? string.Empty,
+        };
+}

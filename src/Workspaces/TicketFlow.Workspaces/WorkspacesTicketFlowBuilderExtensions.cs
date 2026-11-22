@@ -32,8 +32,8 @@ public static class WorkspacesTicketFlowBuilderExtensions
     }
 
     /// <summary>
-    /// Registers development-only, non-durable in-memory workspace settings, inbox, team and calendar stores with TryAdd. State is
-    /// lost on restart and never shared between processes.
+    /// Registers development-only, non-durable in-memory workspace settings, inbox, team and calendar stores (and the settings store as
+    /// <see cref="IWorkspaceDirectory"/>) with TryAdd. State is lost on restart and never shared between processes.
     /// </summary>
     public static TicketFlowBuilder AddInMemoryWorkspaceStores(this TicketFlowBuilder builder)
     {
@@ -43,6 +43,8 @@ public static class WorkspacesTicketFlowBuilderExtensions
         services.TryAddSingleton<IInboxStore, InMemoryInboxStore>();
         services.TryAddSingleton<ITeamStore, InMemoryTeamStore>();
         services.TryAddSingleton<IBusinessCalendarStore, InMemoryBusinessCalendarStore>();
+        services.TryAddSingleton<IWorkspaceDirectory>(provider => provider.GetRequiredService<IWorkspaceSettingsStore>() as IWorkspaceDirectory
+            ?? throw new InvalidOperationException("The registered workspace settings store does not implement IWorkspaceDirectory; register one explicitly."));
         return builder;
     }
 

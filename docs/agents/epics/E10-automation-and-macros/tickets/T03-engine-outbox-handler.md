@@ -42,3 +42,13 @@ Verification commands (run from the repository root, 2026-11-22):
 - `bash scripts/verify-package-metadata.sh` — Validated 47 package projects and central versions.
 
 Post-ticket parallel reviews (docs/agents/prompts/post-ticket-*.md) have not been run yet.
+
+### Review fixes (2026-11-22, after 1742cba)
+
+- Runner builds the context once per occurrence (rebuilt only after a rule ran actions), fetches records with one `FindManyAsync`, takes over `Running` records compare-and-set and leaves just-begun records to their creator; handler reads the change's events with one `ReadTimelineAsync` and uses the version-checked `AutomationRuleCache`. Tests: `NonMatchingRulesCostAConstantNumberOfStoreCalls` (50 rules), `TwoHandlersRacingOnOneEntryRunTheRuleOnce`, `ExecutionResumesAfterLosingAProgressWrite`.
+
+Review-fix verification (2026-11-22):
+
+- `dotnet test tests/Automation/TicketFlow.Automation.Tests -c Release` — 42 passed, 0 failed (regression tests repeated 5×).
+- `TICKETFLOW_TEST_POSTGRES=Host=127.0.0.1;Port=55712;... TICKETFLOW_REQUIRE_POSTGRES=1 dotnet test tests/Automation/TicketFlow.Automation.Stores.Postgres.Tests -c Release` (isolated `postgres:18` container `tf-pg-e10fix`) — 12 passed, 0 failed.
+- `dotnet build` of every Automation project — 0 warnings, 0 errors; `bash scripts/verify-package-metadata.sh` — Validated 51 package projects. `dotnet build TicketFlow.slnx -c Release` currently fails only at restore on E14's in-progress `tests/Reporting/TicketFlow.Reporting.Stores.Postgres.Tests` project (missing file, not an E10 project).

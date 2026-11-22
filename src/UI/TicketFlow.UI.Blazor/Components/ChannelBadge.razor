@@ -1,0 +1,6 @@
+<span class="tf-channel" title="@UiFormat.Channel(Kind)"><LucideIcon Name="@UiFormat.ChannelIcon(Kind)" Size="12" />@(Label ?? UiFormat.Channel(Kind))</span>
+
+@code {
+    [Parameter, EditorRequired] public string Kind { get; set; } = "";
+    [Parameter] public string? Label { get; set; }
+}

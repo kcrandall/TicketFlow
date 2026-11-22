@@ -65,6 +65,7 @@ public sealed class RealtimeFanoutTests
         var deny = new AccessGrant(new GrantId("deny-reader"), AccessPartition.From(host.Scope), new UserId("reader"), reader.Role.Id,
             new WorkspaceGrantScope(host.Scope.WorkspaceId), GrantEffect.Deny);
         Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await host.Services.GetRequiredService<IAccessGrantStore>().CreateAsync(deny)).Value);
+        host.Clock.Advance(TimeSpan.FromSeconds(31));   // past DecisionContextLifetime: the cached decision context is reloaded
         Applied(await host.Conversations.ReplyAsync(host.Agent, conversation, new OutgoingMessageDraft("hello")));
         await host.DispatchAsync();
         Assert.IsEmpty(readerConnection.Received);
@@ -116,7 +117,7 @@ public sealed class RealtimeFanoutTests
         await observer.OnRoutingEventAsync(new AgentStatusChanged(host.Scope, new UserId("agent"), AgentStatus.Online, host.Clock.GetUtcNow()));
         await observer.OnRoutingEventAsync(new AgentStatusChanged(host.Scope, new UserId("owner"), AgentStatus.Away, host.Clock.GetUtcNow()));
         await observer.OnRoutingEventAsync(new ConversationRouted(host.Scope, conversation, new UserId("agent"), 3, host.Clock.GetUtcNow()));
-        Assert.AreEqual(AgentStatus.Online, agent.Events<AgentStatusChangedEvent>().Single().Status);
+        Assert.AreEqual(RealtimeAgentStatus.Online, agent.Events<AgentStatusChangedEvent>().Single().Status);
         Assert.AreEqual(conversation, agent.Events<ConversationAssignedEvent>().Single().Conversation);
     }
 
@@ -132,7 +133,7 @@ public sealed class RealtimeFanoutTests
         await observer.OnRoutingEventAsync(new ConversationPresenceChanged(host.Scope, conversation, new UserId("agent"), ConversationActivity.Composing, host.Clock.GetUtcNow()));
         await observer.OnRoutingEventAsync(new ReplyLockChanged(host.Scope, conversation, new UserId("agent"), host.Clock.GetUtcNow().AddMinutes(1), host.Clock.GetUtcNow()));
         await observer.OnRoutingEventAsync(new QueueWaitExceeded(host.Scope, conversation, new InboxId("email-inbox"), host.Clock.GetUtcNow()));
-        Assert.AreEqual(ConversationActivity.Composing, viewer.Events<PresenceChangedEvent>().Single().Activity);
+        Assert.AreEqual(RealtimeActivity.Composing, viewer.Events<PresenceChangedEvent>().Single().Activity);
         Assert.AreEqual(new UserId("agent"), viewer.Events<ReplyLockChangedEvent>().Single().Holder);
         Assert.AreEqual(QueueChange.WaitExceeded, viewer.Events<QueueChangedEvent>().Single().Change);
     }
@@ -202,7 +203,7 @@ public sealed class RealtimeFanoutTests
         var agent = host.Connect("agent-1", host.Agent);
         Assert.IsNull(await host.SubscribeAsync(agent, new ConversationTopic(host.Scope, conversation)));
         Assert.AreEqual(RealtimeRefusal.LimitReached, await host.SubscribeAsync(agent, new AgentTopic(host.Scope, new UserId("agent"))));
-        Assert.IsInstanceOfType<RealtimeSubscriptionRefused>(host.Registry().Connect(new Testing.RecordingConnection("agent-1", new AgentSubscriber(host.Agent))).Value,
+        Assert.IsInstanceOfType<RealtimeSubscriptionRefused>(host.Registry().Connect(new TicketFlow.Realtime.Testing.RecordingConnection("agent-1", new AgentSubscriber(host.Agent))).Value,
             "Connection ids are unique per node.");
         Assert.IsTrue(host.Registry().Unsubscribe("agent-1", new ConversationTopic(host.Scope, conversation)));
         Assert.IsFalse(host.Registry().Unsubscribe("agent-1", new ConversationTopic(host.Scope, conversation)));

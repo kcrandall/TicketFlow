@@ -72,7 +72,8 @@ public sealed class InMemoryAssistStore : IAssistStore
         }
     }
 
-    public Task<AssistUsageRecord?> SettleAsync(TicketScope scope, Guid id, AssistUsageState state, AssistUsage value, DateTimeOffset completedAt, CancellationToken cancellationToken = default)
+    public Task<AssistUsageRecord?> SettleAsync(TicketScope scope, Guid id, AssistUsageState state, AssistUsage value, DateTimeOffset completedAt, bool estimated = false,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(value);
@@ -86,9 +87,25 @@ public sealed class InMemoryAssistStore : IAssistStore
             var index = records.FindIndex(record => record.Id == id);
             if (index < 0 || records[index].State != AssistUsageState.Reserved)
                 return Task.FromResult<AssistUsageRecord?>(null);
-            var settled = records[index].Settle(state, value, completedAt);
+            var settled = records[index].Settle(state, value, completedAt, estimated);
             records[index] = settled;
             return Task.FromResult<AssistUsageRecord?>(settled);
+        }
+    }
+
+    public Task<int> SweepReservationsAsync(DateTimeOffset createdBefore, DateTimeOffset completedAt, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, AssistLimits.MaximumPurgeBatch);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            var stale = usage.Values.SelectMany(records => records.Select((record, index) => (records, record, index)))
+                .Where(entry => entry.record.State == AssistUsageState.Reserved && entry.record.CreatedAt < createdBefore)
+                .OrderBy(entry => entry.record.CreatedAt).Take(limit).ToList();
+            foreach (var (records, record, index) in stale)
+                records[index] = record.Settle(AssistUsageState.Failed, AssistUsage.Zero, completedAt, estimated: true);
+            return Task.FromResult(stale.Count);
         }
     }
 
@@ -113,7 +130,8 @@ public sealed class InMemoryAssistStore : IAssistStore
                 .OrderBy(group => group.Key.Feature).ThenBy(group => group.Key.Model, StringComparer.Ordinal)
                 .Select(group => new AssistUsageTotal(group.Key.Feature, group.Key.Model, group.LongCount(), group.LongCount(record => record.State == AssistUsageState.Failed),
                     group.Sum(record => record.Usage.InputTokens), group.Sum(record => record.Usage.OutputTokens), group.Sum(record => record.Usage.CacheReadInputTokens),
-                    group.Sum(record => record.Usage.CacheCreationInputTokens), group.Where(record => record.State == AssistUsageState.Reserved).Sum(record => record.ReservedTokens)))
+                    group.Sum(record => record.Usage.CacheCreationInputTokens), group.Where(record => record.State == AssistUsageState.Reserved).Sum(record => record.ReservedTokens),
+                    group.Where(record => record.Estimated).Sum(record => record.ReservedTokens)))
                 .ToList();
             return Task.FromResult(new AssistUsageSummary(from, to, totals));
         }

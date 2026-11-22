@@ -82,6 +82,18 @@ public interface IAssistChatClientFactory
     IChatClient GetChatClient(AssistChatRequest request);
 }
 
+/// <summary>Dependency-injection keys for host-supplied chat clients.</summary>
+public static class AssistChatClients
+{
+    /// <summary>
+    /// The key of a host-registered keyed <see cref="IChatClient"/> used as the base client for every model of
+    /// <paramref name="provider"/> (for example <c>services.AddKeyedSingleton&lt;IChatClient&gt;(AssistChatClients.ServiceKey("claude"), ...)</c>).
+    /// The model is selected per request through <see cref="ChatOptions.ModelId"/>; the host owns and disposes the client.
+    /// </summary>
+    public static string ServiceKey(string provider) =>
+        "ticketflow.assist.chat:" + AssistText.RequireToken(provider, AssistModelDefinition.MaximumIdLength, nameof(provider), "Provider names");
+}
+
 /// <summary>
 /// A model provider (for example Claude). Base clients are cached per provider model by the factory. Provider clients must not log
 /// prompts, outputs or credentials, and must surface provider failures as <see cref="AssistProviderException"/>.
@@ -148,14 +160,23 @@ public enum AssistProviderFailure
 /// </summary>
 public sealed class AssistProviderException : Exception
 {
-    public AssistProviderException(AssistProviderFailure failure, bool retryable, int? statusCode = null, TimeSpan? retryAfter = null, Exception? innerException = null)
+    public AssistProviderException(AssistProviderFailure failure, bool retryable, int? statusCode = null, TimeSpan? retryAfter = null, Exception? innerException = null,
+        bool tokensMayHaveBeenConsumed = true)
         : base($"The assistant provider failed: {failure}.", innerException)
     {
         Failure = failure;
         Retryable = retryable;
         StatusCode = statusCode;
         RetryAfter = retryAfter;
+        TokensMayHaveBeenConsumed = tokensMayHaveBeenConsumed;
     }
+
+    /// <summary>
+    /// False only when the provider provably consumed nothing: the request was never sent (for example no API key) or the provider
+    /// answered with an error status. Ambiguous failures (timeouts, cancellation or network errors after sending, unreadable success
+    /// responses) are true, and usage is then charged at the reserved estimate.
+    /// </summary>
+    public bool TokensMayHaveBeenConsumed { get; }
 
     public AssistProviderFailure Failure { get; }
     public bool Retryable { get; }

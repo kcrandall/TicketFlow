@@ -209,6 +209,50 @@ public sealed class VisitorFlowTests
     }
 
     [TestMethod]
+    public async Task RevokedSessionsReceiveNoPushesAndNoAgentTyping()
+    {
+        await using var host = await CreateAsync();
+        var grant = await host.StartAsync();
+        var visitor = host.ConnectVisitor(grant.Context, "visitor-1");
+        var accepted = Value(await host.Visitors.SendMessageAsync(grant.Context, new VisitorMessageDraft("c1", "Hi")));
+        await host.Host.DispatchAsync();
+        visitor.Clear();
+
+        var sessions = host.Host.Services.GetRequiredService<ILiveChatSessionStore>();
+        var current = (await sessions.GetAsync(host.Partition, grant.Context.Session.Session.Id))!;
+        Assert.IsInstanceOfType<LiveChatWriteApplied<StoredVisitorSession>>((await sessions.UpdateAsync(host.Scope, current.Session.With(revoked: true), current.Revision)).Value);
+        Assert.IsEmpty(await host.Host.Services.GetServices<IVisitorSessionDirectory>().Single().ListSessionsAsync(host.Scope, accepted.Conversation));
+
+        Assert.IsInstanceOfType<RealtimeActionApplied>((await host.Host.Services.GetRequiredService<IRealtimeAgentActions>().SetTypingAsync(host.Host.Agent, accepted.Conversation, true)).Value);
+        Assert.IsInstanceOfType<ConversationApplied>((await host.Host.Replies.ReplyAsync(host.Host.Agent, accepted.Conversation, new OutgoingMessageDraft("after revoke"))).Value);
+        var run = await host.Host.DispatchAsync();
+        Assert.AreEqual(0, run.Retried + run.DeadLettered, "The reply is still accepted (stored for the record).");
+        Assert.IsEmpty(visitor.Received, "Revoked sessions get no pushes.");
+        Assert.AreEqual(LiveChatRefusal.Unauthenticated, Refusal(await host.Visitors.ReadMessagesAsync(grant.Context, accepted.Conversation)));
+    }
+
+    [TestMethod]
+    public async Task EndingASessionClosesAllItsConnections()
+    {
+        await using var host = await CreateAsync();
+        var grant = await host.StartAsync();
+        var tabA = host.ConnectVisitor(grant.Context, "tab-a");
+        var tabB = host.ConnectVisitor(grant.Context, "tab-b");
+        var other = await host.StartAsync();
+        var otherTab = host.ConnectVisitor(other.Context, "other");
+
+        Assert.IsTrue(Value(await host.Visitors.EndSessionAsync(grant.Context)));
+        Assert.IsNotNull(tabA.Events<VisitorSessionEndedEvent>().SingleOrDefault());
+        Assert.IsNotNull(tabB.Events<VisitorSessionEndedEvent>().SingleOrDefault());
+        Assert.IsTrue(tabA.ClosedByServer && tabB.ClosedByServer);
+        Assert.IsEmpty(host.Registry.Topics("tab-a"));
+        Assert.IsEmpty(host.Registry.Topics("tab-b"));
+        Assert.IsFalse(otherTab.ClosedByServer);
+        Assert.HasCount(1, host.Registry.Topics("other"));
+        Assert.AreEqual(LiveChatRefusal.Unauthenticated, Refusal(await host.Visitors.SendMessageAsync(grant.Context, new VisitorMessageDraft("c9", "still there?"))));
+    }
+
+    [TestMethod]
     public void UnsafeFileNamesAreRejected()
     {
         Assert.AreEqual("a.png", LiveChatVisitorService.SafeFileName("C:\\Users\\x\\a.png"));

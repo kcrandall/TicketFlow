@@ -12,6 +12,8 @@ adapter.
   is registered for workspaces that opt in.
 
 ```csharp
+using TicketFlow.Assist.Providers.Claude;
+
 builder.AddAssist().AddClaudeAssist(options => options.GenerationModel = "claude-sonnet-5-5");
 // API key: options.ApiKey, configuration "TicketFlow:Assist:Claude:ApiKey" or "ANTHROPIC_API_KEY". Never hard-code it.
 ```

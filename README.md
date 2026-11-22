@@ -6,7 +6,20 @@ TicketFlow provides domain contracts, behavior and replaceable stores that appli
 
 ## Implementation status
 
-Planned and in progress. See the [epic and ticket roadmap](docs/agents/epics/README.md). Nothing is published to NuGet yet.
+Implemented (see the [epic and ticket roadmap](docs/agents/epics/README.md); nothing is published to NuGet yet):
+
+- **Foundation and access control** — scope, identifiers, principals; permissions, roles, scoped grants, conditions, masking, break-glass, decision audit and query filters ([access-control.md](docs/access-control.md)).
+- **Workspaces, inboxes, teams and business calendars** ([workspaces.md](docs/workspaces.md)).
+- **Contacts and identity graph** — verified/claimed identities, masking, reveal, merge/unmerge, export ([contacts.md](docs/contacts.md)).
+- **Conversations and timeline** — revisioned timelines, commands, durable outbox ([conversations.md](docs/conversations.md)).
+- **Channels** — channel runtime, API channel, EnvelopeFlow adapter ([channels.md](docs/channels.md), [envelopeflow-integration.md](docs/envelopeflow-integration.md)).
+- **Live chat and realtime** — live-chat channel, widget, SignalR hubs ([live-chat.md](docs/live-chat.md), [realtime.md](docs/realtime.md)).
+- **Routing and assignment** ([routing.md](docs/routing.md)), **SLA and calendars** ([sla.md](docs/sla.md)), **automation and macros** ([automation.md](docs/automation.md)).
+- **Help center and surveys** ([help-center.md](docs/help-center.md), [surveys.md](docs/surveys.md)) and **assist** ([assist.md](docs/assist.md)).
+- **Hosting** — ASP.NET Core endpoints with OpenAPI, hosted workers with health checks and telemetry, a runnable sample host ([hosting.md](docs/hosting.md)).
+- **IdentityFlow integration** — principal resolution and visitor identity tokens ([identityflow-integration.md](docs/identityflow-integration.md)).
+
+In progress or planned: reporting (E14) and the React/TanStack agent console (E11 T07). In-memory stores are development examples; PostgreSQL stores are the durable implementations.
 
 ## Design choices
 
@@ -33,6 +46,8 @@ Set `TICKETFLOW_TEST_POSTGRES` to an isolated PostgreSQL database to run durable
 - [Architecture and extension boundaries](docs/architecture.md)
 - [Access control model](docs/access-control.md)
 - [Project structure and dependency rules](docs/project-structure.md)
+- [Hosting: endpoints, workers and the sample host](docs/hosting.md)
+- [IdentityFlow integration](docs/identityflow-integration.md)
 - [Agent workflow and review prompts](docs/agents/README.md)
 
 ## License

@@ -15,7 +15,7 @@ namespace TicketFlow.Contacts.Stores.Postgres;
 /// scope (a per-scope head row serializes appenders until commit); search uses keyset pagination over indexed columns with the
 /// translated <see cref="AccessFilter"/> in the same statement. Rows that fail to decode throw.
 /// </summary>
-public sealed partial class PostgresContactStore : IContactStore, IContactAttributeDefinitionStore, IContactAuditSink
+public sealed partial class PostgresContactStore : IContactStore, IContactAttributeDefinitionStore, IContactAuditSink, IContactLinkingStore
 {
     private const string ScopeWhere = "tenant_id=@tenant AND project_id=@project AND environment_id=@environment AND app_id=@app AND workspace_id=@workspace";
     private const string ScopeKey = "tf_key_v1(@tenant,@project,@environment,@app,@workspace)";
@@ -283,8 +283,8 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
 
     private const string AuditInsert = """
         INSERT INTO tf_contact_audit(event_id, tenant_id, project_id, environment_id, app_id, workspace_id, format_version, occurred_at, kind, actor_kind, actor_id,
-            contact_id, related_id, merge_id, count, justification)
-        VALUES(@event, @tenant, @project, @environment, @app, @workspace, 1, @occurred, @kind, @actor_kind, @actor_id, @contact, @related, @merge, @count, @justification)
+            contact_id, related_id, merge_id, count, justification, suggestion_id)
+        VALUES(@event, @tenant, @project, @environment, @app, @workspace, 1, @occurred, @kind, @actor_kind, @actor_id, @contact, @related, @merge, @count, @justification, @suggestion)
         """;
 
     private static void BindAudit(NpgsqlCommand command, ContactAuditEvent auditEvent)
@@ -300,6 +300,7 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
         command.Parameters.Add(new NpgsqlParameter("merge", NpgsqlDbType.Uuid) { Value = (object?)auditEvent.Merge ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter("count", NpgsqlDbType.Integer) { Value = (object?)auditEvent.Count ?? DBNull.Value });
         AddText(command, "justification", auditEvent.Justification);
+        command.Parameters.Add(new NpgsqlParameter("suggestion", NpgsqlDbType.Uuid) { Value = (object?)auditEvent.Suggestion ?? DBNull.Value });
     }
 
     /// <summary>Loads contacts (with identities) by identifier in one scope.</summary>

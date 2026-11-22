@@ -1,0 +1,550 @@
+@inherits UiPageBase
+@using TicketFlow.Assist
+@using TicketFlow.Automation
+@using TicketFlow.Contacts
+@using TicketFlow.Conversations
+@using TicketFlow.Routing
+@using TicketFlow.Sla
+@using TicketFlow.Workspaces
+
+@if (conversation is null)
+{
+    <StatePanel Icon="search-x" Title="Conversation not available" Message="@(missing ?? "It may have been deleted, or you no longer have access to it.")">
+        <BbButton Href="@Url("conversations")" Variant="ButtonVariant.Outline">Back to conversations</BbButton>
+    </StatePanel>
+}
+else
+{
+    var name = ContactName(conversation.Contact);
+    <div class="tf-page-header">
+        <div class="tf-row" style="gap:14px">
+            <BbAvatar Class="tf-avatar-lg"><BbAvatarFallback>@TicketFlowUISession.Initials(name)</BbAvatarFallback></BbAvatar>
+            <div>
+                <h1 class="tf-page-title">@name</h1>
+                <div class="tf-row tf-muted" style="margin-top:4px">
+                    <ChannelBadge Kind="@InboxChannel(conversation.Inbox)" Label="@InboxName(conversation.Inbox)" />
+                    <span>·</span>
+                    <span class="tf-small">Started @UiFormat.Relative(conversation.CreatedAt, Now)</span>
+                    <span>·</span>
+                    <span class="tf-mono">#@conversation.Id.Value</span>
+                </div>
+            </div>
+        </div>
+        <div class="tf-page-header__actions">
+            <StatusBadge Kind="conversation.Status.Kind" />
+            <PriorityBadge Priority="conversation.Priority" ShowNone="true" />
+            <SlaBadge Status="sla" Now="Now" ShowOnTrack="true" />
+            @if (Session.Can(AccessPermissions.ConversationResolve))
+            {
+                @if (conversation.Status.Kind is ConversationStatusKind.Resolved or ConversationStatusKind.Closed)
+                {
+                    <TfForm Action="conversation.status" Revision="conversation.Revision" Class="tf-inline-form">
+                        <input type="hidden" name="status" value="open" />
+                        <BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="rotate-ccw" Size="14" />Reopen</BbButton>
+                    </TfForm>
+                }
+                else
+                {
+                    <TfForm Action="conversation.status" Revision="conversation.Revision" Class="tf-inline-form">
+                        <input type="hidden" name="status" value="resolved" />
+                        <BbButton Type="ButtonType.Submit" Size="ButtonSize.Small"><LucideIcon Name="circle-check" Size="14" />Resolve</BbButton>
+                    </TfForm>
+                }
+            }
+        </div>
+    </div>
+
+    <div class="tf-conversation">
+        <div class="tf-card" id="tf-conversation" data-conversation="@conversation.Id.Value" data-workspace="@Session.Scope.WorkspaceId.Value"
+             data-hub="@(Session.Options.EnableRealtime ? Session.Http.Request.PathBase + Session.Options.RealtimeHubPath : null)" data-users="@UsersJson">
+            @if (lockHolder is not null)
+            {
+                <div class="tf-card__content" style="padding-bottom:0">
+                    <div class="tf-alert tf-alert--warning"><LucideIcon Name="lock" Size="16" Class="tf-alert__icon" /><div class="tf-alert__body"><div class="tf-alert__title">@lockHolder is replying</div><div class="tf-alert__messages" style="padding:0;list-style:none">They hold the reply lock — coordinate before sending.</div></div></div>
+                </div>
+            }
+            @if (viewers.Count > 0)
+            {
+                <div class="tf-card__content tf-row tf-small tf-muted" style="padding-bottom:0"><LucideIcon Name="eye" Size="14" />Also here: @string.Join(", ", viewers)</div>
+            }
+            <div class="tf-timeline" id="tf-timeline">
+                @if (summary is not null)
+                {
+                    <div class="tf-alert tf-alert--info">
+                        <LucideIcon Name="sparkles" Size="16" Class="tf-alert__icon" />
+                        <div class="tf-alert__body">
+                            <div class="tf-alert__title">AI summary</div>
+                            <div class="tf-small" style="margin-top:4px">@summary.Summary</div>
+                            @if (summary.KeyPoints.Count > 0)
+                            {
+                                <ul class="tf-alert__messages">@foreach (var point in summary.KeyPoints) { <li>@point</li> }</ul>
+                            }
+                            @if (summary.NextStep is { } step)
+                            {
+                                <div class="tf-small" style="margin-top:6px"><strong>Next step:</strong> @step</div>
+                            }
+                        </div>
+                    </div>
+                }
+                @{ DateOnly? day = null; }
+                @foreach (var item in timeline)
+                {
+                    var current = DateOnly.FromDateTime(item.Event.OccurredAt.UtcDateTime);
+                    if (day != current)
+                    {
+                        day = current;
+                        <div class="tf-day">@DayLabel(item.Event.OccurredAt)</div>
+                    }
+                    @switch (item.Event.Event.Value)
+                    {
+                        case MessageEvent message:
+                            var outgoing = message.Direction == MessageDirection.Outgoing;
+                            var author = message.Sender.Value is ContactParty ? name : ActorName(item.Event.Actor);
+                            <div class="tf-msg @(outgoing ? "tf-msg--out" : "tf-msg--in")">
+                                <BbAvatar Size="AvatarSize.Small" Class="tf-avatar-xs"><BbAvatarFallback>@TicketFlowUISession.Initials(author)</BbAvatarFallback></BbAvatar>
+                                <div class="tf-msg__body">
+                                    <div class="tf-msg__meta">
+                                        <strong>@author</strong><span>@item.Event.OccurredAt.ToString("HH:mm", CultureInfo.InvariantCulture)</span>
+                                        @if (outgoing && message.Delivery.State.ToString() is "Failed")
+                                        {
+                                            <span class="tf-msg__failed" title="Delivery failed@(message.Delivery.FailureCode is { } code ? $": {code}" : "")"><LucideIcon Name="circle-alert" Size="12" /></span>
+                                        }
+                                    </div>
+                                    <div class="tf-msg__bubble">@message.Body</div>
+                                    @if (message.Attachments.Count > 0)
+                                    {
+                                        <div class="tf-row tf-small tf-muted" style="margin-top:4px">@foreach (var attachment in message.Attachments) { <span class="tf-badge"><LucideIcon Name="paperclip" Size="12" />@attachment.FileName</span> }</div>
+                                    }
+                                </div>
+                            </div>
+                            break;
+                        case NoteEvent note:
+                            var noteAuthor = ActorName(item.Event.Actor);
+                            <div class="tf-msg tf-msg--out tf-msg--note">
+                                <BbAvatar Size="AvatarSize.Small" Class="tf-avatar-xs"><BbAvatarFallback>@TicketFlowUISession.Initials(noteAuthor)</BbAvatarFallback></BbAvatar>
+                                <div class="tf-msg__body">
+                                    <div class="tf-msg__meta"><LucideIcon Name="sticky-note" Size="12" /><strong>@noteAuthor</strong><span>private note · @item.Event.OccurredAt.ToString("HH:mm", CultureInfo.InvariantCulture)</span></div>
+                                    <div class="tf-msg__bubble">@note.Body</div>
+                                </div>
+                            </div>
+                            break;
+                        default:
+                            if (Describe(item.Event) is { } text)
+                            {
+                                <div class="tf-event" title="@UiFormat.Short(item.Event.OccurredAt)"><LucideIcon Name="@text.Icon" Size="12" />@text.Text</div>
+                            }
+                            break;
+                    }
+                }
+                @if (timeline.Count == 0)
+                {
+                    <EmptyState Icon="message-square" Title="No messages yet" />
+                }
+            </div>
+            <div class="tf-typing" id="tf-typing" aria-live="polite"></div>
+            @if (Session.CanAny(AccessPermissions.ConversationReply, AccessPermissions.NoteWrite) && conversation.Status.Kind != ConversationStatusKind.Closed)
+            {
+                <TfForm Action="conversation.send" Revision="conversation.Revision" Class="tf-composer" Id="tf-composer">
+                    <div class="tf-composer__bar">
+                        <div class="tf-composer__tabs" role="radiogroup" aria-label="Message type">
+                            @if (Session.Can(AccessPermissions.ConversationReply))
+                            {
+                                <label><input type="radio" name="kind" value="reply" checked="@(Session.FormValue("kind", "reply") == "reply")" />Reply</label>
+                            }
+                            @if (Session.Can(AccessPermissions.NoteWrite))
+                            {
+                                <label><input type="radio" name="kind" value="note" checked="@(Session.FormValue("kind", Session.Can(AccessPermissions.ConversationReply) ? "reply" : "note") == "note")" />Private note</label>
+                            }
+                        </div>
+                        <span class="tf-spacer"></span>
+                        @if (canned.Count > 0)
+                        {
+                            <select name="canned" class="tf-select tf-select--sm" style="width:auto" aria-label="Canned response">
+                                <option value="">Canned response…</option>
+                                @foreach (var response in canned)
+                                {
+                                    <option value="@response.Id.Value">/@response.Response.Shortcut — @response.Response.Title</option>
+                                }
+                            </select>
+                            <button type="submit" name="_action" value="conversation.canned" class="tf-button tf-button--outline tf-button--sm" formnovalidate>Insert</button>
+                        }
+                    </div>
+                    <textarea name="body" class="tf-textarea" placeholder="Write a reply… Shift+Enter for a new line" aria-label="Message" maxlength="20000">@(draft ?? Session.FormValue("body", null))</textarea>
+                    <div class="tf-composer__bar">
+                        @if (assistAvailable)
+                        {
+                            <button type="submit" name="_action" value="conversation.assist.draft" class="tf-button tf-button--ghost tf-button--sm" formnovalidate><LucideIcon Name="sparkles" Size="14" />Draft with AI</button>
+                            <button type="submit" name="_action" value="conversation.assist.summary" class="tf-button tf-button--ghost tf-button--sm" formnovalidate><LucideIcon Name="text-quote" Size="14" />Summarize</button>
+                        }
+                        <span class="tf-spacer"></span>
+                        @if (Session.Can(AccessPermissions.ConversationResolve))
+                        {
+                            <label class="tf-check tf-small"><input type="checkbox" name="resolve" />Resolve after sending</label>
+                        }
+                        <BbButton Type="ButtonType.Submit"><LucideIcon Name="send" Size="14" />Send</BbButton>
+                    </div>
+                </TfForm>
+            }
+        </div>
+
+        <div class="tf-card">
+            <div class="tf-side-section">
+                <div class="tf-side-section__title">Details</div>
+                @if (Session.Can(AccessPermissions.ConversationAssign))
+                {
+                    <TfForm Action="conversation.assign" Revision="conversation.Revision" Class="tf-field">
+                        <label class="tf-label" for="tf-assignee">Assignee</label>
+                        <div class="tf-side-form">
+                            <select id="tf-assignee" name="assignee" class="tf-select tf-select--sm">
+                                <option value="">Unassigned</option>
+                                @foreach (var agent in agents)
+                                {
+                                    <option value="@agent" selected="@(conversation.Assignee?.Value == agent)">@Session.UserName(new UserId(agent))</option>
+                                }
+                            </select>
+                            <button class="tf-button tf-button--outline tf-button--sm" type="submit">Save</button>
+                        </div>
+                    </TfForm>
+                    <TfForm Action="conversation.team" Revision="conversation.Revision" Class="tf-field">
+                        <label class="tf-label" for="tf-team">Team</label>
+                        <div class="tf-side-form">
+                            <select id="tf-team" name="team" class="tf-select tf-select--sm">
+                                <option value="">No team</option>
+                                @foreach (var team in Teams)
+                                {
+                                    <option value="@team.Id.Value" selected="@(conversation.Team == team.Id)">@team.Name</option>
+                                }
+                            </select>
+                            <button class="tf-button tf-button--outline tf-button--sm" type="submit">Save</button>
+                        </div>
+                    </TfForm>
+                }
+                else
+                {
+                    <dl class="tf-dl"><dt>Assignee</dt><dd>@Session.UserName(conversation.Assignee)</dd><dt>Team</dt><dd>@TeamName(conversation.Team)</dd></dl>
+                }
+                @if (Session.Can(AccessPermissions.ConversationManage))
+                {
+                    <TfForm Action="conversation.priority" Revision="conversation.Revision" Class="tf-field">
+                        <label class="tf-label" for="tf-priority">Priority</label>
+                        <div class="tf-side-form">
+                            <select id="tf-priority" name="priority" class="tf-select tf-select--sm">
+                                @foreach (var priority in Enum.GetValues<ConversationPriority>())
+                                {
+                                    <option value="@priority" selected="@(conversation.Priority == priority)">@(priority == ConversationPriority.None ? "No priority" : priority.ToString())</option>
+                                }
+                            </select>
+                            <button class="tf-button tf-button--outline tf-button--sm" type="submit">Save</button>
+                        </div>
+                    </TfForm>
+                }
+                @if (Session.Can(AccessPermissions.ConversationResolve) && conversation.Status.Kind is ConversationStatusKind.Open or ConversationStatusKind.Pending)
+                {
+                    <TfForm Action="conversation.status" Revision="conversation.Revision" Class="tf-field">
+                        <label class="tf-label" for="tf-status">Status</label>
+                        <div class="tf-side-form">
+                            <select id="tf-status" name="status" class="tf-select tf-select--sm">
+                                <option value="open" selected="@(conversation.Status.Kind == ConversationStatusKind.Open)">Open</option>
+                                <option value="pending" selected="@(conversation.Status.Kind == ConversationStatusKind.Pending)">Pending</option>
+                                <option value="snooze-1h">Snooze 1 hour</option>
+                                <option value="snooze-tomorrow">Snooze until tomorrow</option>
+                                <option value="resolved">Resolved</option>
+                                <option value="closed">Closed</option>
+                            </select>
+                            <button class="tf-button tf-button--outline tf-button--sm" type="submit">Save</button>
+                        </div>
+                    </TfForm>
+                }
+            </div>
+
+            <div class="tf-side-section">
+                <div class="tf-side-section__title">Labels</div>
+                <div class="tf-row">
+                    @foreach (var label in conversation.Labels)
+                    {
+                        @if (Session.Can(AccessPermissions.ConversationManage))
+                        {
+                            <TfForm Action="conversation.labels.remove" Revision="conversation.Revision" Class="tf-inline-form">
+                                <input type="hidden" name="label" value="@label.Value" />
+                                <button type="submit" class="tf-label-chip" style="--tf-label-hue:@Hue(label.Value);cursor:pointer" title="Remove label">@label.Value ✕</button>
+                            </TfForm>
+                        }
+                        else
+                        {
+                            <LabelChips Labels="[label.Value]" />
+                        }
+                    }
+                    @if (conversation.Labels.Count == 0)
+                    {
+                        <span class="tf-small tf-muted">No labels</span>
+                    }
+                </div>
+                @if (Session.Can(AccessPermissions.ConversationManage))
+                {
+                    <TfForm Action="conversation.labels.add" Revision="conversation.Revision" Class="tf-side-form">
+                        <input name="label" class="tf-input tf-input--sm" placeholder="Add label" aria-label="Add label" maxlength="64" />
+                        <button class="tf-button tf-button--outline tf-button--sm" type="submit">Add</button>
+                    </TfForm>
+                }
+            </div>
+
+            @if (macros.Count > 0 && Session.Can(AutomationPermissions.MacroRun))
+            {
+                <div class="tf-side-section">
+                    <div class="tf-side-section__title">Macros</div>
+                    <TfForm Action="conversation.macro" Class="tf-side-form">
+                        <select name="macro" class="tf-select tf-select--sm" aria-label="Macro">
+                            @foreach (var macro in macros)
+                            {
+                                <option value="@macro.Id.Value">@macro.Macro.Name</option>
+                            }
+                        </select>
+                        <button class="tf-button tf-button--outline tf-button--sm" type="submit"><LucideIcon Name="zap" Size="14" />Run</button>
+                    </TfForm>
+                </div>
+            }
+
+            @if (sla is { Clocks.Count: > 0 })
+            {
+                <div class="tf-side-section">
+                    <div class="tf-side-section__title">SLA · @(sla.RuleName ?? "Policy")</div>
+                    @foreach (var clock in sla.Clocks.Where(clock => clock.State != SlaClockState.Completed || clock.Breached).Take(4))
+                    {
+                        var percent = clock.Target.TotalSeconds > 0 ? Math.Min(100, clock.Elapsed.TotalSeconds / clock.Target.TotalSeconds * 100) : 0;
+                        <div class="tf-stack tf-stack--sm" style="gap:4px">
+                            <div class="tf-row tf-row--between tf-small"><span>@UiFormat.Token(clock.Metric)</span>
+                                <span class="@(clock.Breached ? "tf-badge tf-badge--destructive" : clock.AtRisk ? "tf-badge tf-badge--warning" : "tf-muted")">
+                                    @(clock.Breached ? $"Breached {UiFormat.Relative(clock.BreachedAt, Now)}" : clock.DueAt is { } due ? $"Due {UiFormat.Relative(due, Now)}" : clock.State.ToString())
+                                </span>
+                            </div>
+                            <div class="tf-meter @(clock.Breached ? "tf-meter--destructive" : clock.AtRisk ? "tf-meter--warning" : null)"><span style="width:@percent.ToString("0", CultureInfo.InvariantCulture)%"></span></div>
+                            <div class="tf-small tf-muted">@UiFormat.Duration(clock.Elapsed) of @UiFormat.Duration(clock.Target)</div>
+                        </div>
+                    }
+                    @if (!sla.Clocks.Any(clock => clock.State != SlaClockState.Completed || clock.Breached))
+                    {
+                        <div class="tf-small tf-muted">All targets met.</div>
+                    }
+                </div>
+            }
+
+            @if (conversation.Attributes.Count > 0)
+            {
+                <div class="tf-side-section">
+                    <div class="tf-side-section__title">Attributes</div>
+                    <dl class="tf-dl">
+                        @foreach (var field in conversation.Attributes)
+                        {
+                            <dt>@field.Key</dt>
+                            <dd>@(field.Masked ? "••••••" : UiText.Attribute(field.Value))</dd>
+                        }
+                    </dl>
+                </div>
+            }
+
+            @if (contact is not null)
+            {
+                <div class="tf-side-section">
+                    <div class="tf-side-section__title">Contact</div>
+                    <div class="tf-contact-head">
+                        <BbAvatar Size="AvatarSize.Small"><BbAvatarFallback>@TicketFlowUISession.Initials(name)</BbAvatarFallback></BbAvatar>
+                        <div class="tf-list__main">
+                            <a class="tf-list__title" href="@Url($"contacts/{contact.Id.Value}")">@name</a>
+                            <span class="tf-list__meta">@(contact.Profile.Company ?? "No company")</span>
+                        </div>
+                    </div>
+                    <dl class="tf-dl">
+                        @foreach (var identity in contact.Identities)
+                        {
+                            <dt>@identity.Kind</dt>
+                            <dd>
+                                @if (identity.Masked)
+                                {
+                                    <span class="tf-masked">•••• ••••</span>
+                                }
+                                else
+                                {
+                                    @identity.Value
+                                }
+                            </dd>
+                        }
+                        @foreach (var field in contact.Attributes.Take(4))
+                        {
+                            <dt>@field.Key</dt>
+                            <dd>@(field.Masked ? "••••••" : UiText.Attribute(field.Value))</dd>
+                        }
+                    </dl>
+                    @if (contact.Labels.Count > 0)
+                    {
+                        <div class="tf-row"><LabelChips Labels="contact.Labels.Select(label => label.Value)" /></div>
+                    }
+                </div>
+            }
+            @if (participants.Count > 0)
+            {
+                <div class="tf-side-section">
+                    <div class="tf-side-section__title">Participants</div>
+                    <div class="tf-row">@foreach (var participant in participants) { <UserChip Name="@participant" /> }</div>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private ConversationView? conversation;
+    private string? missing;
+    private readonly List<TimelineEventView> timeline = [];
+    private SlaStatusView? sla;
+    private ContactView? contact;
+    private List<string> agents = [];
+    private List<StoredMacro> macros = [];
+    private List<StoredCannedResponse> canned = [];
+    private List<string> participants = [];
+    private List<string> viewers = [];
+    private string? lockHolder;
+    private bool assistAvailable;
+    private AssistSummary? summary;
+    private string? draft;
+
+    /// <summary>Page state set by assist and canned-response actions (rendered once, never stored).</summary>
+    public sealed record ComposerState(string? Draft, AssistSummary? Summary);
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<IConversationService>() is not { } service || Id is null)
+            return;
+        ConversationId id;
+        try
+        {
+            id = new ConversationId(Id);
+        }
+        catch (ArgumentException)
+        {
+            return;
+        }
+        switch (await service.GetAsync(Actor, id, Aborted))
+        {
+            case ConversationView view:
+                conversation = view;
+                break;
+            case ConversationNotFound:
+                return;
+            case ConversationRefused refused:
+                missing = refused.Reason == ConversationRefusal.Forbidden ? "You don't have access to this conversation." : null;
+                return;
+        }
+        var loaded = conversation!;
+        await LoadWorkspaceAsync();
+        long after = 0;
+        for (var page = 0; page < 10; page++)
+        {
+            if (await service.ReadTimelineAsync(Actor, id, after, 100, Aborted) is not TimelinePage events)
+                break;
+            timeline.AddRange(events.Events);
+            if (events.NextAfterSequence is not { } next)
+                break;
+            after = next;
+        }
+        if (Service<ISlaService>() is { } slaService && await slaService.GetStatusAsync(Actor, id, Aborted) is SlaValue<SlaStatusView> status)
+            sla = status.Value;
+        if (Service<IContactService>() is { } contacts && await contacts.GetAsync(Actor, loaded.Contact, Aborted) is ContactApplied<ContactView> found)
+            contact = found.Value;
+        await LoadContactsAsync([loaded.Contact]);
+
+        var people = new HashSet<string>(StringComparer.Ordinal);
+        if (Service<IAgentAvailabilityService>() is { } availability && await availability.ListAsync(Actor, null, 100, Aborted) is RoutingValue<IReadOnlyList<StoredAgentProfile>> profiles)
+            foreach (var profile in profiles.Value)
+                people.Add(profile.Agent.Value);
+        if (Service<ITeamService>() is { } teams)
+            foreach (var team in Teams.Take(20))
+                if (await teams.GetAsync(Actor, team.Id, Aborted) is WorkspaceSucceeded<StoredTeam> stored)
+                    foreach (var member in stored.Value.Team.Members)
+                        people.Add(member.Value);
+        if (loaded.Assignee is { } assignee)
+            people.Add(assignee.Value);
+        if (Session.UserId is { } me)
+            people.Add(me.Value);
+        agents = [.. people.Order(StringComparer.Ordinal)];
+
+        if (Service<IMacroService>() is { } macroService && await macroService.ListAsync(Actor, Aborted) is AutomationValue<IReadOnlyList<StoredMacro>> macroList)
+            macros = [.. macroList.Value];
+        if (Service<ICannedResponseService>() is { } cannedService && await cannedService.ListAsync(Actor, new CannedResponseQuery(null, null, 50), Aborted) is AutomationValue<CannedResponsePage> cannedPage)
+            canned = [.. cannedPage.Value.Responses];
+        if (Service<IConversationCollisionService>() is { } collisions)
+        {
+            if (await collisions.GetReplyLockAsync(Actor, id, Aborted) is RoutingValue<ReplyLock?> { Value: { } held } && held.Holder != Session.UserId)
+                lockHolder = held.Holder.Value;
+            if (await collisions.ListActivityAsync(Actor, id, Aborted) is RoutingValue<IReadOnlyList<ConversationPresence>> presence)
+                viewers = [.. presence.Value.Where(item => item.User != Session.UserId).Select(item => item.User.Value)];
+        }
+        assistAvailable = Session.Has<IAssistService>() && Session.Can(AssistPermissions.Use);
+        if (Session.PageStateAs<ComposerState>() is { } state)
+        {
+            draft = state.Draft;
+            summary = state.Summary;
+        }
+        var users = timeline.Select(item => item.Event.Actor).Where(actor => actor.Kind == AccessActorKind.User).Select(actor => (UserId?)new UserId(actor.Id))
+            .Concat(agents.Select(agent => (UserId?)new UserId(agent))).Concat(loaded.Participants.Select(user => (UserId?)user)).Concat(viewers.Select(user => (UserId?)new UserId(user)));
+        await Session.LoadUsersAsync(users);
+        participants = [.. loaded.Participants.Select(user => Session.UserName(user))];
+        viewers = [.. viewers.Select(user => Session.UserName(new UserId(user)))];
+        if (lockHolder is not null)
+            lockHolder = Session.UserName(new UserId(lockHolder));
+    }
+
+    private string UsersJson => System.Text.Json.JsonSerializer.Serialize(agents.ToDictionary(agent => agent, agent => Session.UserName(new UserId(agent))));
+
+    private string ActorName(AccessActor actor) => actor.Kind switch
+    {
+        AccessActorKind.User => Session.UserName(new UserId(actor.Id)),
+        AccessActorKind.ApiClient => actor.Id switch
+        {
+            "automation-worker" => "Automation",
+            "sla-worker" => "SLA monitor",
+            "ticketflow-routing" => "Routing",
+            "channels" => "Channel",
+            var other => other,
+        },
+        AccessActorKind.Automation => "Automation",
+        _ => "System",
+    };
+
+    private (string Icon, string Text)? Describe(TimelineEvent item)
+    {
+        var who = ActorName(item.Actor);
+        return item.Event.Value switch
+        {
+            AssignmentChanged change => ("user-check", change.Current is { } user ? $"{who} assigned {Session.UserName(user)}" : $"{who} unassigned the conversation"),
+            TeamChanged change => ("users", change.Current is { } team ? $"{who} moved to {TeamName(team)}" : $"{who} removed the team"),
+            StatusChanged change => (change.Current.Kind switch { ConversationStatusKind.Resolved => "circle-check", ConversationStatusKind.Snoozed => "alarm-clock", _ => "circle-dot" },
+                $"{who} marked as {UiFormat.Status(change.Current.Kind).ToLowerInvariant()}"),
+            PriorityChanged change => ("signal-high", $"{who} set priority to {change.Current.ToString().ToLowerInvariant()}"),
+            LabelsChanged change => ("tag", change.Added.Count > 0 ? $"{who} added {string.Join(", ", change.Added.Select(label => label.Value))}" : $"{who} removed {string.Join(", ", change.Removed.Select(label => label.Value))}"),
+            AttributeChanged change => ("list", $"{who} updated {change.Key}"),
+            ParticipantChanged change => ("user-plus", $"{who} updated participants"),
+            ContactChanged => ("merge", "Contact merged"),
+            SystemEvent system => ("info", system.Detail ?? system.Code),
+            ExtensionEvent extension => extension.Kind switch
+            {
+                "sla.breached" => ("alarm-clock-off", "SLA target breached"),
+                "sla.warning" => ("alarm-clock", "SLA target at risk"),
+                "sla.met" => ("shield-check", "SLA target met"),
+                "sla.applied" or "automation.applied" => null,
+                var kind => ("puzzle", kind),
+            },
+            _ => null,
+        };
+    }
+
+    private string DayLabel(DateTimeOffset instant)
+    {
+        var date = instant.UtcDateTime.Date;
+        var today = Now.UtcDateTime.Date;
+        return date == today ? "Today" : date == today.AddDays(-1) ? "Yesterday" : instant.ToString("dddd, MMM d", CultureInfo.InvariantCulture);
+    }
+
+    private static int Hue(string label) => (int)((uint)label.Aggregate(17, (hash, character) => hash * 31 + character) % 360);
+}

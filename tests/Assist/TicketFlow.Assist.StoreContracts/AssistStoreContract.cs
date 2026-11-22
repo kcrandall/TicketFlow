@@ -102,6 +102,93 @@ public static class AssistStoreContract
         Assert.AreEqual(1000, summary.Totals.Single().ReservedTokens);
     }
 
+    /// <summary>Estimated settlement charges the reservation; partial and full releases adjust the day's counted tokens.</summary>
+    public static async Task VerifyEstimatedSettlementAsync(IAssistStore store, IAssistStore competing)
+    {
+        var scope = TestScopes.Create(workspaceId: "estimate-" + Guid.NewGuid().ToString("N"));
+        var ambiguous = Reservation(Noon, 400);
+        var released = Reservation(Noon.AddSeconds(1), 400);
+        var actual = Reservation(Noon.AddSeconds(2), 200);
+        foreach (var record in new[] { ambiguous, released, actual })
+            Assert.AreEqual("reserved", R(await store.ReserveAsync(scope, record, 1000, 100)));
+        Assert.AreEqual("exceeded:DailyTokens", R(await store.ReserveAsync(scope, Reservation(Noon.AddSeconds(3), 1), 1000, 100)));
+
+        var charged = (await competing.SettleAsync(scope, ambiguous.Id, AssistUsageState.Failed, AssistUsage.Zero, Noon.AddSeconds(5), estimated: true))!;
+        Assert.IsTrue(charged.Estimated);
+        Assert.AreEqual(400, charged.CountedTokens);
+        Assert.IsTrue((await store.GetUsageAsync(scope, ambiguous.Id))!.Estimated);
+        Assert.AreEqual("exceeded:DailyTokens", R(await store.ReserveAsync(scope, Reservation(Noon.AddSeconds(6), 1), 1000, 100)), "estimates stay charged");
+
+        await competing.SettleAsync(scope, released.Id, AssistUsageState.Failed, AssistUsage.Zero, Noon.AddSeconds(7));
+        await competing.SettleAsync(scope, actual.Id, AssistUsageState.Completed, new AssistUsage(50, 50), Noon.AddSeconds(8));
+        // Counted now: 400 (estimate) + 0 (released) + 100 (actual) = 500.
+        Assert.AreEqual("reserved", R(await store.ReserveAsync(scope, Reservation(Noon.AddSeconds(9), 500), 1000, 100)));
+        Assert.AreEqual("exceeded:DailyTokens", R(await competing.ReserveAsync(scope, Reservation(Noon.AddSeconds(10), 1), 1000, 100)));
+
+        var summary = await store.SummarizeAsync(scope, Noon.AddHours(-1), Noon.AddHours(1));
+        Assert.AreEqual(400, summary.Totals.Single().EstimatedTokens);
+        Assert.AreEqual(500, summary.Totals.Single().ReservedTokens);
+    }
+
+    /// <summary>Abandoned reservations (any scope) are settled as Failed at their estimate, oldest first, in bounded batches.</summary>
+    public static async Task VerifySweepAsync(IAssistStore store, IAssistStore competing)
+    {
+        var epoch = new DateTimeOffset(2001, 1, 1, 8, 0, 0, TimeSpan.Zero);
+        var first = TestScopes.Create(workspaceId: "sweep-a-" + Guid.NewGuid().ToString("N"));
+        var second = TestScopes.Create(workspaceId: "sweep-b-" + Guid.NewGuid().ToString("N"));
+        var stale = new[] { (first, Reservation(epoch, 300)), (second, Reservation(epoch.AddMinutes(1), 200)), (first, Reservation(epoch.AddMinutes(2), 100)) };
+        var fresh = Reservation(epoch.AddHours(2), 50);
+        foreach (var (scope, record) in stale)
+            Assert.AreEqual("reserved", R(await store.ReserveAsync(scope, record, 1000, 100)));
+        Assert.AreEqual("reserved", R(await store.ReserveAsync(first, fresh, 1000, 100)));
+
+        var sweptFirst = await competing.SweepReservationsAsync(epoch.AddHours(1), epoch.AddHours(3), 2);
+        Assert.AreEqual(2, sweptFirst, "first sweep");
+        Assert.AreEqual(1, await store.SweepReservationsAsync(epoch.AddHours(1), epoch.AddHours(3), 100));
+        Assert.AreEqual(0, await store.SweepReservationsAsync(epoch.AddHours(1), epoch.AddHours(3), 100));
+        foreach (var (scope, record) in stale)
+        {
+            var swept = (await store.GetUsageAsync(scope, record.Id))!;
+            Assert.AreEqual(AssistUsageState.Failed, swept.State);
+            Assert.IsTrue(swept.Estimated);
+            Assert.AreEqual(record.ReservedTokens, swept.CountedTokens);
+            Assert.AreEqual(epoch.AddHours(3), swept.CompletedAt);
+            Assert.IsNull(await store.SettleAsync(scope, record.Id, AssistUsageState.Completed, new AssistUsage(1, 1), epoch.AddHours(4)), "already settled");
+        }
+        Assert.AreEqual(AssistUsageState.Reserved, (await store.GetUsageAsync(first, fresh.Id))!.State);
+        // Charges are unchanged by the sweep: 300 + 100 + 50 counted in the first workspace.
+        Assert.AreEqual("exceeded:DailyTokens", R(await store.ReserveAsync(first, Reservation(epoch.AddHours(5), 551), 1000, 100)));
+        Assert.AreEqual("reserved", R(await store.ReserveAsync(first, Reservation(epoch.AddHours(5), 550), 1000, 100)));
+    }
+
+    /// <summary>Concurrent reservations and settlements across two clients never let the counted tokens exceed the limit.</summary>
+    public static async Task VerifyConcurrentReserveAndSettleAsync(IAssistStore store, IAssistStore competing)
+    {
+        var scope = TestScopes.Create(workspaceId: "mixed-" + Guid.NewGuid().ToString("N"));
+        var reserved = new System.Collections.Concurrent.ConcurrentBag<AssistUsageRecord>();
+        async Task WorkerAsync(IAssistStore client, int worker)
+        {
+            for (var index = 0; index < 10; index++)
+            {
+                var record = Reservation(Noon.AddMilliseconds(worker * 100 + index), 100);
+                if ((await client.ReserveAsync(scope, record, 1000, 10_000)).Value is AssistUsageReserved)
+                {
+                    reserved.Add(record);
+                    await client.SettleAsync(scope, record.Id, AssistUsageState.Completed, new AssistUsage(40, 20), Noon.AddMinutes(1));
+                }
+            }
+        }
+        await Task.WhenAll(Enumerable.Range(0, 6).Select(worker => WorkerAsync(worker % 2 == 0 ? store : competing, worker)));
+        var counted = 0L;
+        foreach (var record in reserved)
+            counted += (await store.GetUsageAsync(scope, record.Id))!.CountedTokens;
+        Assert.IsTrue(counted <= 1000, $"counted {counted}");
+        Assert.IsGreaterThan(10, reserved.Count, "settled actual usage (60) below the reservation (100) frees room for more reservations");
+        var remaining = 1000 - counted;
+        Assert.AreEqual(remaining >= 1 ? "reserved" : "exceeded:DailyTokens", R(await store.ReserveAsync(scope, Reservation(Noon.AddMinutes(2), Math.Max(1, remaining)), 1000, 10_000)));
+        Assert.AreEqual("exceeded:DailyTokens", R(await competing.ReserveAsync(scope, Reservation(Noon.AddMinutes(3), 1), 1000, 10_000)));
+    }
+
     public static async Task VerifySummaryAndPurgeAsync(IAssistStore store, IAssistStore competing)
     {
         var scope = TestScopes.Create(workspaceId: "summary-" + Guid.NewGuid().ToString("N"));
@@ -122,7 +209,7 @@ public static class AssistStoreContract
         Assert.AreEqual(1, summaryTotal.Failed);
         Assert.AreEqual(10, summaryTotal.ReservedTokens);
         var triage = summary.Totals[1];
-        Assert.AreEqual(new AssistUsageTotal(AssistFeature.Triage, "model-b", 1, 0, 5, 6, 7, 8, 0), triage);
+        Assert.AreEqual(new AssistUsageTotal(AssistFeature.Triage, "model-b", 1, 0, 5, 6, 7, 8, 0, 0), triage);
         Assert.ThrowsExactly<ArgumentException>(() => store.SummarizeAsync(scope, Noon, Noon.AddDays(93)).GetAwaiter().GetResult());
 
         Assert.AreEqual(1, await store.PurgeUsageAsync(scope, Noon.AddMinutes(-1), 100));

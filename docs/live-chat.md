@@ -72,8 +72,13 @@ Persisted as versioned JSON (`LiveChatCodec`, `{"v":1,...}`, unknown properties 
   Expired (`SessionLifetime`, default 30 days) and revoked sessions fail; the Origin must match the widget.
 - **Rotation**: once the token is older than `TokenRotationInterval` (default 1 day) authentication reports `RotationRecommended`;
   `RotateTokenAsync` issues a new secret, extends the session and keeps the previous hash valid for `TokenRotationGrace` (default
-  2 minutes, half-open) for concurrent tabs. The SignalR visitor hub rotates automatically on connect.
-- `EndSessionAsync` revokes the session (tokens stop working) and pushes `session.ended`.
+  2 minutes, half-open) for concurrent tabs. The SignalR visitor hub rotates automatically on connect. When the reloaded session shows
+  that another tab rotated within `TokenRotationInterval`, rotation is skipped and `VisitorTokenRotated.Token` is `null` (keep the
+  current token), so concurrent tabs do not rotate twice.
+- `EndSessionAsync` revokes the session (tokens stop working) and pushes `session.ended`; every connection of the session receives it
+  and is then disconnected and closed by the realtime registry. Sessions revoked directly in the store (no event) are refused on
+  their next call, and revoked or expired sessions receive no pushes: `LiveChatChannel` and `LiveChatSessionDirectory` skip
+  non-live sessions.
 - Every visitor operation reloads the session and refuses revoked or expired sessions. `VisitorSessionContext` can only be obtained
   from the service. Missing Origins are refused unless `LiveChatOptions.AllowMissingOrigin` (non-browser clients).
 - `ILiveChatSessionStore.PruneExpiredAsync` deletes expired sessions and their links (no hosted worker until E11).
@@ -88,7 +93,8 @@ Persisted as versioned JSON (`LiveChatCodec`, `{"v":1,...}`, unknown properties 
 - A verified session records `VerifiedVisitorIdentity(namespace, value, method, verifiedAt)`; later messages carry a **verified
   `ExternalUser` contact identity** (namespace = the widget's identity namespace for HMAC, the validator's for tokens). Unverified
   visitors are a **claimed `WidgetVisitor` identity** (the visitor id). A session cannot be re-verified as a different identity.
-  Earlier anonymous conversations stay with the anonymous contact (merging is an agent action).
+  When an `IContactLinkingService` is registered (E16), identification links the anonymous visitor contact to the verified account
+  (merging it into an existing account contact so earlier conversations follow); see [identity-linking.md](identity-linking.md).
 
 ## Messages
 
@@ -134,7 +140,13 @@ conversation's contact: identity value as `contact.external-id`, email answers a
 with a token it authenticates (an invalid token returns `unauthenticated`, and the widget starts over). The response carries the
 issued or rotated token, the visitor id, widget state and conversations. Then: `SubmitPrechat`, `Identify("hmac"|"token", ...)`,
 `SendMessage`, `ListConversations`, `FetchMessages`, `Typing`, `MarkRead`, `SearchArticles`, `EndSession`. Tokens are sent in hub
-calls, never in URLs. Hosts should rate-limit the visitor hub and upload endpoint (anonymous session creation).
+calls, never in URLs. `Typing` is throttled per connection and conversation (see realtime.md). Hosts should rate-limit the visitor hub and upload endpoint (anonymous session creation).
+
+## Widget token storage
+
+The web widget keeps the session token in `localStorage` by default (reloads resume the chat). Script injected into the host page
+(XSS) could read it and act as that visitor for the session's lifetime; `tokenStorage: "memory"` keeps it in memory only. See
+`clients/widget/README.md`.
 
 ## Store contracts
 

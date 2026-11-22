@@ -9,8 +9,11 @@ namespace TicketFlow.Assist.Stores.Postgres;
 /// <summary>
 /// Durable PostgreSQL implementation of <see cref="IAssistStore"/> over an application-owned <see cref="NpgsqlDataSource"/>. Tables live
 /// in the data source's current schema and are created only by <see cref="InitializeAsync"/>. Every statement is parameterized and
-/// every key includes the full scope. Reservations serialize per workspace on a transaction-scoped advisory lock so quota and rate
-/// checks cannot be raced; settlement is a conditional update that succeeds once.
+/// every key includes the full scope. Reservations serialize per workspace on a transaction-scoped advisory lock; the daily quota is a
+/// conditional UPSERT on a per-workspace, per-UTC-day counter row (<c>tokens = tokens + n</c> only while within the limit) and the
+/// per-minute limit reads at most <c>limit</c> rows of the last minute, so no check scans a day of usage. Settlement is a
+/// conditional update that succeeds once and adjusts the counter by the difference between actual and reserved tokens in the same
+/// transaction; sweeps settle abandoned reservations at their estimate (counter unchanged).
 /// </summary>
 public sealed class PostgresAssistStore : IAssistStore
 {
@@ -19,8 +22,8 @@ public sealed class PostgresAssistStore : IAssistStore
     private const string UsageKeyWhere = "usage_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@usage::text) AND " + WorkspaceWhere + " AND usage_id=@usage";
     private const string ScopeColumns = "tenant_id, project_id, environment_id, app_id, workspace_id";
     private const string ScopeParameters = "@tenant, @project, @environment, @app, @workspace";
-    private const string UsageColumns = "usage_id, format_version, feature, model, actor_kind, actor_id, conversation_id, state, reserved_tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, completed_at";
-    private const string CountedTokens = "CASE WHEN state = 1 THEN reserved_tokens ELSE input_tokens + output_tokens + cache_read_tokens + cache_write_tokens END";
+    private const string UsageColumns = "usage_id, format_version, feature, model, actor_kind, actor_id, conversation_id, state, reserved_tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, created_at, completed_at, estimated";
+    private const string DayKey = "tf_key_v1(@tenant,@project,@environment,@app,@workspace,(@day::date - DATE '1970-01-01')::text)";
 
     private readonly NpgsqlDataSource source;
 
@@ -87,38 +90,39 @@ public sealed class PostgresAssistStore : IAssistStore
         var dayStart = AssistLimits.DayStart(reservation.CreatedAt);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        // Serializes reservations of one workspace so the per-minute window and the day counter are checked together.
         await LockAsync(connection, transaction, scope, "usage", cancellationToken).ConfigureAwait(false);
-        await using (var totals = new NpgsqlCommand($"""
-            SELECT COALESCE(SUM({CountedTokens}) FILTER (WHERE created_at >= @day_start AND created_at < @day_end), 0)::bigint,
-                   COUNT(*) FILTER (WHERE created_at > @window_start AND created_at <= @now)
-            FROM tf_assist_usage WHERE {ScopeKeyWhere} AND created_at >= LEAST(@day_start, @window_start) AND created_at < GREATEST(@day_end, @now + interval '1 microsecond')
+        await using (var recent = new NpgsqlCommand($"""
+            SELECT created_at FROM tf_assist_usage WHERE {ScopeKeyWhere} AND created_at > @window_start AND created_at <= @now
+            ORDER BY created_at DESC LIMIT @limit
             """, connection, transaction))
         {
-            AddScope(totals, scope);
-            AddTime(totals, "day_start", dayStart);
-            AddTime(totals, "day_end", dayStart.AddDays(1));
-            AddTime(totals, "window_start", reservation.CreatedAt - TimeSpan.FromMinutes(1));
-            AddTime(totals, "now", reservation.CreatedAt);
-            await using var reader = await totals.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            var tokens = reader.GetInt64(0);
-            var recent = reader.GetInt64(1);
-            await reader.CloseAsync().ConfigureAwait(false);
-            if (tokens + reservation.ReservedTokens > dailyTokenLimit)
+            AddScope(recent, scope);
+            AddTime(recent, "window_start", reservation.CreatedAt - TimeSpan.FromMinutes(1));
+            AddTime(recent, "now", reservation.CreatedAt);
+            recent.Parameters.AddWithValue("limit", requestsPerMinute);
+            var times = new List<DateTimeOffset>();
+            await using (var reader = await recent.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    times.Add(reader.GetFieldValue<DateTimeOffset>(0));
+            if (times.Count >= requestsPerMinute)
+                return new AssistQuotaExceeded(AssistQuotaKind.RequestsPerMinute, times[^1] + TimeSpan.FromMinutes(1));
+        }
+        if (reservation.ReservedTokens > dailyTokenLimit)
+            return new AssistQuotaExceeded(AssistQuotaKind.DailyTokens, dayStart.AddDays(1));
+        await using (var counter = new NpgsqlCommand($"""
+            INSERT INTO tf_assist_usage_days({ScopeColumns}, day, tokens) VALUES({ScopeParameters}, @day, @tokens)
+            ON CONFLICT (day_key) DO UPDATE SET tokens = tf_assist_usage_days.tokens + EXCLUDED.tokens
+            WHERE tf_assist_usage_days.tokens + EXCLUDED.tokens <= @limit
+            RETURNING tokens
+            """, connection, transaction))
+        {
+            AddScope(counter, scope);
+            AddDay(counter, dayStart);
+            counter.Parameters.AddWithValue("tokens", reservation.ReservedTokens);
+            counter.Parameters.AddWithValue("limit", dailyTokenLimit);
+            if (await counter.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not long)
                 return new AssistQuotaExceeded(AssistQuotaKind.DailyTokens, dayStart.AddDays(1));
-            if (recent >= requestsPerMinute)
-            {
-                await using var oldest = new NpgsqlCommand($"""
-                    SELECT created_at FROM tf_assist_usage WHERE {ScopeKeyWhere} AND created_at > @window_start AND created_at <= @now
-                    ORDER BY created_at DESC OFFSET @offset LIMIT 1
-                    """, connection, transaction);
-                AddScope(oldest, scope);
-                AddTime(oldest, "window_start", reservation.CreatedAt - TimeSpan.FromMinutes(1));
-                AddTime(oldest, "now", reservation.CreatedAt);
-                oldest.Parameters.AddWithValue("offset", (long)requestsPerMinute - 1);
-                var at = await oldest.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is DateTime time ? new DateTimeOffset(time, TimeSpan.Zero) : reservation.CreatedAt;
-                return new AssistQuotaExceeded(AssistQuotaKind.RequestsPerMinute, at + TimeSpan.FromMinutes(1));
-            }
         }
         await using (var insert = new NpgsqlCommand($"""
             INSERT INTO tf_assist_usage({ScopeColumns}, usage_id, format_version, feature, model, actor_kind, actor_id, conversation_id, state, reserved_tokens,
@@ -141,25 +145,55 @@ public sealed class PostgresAssistStore : IAssistStore
         return new AssistUsageReserved(reservation);
     }
 
-    public async Task<AssistUsageRecord?> SettleAsync(TicketScope scope, Guid id, AssistUsageState state, AssistUsage usage, DateTimeOffset completedAt, CancellationToken cancellationToken = default)
+    public async Task<AssistUsageRecord?> SettleAsync(TicketScope scope, Guid id, AssistUsageState state, AssistUsage usage, DateTimeOffset completedAt, bool estimated = false,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(usage);
         if (state is not (AssistUsageState.Completed or AssistUsageState.Failed))
             throw new ArgumentOutOfRangeException(nameof(state));
-        await using var command = source.CreateCommand($"""
-            UPDATE tf_assist_usage SET state=@state, input_tokens=@input, output_tokens=@output, cache_read_tokens=@cache_read, cache_write_tokens=@cache_write, completed_at=@completed
+        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        AssistUsageRecord? settled;
+        await using (var command = new NpgsqlCommand($"""
+            UPDATE tf_assist_usage SET state=@state, input_tokens=@input, output_tokens=@output, cache_read_tokens=@cache_read, cache_write_tokens=@cache_write,
+                completed_at=@completed, estimated=@estimated
             WHERE {UsageKeyWhere} AND state=1 RETURNING {UsageColumns}
+            """, connection, transaction))
+        {
+            AddScope(command, scope);
+            command.Parameters.AddWithValue("usage", id);
+            command.Parameters.AddWithValue("state", (short)state);
+            command.Parameters.AddWithValue("input", usage.InputTokens);
+            command.Parameters.AddWithValue("output", usage.OutputTokens);
+            command.Parameters.AddWithValue("cache_read", usage.CacheReadInputTokens);
+            command.Parameters.AddWithValue("cache_write", usage.CacheCreationInputTokens);
+            command.Parameters.AddWithValue("estimated", estimated);
+            AddTime(command, "completed", AssistLimits.Truncate(completedAt));
+            settled = await ReadSingleAsync(command, cancellationToken).ConfigureAwait(false);
+        }
+        if (settled is null)
+            return null;
+        await AdjustDayAsync(connection, transaction, scope, settled.CreatedAt, settled.CountedTokens - settled.ReservedTokens, cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return settled;
+    }
+
+    public async Task<int> SweepReservationsAsync(DateTimeOffset createdBefore, DateTimeOffset completedAt, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, AssistLimits.MaximumPurgeBatch);
+        // Estimated settlement keeps the counted tokens equal to the reservation, so the day counters do not change.
+        await using var command = source.CreateCommand("""
+            WITH stale AS MATERIALIZED (
+                SELECT usage_key FROM tf_assist_usage WHERE state = 1 AND created_at < @before ORDER BY created_at LIMIT @limit FOR UPDATE SKIP LOCKED)
+            UPDATE tf_assist_usage AS usage SET state=3, estimated=true, completed_at=@completed
+            FROM stale WHERE usage.usage_key = stale.usage_key AND usage.state = 1
             """);
-        AddScope(command, scope);
-        command.Parameters.AddWithValue("usage", id);
-        command.Parameters.AddWithValue("state", (short)state);
-        command.Parameters.AddWithValue("input", usage.InputTokens);
-        command.Parameters.AddWithValue("output", usage.OutputTokens);
-        command.Parameters.AddWithValue("cache_read", usage.CacheReadInputTokens);
-        command.Parameters.AddWithValue("cache_write", usage.CacheCreationInputTokens);
+        AddTime(command, "before", createdBefore);
         AddTime(command, "completed", AssistLimits.Truncate(completedAt));
-        return await ReadSingleAsync(command, cancellationToken).ConfigureAwait(false);
+        command.Parameters.AddWithValue("limit", limit);
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<AssistUsageRecord?> GetUsageAsync(TicketScope scope, Guid id, CancellationToken cancellationToken = default)
@@ -177,7 +211,8 @@ public sealed class PostgresAssistStore : IAssistStore
         AssistLimits.RequireRange(from, to);
         await using var command = source.CreateCommand($"""
             SELECT feature, model, COUNT(*), COUNT(*) FILTER (WHERE state = 3), COALESCE(SUM(input_tokens), 0)::bigint, COALESCE(SUM(output_tokens), 0)::bigint,
-                COALESCE(SUM(cache_read_tokens), 0)::bigint, COALESCE(SUM(cache_write_tokens), 0)::bigint, COALESCE(SUM(reserved_tokens) FILTER (WHERE state = 1), 0)::bigint
+                COALESCE(SUM(cache_read_tokens), 0)::bigint, COALESCE(SUM(cache_write_tokens), 0)::bigint, COALESCE(SUM(reserved_tokens) FILTER (WHERE state = 1), 0)::bigint,
+                COALESCE(SUM(reserved_tokens) FILTER (WHERE estimated), 0)::bigint
             FROM tf_assist_usage WHERE {ScopeKeyWhere} AND created_at >= @from AND created_at < @to
             GROUP BY feature, model ORDER BY feature, model COLLATE "C"
             """);
@@ -188,7 +223,7 @@ public sealed class PostgresAssistStore : IAssistStore
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             totals.Add(Decode(() => new AssistUsageTotal(Feature(reader.GetInt16(0)), reader.GetString(1), reader.GetInt64(2), reader.GetInt64(3), reader.GetInt64(4),
-                reader.GetInt64(5), reader.GetInt64(6), reader.GetInt64(7), reader.GetInt64(8)), "usage total"));
+                reader.GetInt64(5), reader.GetInt64(6), reader.GetInt64(7), reader.GetInt64(8), reader.GetInt64(9)), "usage total"));
         return new AssistUsageSummary(from, to, totals);
     }
 
@@ -198,8 +233,9 @@ public sealed class PostgresAssistStore : IAssistStore
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, AssistLimits.MaximumPurgeBatch);
         await using var command = source.CreateCommand($"""
-            DELETE FROM tf_assist_usage WHERE usage_key IN (
+            WITH doomed AS MATERIALIZED (
                 SELECT usage_key FROM tf_assist_usage WHERE {ScopeKeyWhere} AND state <> 1 AND created_at < @before ORDER BY created_at LIMIT @limit)
+            DELETE FROM tf_assist_usage AS usage USING doomed WHERE usage.usage_key = doomed.usage_key
             """);
         AddScope(command, scope);
         AddTime(command, "before", before);
@@ -222,9 +258,25 @@ public sealed class PostgresAssistStore : IAssistStore
             return new AssistUsageRecord(reader.GetGuid(0), Feature(reader.GetInt16(2)), reader.GetString(3), new AccessActor(actorKind, reader.GetString(5)),
                 reader.IsDBNull(6) ? null : new ConversationId(reader.GetString(6)), State(reader.GetInt16(7)), reader.GetInt64(8),
                 new AssistUsage(reader.GetInt64(9), reader.GetInt64(10), reader.GetInt64(11), reader.GetInt64(12)),
-                reader.GetFieldValue<DateTimeOffset>(13), reader.IsDBNull(14) ? null : reader.GetFieldValue<DateTimeOffset>(14));
+                reader.GetFieldValue<DateTimeOffset>(13), reader.IsDBNull(14) ? null : reader.GetFieldValue<DateTimeOffset>(14), reader.GetBoolean(15));
         }, "usage record");
     }
+
+    private static async Task AdjustDayAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, TicketScope scope, DateTimeOffset createdAt, long delta,
+        CancellationToken cancellationToken)
+    {
+        if (delta == 0)
+            return;
+        await using var command = new NpgsqlCommand($"UPDATE tf_assist_usage_days SET tokens = GREATEST(0, tokens + @delta) WHERE day_key={DayKey} AND {WorkspaceWhere} AND day=@day",
+            connection, transaction);
+        AddScope(command, scope);
+        AddDay(command, AssistLimits.DayStart(createdAt));
+        command.Parameters.AddWithValue("delta", delta);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void AddDay(NpgsqlCommand command, DateTimeOffset dayStart) =>
+        command.Parameters.Add(new NpgsqlParameter("day", NpgsqlDbType.Date) { Value = DateOnly.FromDateTime(dayStart.UtcDateTime) });
 
     private static AssistFeature Feature(short value) =>
         Enum.IsDefined((AssistFeature)value) ? (AssistFeature)value : throw new FormatException("Unknown assist feature.");

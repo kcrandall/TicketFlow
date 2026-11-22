@@ -1,0 +1,98 @@
+@inherits UiPageBase
+@using TicketFlow.Automation
+
+<PageHeader Title="Automation" Description="Rules run on conversation events and schedules as the automation client — never with more access than its grants.">
+    <Actions>
+        @if (Session.Can(AutomationPermissions.Manage))
+        {
+            <BbButton Href="@Url("automation/rules/new")" Size="ButtonSize.Small"><LucideIcon Name="plus" Size="14" />New rule</BbButton>
+        }
+    </Actions>
+</PageHeader>
+<AutomationTabs Active="rules" />
+
+<div class="tf-card">
+    @if (rules.Count == 0)
+    {
+        <EmptyState Icon="workflow" Title="No automation rules" Message="Create a rule to label, route, reply or escalate automatically." />
+    }
+    else
+    {
+        <div class="tf-table-wrap">
+            <table class="tf-table">
+                <thead><tr><th>Rule</th><th>When</th><th>If</th><th>Then</th><th class="tf-num">Runs (7d)</th><th>Status</th></tr></thead>
+                <tbody>
+                    @foreach (var stored in rules.OrderBy(rule => rule.Rule.Priority).ThenBy(rule => rule.Id.Value, StringComparer.Ordinal))
+                    {
+                        var rule = stored.Rule;
+                        var trigger = UiAutomationText.Trigger(rule.Trigger);
+                        <tr>
+                            <td><a class="tf-row-link" href="@Url($"automation/rules/{rule.Id.Value}")">@rule.Name</a><div class="tf-list__meta">priority @rule.Priority@(rule.StopProcessing ? " · stops processing" : "")</div></td>
+                            <td><span class="tf-row" style="flex-wrap:nowrap"><LucideIcon Name="@trigger.Icon" Size="14" />@trigger.Text</span></td>
+                            <td class="tf-muted" style="max-width:260px">@UiAutomationText.Condition(rule.Condition)</td>
+                            <td>
+                                <div class="tf-stack" style="gap:2px">
+                                    @foreach (var action in rule.Actions.Take(3).Select(UiAutomationText.Action))
+                                    {
+                                        <span class="tf-row tf-small" style="flex-wrap:nowrap"><LucideIcon Name="@action.Icon" Size="12" />@action.Text</span>
+                                    }
+                                    @if (rule.Actions.Count > 3)
+                                    {
+                                        <span class="tf-small tf-muted">+@(rule.Actions.Count - 3) more</span>
+                                    }
+                                </div>
+                            </td>
+                            <td class="tf-num">@runs.GetValueOrDefault(rule.Id.Value)</td>
+                            <td>@if (rule.Enabled) { <span class="tf-badge tf-badge--success">Enabled</span> } else { <span class="tf-badge tf-badge--muted">Disabled</span> }</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+<div class="tf-card">
+    <div class="tf-card__header"><div><div class="tf-card__title">Recent executions</div><div class="tf-card__description">Idempotent execution records with per-action outcomes</div></div></div>
+    <div class="tf-table-wrap" style="margin-top:12px">
+        <table class="tf-table">
+            <thead><tr><th>Rule</th><th>Conversation</th><th>Event</th><th>Outcome</th><th class="tf-num">Started</th></tr></thead>
+            <tbody>
+                @foreach (var execution in executions)
+                {
+                    <tr>
+                        <td>@(rules.FirstOrDefault(rule => rule.Id == execution.Execution.Rule)?.Rule.Name ?? execution.Execution.Rule.Value)</td>
+                        <td>@if (execution.Execution.Conversation is { } conversation) { <a class="tf-row-link tf-mono" href="@Url($"conversations/{conversation.Value}")">@conversation.Value</a> }</td>
+                        <td class="tf-muted">@UiFormat.Token(execution.Execution.EventKind)</td>
+                        <td><span class="tf-badge @(execution.Execution.Status.ToString() == "Completed" ? "tf-badge--success" : "tf-badge--muted")">@UiFormat.Token(execution.Execution.Status)</span> <span class="tf-small tf-muted">@execution.Execution.Outcomes.Count/@execution.Execution.ActionCount actions</span></td>
+                        <td class="tf-num tf-muted">@UiFormat.Relative(execution.Execution.StartedAt, Now)</td>
+                    </tr>
+                }
+                @if (executions.Count == 0)
+                {
+                    <tr><td colspan="5" class="tf-muted">No executions yet.</td></tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>
+
+@code {
+    private List<StoredAutomationRule> rules = [];
+    private List<StoredAutomationExecution> executions = [];
+    private readonly Dictionary<string, int> runs = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<IAutomationRuleService>() is not { } service)
+            return;
+        if (await service.ListAsync(Actor, Aborted) is AutomationValue<IReadOnlyList<StoredAutomationRule>> list)
+            rules = [.. list.Value];
+        if (await service.ListExecutionsAsync(Actor, new AutomationExecutionQuery(from: Now.AddDays(-7), limit: 100), Aborted) is AutomationValue<AutomationExecutionPage> page)
+        {
+            foreach (var execution in page.Value.Executions)
+                runs[execution.Execution.Rule.Value] = runs.GetValueOrDefault(execution.Execution.Rule.Value) + 1;
+            executions = [.. page.Value.Executions.Take(8)];
+        }
+    }
+}

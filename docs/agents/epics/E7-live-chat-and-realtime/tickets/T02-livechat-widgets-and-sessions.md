@@ -40,4 +40,8 @@ constant-time verification, rotation grace), `LiveChatOrigin`, `VisitorIdentityH
 - `dotnet test tests/Channels/TicketFlow.Channels.LiveChat.Tests -c Release` — 24 passed, 0 failed (includes token, rotation, origin, HMAC,
   signed-token, widget administration, model validation and in-memory store contract tests).
 
+Review fixes (2026-11-22): rotation is skipped (`VisitorTokenRotated.Token` null) when the reloaded session was rotated within
+`TokenRotationInterval` by another tab.
+- `dotnet test tests/Channels/TicketFlow.Channels.LiveChat.Tests -c Release` — 27 passed (new: concurrent tabs do not rotate twice).
+
 Post-ticket parallel reviews (docs/agents/prompts/post-ticket-*.md) have not been run yet.

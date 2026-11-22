@@ -1,0 +1,18 @@
+@using TicketFlow.Sla
+@if (Status is { } status && (status.Breached || status.AtRisk || ShowOnTrack) && status.Clocks.Count > 0)
+{
+    <BbBadge Variant="@(status.Breached ? BadgeVariant.SoftDestructive : status.AtRisk ? BadgeVariant.SoftWarning : BadgeVariant.SoftSuccess)" Class="tf-sla">
+        <LucideIcon Name="@(status.Breached ? "alarm-clock-off" : status.AtRisk ? "alarm-clock" : "clock")" Size="12" />
+        @Label(status)
+    </BbBadge>
+}
+
+@code {
+    [Parameter] public SlaStatusView? Status { get; set; }
+    [Parameter] public bool ShowOnTrack { get; set; }
+    [Parameter] public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+
+    private string Label(SlaStatusView status) => status.Breached
+        ? "SLA breached"
+        : status.DueAt is { } due ? (status.AtRisk ? "Due " : "SLA ") + UiFormat.Relative(due, Now) : status.AtRisk ? "At risk" : "On track";
+}

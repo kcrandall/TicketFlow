@@ -1,0 +1,122 @@
+@inherits UiPageBase
+@using TicketFlow.Surveys
+
+<PageHeader Title="Surveys" Description="CSAT and NPS surveys sent after conversations are resolved. Responses feed reports." />
+
+<div class="tf-grid tf-grid--stats">
+    <StatCard Label="CSAT (30 days)" Value="@(csatResponses == 0 ? "—" : UiFormat.Percent(csatPositive * 100.0 / csatResponses))" Hint="@($"{csatResponses} responses · satisfied = 4–5")" />
+    <StatCard Label="Average score" Value="@(csatResponses == 0 ? "—" : (csatScore / (double)csatResponses).ToString("0.0", CultureInfo.InvariantCulture) + " / 5")" Hint="All CSAT responses" />
+    <StatCard Label="Detractors" Value="@csatNegative.ToString(CultureInfo.InvariantCulture)" Hint="Scores of 1–2" />
+    <StatCard Label="Active surveys" Value="@surveys.Count(survey => survey.Survey.Enabled).ToString(CultureInfo.InvariantCulture)" Hint="@($"{surveys.Count} defined")" />
+</div>
+
+<div class="tf-grid tf-grid--wide-narrow">
+    <div class="tf-card">
+        <div class="tf-card__header"><div><div class="tf-card__title">CSAT by agent</div><div class="tf-card__description">Share of satisfied responses (4–5) in the last 30 days</div></div></div>
+        <div class="tf-card__content">
+            <BarList Items="byAgent" />
+        </div>
+    </div>
+    <div class="tf-card">
+        <div class="tf-card__header"><div class="tf-card__title">Score distribution</div></div>
+        <div class="tf-card__content">
+            <BarList Items="distribution" />
+        </div>
+    </div>
+</div>
+
+<div class="tf-card">
+    <div class="tf-card__header"><div class="tf-card__title">Survey definitions</div></div>
+    <div class="tf-table-wrap" style="margin-top:12px">
+        <table class="tf-table">
+            <thead><tr><th>Survey</th><th>Type</th><th>Question</th><th>Inbox</th><th>Sent after</th><th>Status</th></tr></thead>
+            <tbody>
+                @foreach (var stored in surveys)
+                {
+                    var survey = stored.Survey;
+                    <tr>
+                        <td style="font-weight:500">@survey.Name</td>
+                        <td><span class="tf-badge">@survey.Kind.ToString().ToUpperInvariant()</span></td>
+                        <td class="tf-muted" style="max-width:380px">@survey.Questions.FirstOrDefault()?.Text</td>
+                        <td>@(survey.Inbox is { } inbox ? InboxName(inbox) : "All inboxes")</td>
+                        <td>@UiFormat.Duration(survey.Policy.Delay)</td>
+                        <td>
+                            @if (Session.Can(SurveyPermissions.Manage))
+                            {
+                                <TfForm Action="survey.toggle" Revision="stored.Revision" Class="tf-inline-form">
+                                    <input type="hidden" name="id" value="@survey.Id.Value" />
+                                    <button type="submit" class="tf-badge @(survey.Enabled ? "tf-badge--success" : "tf-badge--muted")" style="cursor:pointer;background:none" title="Toggle">@(survey.Enabled ? "Enabled" : "Disabled")</button>
+                                </TfForm>
+                            }
+                            else
+                            {
+                                <span class="tf-badge">@(survey.Enabled ? "Enabled" : "Disabled")</span>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="tf-card">
+    <div class="tf-card__header"><div><div class="tf-card__title">Latest responses</div><div class="tf-card__description">Comments may be masked by field policies</div></div></div>
+    <div class="tf-card__content--flush">
+        <ul class="tf-list">
+            @foreach (var response in responses)
+            {
+                <li>
+                    <span class="tf-badge @(response.Response.Score >= 4 ? "tf-badge--success" : response.Response.Score <= 2 ? "tf-badge--destructive" : "tf-badge--warning")" style="min-width:44px;justify-content:center">@response.Response.Score / @(response.Response.Kind == SurveyKind.Csat ? 5 : 10)</span>
+                    <div class="tf-list__main">
+                        <span class="tf-list__title" style="font-weight:400">@(response.CommentMasked ? "Comment hidden" : response.Comment ?? "No comment")</span>
+                        <span class="tf-list__meta">@ContactName(response.Response.Contact) · @Session.UserName(response.Response.Agent) · @UiFormat.Relative(response.Response.RespondedAt, Now)</span>
+                    </div>
+                    <a class="tf-button tf-button--ghost tf-button--xs" href="@Url($"conversations/{response.Response.Conversation.Value}")">Conversation</a>
+                </li>
+            }
+            @if (responses.Count == 0)
+            {
+                <li class="tf-muted">No responses in the last 30 days.</li>
+            }
+        </ul>
+    </div>
+</div>
+
+@code {
+    private List<StoredSurvey> surveys = [];
+    private List<SurveyResponseView> responses = [];
+    private long csatResponses, csatPositive, csatNegative, csatScore;
+    private List<BarList.Item> byAgent = [];
+    private List<BarList.Item> distribution = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadWorkspaceAsync();
+        if (Service<ISurveyService>() is not { } service)
+            return;
+        if (await service.ListSurveysAsync(Actor, Aborted) is SurveySucceeded<IReadOnlyList<StoredSurvey>> list)
+            surveys = [.. list.Value];
+        var to = Now;
+        var from = to.AddDays(-30);
+        if (await service.AggregateAsync(Actor, new SurveyAggregateQuery(SurveyKind.Csat, from, to), Aborted) is SurveySucceeded<SurveyAggregateResult> total)
+            foreach (var row in total.Value.Rows)
+                (csatResponses, csatPositive, csatNegative, csatScore) = (csatResponses + row.Responses, csatPositive + row.Positive, csatNegative + row.Negative, csatScore + row.ScoreSum);
+        if (await service.AggregateAsync(Actor, new SurveyAggregateQuery(SurveyKind.Csat, from, to, groupBy: SurveyDimension.Agent), Aborted) is SurveySucceeded<SurveyAggregateResult> agents)
+        {
+            await Session.LoadUsersAsync(agents.Value.Rows.Where(row => row.Group is not null).Select(row => (UserId?)new UserId(row.Group!)));
+            byAgent = [.. agents.Value.Rows.Where(row => row.Responses > 0).OrderByDescending(row => row.Positive * 100.0 / row.Responses)
+                .Select((row, index) => new BarList.Item(row.Group is null ? "Unassigned" : Session.UserName(new UserId(row.Group)), row.Positive * 100.0 / row.Responses,
+                    $"{UiFormat.Percent(row.Positive * 100.0 / row.Responses)} · {row.Responses}", $"var(--chart-{index % 5 + 1})"))];
+        }
+        if (await service.ListResponsesAsync(Actor, new SurveyResponseQuery(from, to, limit: 50), Aborted) is SurveySucceeded<SurveyResponseViewPage> page)
+        {
+            responses = [.. page.Value.Items.Take(8)];
+            distribution = [.. Enumerable.Range(1, 5).Reverse().Select(score => new BarList.Item($"{score} ★", page.Value.Items.Count(item => item.Response.Kind == SurveyKind.Csat && item.Response.Score == score),
+                page.Value.Items.Count(item => item.Response.Kind == SurveyKind.Csat && item.Response.Score == score).ToString(CultureInfo.InvariantCulture),
+                score >= 4 ? "var(--success)" : score == 3 ? "var(--warning)" : "var(--destructive)"))];
+            await LoadContactsAsync(page.Value.Items.Select(item => item.Response.Contact));
+            await Session.LoadUsersAsync(page.Value.Items.Select(item => item.Response.Agent));
+        }
+    }
+}

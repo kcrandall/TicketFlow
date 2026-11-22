@@ -107,6 +107,21 @@ public enum ContactAuditKind
 
     /// <summary>An export stream finished or was abandoned; <see cref="ContactAuditEvent.Count"/> is the number of contacts emitted.</summary>
     ExportCompleted = 5,
+
+    /// <summary>A verified external account was attached to <see cref="ContactAuditEvent.Contact"/> (or, with a merge, its contact was merged into <see cref="ContactAuditEvent.Related"/>).</summary>
+    Linked = 6,
+
+    /// <summary>A verified external account was removed from <see cref="ContactAuditEvent.Contact"/>.</summary>
+    Unlinked = 7,
+
+    /// <summary>A link suggestion (candidate <see cref="ContactAuditEvent.Contact"/>, account <see cref="ContactAuditEvent.Related"/>) was stored.</summary>
+    LinkSuggested = 8,
+
+    LinkSuggestionAccepted = 9,
+    LinkSuggestionRejected = 10,
+
+    /// <summary>The workspace linking policy was created or changed.</summary>
+    LinkingPolicyChanged = 11,
 }
 
 /// <summary>
@@ -161,6 +176,13 @@ public sealed record ContactAuditEvent
     public Guid? Merge { get; }
     public int? Count { get; }
     public string? Justification { get; }
+
+    /// <summary>The link suggestion the event concerns, when any.</summary>
+    public Guid? Suggestion
+    {
+        get;
+        init => field = value == Guid.Empty ? throw new ArgumentException("Suggestion identifiers must be non-empty.", nameof(value)) : value;
+    }
 }
 
 /// <summary>Records audited contact operations. Must persist before returning and throw on failure.</summary>

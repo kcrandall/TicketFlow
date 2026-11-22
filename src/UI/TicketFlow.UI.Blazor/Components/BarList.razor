@@ -1,0 +1,27 @@
+@* Horizontal bar list (label, bar, value) for rankings and breakdowns. *@
+<div class="tf-barlist">
+    @foreach (var item in Items)
+    {
+        <div class="tf-barlist__row" title="@item.Label: @item.Display">
+            <div class="tf-barlist__bar" style="width:@Width(item.Value);background:@(item.Color ?? "var(--chart-1)")"></div>
+            <span class="tf-barlist__label">@item.Label</span>
+            <span class="tf-barlist__value">@item.Display</span>
+        </div>
+    }
+    @if (Items.Count == 0)
+    {
+        <div class="tf-muted tf-small">No data in this range.</div>
+    }
+</div>
+
+@code {
+    public sealed record Item(string Label, double Value, string Display, string? Color = null);
+
+    [Parameter, EditorRequired] public IReadOnlyList<Item> Items { get; set; } = [];
+
+    private string Width(double value)
+    {
+        var max = Items.Count == 0 ? 1 : Math.Max(1, Items.Max(item => item.Value));
+        return (Math.Max(2, value / max * 100)).ToString("0.#", CultureInfo.InvariantCulture) + "%";
+    }
+}

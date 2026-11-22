@@ -51,6 +51,13 @@ public sealed class PostgresWorkspaceStoreTests
     }
 
     [TestMethod]
+    public async Task DirectoryEnumeratesWorkspacesAcrossPages()
+    {
+        await using var database = await Database.CreateAsync();
+        await WorkspaceStoreContract.VerifyDirectoryAsync(database.Store, database.Competing);
+    }
+
+    [TestMethod]
     public async Task InboxContractUsesIndependentClients()
     {
         await using var database = await Database.CreateAsync();

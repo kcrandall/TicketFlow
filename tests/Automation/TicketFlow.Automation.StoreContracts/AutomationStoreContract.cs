@@ -43,17 +43,23 @@ public static class AutomationStoreContract
     public static async Task VerifyRulesAsync(IAutomationRuleStore primary, IAutomationRuleStore competing)
     {
         var scope = TestScopes.Create(workspaceId: "rules-" + Guid.NewGuid().ToString("N")[..8]);
+        Assert.AreEqual(0, await primary.GetRuleSetVersionAsync(scope));
         var created = Assert.IsInstanceOfType<AutomationWriteApplied<StoredAutomationRule>>((await primary.CreateAsync(scope, Rule("b", 10), null)).Value).Value;
         Assert.AreEqual(1, created.Revision);
+        var afterCreate = await competing.GetRuleSetVersionAsync(scope);
+        Assert.IsTrue(afterCreate > 0);
         Assert.AreEqual("conflict:1", Describe(await competing.CreateAsync(scope, Rule("b", 10), null)));
+        Assert.AreEqual(afterCreate, await primary.GetRuleSetVersionAsync(scope), "Failed writes do not move the version.");
         await primary.CreateAsync(scope, Rule("a", 10), null);
         await primary.CreateAsync(scope, Rule("c", 5), null);
         var listed = await competing.ListAsync(scope);
         CollectionAssert.AreEqual(new[] { "c", "a", "b" }, listed.Select(rule => rule.Id.Value).ToArray());
         Assert.AreEqual(Rule("b", 10), listed[2].Rule);
 
+        var beforeUpdate = await primary.GetRuleSetVersionAsync(scope);
         var updated = Assert.IsInstanceOfType<AutomationWriteApplied<StoredAutomationRule>>((await competing.UpdateAsync(scope, Rule("b", 1, "Renamed"), 1, null)).Value).Value;
         Assert.AreEqual(2, updated.Revision);
+        Assert.IsTrue(await primary.GetRuleSetVersionAsync(scope) > beforeUpdate, "Updates move the version.");
         Assert.AreEqual("conflict:2", Describe(await primary.UpdateAsync(scope, Rule("b", 1), 1, null)));
         Assert.AreEqual("not-found", Describe(await primary.UpdateAsync(scope, Rule("zz"), 1, null)));
         Assert.AreEqual("Renamed", (await primary.GetAsync(scope, new AutomationRuleId("b")))!.Rule.Name);
@@ -65,8 +71,11 @@ public static class AutomationStoreContract
             Assert.AreEqual("not-found", Describe(await primary.DeleteAsync(other, new AutomationRuleId("b"), 2)));
         }
         Assert.AreEqual("conflict:2", Describe(await primary.DeleteAsync(scope, new AutomationRuleId("b"), 1)));
+        var beforeDelete = await primary.GetRuleSetVersionAsync(scope);
         Assert.AreEqual("applied", Describe(await competing.DeleteAsync(scope, new AutomationRuleId("b"), 2)));
         Assert.IsNull(await primary.GetAsync(scope, new AutomationRuleId("b")));
+        Assert.IsTrue(await primary.GetRuleSetVersionAsync(scope) > beforeDelete, "Deletes move the version.");
+        Assert.AreEqual(0, await primary.GetRuleSetVersionAsync(TestScopes.LevelVariants(scope)[5]));
 
         var capacityScope = TestScopes.Create(workspaceId: "cap-" + Guid.NewGuid().ToString("N")[..8]);
         for (var index = 0; index < IAutomationRuleStore.MaximumRulesPerWorkspace; index++)
@@ -138,6 +147,12 @@ public static class AutomationStoreContract
         Assert.AreEqual(execution.Id, duplicate.Id);
         Assert.AreEqual(execution, (await competing.FindAsync(scope, new AutomationRuleId("r1"), new ConversationId("c1"), "evt:1"))!.Execution);
 
+        var many = await competing.FindManyAsync(scope, new ConversationId("c1"), "evt:1", [new AutomationRuleId("r1"), new AutomationRuleId("absent")]);
+        Assert.AreEqual(1, many.Count);
+        Assert.AreEqual(execution.Id, many[new AutomationRuleId("r1")].Id);
+        Assert.AreEqual(0, (await competing.FindManyAsync(scope, new ConversationId("c1"), "evt:2", [new AutomationRuleId("r1")])).Count);
+        Assert.AreEqual(0, (await competing.FindManyAsync(TestScopes.LevelVariants(scope)[1], new ConversationId("c1"), "evt:1", [new AutomationRuleId("r1")])).Count);
+
         var progress = execution.WithProgress([new AutomationActionApplied([5, 6])]);
         var updated = Assert.IsInstanceOfType<AutomationWriteApplied<StoredAutomationExecution>>((await competing.UpdateAsync(scope, progress, 1)).Value).Value;
         Assert.AreEqual(2, updated.Revision);
@@ -182,6 +197,33 @@ public static class AutomationStoreContract
         Assert.IsTrue(await competing.SetCheckpointAsync(scope, "contacts", 9, 5));
         Assert.AreEqual(9, await primary.GetCheckpointAsync(scope, "contacts"));
         Assert.IsNull(await primary.GetCheckpointAsync(TestScopes.LevelVariants(scope)[5], "contacts"));
+    }
+
+    /// <summary>Retention: purges only finished records older than the cutoff, in bounded batches, with their cause rows.</summary>
+    public static async Task VerifyPurgeAsync(IAutomationExecutionStore primary, IAutomationExecutionStore competing)
+    {
+        var scope = TestScopes.Create(workspaceId: "purge-" + Guid.NewGuid().ToString("N")[..8]);
+        var old = new DateTimeOffset(2001, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var cutoff = old.AddDays(1);
+        var completed = Execution(rule: "p1", trigger: "evt:1", startedAt: old).WithProgress([new AutomationActionApplied([11])]).Complete(old.AddSeconds(1), 12);
+        var suppressed = new AutomationExecution(Guid.NewGuid(), new AutomationRuleId("p2"), new ConversationId("c1"), "evt:1", AutomationEventKind.MessageReceived, 4,
+            AutomationExecutionStatus.Suppressed, AutomationSuppression.DepthExceeded, old.AddMinutes(1), old.AddMinutes(1), 1, []);
+        var running = Execution(rule: "p3", trigger: "evt:1", startedAt: old.AddMinutes(2));
+        var recent = Execution(rule: "p4", trigger: "evt:1", startedAt: cutoff.AddMinutes(1)).Complete(cutoff.AddMinutes(2), null);
+        foreach (var item in new[] { completed, suppressed, running, recent })
+            Assert.IsInstanceOfType<AutomationExecutionStarted>((await primary.BeginAsync(scope, item)).Value);
+        Assert.IsNotNull(await primary.FindCauseAsync(scope, new ConversationId("c1"), 12));
+
+        Assert.AreEqual(1, await competing.PurgeAsync(cutoff, 1), "Batches are bounded.");
+        Assert.AreEqual(1, await primary.PurgeAsync(cutoff, 100));
+        Assert.AreEqual(0, await primary.PurgeAsync(cutoff, 100));
+        Assert.IsNull(await primary.GetAsync(scope, completed.Id));
+        Assert.IsNull(await primary.GetAsync(scope, suppressed.Id));
+        Assert.IsNotNull(await primary.GetAsync(scope, running.Id), "Running records are kept.");
+        Assert.IsNotNull(await primary.GetAsync(scope, recent.Id), "Recent records are kept.");
+        Assert.IsNull(await primary.FindCauseAsync(scope, new ConversationId("c1"), 11), "Cause rows go with their execution.");
+        Assert.IsNull(await primary.FindCauseAsync(scope, new ConversationId("c1"), 12));
+        Assert.IsInstanceOfType<AutomationExecutionStarted>((await competing.BeginAsync(scope, Execution(rule: "p1", trigger: "evt:1"))).Value, "The natural key is free again.");
     }
 
     public static async Task VerifyConcurrentBeginAsync(IReadOnlyList<IAutomationExecutionStore> clients)

@@ -1,0 +1,6 @@
+@using TicketFlow.Conversations
+<BbBadge Variant="BadgeVariant.Outline" Class="@($"tf-status tf-status--{Kind.ToString().ToLowerInvariant()}")"><span class="tf-dot"></span>@UiFormat.Status(Kind)</BbBadge>
+
+@code {
+    [Parameter] public ConversationStatusKind Kind { get; set; }
+}

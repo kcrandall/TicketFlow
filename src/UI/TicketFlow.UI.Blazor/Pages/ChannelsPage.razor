@@ -1,0 +1,84 @@
+@inherits UiPageBase
+@using TicketFlow.Channels
+@using TicketFlow.Channels.LiveChat
+@using TicketFlow.Workspaces
+
+<PageHeader Title="Channels" Description="Channel endpoints connect inboxes to email addresses, phone numbers and the live-chat widget." />
+
+<div class="tf-grid tf-grid--2">
+    @foreach (var item in items)
+    {
+        var inbox = item.Inbox.Inbox;
+        <div class="tf-card">
+            <div class="tf-card__header">
+                <div class="tf-row" style="flex-wrap:nowrap">
+                    <span class="tf-brand__mark" style="background:var(--muted);color:var(--foreground)"><LucideIcon Name="@UiFormat.ChannelIcon(inbox.Channel.Kind.Value)" Size="16" /></span>
+                    <div><div class="tf-card__title">@inbox.Name</div><div class="tf-card__description">@UiFormat.Channel(inbox.Channel.Kind.Value) · <span class="tf-mono">@inbox.Channel.ConfigurationId</span></div></div>
+                </div>
+                @if (item.Endpoint is not null || item.Widget is not null)
+                {
+                    <span class="tf-badge tf-badge--success"><span class="tf-dot" style="background:var(--success)"></span>Connected</span>
+                }
+                else
+                {
+                    <span class="tf-badge tf-badge--warning">Not configured</span>
+                }
+            </div>
+            <div class="tf-card__content tf-stack tf-stack--sm">
+                <dl class="tf-dl">
+                    @if (item.Endpoint is { } endpoint)
+                    {
+                        <dt>Address</dt><dd class="tf-mono">@(endpoint.Endpoint.Address ?? "—")</dd>
+                    }
+                    @if (item.Widget is { } widget)
+                    {
+                        <dt>Allowed origins</dt><dd>@string.Join(", ", widget.Widget.AllowedOrigins)</dd>
+                        <dt>Greeting</dt><dd>@(widget.Widget.GreetingMessage ?? "—")</dd>
+                        <dt>Pre-chat fields</dt><dd>@(widget.Widget.PrechatFields.Count == 0 ? "None" : string.Join(", ", widget.Widget.PrechatFields.Select(field => field.Label)))</dd>
+                        <dt>Identity</dt><dd>@(widget.Widget.Identity.AllowHmac ? "HMAC" : "")@(widget.Widget.Identity.AllowSignedToken ? " · signed tokens" : "")@(widget.Widget.Identity.RequireVerified ? " · verified only" : "")</dd>
+                    }
+                </dl>
+                @if (item.Widget is not null && item.Endpoint?.Endpoint.Address is { } key)
+                {
+                    <pre class="tf-pre">&lt;script src="/widget/ticketflow-widget.js"
+        data-widget-key="@key" defer&gt;&lt;/script&gt;</pre>
+                }
+                @if (Session.CanAny(ChannelPermissions.Manage, AccessPermissions.InboxManage))
+                {
+                    <TfForm Action="@(item.Endpoint is null ? "channel.endpoint.create" : "channel.endpoint.update")" Revision="item.Endpoint?.Revision" Class="tf-side-form">
+                        <input type="hidden" name="kind" value="@inbox.Channel.Kind.Value" />
+                        <input type="hidden" name="configuration" value="@inbox.Channel.ConfigurationId" />
+                        <input type="hidden" name="inbox" value="@inbox.Id.Value" />
+                        <input name="address" class="tf-input tf-input--sm" placeholder="@(inbox.Channel.Kind.Value == "livechat" ? "Widget key" : "Address")" maxlength="256" value="@item.Endpoint?.Endpoint.Address" aria-label="Address" />
+                        <button class="tf-button tf-button--outline tf-button--sm" type="submit">@(item.Endpoint is null ? "Connect" : "Update")</button>
+                    </TfForm>
+                }
+            </div>
+        </div>
+    }
+</div>
+@if (items.Count == 0)
+{
+    <div class="tf-card"><EmptyState Icon="radio-tower" Title="No inboxes" Message="Create an inbox first, then connect its channel here." /></div>
+}
+
+@code {
+    private sealed record Item(StoredInbox Inbox, StoredChannelEndpoint? Endpoint, StoredLiveChatWidget? Widget);
+
+    private readonly List<Item> items = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadWorkspaceAsync();
+        var endpoints = Service<IChannelEndpointService>();
+        var widgets = Service<ILiveChatWidgetService>();
+        foreach (var inbox in Inboxes)
+        {
+            var binding = inbox.Inbox.Channel;
+            StoredChannelEndpoint? endpoint = endpoints is not null && await endpoints.GetAsync(Actor, binding.Kind, binding.ConfigurationId, Aborted) is ChannelValue<StoredChannelEndpoint> found ? found.Value : null;
+            StoredLiveChatWidget? widget = widgets is not null && binding.Kind.Value == "livechat"
+                && await widgets.GetAsync(Actor, binding.ConfigurationId, Aborted) is LiveChatValue<StoredLiveChatWidget> stored ? stored.Value : null;
+            items.Add(new Item(inbox, endpoint, widget));
+        }
+    }
+}

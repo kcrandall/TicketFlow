@@ -90,5 +90,40 @@ public static class PostgresContactMigrations
         new(2, "audit-export-completed", """
         ALTER TABLE tf_contact_audit DROP CONSTRAINT tf_contact_audit_kind_check;
         ALTER TABLE tf_contact_audit ADD CONSTRAINT tf_contact_audit_kind_check CHECK (kind BETWEEN 1 AND 5);
+        """),
+        new(3, "account-linking", $"""
+        ALTER TABLE tf_contact_audit DROP CONSTRAINT tf_contact_audit_kind_check;
+        ALTER TABLE tf_contact_audit ADD CONSTRAINT tf_contact_audit_kind_check CHECK (kind BETWEEN 1 AND 11);
+        ALTER TABLE tf_contact_audit ADD COLUMN suggestion_id uuid NULL;
+
+        CREATE TABLE tf_contact_linking_policies (
+            {Scope},
+            format_version smallint NOT NULL CHECK (format_version = 1), policy jsonb NOT NULL,
+            revision bigint NOT NULL CHECK (revision > 0),
+            {ScopeKey},
+            PRIMARY KEY (scope_key));
+
+        CREATE TABLE tf_contact_link_suggestions (
+            {Scope}, suggestion_id uuid NOT NULL,
+            format_version smallint NOT NULL CHECK (format_version = 1),
+            candidate_id text COLLATE "C" NOT NULL, account_id text COLLATE "C" NOT NULL,
+            evidence_kind smallint NOT NULL CHECK (evidence_kind BETWEEN 1 AND 6), evidence_namespace text COLLATE "C" NOT NULL,
+            evidence_value text COLLATE "C" NOT NULL, evidence_verified boolean NOT NULL,
+            status smallint NOT NULL CHECK (status BETWEEN 1 AND 4),
+            created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+            created_by_kind smallint NOT NULL CHECK (created_by_kind BETWEEN 1 AND 4), created_by_id text NOT NULL,
+            decided_by_kind smallint NULL CHECK (decided_by_kind BETWEEN 1 AND 4), decided_by_id text NULL, merge_id uuid NULL,
+            revision bigint NOT NULL CHECK (revision > 0),
+            suggestion_key bytea GENERATED ALWAYS AS (tf_key_v1(tenant_id, project_id, environment_id, app_id, workspace_id, suggestion_id::text)) STORED NOT NULL,
+            {ScopeKey},
+            candidate_key bytea GENERATED ALWAYS AS (tf_key_v1(tenant_id, project_id, environment_id, app_id, workspace_id, candidate_id)) STORED NOT NULL,
+            account_key bytea GENERATED ALWAYS AS (tf_key_v1(tenant_id, project_id, environment_id, app_id, workspace_id, account_id)) STORED NOT NULL,
+            pair_key bytea GENERATED ALWAYS AS (tf_key_v1(tenant_id, project_id, environment_id, app_id, workspace_id, candidate_id, account_id)) STORED NOT NULL,
+            PRIMARY KEY (suggestion_key),
+            CHECK (candidate_id <> account_id));
+        CREATE UNIQUE INDEX tf_contact_link_suggestions_pending ON tf_contact_link_suggestions (pair_key) WHERE status = 1;
+        CREATE INDEX tf_contact_link_suggestions_list ON tf_contact_link_suggestions (scope_key, status, suggestion_id);
+        CREATE INDEX tf_contact_link_suggestions_candidate ON tf_contact_link_suggestions (candidate_key, status, suggestion_id);
+        CREATE INDEX tf_contact_link_suggestions_account ON tf_contact_link_suggestions (account_key, status, suggestion_id);
         """)]);
 }

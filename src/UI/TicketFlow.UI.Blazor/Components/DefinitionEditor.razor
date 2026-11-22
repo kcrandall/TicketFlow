@@ -1,0 +1,45 @@
+@* JSON editor for a feature's versioned definition codec (SLA policies, routing policies, automation rules, macros, canned responses).
+   The server decodes with the feature codec, so invalid definitions come back as validation messages. *@
+<details class="tf-definition" open="@Open">
+    <summary class="tf-button tf-button--ghost tf-button--sm" style="list-style:none;width:max-content"><LucideIcon Name="braces" Size="14" />@(Id is null ? "Create from JSON" : "Edit definition")</summary>
+    <TfForm Action="@SaveAction" Revision="Revision" Class="tf-form" style="margin-top:10px">
+        @if (Id is not null)
+        {
+            <input type="hidden" name="id" value="@Id" />
+        }
+        else
+        {
+            <div class="tf-field"><label class="tf-label">Identifier</label><input name="id" class="tf-input tf-input--sm tf-mono" maxlength="128" placeholder="optional" value="@Session.FormValue("id", null)" /></div>
+        }
+        <textarea name="definition" class="tf-textarea tf-textarea--code" spellcheck="false" aria-label="Definition JSON">@(Session.Form is not null && Session.FormValue("id", null) == Id ? Session.FormValue("definition", Json) : Json)</textarea>
+        <div class="tf-form-actions">
+            @if (Extra is not null)
+            {
+                @Extra
+            }
+            @if (DeleteAction is not null && Id is not null)
+            {
+                <button type="submit" name="_action" value="@DeleteAction" class="tf-button tf-button--ghost tf-button--sm" style="color:var(--destructive)" formnovalidate><LucideIcon Name="trash-2" Size="14" />Delete</button>
+            }
+            <BbButton Type="ButtonType.Submit" Size="ButtonSize.Small">@(Id is null ? "Create" : "Save")</BbButton>
+        </div>
+    </TfForm>
+</details>
+
+@code {
+    [CascadingParameter] public TicketFlowUISession Session { get; set; } = default!;
+    [Parameter] public string? Id { get; set; }
+    [Parameter] public long? Revision { get; set; }
+    [Parameter, EditorRequired] public string Json { get; set; } = "";
+    [Parameter, EditorRequired] public string SaveAction { get; set; } = "";
+    [Parameter] public string? DeleteAction { get; set; }
+    [Parameter] public bool Open { get; set; }
+    [Parameter] public RenderFragment? Extra { get; set; }
+
+    /// <summary>Indents compact codec JSON for editing.</summary>
+    public static string Pretty(string json)
+    {
+        using var document = System.Text.Json.JsonDocument.Parse(json);
+        return System.Text.Json.JsonSerializer.Serialize(document.RootElement, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+    }
+}

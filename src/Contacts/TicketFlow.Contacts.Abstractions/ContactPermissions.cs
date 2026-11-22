@@ -4,7 +4,7 @@ namespace TicketFlow.Contacts;
 
 /// <summary>
 /// Permissions used by the contacts feature. <c>contact:read|update|export|merge|reveal</c> are Access built-ins and are reused;
-/// <c>contact:create</c>, <c>contact:delete</c> and <c>contact-attribute:manage</c> are registered by <c>AddContacts()</c>.
+/// <c>contact:create</c>, <c>contact:delete</c>, <c>contact-attribute:manage</c>, <c>contact:link</c> and <c>contact-linking:manage</c> are registered by <c>AddContacts()</c>.
 /// </summary>
 public static class ContactPermissions
 {
@@ -17,12 +17,20 @@ public static class ContactPermissions
     public static Permission Delete { get; } = new("contact:delete");
     public static Permission ManageAttributes { get; } = new("contact-attribute:manage");
 
+    /// <summary>Link and unlink verified external accounts, resolve signed-in customers and review link suggestions.</summary>
+    public static Permission Link { get; } = new("contact:link");
+
+    /// <summary>Change the workspace contact linking policy.</summary>
+    public static Permission ManageLinking { get; } = new("contact-linking:manage");
+
     /// <summary>The feature-owned definitions registered in the permission catalog (built-ins are already cataloged).</summary>
     public static IReadOnlyList<PermissionDefinition> Definitions { get; } =
     [
         new(Create, false, "Create contacts."),
         new(Delete, true, "Delete contacts and their merge history."),
         new(ManageAttributes, true, "Define contact attributes and their sensitivity."),
+        new(Link, true, "Link verified external accounts to contacts and review link suggestions."),
+        new(ManageLinking, true, "Change the workspace contact linking policy."),
     ];
 }
 

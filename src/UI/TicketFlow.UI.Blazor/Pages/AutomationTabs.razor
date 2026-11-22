@@ -1,0 +1,7 @@
+<TabLinks Tabs="@([new TabLinks.Tab("Rules", Session.Url("automation"), Active == "rules"), new TabLinks.Tab("Macros", Session.Url("automation/macros"), Active == "macros"),
+                  new TabLinks.Tab("Canned responses", Session.Url("automation/canned"), Active == "canned")])" />
+
+@code {
+    [CascadingParameter] public TicketFlowUISession Session { get; set; } = default!;
+    [Parameter] public string Active { get; set; } = "rules";
+}

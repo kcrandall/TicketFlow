@@ -1,0 +1,173 @@
+@inherits UiPageBase
+@using TicketFlow.Conversations
+@using TicketFlow.Sla
+
+<PageHeader Title="Conversations" Description="Every conversation across your inboxes, filtered by what you're allowed to see." />
+
+<div class="tf-row tf-row--between">
+    <TabLinks Tabs="StatusTabs" />
+    <form method="get" action="@Url("conversations")" class="tf-filters" data-autosubmit>
+        <input type="hidden" name="status" value="@Query("status")" />
+        <select name="assignee" class="tf-select tf-select--sm" style="width:auto" aria-label="Assignee">
+            <option value="" selected="@(Query("assignee") is null)">Everyone</option>
+            <option value="me" selected="@(Query("assignee") == "me")">Assigned to me</option>
+            <option value="unassigned" selected="@(Query("assignee") == "unassigned")">Unassigned</option>
+        </select>
+        <select name="inbox" class="tf-select tf-select--sm" style="width:auto" aria-label="Inbox">
+            <option value="">All inboxes</option>
+            @foreach (var inbox in Inboxes)
+            {
+                <option value="@inbox.Inbox.Id.Value" selected="@(Query("inbox") == inbox.Inbox.Id.Value)">@inbox.Inbox.Name</option>
+            }
+        </select>
+        <select name="team" class="tf-select tf-select--sm" style="width:auto" aria-label="Team">
+            <option value="">All teams</option>
+            @foreach (var team in Teams)
+            {
+                <option value="@team.Id.Value" selected="@(Query("team") == team.Id.Value)">@team.Name</option>
+            }
+        </select>
+        <input name="label" class="tf-input tf-input--sm" style="width:130px" placeholder="Label" value="@Query("label")" aria-label="Label" />
+        <noscript><button class="tf-button tf-button--outline tf-button--sm" type="submit">Filter</button></noscript>
+    </form>
+</div>
+
+<div class="tf-card">
+    @if (error is not null)
+    {
+        <div class="tf-card__content"><OutcomeAlert Outcome="error" /></div>
+    }
+    else if (rows.Count == 0)
+    {
+        <EmptyState Icon="inbox" Title="No conversations" Message="Nothing matches these filters. Try another status or clear the filters." />
+    }
+    else
+    {
+        <div>
+            @foreach (var row in rows)
+            {
+                var conversation = row.Conversation;
+                var name = ContactName(conversation.Contact);
+                <a class="tf-inbox-row" href="@Url($"conversations/{conversation.Id.Value}")">
+                    <BbAvatar Size="AvatarSize.Small"><BbAvatarFallback>@TicketFlowUISession.Initials(name)</BbAvatarFallback></BbAvatar>
+                    <div style="min-width:0">
+                        <div class="tf-inbox-row__top">
+                            <span class="tf-inbox-row__name">@name</span>
+                            <ChannelBadge Kind="@InboxChannel(conversation.Inbox)" Label="@InboxName(conversation.Inbox)" />
+                        </div>
+                        <div class="tf-inbox-row__preview">
+                            @if (row.PreviewOutgoing)
+                            {
+                                <LucideIcon Name="corner-up-left" Size="12" />
+                            }
+                            @(row.Preview ?? "No messages yet")
+                        </div>
+                        <div class="tf-inbox-row__meta">
+                            <StatusBadge Kind="conversation.Status.Kind" />
+                            <PriorityBadge Priority="conversation.Priority" />
+                            <SlaBadge Status="row.Sla" Now="Now" />
+                            <LabelChips Labels="conversation.Labels.Select(label => label.Value)" />
+                        </div>
+                    </div>
+                    <div class="tf-inbox-row__side">
+                        <span>@UiFormat.Relative(conversation.LastActivityAt, Now)</span>
+                        @if (conversation.Assignee is { } assignee)
+                        {
+                            <UserChip Name="@Session.UserName(assignee)" />
+                        }
+                        else
+                        {
+                            <span class="tf-badge tf-badge--muted">Unassigned</span>
+                        }
+                        <span>@TeamName(conversation.Team)</span>
+                    </div>
+                </a>
+            }
+        </div>
+        <div class="tf-pager">
+            <span>Showing @rows.Count conversation@(rows.Count == 1 ? "" : "s")</span>
+            <div class="tf-row">
+                @if (Query("cursor") is not null)
+                {
+                    <BbButton Href="@PageUrl(null)" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="chevrons-left" Size="14" />First page</BbButton>
+                }
+                @if (next is not null)
+                {
+                    <BbButton Href="@PageUrl(next)" Variant="ButtonVariant.Outline" Size="ButtonSize.Small">Next<LucideIcon Name="chevron-right" Size="14" /></BbButton>
+                }
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private sealed record Row(ConversationView Conversation, string? Preview, bool PreviewOutgoing, SlaStatusView? Sla);
+
+    private readonly List<Row> rows = [];
+    private string? next;
+    private UiOutcome? error;
+
+    private IReadOnlyList<TabLinks.Tab> StatusTabs => [.. new (string? Value, string Label)[] { ("open", "Open"), ("pending", "Pending"), ("snoozed", "Snoozed"), ("resolved", "Resolved"), ("all", "All") }
+        .Select(tab => new TabLinks.Tab(tab.Label, Url("conversations", ("status", tab.Value), ("assignee", Query("assignee")), ("inbox", Query("inbox")), ("team", Query("team")), ("label", Query("label"))),
+            (Query("status") ?? "open") == tab.Value))];
+
+    private string PageUrl(string? cursor) => Url("conversations", ("status", Query("status")), ("assignee", Query("assignee")), ("inbox", Query("inbox")), ("team", Query("team")),
+        ("label", Query("label")), ("cursor", cursor));
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadWorkspaceAsync();
+        if (Service<IConversationService>() is not { } service)
+            return;
+        ConversationStatusKind? status = (Query("status") ?? "open") switch
+        {
+            "pending" => ConversationStatusKind.Pending,
+            "snoozed" => ConversationStatusKind.Snoozed,
+            "resolved" => ConversationStatusKind.Resolved,
+            "closed" => ConversationStatusKind.Closed,
+            "all" => null,
+            _ => ConversationStatusKind.Open,
+        };
+        ConversationListQuery query;
+        try
+        {
+            query = new ConversationListQuery(Query("inbox") is { } inbox ? new InboxId(inbox) : null, status,
+                Query("assignee") == "me" ? Session.UserId : null, Query("assignee") == "unassigned",
+                Query("team") is { } team ? new TeamId(team) : null, Query("label") is { } label ? new LabelId(label) : null, limit: Session.Options.PageSize);
+        }
+        catch (ArgumentException)
+        {
+            error = UiOutcome.Invalid("One of the filters is not valid.");
+            return;
+        }
+        switch (await service.ListAsync(Actor, query, Query("cursor"), Aborted))
+        {
+            case ConversationListPage page:
+                next = page.NextCursor;
+                var sla = Service<ISlaService>();
+                foreach (var conversation in page.Conversations)
+                {
+                    var (preview, outgoing) = await PreviewAsync(service, conversation);
+                    SlaStatusView? status1 = sla is not null && conversation.Status.Kind is ConversationStatusKind.Open or ConversationStatusKind.Pending
+                        && await sla.GetStatusAsync(Actor, conversation.Id, Aborted) is SlaValue<SlaStatusView> value ? value.Value : null;
+                    rows.Add(new Row(conversation, preview, outgoing, status1));
+                }
+                break;
+            case ConversationRefused refused:
+                error = UiOutcome.Refused(refused.Reason, refused.Errors);
+                break;
+        }
+        await LoadContactsAsync(rows.Select(row => row.Conversation.Contact));
+        await Session.LoadUsersAsync(rows.Select(row => row.Conversation.Assignee));
+    }
+
+    private async Task<(string? Preview, bool Outgoing)> PreviewAsync(IConversationService service, ConversationView conversation)
+    {
+        if (await service.ReadTimelineAsync(Actor, conversation.Id, Math.Max(0, conversation.LastSequence - 30), 30, Aborted) is not TimelinePage page)
+            return (null, false);
+        foreach (var item in page.Events.Reverse())
+            if (item.Event.Event.Value is MessageEvent message)
+                return (UiText.Excerpt(message.Body), message.Direction == MessageDirection.Outgoing);
+        return (null, false);
+    }
+}

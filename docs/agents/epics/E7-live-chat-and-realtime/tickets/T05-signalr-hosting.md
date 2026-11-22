@@ -37,4 +37,10 @@ Implemented `TicketFlow.Realtime.SignalR`: `AgentRealtimeHub`, `VisitorRealtimeH
   agent round trip with typing, push, reconnect-with-cursor and read receipts; foreign origins, bad tokens, missing principals and
   unauthorized subscriptions refused; attachment upload authentication).
 
+Review fixes (2026-11-22): server-side typing throttle per connection and conversation in both hubs (`TypingThrottleInterval`, default
+2 s); optional agent hub origin allow-list (`AgentAllowedOrigins`, `RequireAgentOrigin`) checked in `OnConnectedAsync`, with CORS/SameSite
+guidance in docs/realtime.md; SignalR connections are aborted when their visitor session ends.
+- `dotnet test tests/Hosting/TicketFlow.Realtime.SignalR.Tests -c Release` — 6 passed (new: typing throttle; foreign agent origins
+  rejected; ended session closes the other tab and refuses calls; store-revoked session refused mid-connection).
+
 Post-ticket parallel reviews (docs/agents/prompts/post-ticket-*.md) have not been run yet.

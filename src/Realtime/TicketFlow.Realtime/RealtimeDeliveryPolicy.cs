@@ -5,7 +5,7 @@ using TicketFlow.Workspaces;
 
 namespace TicketFlow.Realtime;
 
-/// <summary>What a granted subscription keeps: the planned <c>conversation:read</c> filter for queue topics.</summary>
+/// <summary>What a granted subscription keeps: the planned <c>conversation:read</c> filter for queue topics. Mutated only by the fan-out worker.</summary>
 internal sealed class SubscriptionGrant(AccessFilter? filter, DateTimeOffset plannedAt)
 {
     public AccessFilter? Filter { get; set; } = filter;
@@ -13,16 +13,54 @@ internal sealed class SubscriptionGrant(AccessFilter? filter, DateTimeOffset pla
 }
 
 /// <summary>
-/// Subscription authorization and per-subscriber delivery filtering. One instance serves one publication (or one subscription
-/// request) inside a DI scope and caches conversation reads and decisions for that unit only, so every delivery is decided against
-/// current data. Agents never receive visitor-only events; visitors never receive agent events or agent identities.
+/// A principal's cached Access decision context (<c>conversation:read</c>, <c>note:read</c>) shared by all of its subscriptions on this
+/// node, reloaded after <see cref="RealtimeOptions.DecisionContextLifetime"/>. Owned by the single fan-out worker (no locking).
 /// </summary>
-internal sealed class RealtimeDeliveryPolicy(IConversationStore conversations, IAccessEvaluator evaluator, IAccessQueryPlanner planner, TimeProvider time, RealtimeOptions options)
+internal sealed class PrincipalAuthorization(PrincipalRef principal)
 {
-    private readonly Dictionary<ConversationId, StoredConversation?> stored = [];
-    private readonly Dictionary<(object Principal, Permission Permission, ConversationId Conversation), bool> decisions = [];
+    private static readonly Permission[] Loaded = [ConversationPermissions.Read, ConversationPermissions.NoteRead];
 
-    public async Task<(SubscriptionGrant? Grant, RealtimeRefusal Refusal)> AuthorizeAsync(RealtimeSubscriber subscriber, RealtimeTopic topic, CancellationToken cancellationToken)
+    private IAccessDecisionContext? context;
+    private DateTimeOffset loadedAt;
+
+    public PrincipalRef Principal { get; } = principal;
+
+    public DateTimeOffset LoadedAt => loadedAt;
+
+    public async ValueTask<bool> PermittedAsync(Permission permission, StoredConversation conversation, IAccessEvaluator evaluator, TimeProvider time, TimeSpan lifetime,
+        CancellationToken cancellationToken)
+    {
+        var resource = ConversationAccess.Resource(conversation);
+        if (context is null || context.Scope != conversation.Scope || time.GetUtcNow() - loadedAt >= lifetime)
+            await LoadAsync(conversation.Scope, evaluator, time, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return (await context!.DecideAsync(permission, resource, cancellationToken).ConfigureAwait(false)).IsPermitted;
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            // A cached context may hold services of a finished scope (for example an audit sink); reload once in the current scope.
+            await LoadAsync(conversation.Scope, evaluator, time, cancellationToken).ConfigureAwait(false);
+            return (await context!.DecideAsync(permission, resource, cancellationToken).ConfigureAwait(false)).IsPermitted;
+        }
+    }
+
+    private async Task LoadAsync(TicketScope scope, IAccessEvaluator evaluator, TimeProvider time, CancellationToken cancellationToken)
+    {
+        context = null;
+        context = await evaluator.LoadDecisionContextAsync(Principal, scope, Loaded, cancellationToken).ConfigureAwait(false);
+        loadedAt = time.GetUtcNow();
+    }
+}
+
+/// <summary>
+/// Subscription authorization (point checks against current data) and per-subscriber delivery filtering. Agents never receive
+/// visitor-only events; visitors never receive agent events or agent identities.
+/// </summary>
+internal static class RealtimeDeliveryPolicy
+{
+    public static async Task<(SubscriptionGrant? Grant, RealtimeRefusal Refusal)> AuthorizeAsync(RealtimeSubscriber subscriber, RealtimeTopic topic, IConversationStore conversations,
+        IAccessEvaluator evaluator, IAccessQueryPlanner planner, TimeProvider time, CancellationToken cancellationToken)
     {
         if (subscriber.Scope != topic.Scope)
             return (null, RealtimeRefusal.Invalid);
@@ -36,16 +74,15 @@ internal sealed class RealtimeDeliveryPolicy(IConversationStore conversations, I
                 switch (topic)
                 {
                     case ConversationTopic conversationTopic:
-                        var conversation = await GetAsync(conversationTopic.Scope, conversationTopic.Conversation, cancellationToken).ConfigureAwait(false);
+                        var conversation = await conversations.GetAsync(conversationTopic.Scope, conversationTopic.Conversation, cancellationToken).ConfigureAwait(false);
                         if (conversation is null)
                             return (null, RealtimeRefusal.NotFound);
-                        return await PermittedAsync(agent.Principal, ConversationPermissions.Read, conversation, cancellationToken).ConfigureAwait(false)
+                        return (await evaluator.AuthorizeAsync(new AccessRequest(agent.Principal, ConversationPermissions.Read, ConversationAccess.Resource(conversation)), cancellationToken)
+                            .ConfigureAwait(false)).IsPermitted
                             ? (new SubscriptionGrant(null, time.GetUtcNow()), default)
                             : (null, RealtimeRefusal.Forbidden);
                     case InboxQueueTopic queue:
-                        var inbox = await evaluator.AuthorizeAsync(new AccessRequest(agent.Principal, WorkspacePermissions.InboxRead, WorkspaceResources.Inbox(queue.Scope, queue.Inbox)),
-                            cancellationToken).ConfigureAwait(false);
-                        if (!inbox.IsPermitted)
+                        if (!await InboxReadableAsync(agent.Principal, queue, evaluator, cancellationToken).ConfigureAwait(false))
                             return (null, RealtimeRefusal.Forbidden);
                         var filter = await planner.PlanAsync(new AccessQuery(agent.Principal, ConversationPermissions.Read, queue.Scope), cancellationToken).ConfigureAwait(false);
                         return (new SubscriptionGrant(filter, time.GetUtcNow()), default);
@@ -61,20 +98,11 @@ internal sealed class RealtimeDeliveryPolicy(IConversationStore conversations, I
         throw new InvalidOperationException("Unknown subscriber or topic.");
     }
 
-    /// <summary>The event as <paramref name="subscriber"/> may see it on <paramref name="topic"/>, or <see langword="null"/> to drop it.</summary>
-    public async Task<RealtimeEvent?> FilterAsync(RealtimeSubscriber subscriber, RealtimeTopic topic, SubscriptionGrant grant, RealtimeEvent realtimeEvent, CancellationToken cancellationToken)
-    {
-        switch (subscriber)
-        {
-            case VisitorSubscriber visitor:
-                return ForVisitor(visitor, realtimeEvent);
-            case AgentSubscriber agent:
-                return await ForAgentAsync(agent.Principal, topic, grant, realtimeEvent, cancellationToken).ConfigureAwait(false);
-        }
-        throw new InvalidOperationException("Unknown subscriber.");
-    }
+    public static async Task<bool> InboxReadableAsync(PrincipalRef principal, InboxQueueTopic queue, IAccessEvaluator evaluator, CancellationToken cancellationToken) =>
+        (await evaluator.AuthorizeAsync(new AccessRequest(principal, WorkspacePermissions.InboxRead, WorkspaceResources.Inbox(queue.Scope, queue.Inbox)), cancellationToken)
+            .ConfigureAwait(false)).IsPermitted;
 
-    private static RealtimeEvent? ForVisitor(VisitorSubscriber visitor, RealtimeEvent realtimeEvent)
+    public static RealtimeEvent? ForVisitor(VisitorSubscriber visitor, RealtimeEvent realtimeEvent)
     {
         switch (realtimeEvent)
         {
@@ -97,23 +125,16 @@ internal sealed class RealtimeDeliveryPolicy(IConversationStore conversations, I
         return null;
     }
 
-    /// <summary>Support-side actors become anonymous for visitors; the visitor's own actions are not echoed.</summary>
-    private static RealtimeActor? Anonymous(RealtimeActor actor) => actor switch
-    {
-        AgentActor => (RealtimeActor?)SupportActor.Instance,
-        SupportActor => (RealtimeActor?)SupportActor.Instance,
-        VisitorActor => null,
-    };
-
-    private async Task<RealtimeEvent?> ForAgentAsync(PrincipalRef principal, RealtimeTopic topic, SubscriptionGrant grant, RealtimeEvent realtimeEvent, CancellationToken cancellationToken)
+    /// <summary>Agent events that need no conversation: returns the decided event, or <see langword="null"/> when the conversation must be consulted.</summary>
+    public static (bool Decided, RealtimeEvent? Event) WithoutConversation(RealtimeTopic topic, RealtimeEvent realtimeEvent)
     {
         switch (realtimeEvent)
         {
             case VisitorMessageEvent:
             case VisitorSessionEndedEvent:
-                return null;
+                return (true, null);
             case AgentStatusChangedEvent status:
-                return topic.Value is AgentTopic own && own.Agent == status.Agent ? realtimeEvent : (RealtimeEvent?)null;
+                return (true, topic.Value is AgentTopic own && own.Agent == status.Agent ? realtimeEvent : (RealtimeEvent?)null);
             case ConversationChangedEvent:
             case PresenceChangedEvent:
             case ReplyLockChangedEvent:
@@ -121,32 +142,16 @@ internal sealed class RealtimeDeliveryPolicy(IConversationStore conversations, I
             case QueueChangedEvent:
             case TypingEvent:
             case ReadReceiptEvent:
-                break;
+                return (false, null);
         }
+        return (true, null);
+    }
 
-        var conversationId = realtimeEvent.Conversation!.Value;
-        var conversation = await GetAsync(realtimeEvent.Scope, conversationId, cancellationToken).ConfigureAwait(false);
-        if (conversation is null)
-        {
-            // A deleted conversation can no longer be authorized: only subscribers already granted the conversation topic learn that it was deleted.
-            return realtimeEvent.Value is ConversationChangedEvent { Kind: ConversationChangeKind.Deleted } && topic.Value is ConversationTopic ? realtimeEvent : (RealtimeEvent?)null;
-        }
-
-        if (topic.Value is InboxQueueTopic)
-        {
-            if (time.GetUtcNow() - grant.PlannedAt >= options.QueueFilterLifetime || grant.Filter is null)
-            {
-                grant.Filter = await planner.PlanAsync(new AccessQuery(principal, ConversationPermissions.Read, conversation.Scope), cancellationToken).ConfigureAwait(false);
-                grant.PlannedAt = time.GetUtcNow();
-            }
-            if (!AccessFilterEvaluator.Matches(grant.Filter, ConversationAccess.Resource(conversation)))
-                return null;
-        }
-        else if (!await PermittedAsync(principal, ConversationPermissions.Read, conversation, cancellationToken).ConfigureAwait(false))
-            return null;
-
+    /// <summary>The event after note stripping for a principal already allowed to read the conversation.</summary>
+    public static async ValueTask<RealtimeEvent?> StripNotesAsync(RealtimeEvent realtimeEvent, Func<ValueTask<bool>> noteReadable)
+    {
         if (realtimeEvent.Value is ConversationChangedEvent changed && changed.Events.Any(summary => summary.Kind == ConversationEventKind.Note)
-            && !await PermittedAsync(principal, ConversationPermissions.NoteRead, conversation, cancellationToken).ConfigureAwait(false))
+            && !await noteReadable().ConfigureAwait(false))
         {
             var visible = changed.Events.Where(summary => summary.Kind != ConversationEventKind.Note).ToList();
             if (visible.Count == 0 && changed.Kind == ConversationChangeKind.EventsAppended)
@@ -156,22 +161,11 @@ internal sealed class RealtimeDeliveryPolicy(IConversationStore conversations, I
         return realtimeEvent;
     }
 
-    private async Task<StoredConversation?> GetAsync(TicketScope scope, ConversationId id, CancellationToken cancellationToken)
+    /// <summary>Support-side actors become anonymous for visitors; the visitor's own actions are not echoed.</summary>
+    private static RealtimeActor? Anonymous(RealtimeActor actor) => actor switch
     {
-        if (stored.TryGetValue(id, out var cached))
-            return cached;
-        var conversation = await conversations.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
-        stored[id] = conversation;
-        return conversation;
-    }
-
-    private async Task<bool> PermittedAsync(PrincipalRef principal, Permission permission, StoredConversation conversation, CancellationToken cancellationToken)
-    {
-        var key = (principal.Value!, permission, conversation.Conversation.Id);
-        if (decisions.TryGetValue(key, out var permitted))
-            return permitted;
-        var decision = await evaluator.AuthorizeAsync(new AccessRequest(principal, permission, ConversationAccess.Resource(conversation)), cancellationToken).ConfigureAwait(false);
-        decisions[key] = decision.IsPermitted;
-        return decision.IsPermitted;
-    }
+        AgentActor => (RealtimeActor?)SupportActor.Instance,
+        SupportActor => (RealtimeActor?)SupportActor.Instance,
+        VisitorActor => null,
+    };
 }

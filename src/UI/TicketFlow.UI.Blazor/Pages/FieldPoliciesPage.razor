@@ -1,0 +1,64 @@
+@inherits UiPageBase
+
+<PageHeader Title="Access" Description="Field policies mask sensitive fields (contact email, phone, attributes) unless the viewer's role unmasks them. Reveals are audited." />
+<AccessTabs Active="fields" />
+
+<div class="tf-card">
+    <div class="tf-table-wrap">
+        <table class="tf-table">
+            <thead><tr><th>Field</th><th>Masked for</th><th>Unmasked roles</th><th>Reveal permission</th><th class="tf-num"></th></tr></thead>
+            <tbody>
+                @foreach (var policy in policies)
+                {
+                    <tr>
+                        <td><span class="tf-code">@policy.Policy.Field.Value</span></td>
+                        <td>@string.Join(", ", policy.Policy.AppliesTo.Select(permission => permission.Value))</td>
+                        <td>@(policy.Policy.UnmaskedRoles.Count == 0 ? "None" : string.Join(", ", policy.Policy.UnmaskedRoles.Select(role => role.Value)))</td>
+                        <td>@(policy.Policy.RevealPermission?.Value ?? "Not revealable")</td>
+                        <td class="tf-num">
+                            <TfForm Action="access.field.delete" Revision="policy.Revision" Class="tf-inline-form">
+                                <input type="hidden" name="field" value="@policy.Policy.Field.Value" />
+                                <button class="tf-button tf-button--ghost tf-button--xs" type="submit">Delete</button>
+                            </TfForm>
+                        </td>
+                    </tr>
+                }
+                @if (policies.Count == 0)
+                {
+                    <tr><td colspan="5" class="tf-muted">No field policies. Sensitive attributes without a policy stay masked and unrevealable.</td></tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="tf-card">
+    <div class="tf-card__header"><div class="tf-card__title">New field policy</div></div>
+    <div class="tf-card__content">
+        <TfForm Action="access.field.create" Class="tf-form">
+            <div class="tf-form-grid">
+                <div class="tf-field"><label class="tf-label" for="tf-f-field">Field</label>
+                    <select id="tf-f-field" name="field" class="tf-select">
+                        @foreach (var field in new[] { "contact.email", "contact.phone", "contact.social", "contact.external-id" })
+                        {
+                            <option value="@field">@field</option>
+                        }
+                    </select></div>
+                <div class="tf-field"><label class="tf-label" for="tf-f-custom">…or attribute field</label><input id="tf-f-custom" name="customField" class="tf-input tf-mono" placeholder="contact.attribute.mrr" maxlength="128" /></div>
+                <div class="tf-field"><label class="tf-label" for="tf-f-unmasked">Unmasked roles (comma separated)</label><input id="tf-f-unmasked" name="unmasked" class="tf-input tf-mono" placeholder="owner, admin" maxlength="512" /></div>
+                <div class="tf-field"><label class="tf-label" for="tf-f-reveal">Reveal permission</label><input id="tf-f-reveal" name="reveal" class="tf-input tf-mono" value="contact:reveal" maxlength="128" /></div>
+            </div>
+            <div class="tf-form-actions"><BbButton Type="ButtonType.Submit"><LucideIcon Name="eye-off" Size="14" />Create policy</BbButton></div>
+        </TfForm>
+    </div>
+</div>
+
+@code {
+    private IReadOnlyList<StoredAccessFieldPolicy> policies = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<IAccessFieldPolicyStore>() is { } store)
+            policies = await store.ListAsync(Session.Scope, Aborted);
+    }
+}

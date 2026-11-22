@@ -11,6 +11,9 @@ automation acting as its own API-client principal with grants) apply a suggestio
 | `TicketFlow.Assist.Providers.Claude` | `ClaudeAssistProvider` over the official `Anthropic` .NET SDK (13.6.0) and its `IChatClient` adapter, `ClaudeAssistOptions`, `AddClaudeAssist()`. |
 | `TicketFlow.Assist.Stores.Postgres` | `PostgresAssistStore`, `PostgresAssistMigrations` (component `ticketflow.assist`), `AddPostgresAssistStores()`. |
 
+Registration extensions live in the feature namespaces (`using TicketFlow.Assist;`, `using TicketFlow.Assist.Providers.Claude;`,
+`using TicketFlow.Assist.Stores.Postgres;`), like the other feature packages.
+
 ```csharp
 services.AddTicketFlow()
     .AddAccessControl().AddPostgresAccessStores(dataSource)
@@ -76,15 +79,21 @@ is set); single bodies are cut at `MaximumMessageCharacters` (default 4,000) wit
 ## Models, providers and telemetry
 
 The AI layer follows the `Microsoft.Extensions.AI` pattern: an `IAssistModelRegistry` of `AssistModelDefinition`s (TicketFlow id,
-provider name, provider model, capabilities, default thinking level), `AssistOptions.FeatureModels` defaults, and an
-`IAssistChatClientFactory` that wraps the provider's base `IChatClient` (cached per provider model) in a pipeline:
+provider name, provider model, capabilities, default thinking level), `AssistOptions.FeatureModels` defaults, and a singleton
+`IAssistChatClientFactory`. The base `IChatClient` of a provider is the host's keyed registration
+`services.AddKeyedSingleton<IChatClient>(AssistChatClients.ServiceKey("claude"), ...)` when present (the model is chosen per request
+through `ChatOptions.ModelId`; the host owns and disposes it), otherwise one client per provider model created by the
+`IAssistChatProvider` and owned by the factory. Pipelines are built once per (model, feature, thinking level) — a bounded set — and
+reused; the factory is disposed with the container and disposes its pipelines (including the OpenTelemetry meters/sources) and the
+provider-created clients. Pipeline order:
 
 1. option mapping — `ModelId`, thinking level → `ChatOptions.Reasoning`, then `IAssistChatProvider.ApplyOptions` for provider
    specifics;
-2. usage metrics (`TicketFlow.Assist` meter: requests, input/output tokens, tool calls, duration; tags feature/model/provider/outcome);
-3. tool-invocation telemetry (`UseFunctionInvocation` with a span and log scope per tool call — name, call id, success, duration,
+2. host middleware from `AssistOptions.Pipeline` (`(builder, model, request) => builder.Use…(…)`, e.g. caching or rate limiting);
+3. usage metrics (`TicketFlow.Assist` meter: requests, input/output tokens, tool calls, duration; tags feature/model/provider/outcome);
+4. tool-invocation telemetry (`UseFunctionInvocation` with a span and log scope per tool call — name, call id, success, duration,
    result type; never arguments or results) for callers that pass `AIFunction` tools;
-4. OpenTelemetry (`TicketFlow.Assist` activity source) with `EnableSensitiveData = false`.
+5. OpenTelemetry (`TicketFlow.Assist` activity source) with `EnableSensitiveData = false`.
 
 Workspace settings may override the model per feature; the model must be registered. Other providers implement
 `IAssistChatProvider` and surface failures as `AssistProviderException`.
@@ -131,9 +140,16 @@ fails the suggestion.
   0 creates.
 - Before each model call the service reserves an estimate (`ceil(prompt characters / 3) + max output tokens`) with
   `IAssistStore.ReserveAsync`, which atomically checks the day's counted tokens and the last minute's requests. Exceeded limits are
-  refused with `RetryAfter` before the model is called. After the call the record is settled with the provider's actual usage
-  (input, output, cache reads, cache writes); failures and cancellations settle as `Failed`, releasing the reservation. A reservation
-  left by a crashed process counts at its estimate until the day ends.
+  refused with `RetryAfter` before the model is called.
+- Settlement rule: actual provider usage (input, output, cache reads, cache writes) when reported. The reservation is released
+  (Failed, zero) **only** when the provider provably consumed nothing — the client could not be built, the request was never sent
+  (`NotConfigured`) or the provider answered with an error status (`AssistProviderException.TokensMayHaveBeenConsumed == false`).
+  Every ambiguous outcome — timeouts, network errors or caller cancellation after sending, unknown exceptions, unreadable success
+  responses, or a success without usage — is settled **at the reserved estimate** (`AssistUsageRecord.Estimated`), so quotas are never
+  under-charged.
+- `AssistMaintenance.RunOnceAsync()` (scoped; host it in a worker such as the E11 worker) settles reservations older than
+  `AssistOptions.ReservationTimeout` (default 15 minutes) — left by a crashed process — as Failed at their estimate via
+  `IAssistStore.SweepReservationsAsync` (any scope, bounded batches, safe on several nodes).
 - Usage records hold feature, model, actor kind/id, conversation id, state and token counts — never prompts or outputs.
   `GetUsageAsync(actor, from, to)` (≤ 92 days) aggregates per feature and model; `PurgeUsageAsync` deletes settled records in
   bounded batches.
@@ -143,11 +159,15 @@ fails the suggestion.
 | Contract | Guarantees |
 | --- | --- |
 | `IAssistStore` settings | Scope-confined; compare-and-set on revision (0 creates). |
-| `IAssistStore` usage | Reservations serialize per workspace (PostgreSQL: transaction-scoped advisory lock) so limits cannot be raced; settle exactly once; summaries ordered by feature then model; purge never removes reserved records. |
+| `IAssistStore` usage | Reservations serialize per workspace so limits cannot be raced; settle exactly once (actual or estimated); sweeps settle abandoned reservations at their estimate; summaries ordered by feature then model (with reserved and estimated tokens); purge never removes reserved records. |
 
-`PostgresAssistStore` tables `tf_assist_settings` (versioned JSON `{"v":1,…}`) and `tf_assist_usage` (numeric feature, actor kind and
-state discriminators, `format_version`), `tf_key_v1` keys over the full scope, parameterized statements, rows that fail to decode
-throw. `InMemoryAssistStore` is a bounded development example. The shared contract lives in `tests/Assist/TicketFlow.Assist.StoreContracts`.
+`PostgresAssistStore` tables `tf_assist_settings` (versioned JSON `{"v":1,…}`), `tf_assist_usage` (numeric feature, actor kind and
+state discriminators, `format_version`, `estimated`) and — migration 2 — `tf_assist_usage_days`, a per-workspace, per-UTC-day counter
+of counted tokens (backfilled from existing usage). A reservation takes the workspace's transaction-scoped advisory lock, reads at
+most `RequestsPerMinute` rows of the last minute, and charges the day counter with a conditional UPSERT
+(`tokens = tokens + n` only while within the limit); no check scans a day of usage. Settlement adjusts the counter by
+`actual − reserved` in the same transaction; estimated settlements and sweeps leave it unchanged. `tf_key_v1` keys over the full
+scope, parameterized statements, rows that fail to decode throw. `InMemoryAssistStore` is a bounded development example. The shared contract lives in `tests/Assist/TicketFlow.Assist.StoreContracts`.
 
 ## Testing
 

@@ -223,7 +223,7 @@ public sealed class ModelAndCodecTests
     [TestMethod]
     public void PermissionsAndAccessResource()
     {
-        CollectionAssert.AreEqual(new[] { "contact-attribute:manage", "contact:create", "contact:delete" },
+        CollectionAssert.AreEqual(new[] { "contact-attribute:manage", "contact-linking:manage", "contact:create", "contact:delete", "contact:link" },
             ContactPermissions.Definitions.Select(definition => definition.Permission.Value).Order(StringComparer.Ordinal).ToArray());
         Assert.IsTrue(ContactPermissions.Definitions.Single(definition => definition.Permission == ContactPermissions.Delete).IsSensitive);
         Assert.AreEqual(AccessPermissions.ContactMerge, ContactPermissions.Merge);

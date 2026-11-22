@@ -1,0 +1,20 @@
+@* Link-based tabs (work in static SSR without interactivity). *@
+<nav class="tf-tabs @Class" role="tablist">
+    @foreach (var tab in Tabs)
+    {
+        <a class="tf-tabs__trigger @(tab.Active ? "is-active" : null)" role="tab" aria-selected="@(tab.Active ? "true" : "false")" href="@tab.Href">
+            @tab.Label
+            @if (tab.Count is { } count)
+            {
+                <span class="tf-tabs__count">@count</span>
+            }
+        </a>
+    }
+</nav>
+
+@code {
+    public sealed record Tab(string Label, string Href, bool Active, int? Count = null);
+
+    [Parameter, EditorRequired] public IReadOnlyList<Tab> Tabs { get; set; } = [];
+    [Parameter] public string? Class { get; set; }
+}

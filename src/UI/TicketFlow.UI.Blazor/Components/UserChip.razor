@@ -1,0 +1,8 @@
+<span class="tf-user-chip">
+    <BbAvatar Size="AvatarSize.Small" Class="tf-avatar-xs"><BbAvatarFallback>@TicketFlowUISession.Initials(Name)</BbAvatarFallback></BbAvatar>
+    <span>@Name</span>
+</span>
+
+@code {
+    [Parameter, EditorRequired] public string Name { get; set; } = "";
+}

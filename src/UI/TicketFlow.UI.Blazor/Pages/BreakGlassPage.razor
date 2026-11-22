@@ -1,0 +1,62 @@
+@inherits UiPageBase
+@using TicketFlow.Workspaces
+
+<PageHeader Title="Access" Description="Break-glass gives you a time-limited elevated role in an emergency. Activation and every decision that uses it are audited." />
+<AccessTabs Active="break-glass" />
+
+<div class="tf-grid tf-grid--wide-narrow">
+    <div class="tf-card">
+        <div class="tf-card__header"><div><div class="tf-card__title">Activate break-glass</div><div class="tf-card__description">Requires <span class="tf-code">access:break-glass</span>. Roles with administrative permissions are not allowed.</div></div></div>
+        <div class="tf-card__content">
+            <TfForm Action="access.breakglass" Class="tf-form">
+                <div class="tf-form-grid">
+                    <div class="tf-field"><label class="tf-label" for="tf-b-role">Role</label>
+                        <select id="tf-b-role" name="role" class="tf-select">@foreach (var role in roles) { <option value="@role.Id.Value">@role.Name</option> }</select></div>
+                    <div class="tf-field"><label class="tf-label" for="tf-b-duration">Duration</label>
+                        <select id="tf-b-duration" name="minutes" class="tf-select"><option value="30">30 minutes</option><option value="60" selected>1 hour</option><option value="120">2 hours</option><option value="240">4 hours</option></select></div>
+                    <div class="tf-field"><label class="tf-label" for="tf-b-scope">Scope</label>
+                        <select id="tf-b-scope" name="scope" class="tf-select">
+                            <option value="workspace">Whole workspace</option>
+                            @foreach (var team in Teams) { <option value="team:@team.Id.Value">Team · @team.Name</option> }
+                            @foreach (var inbox in Inboxes) { <option value="inbox:@inbox.Inbox.Id.Value">Inbox · @inbox.Inbox.Name</option> }
+                        </select></div>
+                    <div class="tf-field tf-field--full"><label class="tf-label" for="tf-b-why">Justification</label><textarea id="tf-b-why" name="justification" class="tf-textarea" required minlength="10" maxlength="1024" placeholder="Incident INC-2291: customer data needed to restore bookings">@Session.FormValue("justification", null)</textarea></div>
+                </div>
+                <div class="tf-form-actions"><BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Destructive"><LucideIcon Name="siren" Size="14" />Activate</BbButton></div>
+            </TfForm>
+        </div>
+    </div>
+    <div class="tf-card">
+        <div class="tf-card__header"><div class="tf-card__title">Active elevations</div></div>
+        <div class="tf-card__content tf-stack tf-stack--sm">
+            @foreach (var grant in active)
+            {
+                <div class="tf-row tf-row--between">
+                    <span>@(grant.Grant.Subject.Value is UserId user ? Session.UserName(user) : "—") · @grant.Grant.Role.Value</span>
+                    <span class="tf-badge tf-badge--warning">until @UiFormat.Short(grant.Grant.ValidUntil)</span>
+                </div>
+            }
+            @if (active.Count == 0)
+            {
+                <div class="tf-small tf-muted">No active break-glass grants.</div>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    private List<AccessRole> roles = [];
+    private readonly List<StoredAccessGrant> active = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadWorkspaceAsync();
+        roles = [.. BuiltInRoles.All.Where(role => !role.Permissions.Contains(AccessPermissions.AccessManage) && !role.Permissions.Contains(AccessPermissions.AccessBreakGlass))];
+        if (Service<IAccessRoleStore>() is { } store)
+            roles.AddRange((await store.ListAsync(Session.Scope, Aborted)).Select(stored => stored.Role).Where(role => !role.Permissions.Contains(AccessPermissions.AccessManage)));
+        if (Service<IAccessGrantStore>() is { } grants)
+            active.AddRange((await grants.ListForTargetAsync(AccessPartition.From(Session.Scope), new WorkspaceGrantScope(Session.Scope.WorkspaceId), 1000, null, Aborted))
+                .Where(grant => grant.Grant.Kind == GrantKind.BreakGlass && grant.Grant.ValidUntil > Now));
+        await Session.LoadUsersAsync(active.Select(grant => grant.Grant.Subject.Value is UserId user ? (UserId?)user : null));
+    }
+}

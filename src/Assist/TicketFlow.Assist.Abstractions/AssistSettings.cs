@@ -67,7 +67,7 @@ public enum AssistUsageState
 public sealed record AssistUsageRecord
 {
     public AssistUsageRecord(Guid id, AssistFeature feature, string model, Access.AccessActor actor, ConversationId? conversation, AssistUsageState state,
-        long reservedTokens, AssistUsage usage, DateTimeOffset createdAt, DateTimeOffset? completedAt)
+        long reservedTokens, AssistUsage usage, DateTimeOffset createdAt, DateTimeOffset? completedAt, bool estimated = false)
     {
         if (id == Guid.Empty)
             throw new ArgumentException("A usage identifier is required.", nameof(id));
@@ -80,6 +80,8 @@ public sealed record AssistUsageRecord
             throw new ArgumentException("Conversation identifiers must be initialized when supplied.", nameof(conversation));
         if ((state == AssistUsageState.Reserved) != (completedAt is null))
             throw new ArgumentException("Only settled records carry a completion time.", nameof(completedAt));
+        if (estimated && state == AssistUsageState.Reserved)
+            throw new ArgumentException("Only settled records can be charged at their estimate.", nameof(estimated));
         Id = id;
         Feature = feature;
         Model = AssistText.RequireToken(model, AssistModelDefinition.MaximumIdLength, nameof(model), "Model identifiers");
@@ -90,6 +92,7 @@ public sealed record AssistUsageRecord
         Usage = usage;
         CreatedAt = AssistLimits.Truncate(createdAt);
         CompletedAt = completedAt is { } completed ? AssistLimits.Truncate(completed) : null;
+        Estimated = estimated;
     }
 
     public Guid Id { get; }
@@ -103,10 +106,16 @@ public sealed record AssistUsageRecord
     public DateTimeOffset CreatedAt { get; }
     public DateTimeOffset? CompletedAt { get; }
 
-    public long CountedTokens => State == AssistUsageState.Reserved ? ReservedTokens : Usage.TotalTokens;
+    /// <summary>
+    /// The settled record is charged at <see cref="ReservedTokens"/> because actual usage is unknown (an ambiguous failure, a
+    /// response without usage, or an abandoned reservation swept by maintenance).
+    /// </summary>
+    public bool Estimated { get; }
 
-    public AssistUsageRecord Settle(AssistUsageState state, AssistUsage usage, DateTimeOffset at) =>
-        new(Id, Feature, Model, Actor, Conversation, state, ReservedTokens, usage, CreatedAt, at);
+    public long CountedTokens => State == AssistUsageState.Reserved || Estimated ? ReservedTokens : Usage.TotalTokens;
+
+    public AssistUsageRecord Settle(AssistUsageState state, AssistUsage usage, DateTimeOffset at, bool estimated = false) =>
+        new(Id, Feature, Model, Actor, Conversation, state, ReservedTokens, usage, CreatedAt, at, estimated);
 }
 
 public enum AssistQuotaKind
@@ -133,9 +142,12 @@ public sealed record AssistWriteConflict(long CurrentRevision);
 /// <summary>Outcome of a revision-fenced settings write. Switch over every case without a discard arm.</summary>
 public union AssistWriteResult<T>(AssistWriteApplied<T>, AssistWriteConflict);
 
-/// <summary>Aggregated usage of one feature and model in a time range.</summary>
+/// <summary>
+/// Aggregated usage of one feature and model in a time range. <see cref="ReservedTokens"/> are held by unsettled reservations;
+/// <see cref="EstimatedTokens"/> were charged at the estimate because actual usage is unknown.
+/// </summary>
 public sealed record AssistUsageTotal(AssistFeature Feature, string Model, long Requests, long Failed, long InputTokens, long OutputTokens, long CacheReadInputTokens,
-    long CacheCreationInputTokens, long ReservedTokens);
+    long CacheCreationInputTokens, long ReservedTokens, long EstimatedTokens);
 
 /// <summary>Usage of a workspace in <c>[From, To)</c>, ordered by feature then model (ordinal).</summary>
 public sealed record AssistUsageSummary(DateTimeOffset From, DateTimeOffset To, IReadOnlyList<AssistUsageTotal> Totals);
@@ -146,7 +158,7 @@ public static class AssistLimits
     /// <summary>Longest usage summary range.</summary>
     public static TimeSpan MaximumSummaryRange { get; } = TimeSpan.FromDays(92);
 
-    /// <summary>Most usage records one purge call removes.</summary>
+    /// <summary>Most records one purge or sweep call processes.</summary>
     public const int MaximumPurgeBatch = 10_000;
 
     /// <summary>UTC with whole-microsecond precision, the resolution durable stores (PostgreSQL) keep.</summary>

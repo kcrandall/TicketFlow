@@ -39,4 +39,9 @@ disabled inbox; masking of pre-chat answers.
 
 - `dotnet test tests/Channels/TicketFlow.Channels.LiveChat.Tests -c Release` — 24 passed, 0 failed.
 
+Review fixes (2026-11-22): `LiveChatChannel` and `LiveChatSessionDirectory` skip revoked/expired sessions; ending a session closes all
+of its connections.
+- `dotnet test tests/Channels/TicketFlow.Channels.LiveChat.Tests -c Release` — 27 passed (new: revoked sessions get no pushes or agent
+  typing; ending a session closes every tab and later calls are refused).
+
 Post-ticket parallel reviews (docs/agents/prompts/post-ticket-*.md) have not been run yet.

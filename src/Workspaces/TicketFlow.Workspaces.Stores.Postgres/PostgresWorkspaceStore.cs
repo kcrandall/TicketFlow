@@ -15,7 +15,7 @@ namespace TicketFlow.Workspaces.Stores.Postgres;
 /// <see cref="AccessFilter"/> with <see cref="PostgresAccessFilterTranslator"/>; untranslatable filters return no rows. Lists are
 /// ordered by identifier with <c>COLLATE "C"</c> (UTF-8 byte order, equal to UTF-16 ordinal order for the Basic Multilingual Plane).
 /// </summary>
-public sealed partial class PostgresWorkspaceStore : IWorkspaceSettingsStore, IInboxStore, ITeamStore, IBusinessCalendarStore
+public sealed partial class PostgresWorkspaceStore : IWorkspaceSettingsStore, IInboxStore, ITeamStore, IBusinessCalendarStore, IWorkspaceDirectory
 {
     private const string WorkspaceWhere = "tenant_id=@tenant AND project_id=@project AND environment_id=@environment AND app_id=@app AND workspace_id=@workspace";
     private const string ScopeKeyWhere = "scope_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace) AND " + WorkspaceWhere;

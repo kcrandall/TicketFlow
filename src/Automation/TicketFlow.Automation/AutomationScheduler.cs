@@ -10,7 +10,7 @@ public sealed record AutomationScheduleRunResult(int Fired, int Conversations, i
 
 /// <summary>
 /// The cron scheduler: claims due scheduled rules (leased; concurrent schedulers never share a live lease), selects the bounded set of
-/// conversations the rule targets — through <see cref="IConversationStore.ListAsync"/> with the automation client's planned
+/// conversations the rule targets (one claim at a time, so each lease covers a single rule's run) — through <see cref="IConversationStore.ListAsync"/> with the automation client's planned
 /// <c>conversation:read</c> filter applied inside the query — and runs the rule for each with the trigger key <c>sched:&lt;slot&gt;</c>,
 /// so a slot executes at most once per conversation. The next run is the first fire instant after <c>max(slot, now)</c>: missed slots
 /// coalesce into one run. A run with failures is released for <see cref="AutomationOptions.ScheduleRetryDelay"/> and retried (finished
@@ -41,10 +41,14 @@ public sealed class AutomationScheduler
     public async Task<AutomationScheduleRunResult> RunOnceAsync(CancellationToken cancellationToken = default)
     {
         int fired = 0, scanned = 0, retried = 0, lost = 0;
-        var claims = await rules.ClaimDueSchedulesAsync(options.ScheduleBatchSize, options.ScheduleLease, cancellationToken).ConfigureAwait(false);
-        foreach (var claim in claims)
+        // Claim one rule at a time, so a claim's lease covers only its own run (never the runs of rules queued behind it).
+        for (var processed = 0; processed < options.ScheduleBatchSize; processed++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var claims = await rules.ClaimDueSchedulesAsync(1, options.ScheduleLease, cancellationToken).ConfigureAwait(false);
+            if (claims.Count == 0)
+                break;
+            var claim = claims[0];
             var stored = await rules.GetAsync(claim.Scope, claim.Rule, cancellationToken).ConfigureAwait(false);
             if (stored?.Rule is not { Enabled: true, Trigger.Value: ScheduledTrigger trigger } rule)
             {

@@ -1,0 +1,80 @@
+@using TicketFlow.Routing
+@using TicketFlow.Sla
+@using TicketFlow.Workspaces
+@* Shared inbox form fields (create and edit). *@
+<div class="tf-form-grid">
+    <div class="tf-field"><label class="tf-label" for="tf-i-name">Name</label><input id="tf-i-name" name="name" class="tf-input" required maxlength="128" value="@Session.FormValue("name", Inbox?.Name)" /></div>
+    @if (Inbox is null)
+    {
+        <div class="tf-field"><label class="tf-label" for="tf-i-id">Identifier</label><input id="tf-i-id" name="id" class="tf-input tf-mono" maxlength="64" placeholder="support-email (optional)" value="@Session.FormValue("id", null)" /></div>
+    }
+    <div class="tf-field">
+        <label class="tf-label" for="tf-i-kind">Channel</label>
+        <select id="tf-i-kind" name="kind" class="tf-select">
+            @foreach (var kind in new[] { "livechat", "email", "whatsapp", "sms", "slack", "teams", "api" })
+            {
+                <option value="@kind" selected="@(Session.FormValue("kind", Inbox?.Channel.Kind.Value) == kind)">@UiFormat.Channel(kind)</option>
+            }
+        </select>
+    </div>
+    <div class="tf-field"><label class="tf-label" for="tf-i-config">Channel configuration ID</label><input id="tf-i-config" name="configuration" class="tf-input tf-mono" required maxlength="128" value="@Session.FormValue("configuration", Inbox?.Channel.ConfigurationId)" /></div>
+    <div class="tf-field">
+        <label class="tf-label" for="tf-i-cal">Business hours</label>
+        <select id="tf-i-cal" name="calendar" class="tf-select">
+            <option value="">Always open</option>
+            @foreach (var (id, name) in Calendars)
+            {
+                <option value="@id" selected="@(Session.FormValue("calendar", Inbox?.Calendar?.Value) == id)">@name</option>
+            }
+        </select>
+    </div>
+    <div class="tf-field">
+        <label class="tf-label" for="tf-i-sla">SLA policy</label>
+        <select id="tf-i-sla" name="sla" class="tf-select">
+            <option value="">None</option>
+            @foreach (var (id, name) in SlaPolicies)
+            {
+                <option value="@id" selected="@(Session.FormValue("sla", Inbox?.SlaPolicy?.Value) == id)">@name</option>
+            }
+        </select>
+    </div>
+    <div class="tf-field">
+        <label class="tf-label" for="tf-i-routing">Routing policy</label>
+        <select id="tf-i-routing" name="routing" class="tf-select">
+            <option value="">Manual assignment</option>
+            @foreach (var (id, name) in RoutingPolicies)
+            {
+                <option value="@id" selected="@(Session.FormValue("routing", Inbox?.RoutingPolicy?.Value) == id)">@name</option>
+            }
+        </select>
+    </div>
+    <div class="tf-field" style="justify-content:flex-end"><label class="tf-check"><input type="checkbox" name="enabled" checked="@(Inbox?.Enabled ?? true)" />Enabled</label></div>
+    <div class="tf-field tf-field--full"><label class="tf-label" for="tf-i-greeting">Greeting message</label><input id="tf-i-greeting" name="greeting" class="tf-input" maxlength="1024" value="@Session.FormValue("greeting", Inbox?.GreetingMessage)" /></div>
+    <div class="tf-field tf-field--full"><label class="tf-label" for="tf-i-away">Away message</label><input id="tf-i-away" name="away" class="tf-input" maxlength="1024" value="@Session.FormValue("away", Inbox?.AwayMessage)" /></div>
+</div>
+
+@code {
+    [CascadingParameter] public TicketFlowUISession Session { get; set; } = default!;
+    [Parameter] public Inbox? Inbox { get; set; }
+    [Parameter] public IReadOnlyDictionary<string, string> Calendars { get; set; } = new Dictionary<string, string>();
+    [Parameter] public IReadOnlyDictionary<string, string> SlaPolicies { get; set; } = new Dictionary<string, string>();
+    [Parameter] public IReadOnlyDictionary<string, string> RoutingPolicies { get; set; } = new Dictionary<string, string>();
+
+    /// <summary>Names of calendars, SLA policies and routing policies the viewer can read (empty when a feature is not registered).</summary>
+    public static async Task<(Dictionary<string, string> Calendars, Dictionary<string, string> Sla, Dictionary<string, string> Routing)> LoadOptionsAsync(TicketFlowUISession session)
+    {
+        var calendars = new Dictionary<string, string>(StringComparer.Ordinal);
+        var sla = new Dictionary<string, string>(StringComparer.Ordinal);
+        var routing = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (session.Service<IBusinessCalendarService>() is { } calendarService && await calendarService.ListAsync(session.Principal, session.Aborted) is WorkspaceSucceeded<IReadOnlyList<StoredBusinessCalendar>> list)
+            foreach (var calendar in list.Value)
+                calendars[calendar.Calendar.Id.Value] = calendar.Calendar.Name;
+        if (session.Service<ISlaPolicyService>() is { } slaService && await slaService.ListAsync(session.Principal, session.Aborted) is SlaValue<IReadOnlyList<StoredSlaPolicy>> policies)
+            foreach (var policy in policies.Value)
+                sla[policy.Policy.Id.Value] = policy.Policy.Name;
+        if (session.Service<IRoutingPolicyService>() is { } routingService && await routingService.ListAsync(session.Principal, session.Aborted) is RoutingValue<IReadOnlyList<StoredRoutingPolicy>> routes)
+            foreach (var policy in routes.Value)
+                routing[policy.Policy.Id.Value] = policy.Policy.Name;
+        return (calendars, sla, routing);
+    }
+}

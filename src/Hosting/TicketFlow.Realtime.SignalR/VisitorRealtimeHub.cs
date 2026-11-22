@@ -11,13 +11,15 @@ namespace TicketFlow.Realtime.SignalR;
 /// is registered as the session's <see cref="VisitorSubscriber"/> and receives only that session's visitor-facing events. Every call
 /// re-checks that the session is still live.
 /// </summary>
-public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILiveChatVisitorService visitors, IVisitorPartitionResolver partitions, IHubContext<VisitorRealtimeHub> hub) : Hub
+public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILiveChatVisitorService visitors, IVisitorPartitionResolver partitions, IHubContext<VisitorRealtimeHub> hub,
+    RealtimeTypingThrottle throttle) : Hub
 {
     private const string ContextKey = "tf.visitor";
 
     public override Task OnDisconnectedAsync(Exception? exception)
     {
         subscriptions.Disconnect(Context.ConnectionId);
+        throttle.Forget(Context.ConnectionId);
         return base.OnDisconnectedAsync(exception);
     }
 
@@ -69,7 +71,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
 
         subscriptions.Disconnect(Context.ConnectionId);
         var subscriber = new VisitorSubscriber(session.Scope, session.Session.Session.Id);
-        if (subscriptions.Connect(new SignalRRealtimeConnection(Context.ConnectionId, subscriber, hub.Clients.Client(Context.ConnectionId))).Value is not RealtimeConnected
+        if (subscriptions.Connect(new SignalRRealtimeConnection(Context.ConnectionId, subscriber, hub.Clients.Client(Context.ConnectionId), Context.Abort)).Value is not RealtimeConnected
             || (await subscriptions.SubscribeAsync(Context.ConnectionId, new VisitorSessionTopic(session.Scope, session.Session.Session.Id), Context.ConnectionAborted).ConfigureAwait(false))
                 .Value is not RealtimeSubscribed)
             return HubResult.Failure("limit-reached");
@@ -176,6 +178,8 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             return HubResult.Failure("unauthenticated");
         if (Id(conversation) is not { } id)
             return HubResult.Failure("invalid");
+        if (!throttle.Allow(Context.ConnectionId, id.Value, typing))
+            return HubResult.Success();
         return Simple(await visitors.SetTypingAsync(session, id, typing, Context.ConnectionAborted).ConfigureAwait(false));
     }
 

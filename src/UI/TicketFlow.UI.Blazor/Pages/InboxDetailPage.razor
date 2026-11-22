@@ -1,0 +1,92 @@
+@inherits UiPageBase
+@using TicketFlow.Workspaces
+
+@if (inbox is null)
+{
+    <StatePanel Icon="search-x" Title="Inbox not available" Message="It may have been deleted, or you no longer have access to it." />
+}
+else
+{
+    <PageHeader Title="@inbox.Inbox.Name" Description="@($"{UiFormat.Channel(inbox.Inbox.Channel.Kind.Value)} inbox · revision {inbox.Revision}")">
+        <Actions>
+            <BbButton Href="@Url("conversations", ("inbox", inbox.Inbox.Id.Value))" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="messages-square" Size="14" />Conversations</BbButton>
+        </Actions>
+    </PageHeader>
+    <div class="tf-grid tf-grid--wide-narrow">
+        <div class="tf-card">
+            <div class="tf-card__header"><div class="tf-card__title">Settings</div></div>
+            <div class="tf-card__content">
+                <TfForm Action="inbox.update" Revision="inbox.Revision" Class="tf-form">
+                    <fieldset disabled="@(!Session.Can(AccessPermissions.InboxManage))" style="border:0;padding:0;margin:0">
+                        <InboxFields Inbox="inbox.Inbox" Calendars="calendars" SlaPolicies="slaNames" RoutingPolicies="routingNames" />
+                    </fieldset>
+                    @if (Session.Can(AccessPermissions.InboxManage))
+                    {
+                        <div class="tf-form-actions"><BbButton Type="ButtonType.Submit">Save changes</BbButton></div>
+                    }
+                </TfForm>
+            </div>
+        </div>
+        <div class="tf-stack">
+            <div class="tf-card">
+                <div class="tf-card__header"><div><div class="tf-card__title">Inbox agents</div><div class="tf-card__description">Inbox-scoped role grants (managed through Access).</div></div></div>
+                <div class="tf-card__content tf-stack tf-stack--sm">
+                    @foreach (var grant in agents)
+                    {
+                        <div class="tf-row tf-row--between">
+                            <UserChip Name="@Session.UserName(grant.UserId)" />
+                            <span class="tf-badge">@grant.Role</span>
+                        </div>
+                    }
+                    @if (agents.Count == 0)
+                    {
+                        <div class="tf-small tf-muted">No inbox-specific agents. Workspace roles still apply.</div>
+                    }
+                    @if (Session.Can(AccessPermissions.InboxManage) && Session.Can(AccessPermissions.AccessManage))
+                    {
+                        <TfForm Action="inbox.agent.add" Class="tf-side-form">
+                            <input name="user" class="tf-input tf-input--sm" placeholder="User ID" required maxlength="256" aria-label="User ID" />
+                            <button class="tf-button tf-button--outline tf-button--sm" type="submit">Add agent</button>
+                        </TfForm>
+                    }
+                </div>
+            </div>
+            @if (Session.Can(AccessPermissions.InboxManage))
+            {
+                <div class="tf-card">
+                    <div class="tf-card__header"><div><div class="tf-card__title">Danger zone</div><div class="tf-card__description">Deleting an inbox stops new conversations from arriving here.</div></div></div>
+                    <div class="tf-card__content">
+                        <TfForm Action="inbox.delete" Revision="inbox.Revision">
+                            <BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Destructive" Size="ButtonSize.Small"><LucideIcon Name="trash-2" Size="14" />Delete inbox</BbButton>
+                        </TfForm>
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private StoredInbox? inbox;
+    private Dictionary<string, string> calendars = [];
+    private Dictionary<string, string> slaNames = [];
+    private Dictionary<string, string> routingNames = [];
+    private readonly List<(UserId UserId, string Role)> agents = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<IInboxService>() is not { } service || Id is null)
+            return;
+        if (await service.GetAsync(Actor, new InboxId(Id), Aborted) is not WorkspaceSucceeded<StoredInbox> found)
+            return;
+        inbox = found.Value;
+        (calendars, slaNames, routingNames) = await InboxFields.LoadOptionsAsync(Session);
+        if (Session.Can(AccessPermissions.AccessManage) && Service<IAccessGrantStore>() is { } grants)
+            foreach (var grant in await grants.ListForTargetAsync(AccessPartition.From(Session.Scope), new InboxGrantScope(Session.Scope.WorkspaceId, inbox.Inbox.Id), 50, null, Aborted))
+                if (grant.Grant.Subject.Value is UserId user)
+                    agents.Add((user, grant.Grant.Role.Value));
+        await Session.LoadUsersAsync(agents.Select(agent => (UserId?)agent.UserId));
+    }
+}

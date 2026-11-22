@@ -48,7 +48,10 @@ rule with `StopProcessing` ends evaluation for that event.
 **Triggers** (`AutomationTrigger` union): `ConversationCreatedTrigger`, `MessageReceivedTrigger` (incoming, including a start
 request's initial message), `MessageSentTrigger`, `ConversationUpdatedTrigger(fields)` (status, priority, assignee, team, labels,
 attributes, participants; empty = any), `StatusChangedTrigger(to)`, `AssignmentChangedTrigger` (assignee or team),
-`SlaEventTrigger(kinds, metrics)` (`sla.warning` / `sla.breached`, decoded with `SlaEventCodec.TryDecode`), `ScheduledTrigger`
+`SlaEventTrigger(kinds, metrics)` (`sla.warning` / `sla.breached`, decoded with `SlaEventCodec.TryDecode` — **only when the
+timeline actor is the SLA worker API client** `AutomationOptions.SlaWorkerClientId`, default `sla-worker`, which must match
+`SlaOptions.WorkerClientId`; anyone with `conversation:manage` can append extension events, so the same payload from any other
+principal is ignored by the engine and by replay), `ScheduledTrigger`
 (cron, below) and `ContactUpdatedTrigger`. One timeline event fires a given rule at most once.
 
 **Conditions** (`AutomationCondition`, closed, depth ≤ 8, ≤ 64 nodes): `AllOfCondition`, `AnyOfCondition`, `NegatedCondition`,
@@ -90,16 +93,21 @@ no redirects or proxies). The delivery id is stable per execution and action. Th
 
 ## Engine, idempotency and loop prevention
 
-`AutomationOutboxHandler` (consumer `automation`) handles every change except delivery updates and deletions. It loads the
-workspace's enabled event rules once, derives trigger events from the appended timeline events (read through the trusted store for
-their actor and payload; `Started` also raises `ConversationCreated`) and runs `AutomationRunner` with the trigger key
-`evt:<sequence>`.
+`AutomationOutboxHandler` (consumer `automation`) handles every change except delivery updates and deletions. It takes the
+workspace's enabled event rules from `AutomationRuleCache` (decoded rule sets cached per scope and revalidated with one
+`GetRuleSetVersionAsync` read; the store bumps the version on every rule write), reads the change's appended events with one
+`ReadTimelineAsync` (trusted store, for actor and payload; `Started` also raises `ConversationCreated`) and runs `AutomationRunner`
+with the trigger key `evt:<sequence>`. Per occurrence the runner fetches every firing rule's execution record with one
+`FindManyAsync` and builds the evaluation context once, rebuilding it only after a rule ran actions — so many non-matching rules cost a
+constant number of store calls.
 
 - **Idempotent execution records.** Before acting, the runner begins an `AutomationExecution` unique per (rule, conversation,
   trigger key). A finished record is never re-run, so outbox redelivery and concurrent workers are harmless. Each action outcome is
   persisted before the next action; after a crash the record (status `Running`) resumes at the first unfinished action. Replies and
   notes use deterministic message ids (`auto-<execution>-<index>`) and are detected on resume, webhooks use stable delivery ids, and
-  label, priority, status, assignment and attribute writes are idempotent, so no action is duplicated.
+  label, priority, status, assignment and attribute writes are idempotent, so no action is duplicated. A `Running` record found at the
+  start of a run is taken over compare-and-set (a revision bump) before it is resumed — the loser of a race skips it — and a record a
+  concurrent runner has just begun is left to that runner. A runner that loses a progress write stops; the next delivery resumes.
 - **Cause metadata.** Events written by the automation client carry it as their timeline actor. Every sequence an execution produces
   (actions and its `automation.applied` marker — `{"v":1,"rule","execution","trigger","depth","applied","skipped","refused","failed"}`)
   is written to the cause index (`IAutomationExecutionStore.FindCauseAsync`) atomically with the execution record. The outbox delivers
@@ -122,11 +130,13 @@ matches), at most 96 fires per day, evaluated in the IANA/Windows time zone (unk
 DST: a local time that does not exist (spring-forward gap) fires once at the transition instant; a local time that occurs twice
 (fall-back overlap) fires once, at its first occurrence. Fire instants are strictly increasing and never duplicated.
 
-`AutomationScheduler.RunOnceAsync` claims due rules (`ClaimDueSchedulesAsync`: leased, fenced, `FOR UPDATE SKIP LOCKED`), selects the
+`AutomationScheduler.RunOnceAsync` claims due rules one at a time (`ClaimDueSchedulesAsync(1, …)`: leased, fenced,
+`FOR UPDATE SKIP LOCKED`), so each lease covers a single rule's run, then selects the
 most recently active conversations with the listed statuses through `IConversationStore.ListAsync` with the automation client's
 planned `conversation:read` filter inside the query, and runs the rule per conversation with the trigger key `sched:<slot>` (one
 execution per conversation and slot). The next run is the first fire after `max(slot, now)`, so missed slots coalesce. A run with
-failures is released for `ScheduleRetryDelay`. Rule writes reschedule the timer and bump its fence.
+failures is released for `ScheduleRetryDelay`; if the release is refused (lease expired or fence moved) the run counts as lost and the
+timer is claimable again once its lease expires. Rule writes reschedule the timer and bump its fence.
 
 ## Contact updates
 
@@ -195,8 +205,8 @@ existence checks for rules and canned responses; macro runs check conversation e
 
 | Contract | Guarantees |
 | --- | --- |
-| `IAutomationRuleStore` | Scope-confined; create at revision 1; compare-and-set update/delete; ≤ 256 rules per workspace, atomically; list by priority then id; writes atomically set the schedule timer, clear its lease and bump its fence; leased, fenced `ClaimDueSchedulesAsync` (a live lease is never shared) with fenced complete/release. |
-| `IAutomationExecutionStore` | Scope-confined; `BeginAsync` unique per (rule, conversation, trigger key), atomically; compare-and-set updates that write the cause index in the same transaction; bounded rate counts; keyset log queries; compare-and-set checkpoints. |
+| `IAutomationRuleStore` | Scope-confined; per-scope `GetRuleSetVersionAsync` bumped atomically by every applied write; create at revision 1; compare-and-set update/delete; ≤ 256 rules per workspace, atomically; list by priority then id; writes atomically set the schedule timer, clear its lease and bump its fence; leased, fenced `ClaimDueSchedulesAsync` (a live lease is never shared) with fenced complete/release. |
+| `IAutomationExecutionStore` | Scope-confined; `BeginAsync` unique per (rule, conversation, trigger key), atomically; `FindManyAsync` (≤ 256 rules, one round trip); compare-and-set updates that write the cause index in the same transaction; bounded rate counts; keyset log queries; compare-and-set checkpoints; `PurgeAsync(before, limit ≤ 10000)` retention. |
 | `IMacroStore` | Scope-confined; compare-and-set; ≤ 1024 per workspace. |
 | `ICannedResponseStore` | Scope-confined; compare-and-set; shortcut unique per workspace (`DuplicateShortcut`); ≤ 1024 per workspace; keyset list by shortcut with prefix filter. |
 
@@ -204,12 +214,22 @@ existence checks for rules and canned responses; macro runs check conversation e
 data sources), including concurrent schedule claimers (each due timer claimed exactly once) and concurrent beginners (one winner).
 The in-memory stores are process-local development examples with no durability.
 
-PostgreSQL: `tf_automation_rules`, `tf_automation_executions`, `tf_automation_causes`, `tf_automation_checkpoints`,
+PostgreSQL (catalog version 2: v2 adds `tf_automation_rule_sets`, the executions `finished` flag with a partial purge index, the
+`(scope_key, rule_id, started_at DESC, execution_id DESC)` log index and a cause index on `execution_id`; existing rows are
+backfilled): `tf_automation_rules`, `tf_automation_executions`, `tf_automation_causes`, `tf_automation_checkpoints`,
 `tf_automation_macros` and `tf_automation_canned_responses`, created only by `InitializeAsync` through the append-only
 `ticketflow.automation` migration catalog; `tf_key_v1` keys plus raw-column comparison and `"C"`-collated identifiers;
 `format_version` on every row; definitions and execution state stored as `AutomationCodec` JSON; capacities under workspace advisory
 locks; schedule timers indexed on `next_run_at` and claimed with `FOR UPDATE SKIP LOCKED`. Lease times come from the store's
 `TimeProvider`, so clients need synchronized clocks. Undecodable rows throw.
+
+## Retention
+
+The execution log and cause index grow with every execution. Hosts call `IAutomationExecutionStore.PurgeAsync(before, limit)`
+periodically (for example daily, with a cutoff well beyond the outbox retention and replay window): it deletes, store-wide, up to
+`limit` finished (completed or suppressed) records started before the cutoff together with their cause-index rows. `Running` records
+are kept. PostgreSQL deletes in `FOR UPDATE SKIP LOCKED` batches, so concurrent purgers and runners never block each other. After a
+purge an old trigger can execute again if its event is redelivered, so keep the cutoff older than any redelivery window.
 
 ## Known limits
 

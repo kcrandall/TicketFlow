@@ -6,7 +6,7 @@ namespace TicketFlow.Assist.Tests;
 
 /// <summary>One scripted model turn: a reply (JSON text, finish reason, usage), optional function calls, or an exception to throw.</summary>
 internal sealed record ScriptedTurn(string? Reply = null, ChatFinishReason? Finish = null, UsageDetails? Usage = null, Exception? Error = null,
-    IReadOnlyList<FunctionCallContent>? Calls = null);
+    IReadOnlyList<FunctionCallContent>? Calls = null, Action? OnCall = null);
 
 /// <summary>Replays scripted turns and captures every request (instructions, messages and options) for assertions.</summary>
 internal sealed class ScriptedChatClient : IChatClient
@@ -30,6 +30,7 @@ internal sealed class ScriptedChatClient : IChatClient
         Requests.Add(([.. messages], options));
         if (!turns.TryDequeue(out var turn))
             throw new AssertFailedException("No scripted model turn is left.");
+        turn.OnCall?.Invoke();
         if (turn.Error is not null)
             throw turn.Error;
         var message = new ChatMessage(ChatRole.Assistant, turn.Reply ?? "");
@@ -48,13 +49,30 @@ internal sealed class ScriptedChatClient : IChatClient
 
     public object? GetService(Type serviceType, object? serviceKey = null) => null;
 
-    public void Dispose()
-    {
-    }
+    public int Disposals { get; private set; }
+
+    public void Dispose() => Disposals++;
+}
+
+/// <summary>Counts provider client creation (through <see cref="ScriptedChatProvider"/>) and disposal of the created clients.</summary>
+internal sealed class CountingChatClient : IChatClient
+{
+    public int Created { get; set; }
+    public int Disposed { get; private set; }
+
+    public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "{}")));
+
+    public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
+    public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+    public void Dispose() => Disposed++;
 }
 
 /// <summary>A provider named <c>scripted</c> that hands out the shared <see cref="ScriptedChatClient"/> and records applied options.</summary>
-internal sealed class ScriptedChatProvider(ScriptedChatClient client) : IAssistChatProvider
+internal sealed class ScriptedChatProvider(IChatClient client) : IAssistChatProvider
 {
     public const string ProviderName = "scripted";
 
@@ -62,7 +80,12 @@ internal sealed class ScriptedChatProvider(ScriptedChatClient client) : IAssistC
 
     public string Name => ProviderName;
 
-    public IChatClient CreateClient(AssistModelDefinition model) => client;
+    public IChatClient CreateClient(AssistModelDefinition model)
+    {
+        if (client is CountingChatClient counting)
+            counting.Created++;
+        return client;
+    }
 
     public ChatOptions ApplyOptions(AssistModelDefinition model, AssistChatRequest request, ChatOptions options)
     {

@@ -17,6 +17,9 @@ npm run typecheck # tsc --noEmit
 npm run build     # esbuild → dist/ticketflow-chat.js (IIFE, global TicketFlowChat)
 ```
 
+`npm test` also builds the bundle in memory and enforces an 80 KB size budget and a source map without embedded sources
+(`--sources-content=false`, so publishing the map does not publish the source text).
+
 Dependencies are pinned to exact versions that were at least two weeks old when added (esbuild 0.28.2, typescript 6.0.3,
 vitest 5.1.0, happy-dom 21.0.4).
 
@@ -37,6 +40,14 @@ vitest 5.1.0, happy-dom 21.0.4).
 
 The page's origin must be one of the widget's allowed origins; the hub checks the browser `Origin` header. When the widget is on
 another origin than the hub, the host must enable CORS with credentials disabled for the hub and upload endpoints.
+
+### Token storage and XSS
+
+By default the session token is kept in `localStorage` (per widget key) so a reload resumes the conversation. Any script that runs
+on the page — including injected script through an XSS flaw on the host site — can read it and act as that visitor (read the
+visitor's own chats, send messages) until it expires or is revoked; it grants nothing beyond that session. Pass
+`tokenStorage: "memory"` to keep the token in memory only (a reload starts a new session), and keep a strict Content Security
+Policy on pages that embed the widget.
 
 Theme with CSS custom properties on the container: `--tf-accent`, `--tf-accent-text`, `--tf-surface`, `--tf-text`, `--tf-muted`,
 `--tf-border`, `--tf-font`. The widget configuration's `themeRef` is passed through to the page (`client.widget.themeRef`) for hosts

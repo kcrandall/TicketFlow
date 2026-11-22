@@ -9,6 +9,18 @@ public sealed class AssistOptions
     /// <summary>Default model identifier per feature. Provider packages fill features that are not set.</summary>
     public IDictionary<AssistFeature, string> FeatureModels { get; } = new Dictionary<AssistFeature, string>();
 
+    /// <summary>
+    /// Host middleware added to every assistant pipeline after option mapping (so it sees the provider model and mapped options) and
+    /// before usage metrics and telemetry, for example <c>(builder, model, request) =&gt; builder.UseDistributedCache(cache)</c>.
+    /// </summary>
+    public IList<Action<Microsoft.Extensions.AI.ChatClientBuilder, AssistModelDefinition, AssistChatRequest>> Pipeline { get; } = [];
+
+    /// <summary>
+    /// Reservations still unsettled after this long are treated as abandoned (crashed process) and settled at their estimate by
+    /// <see cref="AssistMaintenance.RunOnceAsync"/> (default 15 minutes; must exceed the provider's total timeout).
+    /// </summary>
+    public TimeSpan ReservationTimeout { get; set; } = TimeSpan.FromMinutes(15);
+
     /// <summary>Whether workspaces without stored settings may use the assistant (default true).</summary>
     public bool EnabledByDefault { get; set; } = true;
 
@@ -47,6 +59,8 @@ public sealed class AssistOptions
             throw new InvalidOperationException("MaximumMessageCharacters must be between 200 and 65,536.");
         if (MaximumTimelineEvents is < 1 or > 1_000)
             throw new InvalidOperationException("MaximumTimelineEvents must be between 1 and 1,000.");
+        if (ReservationTimeout < TimeSpan.FromMinutes(1) || ReservationTimeout > TimeSpan.FromDays(1))
+            throw new InvalidOperationException("ReservationTimeout must be between one minute and one day.");
         if (MaximumSnippets is < 0 or > 10)
             throw new InvalidOperationException("MaximumSnippets must be between 0 and 10.");
     }

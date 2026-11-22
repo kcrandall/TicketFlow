@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Signed HTTPS webhook sink for the TicketFlow integration event stream: CloudEvents batches signed with the API channel's HMAC-SHA256 v1 scheme, SSRF-guarded destinations and key rotation with dual signatures.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Events.Abstractions/TicketFlow.Events.Abstractions.csproj" />
+    <ProjectReference Include="../../Channels/TicketFlow.Channels.Api/TicketFlow.Channels.Api.csproj" />
+  </ItemGroup>
+</Project>

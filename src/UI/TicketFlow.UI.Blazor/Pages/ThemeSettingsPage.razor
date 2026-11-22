@@ -1,0 +1,71 @@
+@inherits UiPageBase
+
+<PageHeader Title="Theme" Description="Pick a color theme and mode. Your choice is stored in a cookie, so pages render in it from the first byte." />
+
+<TfForm Action="theme.set" Return="@Url("settings/theme")" Class="tf-stack">
+    <div class="tf-card">
+        <div class="tf-card__header"><div><div class="tf-card__title">Mode</div><div class="tf-card__description">Dark is the default.</div></div></div>
+        <div class="tf-card__content tf-mode-cards">
+            @foreach (var (mode, label) in new[] { ("dark", "Dark"), ("light", "Light"), ("system", "System") })
+            {
+                <label class="tf-mode-card">
+                    <input type="radio" name="mode" value="@mode" checked="@(Session.Theme.ModeToken == mode)" />
+                    <span class="tf-mode-card__preview tf-mode-card__preview--@mode"><span></span><span></span></span>
+                    @label
+                </label>
+            }
+        </div>
+    </div>
+    <div class="tf-card">
+        <div class="tf-card__header"><div><div class="tf-card__title">Color theme</div><div class="tf-card__description">Base palettes and accent colors built on shadcn design tokens.</div></div></div>
+        <div class="tf-card__content tf-swatches">
+            @foreach (var theme in Session.Options.Themes)
+            {
+                <label class="tf-swatch">
+                    <input type="radio" name="theme" value="@theme.Id" checked="@(Session.Theme.Theme == theme.Id)" />
+                    <span class="tf-swatch__color" style="background:@theme.Swatch"></span>
+                    @theme.Name
+                </label>
+            }
+        </div>
+    </div>
+    <div class="tf-form-actions"><BbButton Type="ButtonType.Submit"><LucideIcon Name="check" Size="14" />Apply theme</BbButton></div>
+</TfForm>
+
+<div class="tf-grid tf-grid--2">
+    <div class="tf-card">
+        <div class="tf-card__header"><div><div class="tf-card__title">Preview</div><div class="tf-card__description">Components in the current theme</div></div></div>
+        <div class="tf-card__content tf-stack">
+            <div class="tf-row">
+                <BbButton Size="ButtonSize.Small">Primary</BbButton>
+                <BbButton Variant="ButtonVariant.Secondary" Size="ButtonSize.Small">Secondary</BbButton>
+                <BbButton Variant="ButtonVariant.Outline" Size="ButtonSize.Small">Outline</BbButton>
+                <BbButton Variant="ButtonVariant.Destructive" Size="ButtonSize.Small">Destructive</BbButton>
+            </div>
+            <div class="tf-row">
+                <BbBadge>Default</BbBadge>
+                <BbBadge Variant="BadgeVariant.Secondary">Secondary</BbBadge>
+                <BbBadge Variant="BadgeVariant.Outline">Outline</BbBadge>
+                <BbBadge Variant="BadgeVariant.SoftSuccess">Resolved</BbBadge>
+                <BbBadge Variant="BadgeVariant.SoftWarning">At risk</BbBadge>
+                <BbBadge Variant="BadgeVariant.SoftDestructive">Breached</BbBadge>
+            </div>
+            <input class="tf-input" placeholder="Input field" aria-label="Preview input" />
+            <div class="tf-row">@for (var index = 1; index <= 5; index++) { <span class="tf-chart__swatch" style="width:28px;height:28px;border-radius:8px;background:var(--chart-@index)"></span> }</div>
+        </div>
+    </div>
+    <div class="tf-card">
+        <div class="tf-card__header"><div><div class="tf-card__title">Bring your own theme</div><div class="tf-card__description">Hosts register themes in options and override tokens with CSS.</div></div></div>
+        <div class="tf-card__content">
+            <pre class="tf-pre">services.AddTicketFlowBlazorUI(options =>
+{
+    var acme = new TicketFlowTheme("acme", "Acme", "#7c3aed");
+    acme.Dark["primary"] = "oklch(0.62 0.24 293)";
+    acme.Dark["radius"] = "0.5rem";
+    options.Themes.Add(acme);
+    options.DefaultTheme = new("acme", TicketFlowThemeMode.Dark);
+    options.Stylesheets.Add("/css/support-overrides.css");
+});</pre>
+        </div>
+    </div>
+</div>

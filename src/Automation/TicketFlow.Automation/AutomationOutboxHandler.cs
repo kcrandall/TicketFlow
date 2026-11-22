@@ -17,11 +17,13 @@ public sealed class AutomationOutboxHandler : IConversationOutboxHandler
     private readonly IAutomationRuleStore rules;
     private readonly IAutomationExecutionStore executions;
     private readonly AutomationRunner runner;
+    private readonly AutomationRuleCache cache;
     private readonly AutomationOptions options;
 
     public AutomationOutboxHandler(IConversationStore conversations, IAutomationRuleStore rules, IAutomationExecutionStore executions, AutomationRunner runner,
-        IOptions<AutomationOptions> options)
+        AutomationRuleCache cache, IOptions<AutomationOptions> options)
     {
+        this.cache = cache ?? throw new ArgumentNullException(nameof(cache));
         this.conversations = conversations ?? throw new ArgumentNullException(nameof(conversations));
         this.rules = rules ?? throw new ArgumentNullException(nameof(rules));
         this.executions = executions ?? throw new ArgumentNullException(nameof(executions));
@@ -39,8 +41,7 @@ public sealed class AutomationOutboxHandler : IConversationOutboxHandler
         var change = entry.Change;
         if (change.Kind is ConversationChangeKind.DeliveryUpdated or ConversationChangeKind.Deleted)
             return;
-        var eventRules = (await rules.ListAsync(change.Scope, cancellationToken).ConfigureAwait(false))
-            .Select(stored => stored.Rule)
+        var eventRules = (await cache.GetAsync(rules, change.Scope, cancellationToken).ConfigureAwait(false))
             .Where(rule => rule.Enabled && rule.Trigger.Value is not (ScheduledTrigger or ContactUpdatedTrigger))
             .ToList();
         if (eventRules.Count == 0)
@@ -48,15 +49,17 @@ public sealed class AutomationOutboxHandler : IConversationOutboxHandler
         if (change.Kind == ConversationChangeKind.Started)
             await runner.RunAsync(new AutomationOccurrence(change.Scope, change.Conversation, AutomationEvent.ConversationCreated(), AutomationTriggerKeys.Started,
                 false, null, null), eventRules, cancellationToken).ConfigureAwait(false);
-        foreach (var summary in change.Events)
+        var wanted = change.Events.Where(summary => summary.Kind is not (ConversationEventKind.Note or ConversationEventKind.System or ConversationEventKind.Contact))
+            .Select(summary => summary.Sequence).ToHashSet();
+        if (wanted.Count == 0)
+            return;
+        // One read covers the change's (contiguous, at most 16) appended events.
+        var first = wanted.Min();
+        var timeline = await conversations.ReadTimelineAsync(change.Scope, change.Conversation, first - 1, (int)(wanted.Max() - first + 1), includeNotes: false, cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var timelineEvent in timeline.Where(item => wanted.Contains(item.Sequence)).OrderBy(item => item.Sequence))
         {
-            if (summary.Kind is ConversationEventKind.Note or ConversationEventKind.System or ConversationEventKind.Contact)
-                continue;
-            var read = await conversations.ReadTimelineAsync(change.Scope, change.Conversation, summary.Sequence - 1, 1, includeNotes: false, cancellationToken).ConfigureAwait(false);
-            if (read.Count != 1 || read[0].Sequence != summary.Sequence)
-                continue;
-            var timelineEvent = read[0];
-            var (derived, message) = AutomationEventDerivation.Derive(timelineEvent);
+            var (derived, message) = AutomationEventDerivation.Derive(timelineEvent, options.SlaWorkerClientId);
             if (derived.Count == 0)
                 continue;
             var causedByAutomation = AutomationEventDerivation.IsAutomationActor(timelineEvent.Actor, options.ClientId);

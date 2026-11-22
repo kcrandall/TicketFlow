@@ -5,6 +5,8 @@ quota and per-minute rate-limit reservations under a transaction-scoped advisory
 summaries and bounded purge. Usage rows carry identifiers and token counts only — never prompts or outputs.
 
 ```csharp
+using TicketFlow.Assist.Stores.Postgres;
+
 builder.AddAssist().AddPostgresAssistStores(dataSource);
 await new PostgresAssistStore(dataSource).InitializeAsync();   // applies PostgresAssistMigrations.Catalog (component ticketflow.assist)
 ```

@@ -1,0 +1,103 @@
+@inherits UiPageBase
+@using TicketFlow.Workspaces
+
+<PageHeader Title="Access" Description="Grants on the workspace and on each team and inbox. Revoking takes effect on the next request." />
+<AccessTabs Active="grants" />
+
+<div class="tf-card">
+    <div class="tf-table-wrap">
+        <table class="tf-table">
+            <thead><tr><th>Subject</th><th>Role</th><th>Scope</th><th>Effect</th><th>Validity</th><th class="tf-num"></th></tr></thead>
+            <tbody>
+                @foreach (var grant in grants)
+                {
+                    var value = grant.Grant;
+                    <tr>
+                        <td>@Subject(value.Subject)</td>
+                        <td><span class="tf-badge">@RoleName(value.Role)</span>@if (value.Kind == GrantKind.BreakGlass) { <span class="tf-badge tf-badge--warning" style="margin-left:4px">break-glass</span> }</td>
+                        <td>@ScopeLabel(value.Scope)</td>
+                        <td>@if (value.Effect == GrantEffect.Allow) { <span class="tf-badge tf-badge--success">Allow</span> } else { <span class="tf-badge tf-badge--destructive">Deny</span> }</td>
+                        <td class="tf-muted tf-small">@(value.ValidUntil is { } until ? $"until {UiFormat.Short(until)}" : "No expiry")</td>
+                        <td class="tf-num">
+                            <TfForm Action="access.grant.revoke" Revision="grant.Revision" Class="tf-inline-form">
+                                <input type="hidden" name="id" value="@value.Id.Value" />
+                                <button class="tf-button tf-button--ghost tf-button--xs" type="submit">Revoke</button>
+                            </TfForm>
+                        </td>
+                    </tr>
+                }
+                @if (grants.Count == 0)
+                {
+                    <tr><td colspan="6" class="tf-muted">No grants.</td></tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="tf-card">
+    <div class="tf-card__header"><div><div class="tf-card__title">New grant</div><div class="tf-card__description">You can only grant roles whose permissions you hold on the target.</div></div></div>
+    <div class="tf-card__content">
+        <TfForm Action="access.grant.create" Class="tf-form">
+            <div class="tf-form-grid">
+                <div class="tf-field"><label class="tf-label" for="tf-g-kind">Subject type</label>
+                    <select id="tf-g-kind" name="subjectKind" class="tf-select"><option value="user">User</option><option value="team">Team</option><option value="client">API client</option></select></div>
+                <div class="tf-field"><label class="tf-label" for="tf-g-subject">Subject ID</label><input id="tf-g-subject" name="subject" class="tf-input tf-mono" required maxlength="256" value="@Session.FormValue("subject", null)" /></div>
+                <div class="tf-field"><label class="tf-label" for="tf-g-role">Role</label>
+                    <select id="tf-g-role" name="role" class="tf-select">@foreach (var role in roleNames) { <option value="@role.Key">@role.Value</option> }</select></div>
+                <div class="tf-field"><label class="tf-label" for="tf-g-scope">Scope</label>
+                    <select id="tf-g-scope" name="scope" class="tf-select">
+                        <option value="workspace">Whole workspace</option>
+                        @foreach (var team in Teams) { <option value="team:@team.Id.Value">Team · @team.Name</option> }
+                        @foreach (var inbox in Inboxes) { <option value="inbox:@inbox.Inbox.Id.Value">Inbox · @inbox.Inbox.Name</option> }
+                    </select></div>
+                <div class="tf-field"><label class="tf-label" for="tf-g-effect">Effect</label>
+                    <select id="tf-g-effect" name="effect" class="tf-select"><option value="Allow">Allow</option><option value="Deny">Deny</option></select></div>
+                <div class="tf-field"><label class="tf-label" for="tf-g-why">Justification</label><input id="tf-g-why" name="justification" class="tf-input" maxlength="1024" value="@Session.FormValue("justification", null)" /></div>
+            </div>
+            <div class="tf-form-actions"><BbButton Type="ButtonType.Submit"><LucideIcon Name="key-round" Size="14" />Create grant</BbButton></div>
+        </TfForm>
+    </div>
+</div>
+
+@code {
+    private readonly List<StoredAccessGrant> grants = [];
+    private readonly Dictionary<string, string> roleNames = [];
+
+    private string RoleName(RoleId role) => roleNames.GetValueOrDefault(role.Value, role.Value);
+
+    private RenderFragment Subject(GrantSubject subject) => subject.Value switch
+    {
+        UserId user => @<UserChip Name="@Session.UserName(user)" />,
+        TeamId team => @<span class="tf-row"><LucideIcon Name="users" Size="14" />@TeamName(team)</span>,
+        ApiClientId client => @<span class="tf-row"><LucideIcon Name="bot" Size="14" /><span class="tf-mono">@client.Value</span></span>,
+        _ => @<span>—</span>,
+    };
+
+    private string ScopeLabel(GrantScope scope) => scope switch
+    {
+        WorkspaceGrantScope => "Workspace",
+        TeamGrantScope team => "Team · " + TeamName(team.Team),
+        InboxGrantScope inbox => "Inbox · " + InboxName(inbox.Inbox),
+        _ => "Tenant",
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadWorkspaceAsync();
+        foreach (var role in BuiltInRoles.All)
+            roleNames[role.Id.Value] = role.Name;
+        if (Service<IAccessRoleStore>() is { } roles)
+            foreach (var role in await roles.ListAsync(Session.Scope, Aborted))
+                roleNames[role.Role.Id.Value] = role.Role.Name;
+        if (Service<IAccessGrantStore>() is not { } store)
+            return;
+        var partition = AccessPartition.From(Session.Scope);
+        var targets = new List<GrantScope> { new WorkspaceGrantScope(Session.Scope.WorkspaceId) };
+        targets.AddRange(Teams.Select(team => (GrantScope)new TeamGrantScope(Session.Scope.WorkspaceId, team.Id)));
+        targets.AddRange(Inboxes.Select(inbox => (GrantScope)new InboxGrantScope(Session.Scope.WorkspaceId, inbox.Inbox.Id)));
+        foreach (var target in targets)
+            grants.AddRange(await store.ListForTargetAsync(partition, target, 200, null, Aborted));
+        await Session.LoadUsersAsync(grants.Select(grant => grant.Grant.Subject.Value is UserId user ? (UserId?)user : null));
+    }
+}

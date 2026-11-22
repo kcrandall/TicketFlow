@@ -1,0 +1,35 @@
+@* A dashboard metric card (shadcn section card): label, headline value, trend badge and footer note. *@
+<BbCard Class="tf-stat">
+    <div class="tf-stat__header">
+        <span class="tf-stat__label">@Label</span>
+        @if (Trend is not null)
+        {
+            <span class="tf-trend @(TrendPositive ? "is-up" : "is-down")"><LucideIcon Name="@(TrendPositive ? "trending-up" : "trending-down")" Size="12" />@Trend</span>
+        }
+    </div>
+    <div class="tf-stat__value">@Value</div>
+    @if (Note is not null)
+    {
+        <div class="tf-stat__note">
+            @if (NoteIcon is not null)
+            {
+                <LucideIcon Name="@NoteIcon" Size="14" />
+            }
+            @Note
+        </div>
+    }
+    @if (Hint is not null)
+    {
+        <div class="tf-stat__hint">@Hint</div>
+    }
+</BbCard>
+
+@code {
+    [Parameter, EditorRequired] public string Label { get; set; } = "";
+    [Parameter, EditorRequired] public string Value { get; set; } = "";
+    [Parameter] public string? Trend { get; set; }
+    [Parameter] public bool TrendPositive { get; set; } = true;
+    [Parameter] public string? Note { get; set; }
+    [Parameter] public string? NoteIcon { get; set; }
+    [Parameter] public string? Hint { get; set; }
+}

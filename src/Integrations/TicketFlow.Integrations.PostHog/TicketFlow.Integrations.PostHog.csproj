@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>PostHog analytics sink for the TicketFlow integration event stream: maps CloudEvents to the PostHog batch capture API with a configurable distinct_id strategy, workspace group analytics and event-id deduplication, over HttpClient.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Events/TicketFlow.Events.Abstractions/TicketFlow.Events.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

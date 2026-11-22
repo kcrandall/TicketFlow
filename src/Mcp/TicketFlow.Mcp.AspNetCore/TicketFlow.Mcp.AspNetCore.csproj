@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Optional ASP.NET Core wiring for TicketFlow MCP tools: MapTicketFlowMcp() over the official ModelContextProtocol HTTP transport with host-owned authorization, and MCP caller resolution through the TicketFlow hosting partition and principal resolvers.</Description>
+    <PackageTags>$(PackageTags);mcp;model-context-protocol;aspnetcore</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Mcp/TicketFlow.Mcp.csproj" />
+    <ProjectReference Include="../../Hosting/TicketFlow.Hosting.AspNetCore/TicketFlow.Hosting.AspNetCore.csproj" />
+  </ItemGroup>
+</Project>

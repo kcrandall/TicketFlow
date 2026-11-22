@@ -33,3 +33,8 @@ against an isolated `postgres:18` container (4 passed); `clients/widget`: `npx t
 `bash scripts/verify-package-metadata.sh` (47 package projects validated). The outcome's "SignalR fan-out via WalFlow" is delivered as
 SignalR fan-out over the outbox and routing observers; the WalFlow source is the T08 follow-up. Parallel post-ticket reviews are still
 outstanding before commit.
+
+Review fixes (2026-11-22, on top of 1742cba): `dotnet build TicketFlow.slnx -c Release` (0 warnings, 0 errors); Realtime.Tests 12 passed,
+Channels.LiveChat.Tests 27 passed, Realtime.SignalR.Tests 6 passed, Channels.Tests 42 passed; PostgreSQL (isolated `postgres:18`, port 55717,
+`TICKETFLOW_REQUIRE_POSTGRES=1`): Channels.LiveChat.Stores.Postgres.Tests 4 passed, Channels.Stores.Postgres.Tests 6 passed; widget 14 tests
+passed; `bash scripts/verify-package-metadata.sh` (51 package projects validated).

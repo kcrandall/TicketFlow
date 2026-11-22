@@ -92,7 +92,7 @@ public sealed class PostgresContactStoreTests
         await using var database = await Database.CreateAsync();
         await database.Competing.InitializeAsync();
         var inspection = await new PostgresMigrationRunner(database.Primary, PostgresContactMigrations.Catalog).InspectAsync();
-        Assert.AreEqual(2, inspection.CurrentVersion);
+        Assert.AreEqual(3, inspection.CurrentVersion);
         Assert.AreEqual("ticketflow.contacts", inspection.Component);
     }
 
@@ -202,7 +202,7 @@ public sealed class PostgresContactStoreTests
         await database.Store.RecordAsync(new ContactAuditEvent(Guid.NewGuid(), ContactStoreContract.At, TestScopes.Create(), ContactAuditKind.ExportCompleted,
             new AccessActor(AccessActorKind.User, "sam"), count: 3));
         Assert.AreEqual((short)5, await database.ScalarAsync("SELECT kind FROM tf_contact_audit"));
-        Assert.AreEqual(2, (await new PostgresMigrationRunner(database.Primary, PostgresContactMigrations.Catalog).InspectAsync()).CurrentVersion);
+        Assert.AreEqual(3, (await new PostgresMigrationRunner(database.Primary, PostgresContactMigrations.Catalog).InspectAsync()).CurrentVersion);
     }
 
     [TestMethod]

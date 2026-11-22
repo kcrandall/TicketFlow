@@ -4,7 +4,8 @@ namespace TicketFlow.Assist.Stores.Postgres;
 
 /// <summary>
 /// Feature-owned, append-only migration history for the assistant tables. Keys use fixed-size <c>tf_key_v1</c> SHA-256 keys over the
-/// raw identifiers. Usage rows hold identifiers and token counts only. Never edit an applied step; append a new one.
+/// raw identifiers. Usage rows hold identifiers and token counts only. Version 2 adds per-workspace, per-UTC-day counters of
+/// counted tokens (so quota checks never scan a day of usage rows) and the <c>estimated</c> settlement flag. Never edit an applied step; append a new one.
 /// </summary>
 public static class PostgresAssistMigrations
 {
@@ -36,5 +37,22 @@ public static class PostgresAssistMigrations
             {ScopeKey},
             PRIMARY KEY (usage_key));
         CREATE INDEX tf_assist_usage_time ON tf_assist_usage (scope_key, created_at);
+        """),
+        new(2, "day-counters-and-estimates", $"""
+        ALTER TABLE tf_assist_usage ADD COLUMN estimated boolean NOT NULL DEFAULT false;
+        ALTER TABLE tf_assist_usage ADD CONSTRAINT tf_assist_usage_estimated_settled CHECK (NOT estimated OR state <> 1);
+        CREATE INDEX tf_assist_usage_reserved ON tf_assist_usage (created_at) WHERE state = 1;
+
+        CREATE TABLE tf_assist_usage_days (
+            {Scope}, day date NOT NULL,
+            tokens bigint NOT NULL CHECK (tokens >= 0),
+            day_key bytea GENERATED ALWAYS AS (tf_key_v1({ScopeColumns}, (day - DATE '1970-01-01')::text)) STORED NOT NULL,
+            {ScopeKey},
+            PRIMARY KEY (day_key));
+
+        INSERT INTO tf_assist_usage_days ({ScopeColumns}, day, tokens)
+        SELECT {ScopeColumns}, (created_at AT TIME ZONE 'UTC')::date,
+               SUM(CASE WHEN state = 1 THEN reserved_tokens ELSE input_tokens + output_tokens + cache_read_tokens + cache_write_tokens END)
+        FROM tf_assist_usage GROUP BY {ScopeColumns}, (created_at AT TIME ZONE 'UTC')::date;
         """)]);
 }

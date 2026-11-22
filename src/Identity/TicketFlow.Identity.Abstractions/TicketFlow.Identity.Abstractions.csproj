@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Staff external identity mapping (provider subject to TicketFlow UserId), optional agent profiles, audit events, results and store contracts for TicketFlow.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Access/TicketFlow.Access.Abstractions/TicketFlow.Access.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

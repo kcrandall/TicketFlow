@@ -12,6 +12,8 @@ Assistant service for TicketFlow on `Microsoft.Extensions.AI`:
   usage metrics, tool-invocation telemetry, OpenTelemetry without sensitive data), `AssistModelRegistry`, `InMemoryAssistStore`.
 
 ```csharp
+using TicketFlow.Assist;
+
 services.AddTicketFlow()
     .AddAccessControl().AddConversations().AddContacts().AddHelpCenter()
     .AddAssist(options => options.DefaultDailyTokenLimit = 1_000_000)

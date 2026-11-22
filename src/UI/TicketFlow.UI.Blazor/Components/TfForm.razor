@@ -1,0 +1,24 @@
+@* A static-SSR form post: antiforgery token, the action name, the return path and (optionally) the expected revision for fenced writes. Enhanced by blazor.web.js when it is loaded. *@
+<form method="post" action="@(Target ?? Session.Http.Request.Path + Session.Http.Request.QueryString)" class="@Class" data-enhance="@(Enhance ? "true" : null)" id="@Id" @attributes="AdditionalAttributes">
+    <input type="hidden" name="@Session.Antiforgery.Name" value="@Session.Antiforgery.Token" />
+    <input type="hidden" name="_action" value="@Action" />
+    <input type="hidden" name="_return" value="@(Return ?? Session.Http.Request.Path + Session.Http.Request.QueryString)" />
+    @if (Revision is { } revision)
+    {
+        <input type="hidden" name="_revision" value="@revision.ToString(CultureInfo.InvariantCulture)" />
+    }
+    @ChildContent
+</form>
+
+@code {
+    [CascadingParameter] public TicketFlowUISession Session { get; set; } = default!;
+    [Parameter, EditorRequired] public string Action { get; set; } = default!;
+    [Parameter] public long? Revision { get; set; }
+    [Parameter] public string? Return { get; set; }
+    [Parameter] public string? Target { get; set; }
+    [Parameter] public string? Class { get; set; }
+    [Parameter] public string? Id { get; set; }
+    [Parameter] public bool Enhance { get; set; } = true;
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+    [Parameter(CaptureUnmatchedValues = true)] public IReadOnlyDictionary<string, object>? AdditionalAttributes { get; set; }
+}

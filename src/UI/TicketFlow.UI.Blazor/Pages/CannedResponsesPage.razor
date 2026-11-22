@@ -1,0 +1,53 @@
+@inherits UiPageBase
+@using TicketFlow.Automation
+
+<PageHeader Title="Automation" Description="Canned responses are reusable replies with template variables such as {{contact.name}}." />
+<AutomationTabs Active="canned" />
+
+<div class="tf-card">
+    <div class="tf-table-wrap">
+        <table class="tf-table">
+            <thead><tr><th>Shortcut</th><th>Title</th><th>Preview</th><th>Locales</th></tr></thead>
+            <tbody>
+                @foreach (var response in responses)
+                {
+                    <tr>
+                        <td><span class="tf-code">/@response.Response.Shortcut</span></td>
+                        <td style="font-weight:500">@response.Response.Title</td>
+                        <td class="tf-muted" style="max-width:520px">@UiText.Excerpt(response.Response.Variants.FirstOrDefault()?.Template.Source, 110)</td>
+                        <td>@string.Join(", ", response.Response.Variants.Select(variant => variant.Locale))</td>
+                    </tr>
+                }
+                @if (responses.Count == 0)
+                {
+                    <tr><td colspan="4" class="tf-muted">No canned responses yet.</td></tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>
+
+@if (Session.Can(AutomationPermissions.CannedResponseManage))
+{
+    <div class="tf-grid tf-grid--2">
+        @foreach (var response in responses)
+        {
+            <div class="tf-card"><div class="tf-card__header"><div class="tf-card__title">/@response.Response.Shortcut</div></div><div class="tf-card__content">
+                <DefinitionEditor Id="@response.Id.Value" Revision="response.Revision" Json="@DefinitionEditor.Pretty(AutomationCodec.SerializeCannedResponse(response.Response))" SaveAction="automation.canned.save" DeleteAction="automation.canned.delete" />
+            </div></div>
+        }
+        <div class="tf-card"><div class="tf-card__header"><div class="tf-card__title">New canned response</div></div><div class="tf-card__content">
+            <DefinitionEditor Json="@DefinitionEditor.Pretty(AutomationCodec.SerializeCannedResponse(new CannedResponse(new CannedResponseId("new"), "thanks", "Thank you", "en", [new CannedResponseVariant("en", new AutomationTemplate("Thanks {{contact.name}}!"))])))" SaveAction="automation.canned.save" />
+        </div></div>
+    </div>
+}
+
+@code {
+    private List<StoredCannedResponse> responses = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<ICannedResponseService>() is { } service && await service.ListAsync(Actor, new CannedResponseQuery(null, null, 100), Aborted) is AutomationValue<CannedResponsePage> page)
+            responses = [.. page.Value.Responses];
+    }
+}

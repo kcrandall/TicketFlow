@@ -1,0 +1,129 @@
+@inherits UiPageBase
+@using TicketFlow.Reporting
+
+<PageHeader Title="Reports" Description="Volume, responsiveness, SLA compliance and satisfaction — computed from your workspace's own facts, filtered by your access.">
+    <Actions>
+        <form method="get" action="@Url("reports")" class="tf-row" style="flex-wrap:nowrap">
+            <input type="date" name="from" class="tf-input tf-input--sm" value="@From.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)" aria-label="From" />
+            <span class="tf-muted">–</span>
+            <input type="date" name="to" class="tf-input tf-input--sm" value="@To.AddDays(-1).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)" aria-label="To" />
+            <button class="tf-button tf-button--outline tf-button--sm" type="submit">Apply</button>
+        </form>
+        @if (Session.Can(ReportPermissions.Export))
+        {
+            <a class="tf-button tf-button--sm" href="@Url("reports/export.csv", ("from", From.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)), ("to", To.AddDays(-1).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)))" data-enhance-nav="false"><LucideIcon Name="download" Size="14" />Export CSV</a>
+        }
+    </Actions>
+</PageHeader>
+
+@if (error is not null)
+{
+    <OutcomeAlert Outcome="error" />
+}
+else if (overview is not null)
+{
+    <div class="tf-grid tf-grid--stats">
+        <StatCard Label="Conversations created" Value="@UiFormat.Number(overview.Created)" Note="@($"{UiFormat.Number(overview.Resolved)} resolved · {UiFormat.Number(overview.Reopened)} reopened")" NoteIcon="inbox" />
+        <StatCard Label="First response (median)" Value="@UiFormat.Duration(overview.FirstResponse.Median)" Note="@($"p90 {UiFormat.Duration(overview.FirstResponse.P90)} · business {UiFormat.Duration(overview.FirstResponseBusiness.Median)}")" NoteIcon="timer" />
+        <StatCard Label="Resolution time (median)" Value="@UiFormat.Duration(overview.Resolution.Median)" Note="@($"p90 {UiFormat.Duration(overview.Resolution.P90)}")" NoteIcon="circle-check" />
+        <StatCard Label="SLA compliance" Value="@UiFormat.Percent(overview.SlaCompliancePercent)" Note="@($"{UiFormat.Number(overview.SlaAchieved)} met · {UiFormat.Number(overview.SlaBreached)} breached")" NoteIcon="shield-check" />
+    </div>
+    <div class="tf-grid tf-grid--stats">
+        <StatCard Label="Messages received" Value="@UiFormat.Number(overview.MessagesReceived)" Hint="@($"{UiFormat.Number(overview.MessagesSent)} sent")" />
+        <StatCard Label="Assignments" Value="@UiFormat.Number(overview.Assignments)" Hint="@($"{UiFormat.Number(overview.Handoffs)} handoffs · {UiFormat.Number(overview.TeamTransfers)} team transfers")" />
+        <StatCard Label="CSAT" Value="@UiFormat.Percent(overview.Satisfaction?.CsatPercent)" Hint="@($"{overview.Satisfaction?.CsatResponses ?? 0} responses")" />
+        <StatCard Label="Open backlog" Value="@UiFormat.Number(overview.OpenBacklog)" Hint="Current, not range-bound" />
+    </div>
+
+    @if (trend is not null)
+    {
+        <div class="tf-card">
+            <div class="tf-card__header"><div><div class="tf-card__title">Volume trend</div><div class="tf-card__description">@UiFormat.Date(From) – @UiFormat.Date(To.AddDays(-1)) · daily buckets in the workspace time zone</div></div></div>
+            <div class="tf-card__content"><AreaChart Id="tf-report-trend" Labels="trend.Value.Labels" Series="trend.Value.Series" Height="260" AriaLabel="Conversations created, resolved and messages received per day" /></div>
+        </div>
+    }
+
+    <div class="tf-grid tf-grid--wide-narrow">
+        <div class="tf-card">
+            <div class="tf-card__header"><div><div class="tf-card__title">Agent leaderboard</div><div class="tf-card__description">Sorted by conversations resolved</div></div></div>
+            <div class="tf-table-wrap" style="margin-top:12px">
+                <table class="tf-table">
+                    <thead><tr><th>Agent</th><th class="tf-num">Resolved</th><th class="tf-num">Replies</th><th class="tf-num">Assignments</th><th class="tf-num">First response</th><th class="tf-num">Resolution</th><th class="tf-num">CSAT</th></tr></thead>
+                    <tbody>
+                        @foreach (var row in leaderboard)
+                        {
+                            <tr>
+                                <td><UserChip Name="@Session.UserName(row.Agent)" /></td>
+                                <td class="tf-num">@row.Resolved</td>
+                                <td class="tf-num">@row.MessagesSent</td>
+                                <td class="tf-num">@row.Assignments</td>
+                                <td class="tf-num">@UiFormat.Duration(row.FirstResponse.Median)</td>
+                                <td class="tf-num">@UiFormat.Duration(row.Resolution.Median)</td>
+                                <td class="tf-num">@UiFormat.Percent(row.Satisfaction?.CsatPercent)</td>
+                            </tr>
+                        }
+                        @if (leaderboard.Count == 0)
+                        {
+                            <tr><td colspan="7" class="tf-muted">No agent activity in this range.</td></tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="tf-stack">
+            <div class="tf-card">
+                <div class="tf-card__header"><div class="tf-card__title">By channel</div></div>
+                <div class="tf-card__content"><BarList Items="byChannel" /></div>
+            </div>
+            <div class="tf-card">
+                <div class="tf-card__header"><div class="tf-card__title">By priority</div></div>
+                <div class="tf-card__content"><BarList Items="byPriority" /></div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private ReportOverview? overview;
+    private (IReadOnlyList<string> Labels, IReadOnlyList<AreaChart.ChartSeries> Series)? trend;
+    private List<ReportLeaderboardRow> leaderboard = [];
+    private List<BarList.Item> byChannel = [];
+    private List<BarList.Item> byPriority = [];
+    private UiOutcome? error;
+    private DateTimeOffset From;
+    private DateTimeOffset To;
+
+    protected override async Task OnInitializedAsync()
+    {
+        (From, To) = UiFormat.Range(Query("from"), Query("to"), Now);
+        if (Service<IReportingService>() is not { } reporting)
+            return;
+        var query = new ReportQuery(From, To);
+        switch (await reporting.GetOverviewAsync(Actor, query, Aborted))
+        {
+            case ReportSucceeded<ReportOverview> value:
+                overview = value.Value;
+                break;
+            case ReportRefused refused:
+                error = UiOutcome.Refused(refused.Reason, refused.Errors);
+                return;
+        }
+        var granularity = To - From > TimeSpan.FromDays(120) ? ReportGranularity.Week : ReportGranularity.Day;
+        if (await reporting.GetTrendsAsync(Actor, new ReportTrendQuery(query, [ReportMetric.ConversationCreated, ReportMetric.ConversationResolved, ReportMetric.MessageReceived], granularity), Aborted)
+            is ReportSucceeded<ReportTrend> series)
+            trend = UiCharts.Daily(series.Value, [(ReportMetric.ConversationCreated, "Created"), (ReportMetric.ConversationResolved, "Resolved"), (ReportMetric.MessageReceived, "Messages received")]);
+        if (await reporting.GetLeaderboardAsync(Actor, new ReportLeaderboardQuery(query, ReportLeaderboardSort.Resolved, 10), Aborted) is ReportSucceeded<ReportLeaderboard> board)
+            leaderboard = [.. board.Value.Rows];
+        byChannel = await BreakdownAsync(reporting, Actor, query, ReportDimension.Channel, UiFormat.Channel);
+        byPriority = await BreakdownAsync(reporting, Actor, query, ReportDimension.Priority, value => string.IsNullOrEmpty(value) ? "No priority" : char.ToUpperInvariant(value[0]) + value[1..]);
+        await Session.LoadUsersAsync(leaderboard.Select(row => (UserId?)row.Agent));
+    }
+
+    private static async Task<List<BarList.Item>> BreakdownAsync(IReportingService reporting, PrincipalRef actor, ReportQuery query, ReportDimension dimension, Func<string, string> label)
+    {
+        if (await reporting.GetTrendsAsync(actor, new ReportTrendQuery(query, [ReportMetric.ConversationCreated], ReportGranularity.Month, dimension)) is not ReportSucceeded<ReportTrend> trend)
+            return [];
+        return [.. trend.Value.Points.GroupBy(point => point.Group ?? "").Select(group => (group.Key, Count: group.Sum(point => point.Count))).OrderByDescending(pair => pair.Count).Take(6)
+            .Select((pair, index) => new BarList.Item(label(pair.Key), pair.Count, pair.Count.ToString(CultureInfo.InvariantCulture), $"var(--chart-{index % 5 + 1})"))];
+    }
+}

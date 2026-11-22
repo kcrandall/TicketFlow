@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Help center portals, hierarchical collections, localized articles with immutable published revisions, search and feedback contracts, union results and store contracts for TicketFlow.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Access/TicketFlow.Access.Abstractions/TicketFlow.Access.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

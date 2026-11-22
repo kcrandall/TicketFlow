@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Optional durable PostgreSQL help center store for TicketFlow: portals, collections, articles with immutable revisions, an atomic published read model with per-locale full-text search, and abuse-resistant feedback counters.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.HelpCenter.Abstractions/TicketFlow.HelpCenter.Abstractions.csproj" />
+    <ProjectReference Include="../../Stores/TicketFlow.Stores.Migrations.Postgres/TicketFlow.Stores.Migrations.Postgres.csproj" />
+    <PackageReference Include="Npgsql" />
+  </ItemGroup>
+</Project>

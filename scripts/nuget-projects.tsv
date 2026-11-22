@@ -12,3 +12,12 @@ TicketFlow.Workspaces.Stores.Postgres	src/Workspaces/TicketFlow.Workspaces.Store
 TicketFlow.Contacts.Abstractions	src/Contacts/TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj
 TicketFlow.Contacts	src/Contacts/TicketFlow.Contacts/TicketFlow.Contacts.csproj
 TicketFlow.Contacts.Stores.Postgres	src/Contacts/TicketFlow.Contacts.Stores.Postgres/TicketFlow.Contacts.Stores.Postgres.csproj
+TicketFlow.Conversations.Abstractions	src/Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj
+TicketFlow.Conversations	src/Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj
+TicketFlow.Conversations.Stores.Postgres	src/Conversations/TicketFlow.Conversations.Stores.Postgres/TicketFlow.Conversations.Stores.Postgres.csproj
+TicketFlow.HelpCenter.Abstractions	src/HelpCenter/TicketFlow.HelpCenter.Abstractions/TicketFlow.HelpCenter.Abstractions.csproj
+TicketFlow.HelpCenter	src/HelpCenter/TicketFlow.HelpCenter/TicketFlow.HelpCenter.csproj
+TicketFlow.HelpCenter.Stores.Postgres	src/HelpCenter/TicketFlow.HelpCenter.Stores.Postgres/TicketFlow.HelpCenter.Stores.Postgres.csproj
+TicketFlow.Surveys.Abstractions	src/Surveys/TicketFlow.Surveys.Abstractions/TicketFlow.Surveys.Abstractions.csproj
+TicketFlow.Surveys	src/Surveys/TicketFlow.Surveys/TicketFlow.Surveys.csproj
+TicketFlow.Surveys.Stores.Postgres	src/Surveys/TicketFlow.Surveys.Stores.Postgres/TicketFlow.Surveys.Stores.Postgres.csproj

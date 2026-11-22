@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>CSAT and NPS survey scheduling on conversation resolution, token-issuing dispatch through a pluggable sender, anonymous single-use responses, authorized definitions, masked response reads, Access-filtered aggregates and development in-memory stores for TicketFlow.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Surveys.Abstractions/TicketFlow.Surveys.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

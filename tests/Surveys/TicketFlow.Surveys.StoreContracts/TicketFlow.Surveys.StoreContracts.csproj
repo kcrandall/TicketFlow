@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><IsTestProject>false</IsTestProject><IsPackable>false</IsPackable></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MSTest.TestFramework" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Surveys/TicketFlow.Surveys.Abstractions/TicketFlow.Surveys.Abstractions.csproj" />
+    <ProjectReference Include="../../../src/Access/TicketFlow.Access/TicketFlow.Access.csproj" />
+    <ProjectReference Include="../../../src/TicketFlow/TicketFlow.csproj" />
+    <ProjectReference Include="../../TicketFlow.Testing/TicketFlow.Testing.csproj" />
+    <ProjectReference Include="../../Access/TicketFlow.Access.StoreContracts/TicketFlow.Access.StoreContracts.csproj" />
+  </ItemGroup>
+</Project>

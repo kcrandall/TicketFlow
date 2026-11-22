@@ -102,7 +102,7 @@ public static class BuiltInRoles
     private static readonly Permission[] AgentPermissions =
     [
         AccessPermissions.ConversationRead, AccessPermissions.ConversationReply, AccessPermissions.ConversationAssign,
-        AccessPermissions.ConversationResolve, AccessPermissions.NoteRead, AccessPermissions.NoteWrite,
+        AccessPermissions.ConversationResolve, AccessPermissions.ConversationManage, AccessPermissions.NoteRead, AccessPermissions.NoteWrite,
         AccessPermissions.ContactRead, AccessPermissions.ContactUpdate, .. StructureReadPermissions,
     ];
 

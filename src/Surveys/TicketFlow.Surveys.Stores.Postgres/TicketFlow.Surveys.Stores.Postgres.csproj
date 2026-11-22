@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Optional durable PostgreSQL survey store for TicketFlow: definitions, idempotent cooldown-safe invitations with hashed tokens, single responses and Access-filtered response lists and aggregates.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Surveys.Abstractions/TicketFlow.Surveys.Abstractions.csproj" />
+    <ProjectReference Include="../../Access/TicketFlow.Access.Stores.Postgres/TicketFlow.Access.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../Stores/TicketFlow.Stores.Migrations.Postgres/TicketFlow.Stores.Migrations.Postgres.csproj" />
+    <PackageReference Include="Npgsql" />
+  </ItemGroup>
+</Project>

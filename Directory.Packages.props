@@ -15,5 +15,7 @@
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="11.0.100" />
     <PackageVersion Include="MSTest.TestAdapter" Version="4.5.3" />
     <PackageVersion Include="MSTest.TestFramework" Version="4.5.3" />
+    <PackageVersion Include="Markdig" Version="1.5.1" />
+    <PackageVersion Include="HtmlSanitizer" Version="10.0.1120" />
   </ItemGroup>
 </Project>

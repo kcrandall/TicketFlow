@@ -98,6 +98,7 @@ public static class AccessPermissions
     public static Permission ConversationAssign { get; } = new("conversation:assign");
     public static Permission ConversationResolve { get; } = new("conversation:resolve");
     public static Permission ConversationDelete { get; } = new("conversation:delete");
+    public static Permission ConversationManage { get; } = new("conversation:manage");
     public static Permission NoteRead { get; } = new("note:read");
     public static Permission NoteWrite { get; } = new("note:write");
     public static Permission ContactRead { get; } = new("contact:read");
@@ -133,6 +134,7 @@ public static class AccessPermissions
         new(ContactUpdate, false, "Update contacts."),
         new(ConversationAssign, false, "Assign conversations."),
         new(ConversationDelete, true, "Delete conversations."),
+        new(ConversationManage, false, "Change conversation priority, labels, attributes and participants."),
         new(ConversationRead, false, "Read conversations."),
         new(ConversationReply, false, "Reply to conversations."),
         new(ConversationResolve, false, "Resolve or reopen conversations."),

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Conversation service for TicketFlow: access-checked commands and timeline reads, masking, filtered lists, outbox dispatcher, contact-merge follower and development in-memory stores.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
+    <ProjectReference Include="../../Contacts/TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj" />
+    <ProjectReference Include="../../Workspaces/TicketFlow.Workspaces.Abstractions/TicketFlow.Workspaces.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

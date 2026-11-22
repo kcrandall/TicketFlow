@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Authorized help center administration, anonymous public reads, search for deflection and assistant grounding, abuse-resistant feedback, Markdig + HtmlSanitizer safe rendering and development in-memory stores for TicketFlow.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.HelpCenter.Abstractions/TicketFlow.HelpCenter.Abstractions.csproj" />
+    <PackageReference Include="Markdig" />
+    <PackageReference Include="HtmlSanitizer" />
+  </ItemGroup>
+</Project>

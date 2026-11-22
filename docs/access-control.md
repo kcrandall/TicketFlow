@@ -25,7 +25,7 @@ depend on scoped application stores. `TicketFlowBuilder` lives in `TicketFlow.Co
 
 - **Permission**: `Permission` is a validated `resource:action` value (each segment 1-64 characters of `a-z 0-9 - _ .`,
   starting with a letter). `default(Permission)` is uninitialized and never granted. Built-in permissions live in
-  `AccessPermissions` (`conversation:read|reply|assign|resolve|delete`, `note:read|write`,
+  `AccessPermissions` (`conversation:read|reply|assign|resolve|manage|delete`, `note:read|write`,
   `contact:read|update|export|merge|reveal`, `report:view`, `inbox:read|manage`, `team:read|manage`, `workspace:read|manage`,
   `calendar:manage`, `access:manage`, `access:manage-tenant`, `access:audit-read`, `access:break-glass`).
 - **Catalog**: `PermissionCatalog` holds the built-ins plus feature registrations (`services.AddAccessPermissions(...)`).

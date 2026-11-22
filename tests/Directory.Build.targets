@@ -1,0 +1,17 @@
+<Project>
+  <Target Name="CopyTicketFlowTestHosts" AfterTargets="Build" Condition="'@(TestHost)' != ''">
+    <Error Condition="'@(TestHost->Count())' != '1'" Text="Declare one test host per project." />
+    <MSBuild Projects="%(TestHost.Identity)" Targets="GetTargetPath" BuildInParallel="false">
+      <Output TaskParameter="TargetOutputs" ItemName="_TestHostTarget" />
+    </MSBuild>
+    <Error Condition="'@(_TestHostTarget)' == ''" Text="Test host target paths are required." />
+    <PropertyGroup>
+      <_TestHostSource>@(_TestHostTarget->'%(RootDir)%(Directory)')</_TestHostSource>
+      <_TestHostDestination>@(TestHost->'%(OutputDirectory)')</_TestHostDestination>
+    </PropertyGroup>
+    <ItemGroup>
+      <_TestHostAsset Include="$(_TestHostSource)**/*" Exclude="$(_TestHostSource)$(_TestHostDestination)/**/*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_TestHostAsset)" DestinationFiles="@(_TestHostAsset->'$(TargetDir)$(_TestHostDestination)/%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

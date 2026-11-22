@@ -1,0 +1,29 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <TicketFlowVersion>0.1.0</TicketFlowVersion>
+    <Version Condition="'$(Version)' == ''">$(TicketFlowVersion)</Version>
+    <PackageVersion Condition="'$(PackageVersion)' == ''">$(Version)</PackageVersion>
+    <Authors>Kyle Crandall</Authors>
+    <Company>TicketFlow</Company>
+    <Product>TicketFlow</Product>
+    <Copyright>Copyright (c) 2026 Kyle Crandall and TicketFlow contributors</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/kcrandall/TicketFlow</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/kcrandall/TicketFlow</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>support;helpdesk;tickets;conversations;omnichannel;dotnet</PackageTags>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <EnablePackageValidation>true</EnablePackageValidation>
+  </PropertyGroup>
+</Project>

@@ -22,9 +22,20 @@ public sealed partial class PostgresContactStore
                 return await MissAsync(connection, transaction, scope, put.Contact.Id, cancellationToken).ConfigureAwait(false);
             stored[put.Contact.Id] = new StoredContact(scope, put.Contact, revision.Value);
         }
+        var deleted = new List<ContactId>();
         foreach (var delete in batch.Deletes.OrderBy(delete => delete.Id.Value, StringComparer.Ordinal))
-            if (!await DeleteContactAsync(connection, transaction, scope, delete, cancellationToken).ConfigureAwait(false))
+        {
+            var removed = await DeleteContactAsync(connection, transaction, scope, delete, cancellationToken).ConfigureAwait(false);
+            if (removed is null)
                 return await MissAsync(connection, transaction, scope, delete.Id, cancellationToken).ConfigureAwait(false);
+            if (removed.Count == 0)
+            {
+                // The cascade differs from the caller's authorized set: report a conflict at the current revision.
+                await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                return new ContactWriteConflict(delete.Id, delete.ExpectedRevision);
+            }
+            deleted.AddRange(removed);
+        }
 
         // Replace identity rows only after every contact row is written, so identities can move between contacts in one batch.
         if (batch.Puts.Count > 0)
@@ -79,7 +90,7 @@ public sealed partial class PostgresContactStore
             await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new ContactWriteApplied([.. batch.Puts.Select(put => stored[put.Contact.Id])], changes);
+        return new ContactWriteApplied([.. batch.Puts.Select(put => stored[put.Contact.Id])], changes) { Deleted = deleted };
     }
 
     private static async Task<long?> PutContactAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, TicketScope scope, ContactPut put, CancellationToken cancellationToken)
@@ -119,8 +130,12 @@ public sealed partial class PostgresContactStore
         return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as long?;
     }
 
-    /// <summary>Fenced delete of the root plus recursive removal of tombstones merged into it and every merge record naming them.</summary>
-    private static async Task<bool> DeleteContactAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, TicketScope scope, ContactDelete delete, CancellationToken cancellationToken)
+    /// <summary>
+    /// Fenced delete of the root plus recursive removal of tombstones merged into it and every merge record naming them. Returns
+    /// <see langword="null"/> on a missed fence, an empty list when the cascade differs from <see cref="ContactDelete.ExpectedCascade"/>,
+    /// otherwise the removed identifiers (root first, then tombstones by identifier).
+    /// </summary>
+    private static async Task<List<ContactId>?> DeleteContactAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, TicketScope scope, ContactDelete delete, CancellationToken cancellationToken)
     {
         string[] doomed;
         await using (var cascade = new NpgsqlCommand($"""
@@ -143,13 +158,22 @@ public sealed partial class PostgresContactStore
                 throw new InvalidOperationException("The contact merge history is too large to delete in one transaction.");
             doomed = [.. ids];
         }
+        var tombstones = doomed.Where(id => id != delete.Id.Value).Select(id => new ContactId(id)).ToHashSet();
+        if (delete.ExpectedCascade is { } expected && !expected.SetEquals(tombstones))
+        {
+            await using var exists = new NpgsqlCommand($"SELECT revision FROM tf_contacts WHERE {ContactKey} AND revision=@expected", connection, transaction);
+            AddScope(exists, scope);
+            AddText(exists, "contact", delete.Id.Value);
+            exists.Parameters.AddWithValue("expected", delete.ExpectedRevision);
+            return await exists.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long ? [] : null;
+        }
         await using (var root = new NpgsqlCommand($"DELETE FROM tf_contacts WHERE {ContactKey} AND revision=@expected", connection, transaction))
         {
             AddScope(root, scope);
             AddText(root, "contact", delete.Id.Value);
             root.Parameters.AddWithValue("expected", delete.ExpectedRevision);
             if (await root.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 0)
-                return false;
+                return null;
         }
         await using (var rest = new NpgsqlCommand($"""
             DELETE FROM tf_contacts WHERE contact_key IN (SELECT tf_key_v1(@tenant,@project,@environment,@app,@workspace,id) FROM unnest(@ids) AS id) AND {ScopeWhere};
@@ -162,7 +186,7 @@ public sealed partial class PostgresContactStore
             AddTextArray(rest, "ids", doomed);
             await rest.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
-        return true;
+        return [delete.Id, .. tombstones.OrderBy(id => id.Value, StringComparer.Ordinal)];
     }
 
     private static async Task<ContactWriteResult?> InsertIdentitiesAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, TicketScope scope, Contact contact, CancellationToken cancellationToken)

@@ -31,6 +31,16 @@ public sealed class InMemoryContactStoreTests
     }
 
     [TestMethod]
+    public async Task DeleteCascadeContract()
+    {
+        var store = new InMemoryContactStore();
+        await ContactStoreContract.VerifyDeleteCascadeAsync(store, store);
+    }
+
+    [TestMethod]
+    public async Task BoundedScanContract() => await ContactStoreContract.VerifyBoundedScanAsync(new InMemoryContactStore(maximumRowsExamined: 3));
+
+    [TestMethod]
     public async Task ConcurrentVerifiedIdentityContract()
     {
         var store = new InMemoryContactStore();

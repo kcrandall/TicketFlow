@@ -53,6 +53,8 @@ public sealed partial class PostgresWorkspaceStore
             return new WorkspaceWriteConflict(existing);
         if (await CountAsync(connection, transaction, "tf_workspace_inboxes", scope, cancellationToken).ConfigureAwait(false) >= WorkspaceLimits.MaximumInboxesPerWorkspace)
             return new WorkspaceWriteRejected(WorkspaceWriteRejection.CapacityExceeded);
+        if (await BindingTakenAsync(connection, transaction, scope, inbox, cancellationToken).ConfigureAwait(false))
+            return new WorkspaceWriteRejected(WorkspaceWriteRejection.ChannelBindingInUse);
         await using (var insert = new NpgsqlCommand("""
             INSERT INTO tf_workspace_inboxes(tenant_id, project_id, environment_id, app_id, workspace_id, inbox_id, format_version, name, channel_kind,
                 channel_config_id, calendar_id, sla_policy_id, routing_policy_id, enabled, greeting_message, away_message, revision)
@@ -60,7 +62,8 @@ public sealed partial class PostgresWorkspaceStore
             """, connection, transaction))
         {
             BindInbox(insert, scope, inbox);
-            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            if (!await TryWriteBindingAsync(() => insert.ExecuteNonQueryAsync(cancellationToken)).ConfigureAwait(false))
+                return new WorkspaceWriteRejected(WorkspaceWriteRejection.ChannelBindingInUse);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return new WorkspaceWriteApplied<StoredInbox>(new(scope, inbox, 1));
@@ -81,7 +84,10 @@ public sealed partial class PostgresWorkspaceStore
         {
             BindInbox(update, scope, inbox);
             update.Parameters.AddWithValue("expected", expectedRevision);
-            if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
+            object? written = null;
+            if (!await TryWriteBindingAsync(async () => written = await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)).ConfigureAwait(false))
+                return new WorkspaceWriteRejected(WorkspaceWriteRejection.ChannelBindingInUse);
+            if (written is long revision)
             {
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
                 return new WorkspaceWriteApplied<StoredInbox>(new(scope, inbox, revision));
@@ -110,6 +116,34 @@ public sealed partial class PostgresWorkspaceStore
             return await MissAsync<StoredInbox>(connection, transaction, InboxRevision, command => BindInboxKey(command, scope, id), cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return new WorkspaceWriteApplied<StoredInbox>(removed);
+    }
+
+    private const string BindingIndex = "tf_workspace_inboxes_channel_binding";
+
+    /// <summary>True when another inbox of the scope already uses the binding (raw columns compared, not only the key).</summary>
+    private static async Task<bool> BindingTakenAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, TicketScope scope, Inbox inbox, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand($"""
+            SELECT EXISTS (SELECT 1 FROM tf_workspace_inboxes
+                WHERE binding_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@kind,@config) AND {WorkspaceWhere}
+                  AND channel_kind=@kind AND channel_config_id=@config AND inbox_id<>@inbox)
+            """, connection, transaction);
+        BindInbox(command, scope, inbox);
+        return (bool)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+    }
+
+    /// <summary>Runs a write and reports false when the unique binding index refused it (the transaction is then aborted).</summary>
+    private static async Task<bool> TryWriteBindingAsync(Func<Task> write)
+    {
+        try
+        {
+            await write().ConfigureAwait(false);
+            return true;
+        }
+        catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == BindingIndex)
+        {
+            return false;
+        }
     }
 
     private static void RequireInbox(InboxId id)

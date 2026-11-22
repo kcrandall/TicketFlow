@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Channel contracts for TicketFlow: ITicketChannel with capabilities and reply windows, normalized inbound messages, outbound send requests and results, delivery reports, channel state store contracts and service contracts.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
+    <ProjectReference Include="../../Contacts/TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj" />
+    <ProjectReference Include="../../Workspaces/TicketFlow.Workspaces.Abstractions/TicketFlow.Workspaces.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

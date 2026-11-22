@@ -28,6 +28,9 @@ public enum WorkspaceWriteRejection
 
     /// <summary>A member would belong to more than <see cref="WorkspaceLimits.MaximumTeamsPerUser"/> teams in the workspace.</summary>
     TeamMembershipLimitExceeded = 2,
+
+    /// <summary>Another inbox in the workspace is already bound to the same channel kind and configuration.</summary>
+    ChannelBindingInUse = 3,
 }
 
 /// <summary>Outcome of a revision-fenced store write. Switch over every case without a discard arm.</summary>

@@ -43,6 +43,9 @@ public static class AccessLimits
     public const int MaximumFieldPoliciesPerWorkspace = 256;
     public const int MaximumGrantsPerSubject = 256;
 
+    /// <summary>Maximum grants returned by one <see cref="IAccessGrantStore.ListForTargetAsync"/> call.</summary>
+    public const int MaximumTargetPage = 1000;
+
     /// <summary>A user plus <see cref="UserPrincipal.MaximumTeamMemberships"/> teams.</summary>
     public const int MaximumSubjectsPerQuery = UserPrincipal.MaximumTeamMemberships + 1;
 }
@@ -83,6 +86,14 @@ public interface IAccessGrantStore
     /// name <paramref name="workspace"/>, ordered by grant identifier (ordinal). Validity windows are not filtered by the store.
     /// </summary>
     Task<IReadOnlyList<StoredAccessGrant>> ListForSubjectsAsync(AccessPartition partition, WorkspaceId workspace, IReadOnlyCollection<GrantSubject> subjects, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Grants (any subject) whose scope equals <paramref name="target"/> — a workspace, team or inbox scope, never tenant — ordered by
+    /// grant identifier (ordinal), after <paramref name="after"/> when supplied, at most <paramref name="limit"/>
+    /// (1-<see cref="AccessLimits.MaximumTargetPage"/>). Used to clean up grants when a team or inbox is deleted. Validity windows
+    /// are not filtered by the store.
+    /// </summary>
+    Task<IReadOnlyList<StoredAccessGrant>> ListForTargetAsync(AccessPartition partition, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default);
 
     Task<AccessWriteResult<StoredAccessGrant>> CreateAsync(AccessGrant grant, CancellationToken cancellationToken = default);
 

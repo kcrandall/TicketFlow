@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <ProjectReference Include="../../../src/Routing/TicketFlow.Routing.Stores.Postgres/TicketFlow.Routing.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../../src/Routing/TicketFlow.Routing/TicketFlow.Routing.csproj" />
+    <ProjectReference Include="../../../src/Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
+    <ProjectReference Include="../../../src/Contacts/TicketFlow.Contacts/TicketFlow.Contacts.csproj" />
+    <ProjectReference Include="../../../src/Workspaces/TicketFlow.Workspaces/TicketFlow.Workspaces.csproj" />
+    <ProjectReference Include="../../../src/Access/TicketFlow.Access/TicketFlow.Access.csproj" />
+    <ProjectReference Include="../../../src/TicketFlow/TicketFlow.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../TicketFlow.Routing.Tests/RoutingFixture.cs" Link="Shared/RoutingFixture.cs" />
+    <Compile Include="../TicketFlow.Routing.Tests/ConcurrencyScenarios.cs" Link="Shared/ConcurrencyScenarios.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../TicketFlow.Testing/TicketFlow.Testing.csproj" />
+    <ProjectReference Include="../TicketFlow.Routing.StoreContracts/TicketFlow.Routing.StoreContracts.csproj" />
+  </ItemGroup>
+</Project>

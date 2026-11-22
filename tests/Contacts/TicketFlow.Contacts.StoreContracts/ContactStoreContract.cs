@@ -274,9 +274,80 @@ public static class ContactStoreContract
                 Assert.AreEqual(change.Event.Id, all.Single(item => item.Sequence == change.Sequence).Event.Id);
         CollectionAssert.AreEqual(new long[] { 11, 12, 13 }, (await primary.ReadChangesAsync(scope, 10, 3)).Select(change => change.Sequence).ToArray());
         Assert.IsEmpty(await primary.ReadChangesAsync(scope, 24, 10));
+
+        // A failed batch appends nothing; the next successful batch continues the sequence without a gap.
+        var failed = await primary.WriteAsync(scope, new ContactWriteBatch(puts: [new ContactPut(NewContact("c00"), null)],
+            changes: [Change(ContactChangeKind.Created, "c00")]));
+        Assert.AreEqual("conflict:c00:1", Describe(failed));
+        var taken = await competing.WriteAsync(scope, new ContactWriteBatch(puts: [new ContactPut(NewContact("v1", identities: [Verified(Email("v@example.com"))]), null),
+            new ContactPut(NewContact("v2", identities: [Verified(Email("v@example.com"))]), null)], changes: [Change(ContactChangeKind.Created, "v1")]));
+        StringAssert.StartsWith(Describe(taken), "taken:");
+        var next = (ContactWriteApplied)(await competing.WriteAsync(scope, new ContactWriteBatch(puts: [new ContactPut(NewContact("after-failure"), null)],
+            changes: [Change(ContactChangeKind.Created, "after-failure")]))).Value!;
+        Assert.AreEqual(25L, next.Changes.Single().Sequence);
+        CollectionAssert.AreEqual(Enumerable.Range(1, 25).Select(value => (long)value).ToArray(),
+            (await primary.ReadChangesAsync(scope, 0, IContactStore.MaximumChangesPerRead)).Select(change => change.Sequence).ToArray());
         var otherScope = TestScopes.Create(workspaceId: "changes-other");
         Assert.AreEqual("applied:1", Describe(await CreateAsync(primary, otherScope, NewContact("x"))));
         Assert.AreEqual(1L, (await primary.ReadChangesAsync(otherScope, 0, 10)).Single().Sequence);
+    }
+
+    public static async Task VerifyDeleteCascadeAsync(IContactStore primary, IContactStore competing)
+    {
+        var scope = TestScopes.Create(workspaceId: "cascade-contract");
+        var actor = new AccessActor(AccessActorKind.User, "supervisor");
+        foreach (var id in new[] { "root", "child-a", "child-b", "grandchild" })
+            Assert.AreEqual("applied:1", Describe(await CreateAsync(primary, scope, NewContact(id))));
+        async Task MergeAsync(string target, string source)
+        {
+            var targetStored = (await primary.GetAsync(scope, new ContactId(target)))!;
+            var sourceStored = (await primary.GetAsync(scope, new ContactId(source)))!;
+            StringAssert.StartsWith(Describe(await primary.WriteAsync(scope, new ContactWriteBatch(
+                puts: [new ContactPut(targetStored.Contact, targetStored.Revision), new ContactPut(sourceStored.Contact.Tombstone(targetStored.Id, At), sourceStored.Revision)],
+                createMerge: ContactMergerShape(targetStored.Contact, sourceStored.Contact, actor)))), "applied:");
+        }
+        await MergeAsync("child-a", "grandchild");
+        await MergeAsync("root", "child-a");
+        await MergeAsync("root", "child-b");
+
+        CollectionAssert.AreEqual(new[] { "child-a", "child-b" }, (await competing.ListMergedIntoAsync(scope, new ContactId("root"), 10)).Select(id => id.Value).ToArray());
+        CollectionAssert.AreEqual(new[] { "child-a" }, (await competing.ListMergedIntoAsync(scope, new ContactId("root"), 1)).Select(id => id.Value).ToArray());
+        CollectionAssert.AreEqual(new[] { "grandchild" }, (await competing.ListMergedIntoAsync(scope, new ContactId("child-a"), 10)).Select(id => id.Value).ToArray());
+        Assert.IsEmpty(await competing.ListMergedIntoAsync(TestScopes.LevelVariants(scope)[5], new ContactId("root"), 10));
+
+        // A cascade that differs from the authorized set is a conflict and removes nothing.
+        var partial = await competing.WriteAsync(scope, new ContactWriteBatch(deletes: [new ContactDelete(new ContactId("root"), 3, [new ContactId("child-a"), new ContactId("child-b")])],
+            changes: [Change(ContactChangeKind.Deleted, "root")]));
+        Assert.AreEqual("conflict:root:3", Describe(partial));
+        Assert.IsNotNull(await primary.GetAsync(scope, new ContactId("grandchild")));
+
+        var applied = (ContactWriteApplied)(await competing.WriteAsync(scope, new ContactWriteBatch(
+            deletes: [new ContactDelete(new ContactId("root"), 3, [new ContactId("child-a"), new ContactId("child-b"), new ContactId("grandchild")])],
+            changes: [Change(ContactChangeKind.Deleted, "root")]))).Value!;
+        CollectionAssert.AreEqual(new[] { "root", "child-a", "child-b", "grandchild" }, applied.Deleted.Select(id => id.Value).ToArray());
+        foreach (var id in applied.Deleted)
+            Assert.IsNull(await primary.GetAsync(scope, id));
+    }
+
+    /// <summary><paramref name="store"/> must examine at most 3 rows per search page.</summary>
+    public static async Task VerifyBoundedScanAsync(IContactStore store)
+    {
+        var scope = TestScopes.Create(workspaceId: "bounded-scan");
+        for (var index = 0; index < 7; index++)
+            Assert.AreEqual("applied:1", Describe(await CreateAsync(store, scope, NewContact($"c{index}", $"name {index}", labels: index == 5 ? ["vip"] : null))));
+        var filter = new HasLabelFilter(new LabelId("vip"));
+        var search = ContactSearch.ByName(limit: 10);
+        var first = await store.SearchAsync(scope, search, filter);
+        Assert.IsEmpty(first.Contacts);
+        Assert.AreEqual("c2", first.Next!.Contact.Value);
+        var second = await store.SearchAsync(scope, search.WithAfter(first.Next), filter);
+        CollectionAssert.AreEqual(new[] { "c5" }, second.Contacts.Select(stored => stored.Id.Value).ToArray());
+        Assert.AreEqual("c5", second.Next!.Contact.Value);
+        var third = await store.SearchAsync(scope, search.WithAfter(second.Next), filter);
+        Assert.IsEmpty(third.Contacts);
+        Assert.IsNull(third.Next);
+        var unfiltered = await store.SearchAsync(scope, ContactSearch.ByName(limit: 2), AllowAllFilter.Instance);
+        CollectionAssert.AreEqual(new[] { "c0", "c1" }, unfiltered.Contacts.Select(stored => stored.Id.Value).ToArray());
     }
 
     public static async Task VerifyConcurrentVerifiedIdentityAsync(IContactStore primary, IContactStore competing)

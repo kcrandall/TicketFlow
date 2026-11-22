@@ -10,7 +10,8 @@ Durable PostgreSQL storage for TicketFlow workspaces. `PostgresWorkspaceStore` i
   are compared for exact identity. Team members live in `tf_workspace_team_members` with a per-user index, so
   `ListTeamsForUserAsync` (and principal team snapshots) is one indexed query.
 - Updates and deletes are compare-and-set on `revision`; creates start at revision 1. Per-workspace capacity and the per-user team
-  limit (256) are checked under transaction-scoped advisory locks.
+  limit (256) are checked under transaction-scoped advisory locks. Channel bindings are unique per workspace (migration v2 index;
+  reuse is `WorkspaceWriteRejection.ChannelBindingInUse`).
 - Inbox and team lists translate the caller's `AccessFilter` with `PostgresAccessFilterTranslator` inside the query; an
   untranslatable filter returns no rows. Ordering uses `COLLATE "C"`.
 - Rows carry `format_version`; calendar schedules use the canonical `BusinessCalendarCodec` text. Undecodable rows throw.

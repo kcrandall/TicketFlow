@@ -11,6 +11,12 @@
   <Project Path="src/HelpCenter/TicketFlow.HelpCenter.Abstractions/TicketFlow.HelpCenter.Abstractions.csproj" />
   <Project Path="src/HelpCenter/TicketFlow.HelpCenter/TicketFlow.HelpCenter.csproj" />
   <Project Path="src/HelpCenter/TicketFlow.HelpCenter.Stores.Postgres/TicketFlow.HelpCenter.Stores.Postgres.csproj" />
+  <Project Path="src/Routing/TicketFlow.Routing.Abstractions/TicketFlow.Routing.Abstractions.csproj" />
+  <Project Path="src/Routing/TicketFlow.Routing/TicketFlow.Routing.csproj" />
+  <Project Path="src/Routing/TicketFlow.Routing.Stores.Postgres/TicketFlow.Routing.Stores.Postgres.csproj" />
+  <Project Path="src/Sla/TicketFlow.Sla.Abstractions/TicketFlow.Sla.Abstractions.csproj" />
+  <Project Path="src/Sla/TicketFlow.Sla/TicketFlow.Sla.csproj" />
+  <Project Path="src/Sla/TicketFlow.Sla.Stores.Postgres/TicketFlow.Sla.Stores.Postgres.csproj" />
   <Project Path="src/Stores/TicketFlow.Stores.InMemory/TicketFlow.Stores.InMemory.csproj" />
   <Project Path="src/Stores/TicketFlow.Stores.Migrations.Postgres/TicketFlow.Stores.Migrations.Postgres.csproj" />
   <Project Path="src/Surveys/TicketFlow.Surveys.Abstractions/TicketFlow.Surveys.Abstractions.csproj" />
@@ -33,6 +39,12 @@
   <Project Path="tests/HelpCenter/TicketFlow.HelpCenter.StoreContracts/TicketFlow.HelpCenter.StoreContracts.csproj" />
   <Project Path="tests/HelpCenter/TicketFlow.HelpCenter.Tests/TicketFlow.HelpCenter.Tests.csproj" />
   <Project Path="tests/HelpCenter/TicketFlow.HelpCenter.Stores.Postgres.Tests/TicketFlow.HelpCenter.Stores.Postgres.Tests.csproj" />
+  <Project Path="tests/Routing/TicketFlow.Routing.StoreContracts/TicketFlow.Routing.StoreContracts.csproj" />
+  <Project Path="tests/Routing/TicketFlow.Routing.Tests/TicketFlow.Routing.Tests.csproj" />
+  <Project Path="tests/Routing/TicketFlow.Routing.Stores.Postgres.Tests/TicketFlow.Routing.Stores.Postgres.Tests.csproj" />
+  <Project Path="tests/Sla/TicketFlow.Sla.StoreContracts/TicketFlow.Sla.StoreContracts.csproj" />
+  <Project Path="tests/Sla/TicketFlow.Sla.Tests/TicketFlow.Sla.Tests.csproj" />
+  <Project Path="tests/Sla/TicketFlow.Sla.Stores.Postgres.Tests/TicketFlow.Sla.Stores.Postgres.Tests.csproj" />
   <Project Path="tests/Stores/TicketFlow.Stores.Migrations.Postgres.Tests/TicketFlow.Stores.Migrations.Postgres.Tests.csproj" />
   <Project Path="tests/Stores/TicketFlow.Stores.InMemory.Tests/TicketFlow.Stores.InMemory.Tests.csproj" />
   <Project Path="tests/Surveys/TicketFlow.Surveys.StoreContracts/TicketFlow.Surveys.StoreContracts.csproj" />
@@ -44,4 +56,17 @@
   <Project Path="tests/Workspaces/TicketFlow.Workspaces.StoreContracts/TicketFlow.Workspaces.StoreContracts.csproj" />
   <Project Path="tests/Workspaces/TicketFlow.Workspaces.Tests/TicketFlow.Workspaces.Tests.csproj" />
   <Project Path="tests/Workspaces/TicketFlow.Workspaces.Stores.Postgres.Tests/TicketFlow.Workspaces.Stores.Postgres.Tests.csproj" />
+  <Project Path="src/Channels/TicketFlow.Channels.Abstractions/TicketFlow.Channels.Abstractions.csproj" />
+  <Project Path="src/Channels/TicketFlow.Channels/TicketFlow.Channels.csproj" />
+  <Project Path="src/Channels/TicketFlow.Channels.Stores.Postgres/TicketFlow.Channels.Stores.Postgres.csproj" />
+  <Project Path="src/Channels/TicketFlow.Channels.Api/TicketFlow.Channels.Api.csproj" />
+  <Project Path="src/Integrations/TicketFlow.Integrations.Surveys/TicketFlow.Integrations.Surveys.csproj" />
+  <Project Path="src/Integrations/TicketFlow.Integrations.EnvelopeFlow/TicketFlow.Integrations.EnvelopeFlow.csproj" />
+  <Project Path="tests/Channels/TicketFlow.Channels.Testing/TicketFlow.Channels.Testing.csproj" />
+  <Project Path="tests/Channels/TicketFlow.Channels.StoreContracts/TicketFlow.Channels.StoreContracts.csproj" />
+  <Project Path="tests/Channels/TicketFlow.Channels.Tests/TicketFlow.Channels.Tests.csproj" />
+  <Project Path="tests/Channels/TicketFlow.Channels.Stores.Postgres.Tests/TicketFlow.Channels.Stores.Postgres.Tests.csproj" />
+  <Project Path="tests/Channels/TicketFlow.Channels.Api.Tests/TicketFlow.Channels.Api.Tests.csproj" />
+  <Project Path="tests/Integrations/TicketFlow.Integrations.Surveys.Tests/TicketFlow.Integrations.Surveys.Tests.csproj" />
+  <Project Path="tests/Integrations/TicketFlow.Integrations.EnvelopeFlow.Tests/TicketFlow.Integrations.EnvelopeFlow.Tests.csproj" />
 </Solution>

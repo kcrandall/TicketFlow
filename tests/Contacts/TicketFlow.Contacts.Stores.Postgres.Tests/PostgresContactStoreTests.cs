@@ -26,6 +26,7 @@ public sealed class PostgresContactStoreTests
         public PostgresContactStore Store { get; }
         public PostgresContactStore Competing { get; }
         public NpgsqlDataSource Primary => storage.First;
+        public NpgsqlDataSource Secondary => storage.Second;
 
         public static Task<Database> CreateAsync() => PostgresTestDatabase.CreateAsync("tf_contacts_test_", async storage =>
         {
@@ -91,7 +92,7 @@ public sealed class PostgresContactStoreTests
         await using var database = await Database.CreateAsync();
         await database.Competing.InitializeAsync();
         var inspection = await new PostgresMigrationRunner(database.Primary, PostgresContactMigrations.Catalog).InspectAsync();
-        Assert.AreEqual(1, inspection.CurrentVersion);
+        Assert.AreEqual(2, inspection.CurrentVersion);
         Assert.AreEqual("ticketflow.contacts", inspection.Component);
     }
 
@@ -138,34 +139,115 @@ public sealed class PostgresContactStoreTests
     }
 
     [TestMethod]
-    public async Task SearchPlansUseIndexes()
+    public async Task GeneratedStatementsUseIndexes()
     {
         await using var database = await Database.CreateAsync();
+        var scope = TestScopes.Create();
+        for (var index = 0; index < 200; index++)
+        {
+            var identities = new List<ContactIdentity> { ContactStoreContract.Claimed(ContactStoreContract.Email($"user{index:D3}@example.com")) };
+            StringAssert.StartsWith(ContactStoreContract.Describe(await ContactStoreContract.CreateAsync(database.Store, index % 2 == 0 ? scope : TestScopes.Create(workspaceId: "noise"),
+                ContactStoreContract.NewContact($"c{index:D3}", $"Name {index:D3}", identities, index % 10 == 0 ? ["vip"] : null))), "applied:");
+        }
+        await database.ScalarAsync("ANALYZE");
         await using var connection = await database.Primary.OpenConnectionAsync();
         await using (var off = new NpgsqlCommand("SET enable_seqscan = off", connection))
             await off.ExecuteNonQueryAsync();
-        await using var explain = new NpgsqlCommand("""
-            EXPLAIN SELECT c.contact_id FROM tf_contacts c
-            WHERE c.scope_key = tf_key_v1('t','p','e','a','w') AND c.merged_into IS NULL AND c.name_folded >= 'ad' AND c.name_folded < 'ad' || chr(1114111)
-            ORDER BY c.name_folded, c.contact_id LIMIT 50
-            """, connection);
-        var plan = string.Join("\n", await ReadAllAsync(explain));
-        StringAssert.Contains(plan, "tf_contacts_name");
-        await using var identities = new NpgsqlCommand("""
-            EXPLAIN SELECT i.contact_id FROM tf_contact_identities i
-            WHERE i.scope_key = tf_key_v1('t','p','e','a','w') AND i.kind = 1 AND i.value >= 'ad' AND i.value < 'ad' || chr(1114111)
-            ORDER BY i.value, i.contact_id LIMIT 50
-            """, connection);
-        StringAssert.Contains(string.Join("\n", await ReadAllAsync(identities)), "tf_contact_identities_search");
+
+        async Task<string> ExplainAsync(NpgsqlCommand command)
+        {
+            command.Connection = connection;
+            command.CommandText = "EXPLAIN " + command.CommandText;
+            var lines = new List<string>();
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                lines.Add(reader.GetString(0));
+            return string.Join("\n", lines);
+        }
+
+        var cursor = new ContactSearchCursor("name 050", new ContactId("c050"));
+        var filter = new OrFilter(new HasLabelFilter(new LabelId("vip")), new NotFilter(new ScopeFilter(TestScopes.Create(workspaceId: "noise"))));
+        var namePlan = await ExplainAsync(PostgresContactStore.SearchCommand(scope, ContactSearch.ByName("name", 20).WithAfter(cursor), filter, 1000));
+        StringAssert.Contains(namePlan, "tf_contacts_name");
+        StringAssert.Contains(namePlan, "Limit");
+        var identityPlan = await ExplainAsync(PostgresContactStore.SearchCommand(scope,
+            ContactSearch.ByIdentity(ContactIdentityKind.Email, "user", limit: 20).WithAfter(new ContactSearchCursor("user050@example.com", new ContactId("c050"))), filter, 1000));
+        StringAssert.Contains(identityPlan, "tf_contact_identities_search");
+        var lookupPlan = await ExplainAsync(PostgresContactStore.FindByIdentityCommand(scope, ContactStoreContract.Email("user010@example.com")));
+        StringAssert.Contains(lookupPlan, "tf_contact_identities_");
+        Assert.DoesNotContain("Seq Scan", lookupPlan);
+        var changesPlan = await ExplainAsync(PostgresContactStore.ReadChangesCommand(scope, 50, 100));
+        StringAssert.Contains(changesPlan, "tf_contact_changes_pkey");
+        Assert.DoesNotContain("Seq Scan", namePlan + identityPlan + changesPlan);
     }
 
-    private static async Task<List<string>> ReadAllAsync(NpgsqlCommand command)
+    [TestMethod]
+    public async Task DeleteCascadeContractUsesIndependentClients()
     {
-        var lines = new List<string>();
-        await using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
-            lines.Add(reader.GetString(0));
-        return lines;
+        await using var database = await Database.CreateAsync();
+        await ContactStoreContract.VerifyDeleteCascadeAsync(database.Store, database.Competing);
+    }
+
+    [TestMethod]
+    public async Task BoundedScanContract()
+    {
+        await using var database = await Database.CreateAsync();
+        await ContactStoreContract.VerifyBoundedScanAsync(new PostgresContactStore(database.Primary, 3));
+    }
+
+    [TestMethod]
+    public async Task ExportCompletedAuditKindIsStored()
+    {
+        await using var database = await Database.CreateAsync();
+        await database.Store.RecordAsync(new ContactAuditEvent(Guid.NewGuid(), ContactStoreContract.At, TestScopes.Create(), ContactAuditKind.ExportCompleted,
+            new AccessActor(AccessActorKind.User, "sam"), count: 3));
+        Assert.AreEqual((short)5, await database.ScalarAsync("SELECT kind FROM tf_contact_audit"));
+        Assert.AreEqual(2, (await new PostgresMigrationRunner(database.Primary, PostgresContactMigrations.Catalog).InspectAsync()).CurrentVersion);
+    }
+
+    [TestMethod]
+    public async Task ConcurrentResolutionsRetryAndConvergeOnPostgres()
+    {
+        await using var database = await Database.CreateAsync();
+        var access = new PostgresAccessStore(database.Primary);
+        await access.InitializeAsync();
+        var scope = TestScopes.Create();
+        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await access.CreateAsync(new AccessGrant(new GrantId("owner"), AccessPartition.From(scope),
+            new UserId("owner"), BuiltInRoles.Owner.Id, new WorkspaceGrantScope(scope.WorkspaceId)))).Value);
+        var owner = TestPrincipals.User(scope, "owner");
+        var providers = new List<ServiceProvider>();
+        try
+        {
+            // Independent service providers over independent data sources race on the same verified identity.
+            var services = new List<IContactService>();
+            foreach (var source in new[] { database.Primary, database.Secondary })
+                for (var copy = 0; copy < 3; copy++)
+                {
+                    var collection = new ServiceCollection();
+                    collection.AddTicketFlow().AddAccessControl().AddPostgresAccessStores(source).AddContacts().AddPostgresContactStores(source);
+                    var provider = collection.BuildServiceProvider();
+                    providers.Add(provider);
+                    services.Add(provider.CreateScope().ServiceProvider.GetRequiredService<IContactService>());
+                }
+            for (var round = 0; round < 5; round++)
+            {
+                var evidence = new ContactIdentityEvidence(ContactStoreContract.Email($"race{round}@example.com"), new IdentityVerified("dkim", ContactStoreContract.At));
+                var results = await Task.WhenAll(services.Select(service => service.ResolveAsync(owner, new ContactResolveRequest([evidence]))));
+                var ids = results.Select(result => result.Value switch
+                {
+                    ContactCreated created => created.Contact.Id,
+                    ContactMatched matched => matched.Contact.Id,
+                    _ => throw new AssertFailedException($"round {round}: unexpected resolution"),
+                }).Distinct().ToList();
+                Assert.HasCount(1, ids, $"round {round}");
+                Assert.AreEqual(1, results.Count(result => result.Value is ContactCreated), $"round {round}");
+            }
+        }
+        finally
+        {
+            foreach (var provider in providers)
+                await provider.DisposeAsync();
+        }
     }
 
     [TestMethod]

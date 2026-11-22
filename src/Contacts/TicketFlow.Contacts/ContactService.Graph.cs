@@ -57,7 +57,7 @@ public sealed partial class ContactService
             // A concurrent writer took a verified identity: resolve again so the winner is matched.
             if (result.Value is ContactIdentityTaken && attempt < MaximumResolveAttempts)
                 continue;
-            return Refusal(result);
+            return result.Value is ContactIdentityTaken taken ? await TakenAsync(actor, taken, cancellationToken).ConfigureAwait(false) : Refusal(result);
         }
     }
 
@@ -115,7 +115,7 @@ public sealed partial class ContactService
         var filter = await planner.PlanAsync(new AccessQuery(actor, ContactPermissions.Read, scope), cancellationToken).ConfigureAwait(false);
         var page = await store.SearchAsync(scope, search, filter, cancellationToken).ConfigureAwait(false);
         var masking = await MaskingAsync(scope, ContactPermissions.Read, cancellationToken).ConfigureAwait(false);
-        var decisions = new ContactDecisionCache(evaluator, actor, ContactPermissions.Read);
+        var decisions = Decisions(actor, ContactPermissions.Read);
         var views = new List<ContactView>(page.Contacts.Count);
         foreach (var stored in page.Contacts)
         {
@@ -140,33 +140,48 @@ public sealed partial class ContactService
         var auditEvent = new ContactAuditEvent(Guid.CreateVersion7(), Now, scope, ContactAuditKind.Exported, AccessActor.From(actor),
             count: request.MaximumContacts, justification: request.Justification);
         await audit.RecordAsync(auditEvent, cancellationToken).ConfigureAwait(false);
-        return new ContactExportStarted(ExportRowsAsync(actor, scope, filter, request.MaximumContacts, CancellationToken.None), auditEvent.Id);
+        return new ContactExportStarted(ExportRowsAsync(actor, scope, filter, request, CancellationToken.None), auditEvent.Id);
     }
 
-    private async IAsyncEnumerable<ContactView> ExportRowsAsync(PrincipalRef actor, TicketScope scope, AccessFilter filter, int maximum,
+    /// <summary>
+    /// Streams the export. Per-contact decisions for the sensitive <c>contact:export</c> permission are never cached, so Access audits
+    /// each exported contact; when the stream completes or is disposed, an <see cref="ContactAuditKind.ExportCompleted"/> event records
+    /// the number of contacts actually emitted.
+    /// </summary>
+    private async IAsyncEnumerable<ContactView> ExportRowsAsync(PrincipalRef actor, TicketScope scope, AccessFilter filter, ContactExportRequest request,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var masking = await MaskingAsync(scope, ContactPermissions.Export, cancellationToken).ConfigureAwait(false);
-        var decisions = new ContactDecisionCache(evaluator, actor, ContactPermissions.Export);
-        var search = ContactSearch.ByName(limit: options.ExportPageSize);
         var emitted = 0;
-        while (emitted < maximum)
+        try
         {
-            var page = await store.SearchAsync(scope, search, filter, cancellationToken).ConfigureAwait(false);
-            foreach (var stored in page.Contacts)
+            var masking = await MaskingAsync(scope, ContactPermissions.Export, cancellationToken).ConfigureAwait(false);
+            var decisions = Decisions(actor, ContactPermissions.Export);
+            var search = ContactSearch.ByName(limit: options.ExportPageSize);
+            while (emitted < request.MaximumContacts)
             {
-                if (stored.Scope != scope || stored.Contact.MergedInto is not null)
-                    throw new InvalidOperationException("The contact store returned a record outside the search contract.");
-                var decision = await decisions.DecideAsync(stored, cancellationToken).ConfigureAwait(false);
-                if (!decision.IsPermitted)
-                    continue;
-                yield return masking.Project(stored, decision);
-                if (++emitted == maximum)
+                var page = await store.SearchAsync(scope, search, filter, cancellationToken).ConfigureAwait(false);
+                foreach (var stored in page.Contacts)
+                {
+                    if (stored.Scope != scope || stored.Contact.MergedInto is not null)
+                        throw new InvalidOperationException("The contact store returned a record outside the search contract.");
+                    var decision = await decisions.DecideAsync(stored, cancellationToken).ConfigureAwait(false);
+                    if (!decision.IsPermitted)
+                        continue;
+                    var view = masking.Project(stored, decision);
+                    emitted++;
+                    yield return view;
+                    if (emitted == request.MaximumContacts)
+                        yield break;
+                }
+                if (page.Next is null)
                     yield break;
+                search = search.WithAfter(page.Next);
             }
-            if (page.Next is null)
-                yield break;
-            search = search.WithAfter(page.Next);
+        }
+        finally
+        {
+            await audit.RecordAsync(new ContactAuditEvent(Guid.CreateVersion7(), Now, scope, ContactAuditKind.ExportCompleted, AccessActor.From(actor),
+                count: emitted, justification: request.Justification), CancellationToken.None).ConfigureAwait(false);
         }
     }
 
@@ -214,7 +229,7 @@ public sealed partial class ContactService
             changes: [Change(ContactChangeKind.Merged, request.Source, now, request.Target, mergeId), Change(ContactChangeKind.Updated, request.Target, now, merge: mergeId)],
             createMerge: computation.Record,
             audit: auditEvent);
-        return await WriteAsync(scope, batch, async applied =>
+        return await WriteAsync(actor, scope, batch, async applied =>
             new ContactMergeOutcome(await ViewAsync(actor, applied.Contacts[0], cancellationToken).ConfigureAwait(false), mergeId, auditEvent.Id), cancellationToken)
             .ConfigureAwait(false);
     }
@@ -241,13 +256,15 @@ public sealed partial class ContactService
 
         var now = Now;
         var (restoredTarget, restoredSource) = ContactMerger.Unmerge(record, target.Contact, now);
+        if (!(await AuthorizeAsync(actor, ContactPermissions.Merge, ContactAccess.Resource(scope, restoredTarget), cancellationToken).ConfigureAwait(false)).IsPermitted)
+            return ContactRefused.Forbidden;
         var auditEvent = new ContactAuditEvent(Guid.CreateVersion7(), now, scope, ContactAuditKind.Unmerged, AccessActor.From(actor), record.Source, record.Target, mergeId);
         var batch = new ContactWriteBatch(
             puts: [new ContactPut(restoredTarget, target.Revision), new ContactPut(restoredSource, source.Revision)],
             changes: [Change(ContactChangeKind.Unmerged, record.Source, now, record.Target, mergeId), Change(ContactChangeKind.Updated, record.Target, now, merge: mergeId)],
             deleteMerge: mergeId,
             audit: auditEvent);
-        return await WriteAsync(scope, batch, async applied => new ContactUnmergeOutcome(
+        return await WriteAsync(actor, scope, batch, async applied => new ContactUnmergeOutcome(
                 await ViewAsync(actor, applied.Contacts[0], cancellationToken).ConfigureAwait(false),
                 await ViewAsync(actor, applied.Contacts[1], cancellationToken).ConfigureAwait(false),
                 auditEvent.Id), cancellationToken)

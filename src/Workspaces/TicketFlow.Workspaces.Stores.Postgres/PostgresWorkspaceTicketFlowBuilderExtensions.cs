@@ -1,10 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Npgsql;
-using TicketFlow.Workspaces;
-using TicketFlow.Workspaces.Stores.Postgres;
 
-namespace TicketFlow;
+namespace TicketFlow.Workspaces.Stores.Postgres;
 
 public static class PostgresWorkspaceTicketFlowBuilderExtensions
 {

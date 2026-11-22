@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Routing policies (round robin, least busy, skills, sticky owner, manual, overflow), agent availability, capacity and skills, unassigned queues, collision presence and reply locks, result unions and store contracts for TicketFlow.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
+    <ProjectReference Include="../../Workspaces/TicketFlow.Workspaces.Abstractions/TicketFlow.Workspaces.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

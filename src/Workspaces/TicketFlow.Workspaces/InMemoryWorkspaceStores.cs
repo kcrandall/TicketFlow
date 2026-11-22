@@ -60,7 +60,7 @@ public sealed class InMemoryInboxStore(int maximumEntries = 10_000) : IInboxStor
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(inbox);
-        return Task.FromResult(table.Create(scope, Key(inbox.Id), inbox, entry => Project(scope, entry)));
+        return Task.FromResult(table.Create(scope, Key(inbox.Id), inbox, entry => Project(scope, entry), others => CheckBinding(inbox, others)));
     }
 
     public Task<WorkspaceWriteResult<StoredInbox>> UpdateAsync(TicketScope scope, Inbox inbox, long expectedRevision, CancellationToken cancellationToken = default)
@@ -68,7 +68,7 @@ public sealed class InMemoryInboxStore(int maximumEntries = 10_000) : IInboxStor
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(inbox);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
-        return Task.FromResult(table.Update(scope, Key(inbox.Id), expectedRevision, inbox, entry => Project(scope, entry)));
+        return Task.FromResult(table.Update(scope, Key(inbox.Id), expectedRevision, inbox, entry => Project(scope, entry), others => CheckBinding(inbox, others)));
     }
 
     public Task<WorkspaceWriteResult<StoredInbox>> DeleteAsync(TicketScope scope, InboxId id, long expectedRevision, CancellationToken cancellationToken = default)
@@ -77,6 +77,9 @@ public sealed class InMemoryInboxStore(int maximumEntries = 10_000) : IInboxStor
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         return Task.FromResult(table.Delete(scope, Key(id), expectedRevision, entry => Project(scope, entry)));
     }
+
+    private static WorkspaceWriteRejection? CheckBinding(Inbox inbox, IEnumerable<InMemoryWorkspaceTable<Inbox>.Entry> others) =>
+        others.Any(other => other.Value.Channel == inbox.Channel) ? WorkspaceWriteRejection.ChannelBindingInUse : null;
 
     private static string Key(InboxId id) => id == default ? throw new ArgumentException("An inbox identifier is required.", nameof(id)) : id.Value;
 

@@ -78,18 +78,30 @@ internal sealed class ContactMasking
     }
 }
 
-/// <summary>Caches point decisions for one principal and permission by label set within a single call.</summary>
-internal sealed class ContactDecisionCache(IAccessEvaluator evaluator, PrincipalRef actor, Permission permission)
+/// <summary>
+/// Caches point decisions for one principal and permission by label set within a single call. Decisions for sensitive permissions
+/// (which Access audits per call) are never cached, and neither are decisions that used a break-glass grant, so caching never
+/// suppresses an audit event.
+/// </summary>
+internal sealed class ContactDecisionCache(IAccessEvaluator evaluator, PrincipalRef actor, Permission permission, bool sensitive)
 {
     private readonly Dictionary<string, AccessDecision> decisions = new(StringComparer.Ordinal);
 
     public async Task<AccessDecision> DecideAsync(StoredContact stored, CancellationToken cancellationToken)
     {
         var key = string.Join('\u001F', stored.Contact.Labels.Select(label => label.Value));
-        if (decisions.TryGetValue(key, out var cached))
+        if (!sensitive && decisions.TryGetValue(key, out var cached))
             return cached;
         var decision = await evaluator.AuthorizeAsync(new AccessRequest(actor, permission, ContactAccess.Resource(stored)), cancellationToken).ConfigureAwait(false);
-        decisions[key] = decision;
+        if (!sensitive && !UsedBreakGlass(decision))
+            decisions[key] = decision;
         return decision;
     }
+
+    private static bool UsedBreakGlass(AccessDecision decision) => decision switch
+    {
+        AccessAllowed allowed => allowed.UsedBreakGlass,
+        AccessDenied => false,
+        AccessMasked masked => masked.UsedBreakGlass,
+    };
 }

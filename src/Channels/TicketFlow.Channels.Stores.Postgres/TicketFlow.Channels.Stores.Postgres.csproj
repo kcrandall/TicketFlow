@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Optional durable PostgreSQL channel state for TicketFlow: endpoints, per-conversation channel state, threading reference chains and dispatch records.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Channels.Abstractions/TicketFlow.Channels.Abstractions.csproj" />
+    <ProjectReference Include="../../Stores/TicketFlow.Stores.Migrations.Postgres/TicketFlow.Stores.Migrations.Postgres.csproj" />
+    <PackageReference Include="Npgsql" />
+  </ItemGroup>
+</Project>

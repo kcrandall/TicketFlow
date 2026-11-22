@@ -131,6 +131,20 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
         }
     }
 
+    public Task<IReadOnlyList<StoredAccessGrant>> ListForTargetAsync(AccessPartition partition, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        AccessGrantTargets.Validate(target, limit, after);
+        lock (gate)
+        {
+            return Task.FromResult<IReadOnlyList<StoredAccessGrant>>([.. grants.Values
+                .Where(entry => entry.Grant.Partition == partition && entry.Grant.Scope == target
+                    && (after is not { } cursor || string.CompareOrdinal(entry.Grant.Id.Value, cursor.Value) > 0))
+                .OrderBy(entry => entry.Grant.Id.Value, StringComparer.Ordinal)
+                .Take(limit)]);
+        }
+    }
+
     public Task<AccessWriteResult<StoredAccessGrant>> CreateAsync(AccessGrant grant, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(grant);

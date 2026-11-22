@@ -17,8 +17,11 @@ public sealed class InMemoryContactStore : IContactStore, IContactAuditSink
     private readonly List<ContactAuditEvent> audit = [];
     private int changeCount;
 
-    public InMemoryContactStore(int maximumContacts = 10_000, int maximumChanges = 100_000, int maximumAuditEvents = 10_000)
+    public InMemoryContactStore(int maximumContacts = 10_000, int maximumChanges = 100_000, int maximumAuditEvents = 10_000,
+        int maximumRowsExamined = ContactSearch.DefaultMaximumRowsExamined)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maximumRowsExamined, 1);
+        MaximumRowsExamined = maximumRowsExamined;
         ArgumentOutOfRangeException.ThrowIfLessThan(maximumContacts, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(maximumChanges, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(maximumAuditEvents, 1);
@@ -30,6 +33,9 @@ public sealed class InMemoryContactStore : IContactStore, IContactAuditSink
     public int MaximumContacts { get; }
     public int MaximumChanges { get; }
     public int MaximumAuditEvents { get; }
+
+    /// <summary>Rows examined per search page before the access filter is applied.</summary>
+    public int MaximumRowsExamined { get; }
 
     /// <summary>A snapshot of recorded audit events in recording order.</summary>
     public IReadOnlyList<ContactAuditEvent> AuditEvents
@@ -86,17 +92,38 @@ public sealed class InMemoryContactStore : IContactStore, IContactAuditSink
             };
             if (search.After is { } after)
                 rows = rows.Where(row => Compare(row.Key, row.Stored.Id, after.SortKey, after.Contact) > 0);
-            var page = rows
-                .Where(row => AccessFilterEvaluator.Matches(filter, ContactAccess.Resource(row.Stored)))
+            var examined = rows
                 .OrderBy(row => row.Key, StringComparer.Ordinal)
                 .ThenBy(row => row.Stored.Id.Value, StringComparer.Ordinal)
-                .Take(search.Limit)
+                .Take(MaximumRowsExamined)
                 .ToList();
+            var page = new List<(string Key, StoredContact Stored)>();
+            foreach (var row in examined)
+            {
+                if (!AccessFilterEvaluator.Matches(filter, ContactAccess.Resource(row.Stored)))
+                    continue;
+                page.Add(row);
+                if (page.Count == search.Limit)
+                    break;
+            }
             var seen = new HashSet<ContactId>();
             var result = page.Where(row => seen.Add(row.Stored.Id)).Select(row => row.Stored).ToList();
-            var next = page.Count == search.Limit ? new ContactSearchCursor(page[^1].Key, page[^1].Stored.Id) : null;
+            ContactSearchCursor? next = page.Count == search.Limit
+                ? new ContactSearchCursor(page[^1].Key, page[^1].Stored.Id)
+                : examined.Count == MaximumRowsExamined ? new ContactSearchCursor(examined[^1].Key, examined[^1].Stored.Id) : null;
             return Task.FromResult(new ContactPage(result, next));
         }
+    }
+
+    public Task<IReadOnlyList<ContactId>> ListMergedIntoAsync(TicketScope scope, ContactId target, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        RequireId(target);
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, ContactDelete.MaximumCascade);
+        lock (gate)
+            return Task.FromResult<IReadOnlyList<ContactId>>([.. contacts.Values.Where(stored => stored.Scope == scope && stored.Contact.MergedInto == target)
+                .Select(stored => stored.Id).OrderBy(id => id.Value, StringComparer.Ordinal).Take(limit)]);
     }
 
     public Task<ContactWriteResult> WriteAsync(TicketScope scope, ContactWriteBatch batch, CancellationToken cancellationToken = default)
@@ -169,7 +196,17 @@ public sealed class InMemoryContactStore : IContactStore, IContactAuditSink
         if (batch.CreateMerge is { } createMerge && merges.ContainsKey((scope, createMerge.Id)))
             return new ContactWriteRejected(ContactWriteRejection.DuplicateMerge);
 
-        var removed = Cascade(scope, batch.Deletes.Select(delete => delete.Id));
+        var removedOrder = new List<ContactId>();
+        foreach (var delete in batch.Deletes)
+        {
+            var cascade = Cascade(scope, [delete.Id]);
+            cascade.Remove(delete.Id);
+            if (delete.ExpectedCascade is { } expected && !expected.SetEquals(cascade))
+                return new ContactWriteConflict(delete.Id, contacts[(scope, delete.Id)].Revision);
+            removedOrder.Add(delete.Id);
+            removedOrder.AddRange(cascade.OrderBy(id => id.Value, StringComparer.Ordinal));
+        }
+        var removed = removedOrder.ToHashSet();
         var written = batch.Puts.Select(put => put.Contact.Id).Concat(removed).ToHashSet();
         var claimedInBatch = new Dictionary<ContactIdentityAddress, ContactId>();
         foreach (var put in batch.Puts)
@@ -217,7 +254,7 @@ public sealed class InMemoryContactStore : IContactStore, IContactAuditSink
         changeCount += appended.Count;
         if (batch.Audit is { } auditEvent)
             audit.Add(auditEvent);
-        return new ContactWriteApplied(stored, appended);
+        return new ContactWriteApplied(stored, appended) { Deleted = [.. removedOrder.Distinct()] };
     }
 
     private HashSet<ContactId> Cascade(TicketScope scope, IEnumerable<ContactId> roots)

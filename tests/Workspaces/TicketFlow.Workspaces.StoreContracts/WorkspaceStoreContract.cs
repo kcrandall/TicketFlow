@@ -25,7 +25,7 @@ public static class WorkspaceStoreContract
     private static string C(WorkspaceWriteResult<StoredBusinessCalendar> result) => Describe(result, stored => stored.Revision);
 
     public static Inbox SampleInbox(string id, string name = "Support", BusinessCalendarId? calendar = null) => new(
-        new InboxId(id), name, new ChannelBinding(new ChannelKind("email"), "mailbox-1"), calendar, new SlaPolicyId("sla-gold"),
+        new InboxId(id), name, new ChannelBinding(new ChannelKind("email"), id), calendar, new SlaPolicyId("sla-gold"),
         new RoutingPolicyId("round-robin"), enabled: true, greetingMessage: "Hello!\nWe reply within a day.", awayMessage: "We are closed.");
 
     public static BusinessCalendar SampleCalendar(string id, string timeZone = "America/New_York") => new(
@@ -110,6 +110,33 @@ public static class WorkspaceStoreContract
         Assert.AreEqual("applied:1", I(await primary.CreateAsync(longScope, longInbox)));
         AssertInbox(longInbox, (await competing.GetAsync(longScope, longInbox.Id))!.Inbox);
         Assert.HasCount(1, (await competing.ListAsync(longScope, new InboxInFilter([longInbox.Id]), new())).Items);
+    }
+
+    /// <summary>One inbox per (scope, channel kind, configuration): creates and updates that reuse a binding are rejected.</summary>
+    public static async Task VerifyInboxChannelBindingsAsync(IInboxStore primary, IInboxStore competing)
+    {
+        var scope = TestScopes.Create(workspaceId: "bindings");
+        var mailbox = new ChannelBinding(new ChannelKind("email"), "support-mailbox");
+        Inbox Bound(string id, ChannelBinding binding, string name = "Inbox") => new(new InboxId(id), name, binding);
+        Assert.AreEqual("applied:1", I(await primary.CreateAsync(scope, Bound("a", mailbox))));
+        Assert.AreEqual("rejected:ChannelBindingInUse", I(await competing.CreateAsync(scope, Bound("b", mailbox))));
+        Assert.AreEqual("conflict:1", I(await competing.CreateAsync(scope, Bound("a", mailbox, "Again"))));
+        // Same configuration under another kind, or in another scope, is a different binding.
+        Assert.AreEqual("applied:1", I(await competing.CreateAsync(scope, Bound("b", new ChannelBinding(new ChannelKind("sms"), "support-mailbox")))));
+        foreach (var other in TestScopes.LevelVariants(scope).Skip(1))
+            Assert.AreEqual("applied:1", I(await primary.CreateAsync(other, Bound("a2", mailbox))));
+        // Re-saving an inbox with its own binding is fine; taking another inbox's binding is not.
+        Assert.AreEqual("applied:2", I(await primary.UpdateAsync(scope, Bound("a", mailbox, "Renamed"), 1)));
+        Assert.AreEqual("rejected:ChannelBindingInUse", I(await primary.UpdateAsync(scope, Bound("b", mailbox), 1)));
+        Assert.AreEqual(1L, (await competing.GetAsync(scope, new InboxId("b")))!.Revision);
+        // A deleted inbox frees its binding; a fenced-out update reports the conflict first.
+        Assert.AreEqual("conflict:1", I(await primary.UpdateAsync(scope, Bound("b", mailbox), 5)));
+        Assert.AreEqual("applied:2", I(await competing.DeleteAsync(scope, new InboxId("a"), 2)));
+        Assert.AreEqual("applied:2", I(await primary.UpdateAsync(scope, Bound("b", mailbox), 1)));
+        var racers = await Task.WhenAll(Enumerable.Range(0, 6).Select(index =>
+            (index % 2 == 0 ? primary : competing).CreateAsync(scope, Bound($"race-{index}", new ChannelBinding(new ChannelKind("chat"), "widget")))));
+        Assert.AreEqual(1, racers.Count(result => result.Value is WorkspaceWriteApplied<StoredInbox>));
+        Assert.AreEqual(5, racers.Count(result => result.Value is WorkspaceWriteRejected { Reason: WorkspaceWriteRejection.ChannelBindingInUse }));
     }
 
     public static void AssertInbox(Inbox expected, Inbox actual)

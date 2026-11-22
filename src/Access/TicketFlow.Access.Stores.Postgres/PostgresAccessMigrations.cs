@@ -58,5 +58,10 @@ public static class PostgresAccessMigrations
             role_id text NULL, field text NULL, used_break_glass boolean NOT NULL, denial_reason smallint NULL, justification text NULL,
             scope_key bytea GENERATED ALWAYS AS (tf_key_v1(tenant_id, project_id, environment_id, app_id, workspace_id)) STORED NOT NULL);
         CREATE INDEX tf_access_audit_scope ON tf_access_audit (scope_key, occurred_at, event_id);
+        """),
+        new(2, "grant-target-index", """
+        ALTER TABLE tf_access_grants ADD COLUMN target_key bytea GENERATED ALWAYS AS
+            (tf_key_v1(tenant_id, project_id, environment_id, app_id, workspace_id, scope_level::text, coalesce(team_id, inbox_id, ''))) STORED;
+        CREATE INDEX tf_access_grants_target ON tf_access_grants (target_key) WHERE target_key IS NOT NULL;
         """)]);
 }

@@ -49,4 +49,4 @@ Verification commands (run from the repository root, 2026-11-22):
 - `dotnet pack` of the three Workspaces projects — packages and symbols created with package validation.
 - `bash scripts/verify-package-metadata.sh` currently stops at E4's in-progress `src/Contacts` projects (not yet in the solution); the Workspaces entries were added to `TicketFlow.slnx` and `scripts/nuget-projects.tsv` in dependency order.
 
-Post-ticket parallel reviews have not been run yet.
+Post-ticket reviews completed; fixes are recorded in [T03](T03-teams-and-membership.md#post-ticket-review-fixes-2026-11-22).

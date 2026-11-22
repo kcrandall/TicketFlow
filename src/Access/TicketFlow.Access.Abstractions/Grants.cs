@@ -246,3 +246,18 @@ public sealed record GrantInvalid(IReadOnlyList<string> Errors);
 
 /// <summary>Outcome of contextual grant validation. Switch over every case without a discard arm.</summary>
 public union GrantValidationResult(GrantValid, GrantInvalid);
+
+/// <summary>Argument validation shared by <see cref="IAccessGrantStore.ListForTargetAsync"/> implementations.</summary>
+public static class AccessGrantTargets
+{
+    public static void Validate(GrantScope target, int limit, GrantId? after)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        if (target is TenantGrantScope)
+            throw new ArgumentException("Tenant scopes cannot be listed by target.", nameof(target));
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, AccessLimits.MaximumTargetPage);
+        if (after is { IsInitialized: false })
+            throw new ArgumentException("The cursor must be initialized when supplied.", nameof(after));
+    }
+}

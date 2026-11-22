@@ -342,7 +342,7 @@ public sealed class MergeTests
         using var scope = Microsoft.Extensions.DependencyInjection.ServiceProviderServiceExtensions.CreateScope(fixture.Provider);
         var services = scope.ServiceProvider;
         var service = new ContactService(fixture.Store, new InMemoryContactAttributeDefinitionStore(), fixture.Store,
-            (IAccessEvaluator)services.GetService(typeof(IAccessEvaluator))!, (IAccessQueryPlanner)services.GetService(typeof(IAccessQueryPlanner))!, fixture.Policies,
+            (IAccessEvaluator)services.GetService(typeof(IAccessEvaluator))!, (IAccessQueryPlanner)services.GetService(typeof(IAccessQueryPlanner))!, fixture.Policies, fixture.Catalog,
             [new ThrowingObserver()], Microsoft.Extensions.Options.Options.Create(new ContactsOptions()), fixture.Clock);
         await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => service.CreateAsync(fixture.Owner, new ContactDraft(ContactProfile.Empty, Id: new ContactId("kept"))));
         Assert.IsNotNull(await fixture.Store.GetAsync(fixture.Scope, new ContactId("kept")));

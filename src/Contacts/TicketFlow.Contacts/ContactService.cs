@@ -18,6 +18,7 @@ public sealed partial class ContactService : IContactService
     private readonly IAccessEvaluator evaluator;
     private readonly IAccessQueryPlanner planner;
     private readonly IAccessFieldPolicyStore policies;
+    private readonly IPermissionCatalog catalog;
     private readonly IReadOnlyList<IContactChangeObserver> observers;
     private readonly ContactsOptions options;
     private readonly TimeProvider time;
@@ -29,6 +30,7 @@ public sealed partial class ContactService : IContactService
         IAccessEvaluator evaluator,
         IAccessQueryPlanner planner,
         IAccessFieldPolicyStore policies,
+        IPermissionCatalog catalog,
         IEnumerable<IContactChangeObserver> observers,
         IOptions<ContactsOptions> options,
         TimeProvider time)
@@ -39,6 +41,7 @@ public sealed partial class ContactService : IContactService
         this.evaluator = evaluator ?? throw new ArgumentNullException(nameof(evaluator));
         this.planner = planner ?? throw new ArgumentNullException(nameof(planner));
         this.policies = policies ?? throw new ArgumentNullException(nameof(policies));
+        this.catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         ArgumentNullException.ThrowIfNull(observers);
         this.observers = [.. observers];
         ArgumentNullException.ThrowIfNull(options);
@@ -69,7 +72,7 @@ public sealed partial class ContactService : IContactService
             return ContactRefused.Forbidden;
 
         var batch = new ContactWriteBatch(puts: [new ContactPut(contact, null)], changes: [Change(ContactChangeKind.Created, contact.Id, now)]);
-        return await WriteAsync(scope, batch, async applied => await ViewAsync(actor, applied.Contacts[0], cancellationToken).ConfigureAwait(false), cancellationToken)
+        return await WriteAsync(actor, scope, batch, async applied => await ViewAsync(actor, applied.Contacts[0], cancellationToken).ConfigureAwait(false), cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -108,6 +111,16 @@ public sealed partial class ContactService : IContactService
         if (stored.Contact.MergedInto is { } mergedInto)
             return new ContactRefused(ContactRefusal.Merged, [], stored.Revision, mergedInto);
 
+        // Identity edits on a field the actor cannot see unmasked are refused up front with one uniform answer, so neither the
+        // presence of an address on this contact nor its verified ownership elsewhere can be probed through updates.
+        var identityFields = editList.Select(IdentityField).OfType<FieldPath>().ToHashSet();
+        if (identityFields.Count > 0)
+        {
+            var read = await AuthorizeAsync(actor, ContactPermissions.Read, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false);
+            if (!Unmasked(read, identityFields))
+                return ContactRefused.Forbidden;
+        }
+
         var definitionMap = await DefinitionsAsync(scope, cancellationToken).ConfigureAwait(false);
         var now = Now;
         var (updated, refusal) = ApplyEdits(stored.Contact, editList, definitionMap, now);
@@ -117,7 +130,7 @@ public sealed partial class ContactService : IContactService
             return ContactRefused.Forbidden;
 
         var batch = new ContactWriteBatch(puts: [new ContactPut(updated, expectedRevision)], changes: [Change(ContactChangeKind.Updated, id, now)]);
-        return await WriteAsync(scope, batch, async result => await ViewAsync(actor, result.Contacts[0], cancellationToken).ConfigureAwait(false), cancellationToken)
+        return await WriteAsync(actor, scope, batch, async result => await ViewAsync(actor, result.Contacts[0], cancellationToken).ConfigureAwait(false), cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -136,18 +149,43 @@ public sealed partial class ContactService : IContactService
         if (!(await AuthorizeAsync(actor, ContactPermissions.Delete, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false)).IsPermitted)
             return ContactRefused.Forbidden;
 
+        // Every tombstone the delete cascades to is authorized too; the store applies the delete only for exactly this set.
+        var cascade = new List<ContactId>();
+        var pending = new Queue<ContactId>([id]);
+        while (pending.TryDequeue(out var parent))
+        {
+            foreach (var child in await store.ListMergedIntoAsync(scope, parent, ContactDelete.MaximumCascade, cancellationToken).ConfigureAwait(false))
+            {
+                if (child == id || cascade.Contains(child))
+                    continue;
+                if (cascade.Count == ContactDelete.MaximumCascade)
+                    return new ContactRefused(ContactRefusal.Rejected, ["The contact's merge history is too large to delete in one operation."]);
+                var tombstone = await store.GetAsync(scope, child, cancellationToken).ConfigureAwait(false);
+                if (tombstone is null)
+                    continue;
+                if (!(await AuthorizeAsync(actor, ContactPermissions.Delete, ContactAccess.Resource(tombstone), cancellationToken).ConfigureAwait(false)).IsPermitted)
+                    return ContactRefused.Forbidden;
+                cascade.Add(child);
+                pending.Enqueue(child);
+            }
+        }
+
         var now = Now;
         ContactAuditEvent auditEvent;
         try
         {
-            auditEvent = new ContactAuditEvent(Guid.CreateVersion7(), now, scope, ContactAuditKind.Deleted, AccessActor.From(actor), id, justification: justification);
+            auditEvent = new ContactAuditEvent(Guid.CreateVersion7(), now, scope, ContactAuditKind.Deleted, AccessActor.From(actor), id, count: cascade.Count + 1,
+                justification: justification);
         }
         catch (ArgumentException)
         {
             return ContactRefused.Invalid("The justification is invalid.");
         }
-        var batch = new ContactWriteBatch(deletes: [new ContactDelete(id, expectedRevision)], changes: [Change(ContactChangeKind.Deleted, id, now)], audit: auditEvent);
-        return await WriteAsync(scope, batch, _ => Task.FromResult(id), cancellationToken).ConfigureAwait(false);
+        var batch = new ContactWriteBatch(
+            deletes: [new ContactDelete(id, expectedRevision, cascade)],
+            changes: [Change(ContactChangeKind.Deleted, id, now), .. cascade.Select(child => Change(ContactChangeKind.Deleted, child, now, related: id))],
+            audit: auditEvent);
+        return await WriteAsync(actor, scope, batch, _ => Task.FromResult(id), cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<ContactRevealResult> RevealAsync(PrincipalRef actor, ContactId id, FieldPath field, string? justification = null, CancellationToken cancellationToken = default)
@@ -227,6 +265,9 @@ public sealed partial class ContactService : IContactService
         return masking.Project(stored, decision);
     }
 
+    private ContactDecisionCache Decisions(PrincipalRef actor, Permission permission) =>
+        new(evaluator, actor, permission, catalog.Find(permission)?.IsSensitive != false);
+
     private static ContactChangeDraft Change(ContactChangeKind kind, ContactId contact, DateTimeOffset at, ContactId? related = null, Guid? merge = null) =>
         new(Guid.CreateVersion7(), kind, contact, at, related, merge);
 
@@ -305,7 +346,7 @@ public sealed partial class ContactService : IContactService
     private static (Contact? Contact, ContactRefused? Refused) Refuse(ContactRefused refused) => (null, refused);
 
     /// <summary>Writes a batch, notifies observers after commit and maps store outcomes to refusals.</summary>
-    private async Task<ContactResult<T>> WriteAsync<T>(TicketScope scope, ContactWriteBatch batch, Func<ContactWriteApplied, Task<T>> onApplied, CancellationToken cancellationToken)
+    private async Task<ContactResult<T>> WriteAsync<T>(PrincipalRef actor, TicketScope scope, ContactWriteBatch batch, Func<ContactWriteApplied, Task<T>> onApplied, CancellationToken cancellationToken)
     {
         var result = await store.WriteAsync(scope, batch, cancellationToken).ConfigureAwait(false);
         if (result.Value is ContactWriteApplied applied)
@@ -313,8 +354,44 @@ public sealed partial class ContactService : IContactService
             await NotifyAsync(applied.Changes, cancellationToken).ConfigureAwait(false);
             return new ContactApplied<T>(await onApplied(applied).ConfigureAwait(false));
         }
-        return Refusal(result);
+        return result.Value is ContactIdentityTaken taken ? await TakenAsync(actor, taken, cancellationToken).ConfigureAwait(false) : Refusal(result);
     }
+
+    /// <summary>
+    /// Reports <see cref="ContactRefusal.IdentityTaken"/> only when the actor may read the holder with that identity field unmasked;
+    /// otherwise the uniform <see cref="ContactRefused.Forbidden"/>, so ownership of masked or unreadable data is not disclosed.
+    /// </summary>
+    private async Task<ContactRefused> TakenAsync(PrincipalRef actor, ContactIdentityTaken taken, CancellationToken cancellationToken)
+    {
+        var owner = await store.GetAsync(actor.Scope, taken.Owner, cancellationToken).ConfigureAwait(false);
+        if (owner is not null)
+        {
+            var read = await AuthorizeAsync(actor, ContactPermissions.Read, ContactAccess.Resource(owner), cancellationToken).ConfigureAwait(false);
+            if (Unmasked(read, [taken.Address.Field]))
+                return Refusal(taken);
+        }
+        return ContactRefused.Forbidden;
+    }
+
+    /// <summary>True when the decision permits reading and masks none of <paramref name="fields"/>.</summary>
+    private static bool Unmasked(AccessDecision decision, IReadOnlyCollection<FieldPath> fields) => decision switch
+    {
+        AccessAllowed => true,
+        AccessMasked masked => masked.Fields.All(field => !fields.Contains(field.Field)),
+        AccessDenied => false,
+    };
+
+    private static FieldPath? IdentityField(ContactEdit edit) => edit switch
+    {
+        AddContactIdentity add => add.Identity?.Address.Field,
+        RemoveContactIdentity remove => remove.Address?.Field,
+        SetContactProfile => null,
+        SetContactAttribute => null,
+        RemoveContactAttribute => null,
+        AddContactLabel => null,
+        RemoveContactLabel => null,
+        SetContactBlocked => null,
+    };
 
     private static ContactRefused Refusal(ContactWriteResult result) => result switch
     {

@@ -18,6 +18,8 @@ public sealed class InMemoryWorkspaceStoreTests
         var store = new InMemoryInboxStore();
         await WorkspaceStoreContract.VerifyInboxesAsync(store, store);
         await WorkspaceStoreContract.VerifyInboxListsAsync(store);
+        var bindings = new InMemoryInboxStore();
+        await WorkspaceStoreContract.VerifyInboxChannelBindingsAsync(bindings, bindings);
         await WorkspaceStoreContract.VerifyInboxCapacityAsync(new InMemoryInboxStore());
     }
 

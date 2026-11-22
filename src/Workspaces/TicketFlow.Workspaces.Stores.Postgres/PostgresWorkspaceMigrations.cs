@@ -64,5 +64,11 @@ public static class PostgresWorkspaceMigrations
             {ScopeKey},
             PRIMARY KEY (calendar_key));
         CREATE INDEX tf_workspace_calendars_scope ON tf_workspace_calendars (scope_key);
+        """),
+        // Fails if existing rows already share a binding; resolve duplicates before upgrading.
+        new(2, "unique-channel-binding", """
+        ALTER TABLE tf_workspace_inboxes ADD COLUMN binding_key bytea GENERATED ALWAYS AS
+            (tf_key_v1(tenant_id, project_id, environment_id, app_id, workspace_id, channel_kind, channel_config_id)) STORED NOT NULL;
+        CREATE UNIQUE INDEX tf_workspace_inboxes_channel_binding ON tf_workspace_inboxes (binding_key);
         """)]);
 }

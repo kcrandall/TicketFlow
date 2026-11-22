@@ -19,6 +19,8 @@ public sealed class InMemoryAccessStoreTests
     {
         var store = new InMemoryAccessGrantStore();
         await AccessStoreContract.VerifyGrantsAsync(store, store);
+        var targets = new InMemoryAccessGrantStore();
+        await AccessStoreContract.VerifyGrantTargetsAsync(targets, targets);
         await AccessStoreContract.VerifyGrantCapacityAsync(new InMemoryAccessGrantStore());
         var concurrent = new InMemoryAccessGrantStore();
         await AccessStoreContract.VerifyConcurrentGrantCapacityAsync(concurrent, concurrent);

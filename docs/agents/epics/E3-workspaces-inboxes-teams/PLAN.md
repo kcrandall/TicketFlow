@@ -28,4 +28,4 @@ Packages: `TicketFlow.Workspaces.Abstractions`, `TicketFlow.Workspaces`, `Ticket
 T01–T05: `dotnet build TicketFlow.slnx -c Release` (0 warnings, 0 errors); Workspaces.Tests 42 passed; Workspaces.Stores.Postgres.Tests
 11 passed against a disposable `postgres:18` with `TICKETFLOW_REQUIRE_POSTGRES=1`; Access.Tests 95 and Access.Stores.Postgres.Tests
 15 passed after the additive permission change; the three Workspaces packages pack with validation. `verify-package-metadata.sh`
-is blocked by E4's in-progress Contacts projects. Post-ticket parallel reviews are still outstanding.
+is blocked by E4's in-progress Contacts projects. Post-ticket reviews completed and all findings fixed with regression tests (see T03 Results): Workspaces.Tests 50, Workspaces.Stores.Postgres.Tests 13, Access.Tests 99, Access.Stores.Postgres.Tests 15 passed.

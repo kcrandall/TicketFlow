@@ -21,3 +21,15 @@ TicketFlow.HelpCenter.Stores.Postgres	src/HelpCenter/TicketFlow.HelpCenter.Store
 TicketFlow.Surveys.Abstractions	src/Surveys/TicketFlow.Surveys.Abstractions/TicketFlow.Surveys.Abstractions.csproj
 TicketFlow.Surveys	src/Surveys/TicketFlow.Surveys/TicketFlow.Surveys.csproj
 TicketFlow.Surveys.Stores.Postgres	src/Surveys/TicketFlow.Surveys.Stores.Postgres/TicketFlow.Surveys.Stores.Postgres.csproj
+TicketFlow.Sla.Abstractions	src/Sla/TicketFlow.Sla.Abstractions/TicketFlow.Sla.Abstractions.csproj
+TicketFlow.Sla	src/Sla/TicketFlow.Sla/TicketFlow.Sla.csproj
+TicketFlow.Sla.Stores.Postgres	src/Sla/TicketFlow.Sla.Stores.Postgres/TicketFlow.Sla.Stores.Postgres.csproj
+TicketFlow.Routing.Abstractions	src/Routing/TicketFlow.Routing.Abstractions/TicketFlow.Routing.Abstractions.csproj
+TicketFlow.Routing	src/Routing/TicketFlow.Routing/TicketFlow.Routing.csproj
+TicketFlow.Routing.Stores.Postgres	src/Routing/TicketFlow.Routing.Stores.Postgres/TicketFlow.Routing.Stores.Postgres.csproj
+TicketFlow.Channels.Abstractions	src/Channels/TicketFlow.Channels.Abstractions/TicketFlow.Channels.Abstractions.csproj
+TicketFlow.Channels	src/Channels/TicketFlow.Channels/TicketFlow.Channels.csproj
+TicketFlow.Channels.Stores.Postgres	src/Channels/TicketFlow.Channels.Stores.Postgres/TicketFlow.Channels.Stores.Postgres.csproj
+TicketFlow.Channels.Api	src/Channels/TicketFlow.Channels.Api/TicketFlow.Channels.Api.csproj
+TicketFlow.Integrations.Surveys	src/Integrations/TicketFlow.Integrations.Surveys/TicketFlow.Integrations.Surveys.csproj
+TicketFlow.Integrations.EnvelopeFlow	src/Integrations/TicketFlow.Integrations.EnvelopeFlow/TicketFlow.Integrations.EnvelopeFlow.csproj

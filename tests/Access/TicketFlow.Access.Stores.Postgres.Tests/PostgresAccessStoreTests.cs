@@ -56,6 +56,7 @@ public sealed class PostgresAccessStoreTests
     {
         await using var database = await Database.CreateAsync();
         await AccessStoreContract.VerifyGrantsAsync(database.Store, database.Competing);
+        await AccessStoreContract.VerifyGrantTargetsAsync(database.Store, database.Competing);
         await AccessStoreContract.VerifyGrantCapacityAsync(database.Store);
     }
 
@@ -75,12 +76,12 @@ public sealed class PostgresAccessStoreTests
         await Task.WhenAll(database.Store.InitializeAsync(), database.Competing.InitializeAsync(), database.Store.InitializeAsync());
         await database.Competing.InitializeAsync();
         var inspection = await new PostgresMigrationRunner(database.Primary, PostgresAccessMigrations.Catalog).InspectAsync();
-        Assert.AreEqual(1, inspection.CurrentVersion);
+        Assert.AreEqual(PostgresAccessMigrations.Catalog.Migrations.Count, inspection.CurrentVersion);
         Assert.AreEqual(PostgresAccessMigrations.Catalog.Migrations[0].Checksum, inspection.Applied[0].Checksum);
         Assert.IsNull(await database.Store.GetAsync(scope, new RoleId("triage")));
 
         // Only bounded hash-key indexes exist (no raw composite text keys).
-        Assert.AreEqual("tf_access_audit_scope,tf_access_field_policies_scope,tf_access_grants_subject,tf_access_roles_scope",
+        Assert.AreEqual("tf_access_audit_scope,tf_access_field_policies_scope,tf_access_grants_subject,tf_access_grants_target,tf_access_roles_scope",
             await database.ScalarAsync($"SELECT string_agg(indexname, ',' ORDER BY indexname) FROM pg_indexes WHERE schemaname='{database.Schema}' AND indexname LIKE 'tf_access_%' AND indexname NOT LIKE '%pkey'"));
         Assert.AreEqual(0L, await database.ScalarAsync($"""
             SELECT count(*) FROM pg_index i JOIN pg_class t ON t.oid = i.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace

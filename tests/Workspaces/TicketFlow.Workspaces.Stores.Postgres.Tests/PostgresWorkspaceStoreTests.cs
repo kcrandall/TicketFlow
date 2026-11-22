@@ -56,6 +56,7 @@ public sealed class PostgresWorkspaceStoreTests
         await using var database = await Database.CreateAsync();
         await WorkspaceStoreContract.VerifyInboxesAsync(database.Store, database.Competing);
         await WorkspaceStoreContract.VerifyInboxListsAsync(database.Store);
+        await WorkspaceStoreContract.VerifyInboxChannelBindingsAsync(database.Store, database.Competing);
         await WorkspaceStoreContract.VerifyInboxCapacityAsync(database.Store);
     }
 
@@ -89,6 +90,73 @@ public sealed class PostgresWorkspaceStoreTests
     }
 
     [TestMethod]
+    public async Task MaximumLengthIdentifiersRoundTripEverywhere()
+    {
+        await using var database = await Database.CreateAsync();
+        string Long(int seed) => TestScopes.LongIdentifier(seed);
+        var scope = new TicketScope(Long(101), Long(102), Long(103), Long(104), new WorkspaceId(Long(105)));
+        var sibling = new TicketScope(Long(101), Long(102), Long(103), Long(104), new WorkspaceId(Long(106)));
+        var calendarId = new BusinessCalendarId(Long(110));
+        var calendar = new BusinessCalendar(calendarId, "Long", "Europe/London", [new(DayOfWeek.Monday, BusinessHours.From(9, 0, 17, 0))], [CalendarDateOverride.Holiday(new(2026, 12, 25))]);
+        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredBusinessCalendar>>((await database.Store.CreateAsync(scope, calendar)).Value);
+        Assert.AreEqual(calendar, (await database.Competing.GetAsync(scope, calendarId))!.Calendar);
+        Assert.AreEqual(calendarId, (await database.Competing.ListCalendarsAsync(scope)).Single().Calendar.Id);
+        Assert.IsNull(await database.Competing.GetAsync(sibling, calendarId));
+
+        var inboxIds = new[] { Long(120), Long(121), Long(122) }.Order(StringComparer.Ordinal).ToArray();
+        foreach (var (id, index) in inboxIds.Select((id, index) => (id, index)))
+        {
+            var inbox = new Inbox(new InboxId(id), "Long", new ChannelBinding(new ChannelKind(new string('k', ChannelKind.MaximumLength)), Long(130 + index)), calendarId,
+                new SlaPolicyId(Long(140)), new RoutingPolicyId(Long(141)));
+            Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await database.Store.CreateAsync(scope, inbox)).Value);
+            WorkspaceStoreContract.AssertInbox(inbox, (await database.Competing.GetAsync(scope, inbox.Id))!.Inbox);
+        }
+        var firstPage = await database.Competing.ListInboxesAsync(scope, new ScopeFilter(scope), new(2));
+        Assert.IsTrue(firstPage.HasMore);
+        var rest = await database.Competing.ListInboxesAsync(scope, new InboxInFilter(inboxIds.Select(id => new InboxId(id))), new(2, firstPage.Items[^1].Inbox.Id.Value));
+        CollectionAssert.AreEqual(inboxIds, firstPage.Items.Concat(rest.Items).Select(item => item.Inbox.Id.Value).ToArray());
+        Assert.IsFalse(rest.HasMore);
+        Assert.IsEmpty((await database.Competing.ListInboxesAsync(sibling, AllowAllFilter.Instance, new())).Items);
+
+        var member = new UserId(Long(150));
+        var teamIds = new[] { Long(160), Long(161), Long(162) }.Order(StringComparer.Ordinal).ToArray();
+        foreach (var id in teamIds)
+        {
+            var team = new Team(new TeamId(id), "Long", "Long team", [member, new UserId(Long(151)), new UserId(Long(152))]);
+            Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredTeam>>((await database.Store.CreateAsync(scope, team)).Value);
+            Assert.AreEqual(team, (await database.Competing.GetAsync(scope, team.Id))!.Team);
+        }
+        CollectionAssert.AreEqual(teamIds, (await database.Competing.ListTeamsForUserAsync(scope, member)).Select(team => team.Value).ToArray());
+        Assert.IsEmpty(await database.Competing.ListTeamsForUserAsync(sibling, member));
+        var teamsFirst = await database.Competing.ListTeamsAsync(scope, new TeamInFilter(teamIds.Select(id => new TeamId(id))), new(1));
+        var teamsRest = await database.Competing.ListTeamsAsync(scope, AllowAllFilter.Instance, new(10, teamsFirst.Items[0].Id.Value));
+        CollectionAssert.AreEqual(teamIds, teamsFirst.Items.Concat(teamsRest.Items).Select(team => team.Id.Value).ToArray());
+        Assert.AreEqual(3, teamsRest.Items[0].MemberCount);
+
+        var updated = new Team(new TeamId(teamIds[0]), "Long", null, [new UserId(Long(153))]);
+        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredTeam>>((await database.Competing.UpdateAsync(scope, updated, 1)).Value);
+        CollectionAssert.AreEqual(teamIds.Skip(1).ToArray(), (await database.Store.ListTeamsForUserAsync(scope, member)).Select(team => team.Value).ToArray());
+        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredTeam>>((await database.Store.DeleteAsync(scope, new TeamId(teamIds[1]), 1)).Value);
+        CollectionAssert.AreEqual(new[] { teamIds[2] }, (await database.Store.ListTeamsForUserAsync(scope, member)).Select(team => team.Value).ToArray());
+    }
+
+    [TestMethod]
+    public async Task UpgradesFromVersionOneAndEnforcesBindingsOnExistingRows()
+    {
+        await using var database = await Database.CreateAsync(initialize: false);
+        await new PostgresMigrationRunner(database.Primary, PostgresWorkspaceMigrations.Catalog).ApplyAsync(1);
+        var scope = TestScopes.Create();
+        await database.ExecuteAsync("""
+            INSERT INTO tf_workspace_inboxes(tenant_id, project_id, environment_id, app_id, workspace_id, inbox_id, format_version, name, channel_kind, channel_config_id, enabled, revision)
+            VALUES('tenant', 'project', 'test', 'app', 'workspace', 'legacy', 1, 'Legacy', 'email', 'mailbox', true, 1)
+            """);
+        await database.Store.InitializeAsync();
+        Assert.AreEqual("Legacy", (await database.Store.GetAsync(scope, new InboxId("legacy")))!.Inbox.Name);
+        var duplicate = new Inbox(new InboxId("new"), "New", new ChannelBinding(new ChannelKind("email"), "mailbox"));
+        Assert.AreEqual(WorkspaceWriteRejection.ChannelBindingInUse, ((WorkspaceWriteRejected)(await database.Competing.CreateAsync(scope, duplicate)).Value!).Reason);
+    }
+
+    [TestMethod]
     public async Task InitializationIsExplicitConcurrentAndChecksumVerified()
     {
         await using var database = await Database.CreateAsync(initialize: false);
@@ -97,7 +165,7 @@ public sealed class PostgresWorkspaceStoreTests
         await Task.WhenAll(database.Store.InitializeAsync(), database.Competing.InitializeAsync(), database.Store.InitializeAsync());
         await database.Competing.InitializeAsync();
         var inspection = await new PostgresMigrationRunner(database.Primary, PostgresWorkspaceMigrations.Catalog).InspectAsync();
-        Assert.AreEqual(1, inspection.CurrentVersion);
+        Assert.AreEqual(PostgresWorkspaceMigrations.Catalog.Migrations.Count, inspection.CurrentVersion);
         Assert.AreEqual(PostgresWorkspaceMigrations.Catalog.Migrations[0].Checksum, inspection.Applied[0].Checksum);
         Assert.IsNull(await database.Store.GetAsync(scope));
 

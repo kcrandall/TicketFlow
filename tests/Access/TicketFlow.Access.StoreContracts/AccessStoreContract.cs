@@ -81,6 +81,40 @@ public static class AccessStoreContract
             new OrCondition(new AssigneeIsSelfCondition(), new HasLabelCondition(new LabelId("escalated")), new TimeWindowCondition(new(22, 0), new(6, 0)))),
         TestClock.DefaultStart.AddDays(-1), TestClock.DefaultStart.AddDays(30), "Coverage for the night shift");
 
+    /// <summary>Listing by target returns exactly the grants with that scope (any subject), in identifier order, paged.</summary>
+    public static async Task VerifyGrantTargetsAsync(IAccessGrantStore primary, IAccessGrantStore competing)
+    {
+        var scope = TestScopes.Create(workspaceId: "targets");
+        var partition = AccessPartition.From(scope);
+        var inbox = new InboxGrantScope(scope.WorkspaceId, new InboxId("email"));
+        var team = new TeamGrantScope(scope.WorkspaceId, new TeamId("email"));
+        var workspace = new WorkspaceGrantScope(scope.WorkspaceId);
+        AccessGrant Make(string id, GrantSubject subject, GrantScope grantScope, GrantEffect effect = GrantEffect.Allow) =>
+            new(new GrantId(id), partition, subject, BuiltInRoles.Agent.Id, grantScope, effect);
+        AccessGrant[] seeded =
+        [
+            Make("t-c", new UserId("ada"), inbox), Make("t-a", new TeamId("billing"), inbox, GrantEffect.Deny), Make("t-b", new ApiClientId("crm"), inbox),
+            Make("t-team", new UserId("ada"), team), Make("t-ws", new UserId("ada"), workspace), Make("t-tenant", new UserId("ada"), TenantGrantScope.Instance),
+            Make("t-other-inbox", new UserId("ada"), new InboxGrantScope(scope.WorkspaceId, new InboxId("chat"))),
+            Make("t-other-ws", new UserId("ada"), new InboxGrantScope(new WorkspaceId("elsewhere"), new InboxId("email"))),
+        ];
+        foreach (var grant in seeded)
+            Assert.AreEqual("applied:1", Grant(await primary.CreateAsync(grant)));
+        Assert.AreEqual("applied:1", Grant(await primary.CreateAsync(new AccessGrant(new GrantId("t-c"), AccessPartition.From(TestScopes.Create(tenantId: "other-tenant")), new UserId("ada"), BuiltInRoles.Agent.Id, inbox))));
+
+        CollectionAssert.AreEqual(new[] { "t-a", "t-b", "t-c" }, (await competing.ListForTargetAsync(partition, inbox, 100)).Select(entry => entry.Grant.Id.Value).ToArray());
+        CollectionAssert.AreEqual(new[] { "t-a", "t-b" }, (await competing.ListForTargetAsync(partition, inbox, 2)).Select(entry => entry.Grant.Id.Value).ToArray());
+        CollectionAssert.AreEqual(new[] { "t-c" }, (await competing.ListForTargetAsync(partition, inbox, 2, new GrantId("t-b"))).Select(entry => entry.Grant.Id.Value).ToArray());
+        CollectionAssert.AreEqual(new[] { "t-team" }, (await competing.ListForTargetAsync(partition, team, 100)).Select(entry => entry.Grant.Id.Value).ToArray());
+        CollectionAssert.AreEqual(new[] { "t-ws" }, (await competing.ListForTargetAsync(partition, workspace, 100)).Select(entry => entry.Grant.Id.Value).ToArray());
+        Assert.AreEqual(seeded[1], (await competing.ListForTargetAsync(partition, inbox, 1)).Single().Grant);
+        Assert.IsEmpty(await competing.ListForTargetAsync(AccessPartition.From(TestScopes.Create(projectId: "other-project")), inbox, 100));
+        await Assert.ThrowsExactlyAsync<ArgumentException>(() => competing.ListForTargetAsync(partition, TenantGrantScope.Instance, 100));
+        await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(() => competing.ListForTargetAsync(partition, inbox, AccessLimits.MaximumTargetPage + 1));
+        Assert.AreEqual("applied:1", Grant(await competing.DeleteAsync(partition, new GrantId("t-b"), 1)));
+        CollectionAssert.AreEqual(new[] { "t-a", "t-c" }, (await primary.ListForTargetAsync(partition, inbox, 100)).Select(entry => entry.Grant.Id.Value).ToArray());
+    }
+
     public static async Task VerifyGrantsAsync(IAccessGrantStore primary, IAccessGrantStore competing)
     {
         var scope = TestScopes.Create();

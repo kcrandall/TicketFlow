@@ -103,7 +103,7 @@ public static class BuiltInRoles
     [
         AccessPermissions.ConversationRead, AccessPermissions.ConversationReply, AccessPermissions.ConversationAssign,
         AccessPermissions.ConversationResolve, AccessPermissions.ConversationManage, AccessPermissions.NoteRead, AccessPermissions.NoteWrite,
-        AccessPermissions.ContactRead, AccessPermissions.ContactUpdate, .. StructureReadPermissions,
+        AccessPermissions.ContactRead, AccessPermissions.ContactUpdate, AccessPermissions.AgentStatusUpdate, .. StructureReadPermissions,
     ];
 
     /// <summary>Every permission registered in the catalog, including feature permissions.</summary>
@@ -117,7 +117,8 @@ public static class BuiltInRoles
     public static AccessRole Supervisor { get; } = AccessRole.BuiltIn("supervisor", "Supervisor",
     [
         .. AgentPermissions, AccessPermissions.ConversationDelete, AccessPermissions.ContactExport, AccessPermissions.ContactMerge,
-        AccessPermissions.ReportView, AccessPermissions.TeamManage, AccessPermissions.AccessAuditRead,
+        AccessPermissions.ReportView, AccessPermissions.TeamManage, AccessPermissions.AccessAuditRead, AccessPermissions.RoutingManage,
+        AccessPermissions.AgentStatusManage,
     ]);
 
     public static AccessRole Agent { get; } = AccessRole.BuiltIn("agent", "Agent", AgentPermissions);

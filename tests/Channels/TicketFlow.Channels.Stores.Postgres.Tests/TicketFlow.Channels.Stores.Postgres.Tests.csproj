@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Channels/TicketFlow.Channels.Stores.Postgres/TicketFlow.Channels.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../../src/Access/TicketFlow.Access.Stores.Postgres/TicketFlow.Access.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../../src/Workspaces/TicketFlow.Workspaces.Stores.Postgres/TicketFlow.Workspaces.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../../src/Contacts/TicketFlow.Contacts.Stores.Postgres/TicketFlow.Contacts.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../../src/Conversations/TicketFlow.Conversations.Stores.Postgres/TicketFlow.Conversations.Stores.Postgres.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Channels.Testing/TicketFlow.Channels.Testing.csproj" />
+    <ProjectReference Include="../TicketFlow.Channels.StoreContracts/TicketFlow.Channels.StoreContracts.csproj" />
+  </ItemGroup>
+</Project>

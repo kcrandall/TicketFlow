@@ -21,21 +21,36 @@ public sealed record ContactPut
 
 /// <summary>
 /// Compare-and-set delete. Deleting a contact also removes its identities, every merge record naming it, and (recursively) the merge
-/// tombstones merged into it together with their merge records.
+/// tombstones merged into it together with their merge records. When <see cref="ExpectedCascade"/> is supplied, the store applies the
+/// delete only if the tombstones it would cascade to are exactly that set (otherwise <see cref="ContactWriteConflict"/>), so callers can
+/// authorize every removed contact first.
 /// </summary>
 public sealed record ContactDelete
 {
-    public ContactDelete(ContactId id, long expectedRevision)
+    /// <summary>Maximum tombstones one delete may cascade to.</summary>
+    public const int MaximumCascade = 256;
+
+    public ContactDelete(ContactId id, long expectedRevision, IEnumerable<ContactId>? expectedCascade = null)
     {
         if (id == default)
             throw new ArgumentException("A contact identifier is required.", nameof(id));
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         Id = id;
         ExpectedRevision = expectedRevision;
+        if (expectedCascade is not null)
+        {
+            var cascade = expectedCascade.ToHashSet();
+            if (cascade.Count > MaximumCascade || cascade.Contains(id) || cascade.Contains(default))
+                throw new ArgumentException($"An expected cascade lists at most {MaximumCascade} other initialized contacts.", nameof(expectedCascade));
+            ExpectedCascade = cascade;
+        }
     }
 
     public ContactId Id { get; }
     public long ExpectedRevision { get; }
+
+    /// <summary>The tombstones (excluding <see cref="Id"/>) the delete must cascade to, or <see langword="null"/> to accept any.</summary>
+    public IReadOnlySet<ContactId>? ExpectedCascade { get; }
 }
 
 public enum ContactChangeKind
@@ -85,8 +100,13 @@ public enum ContactAuditKind
 {
     Merged = 1,
     Unmerged = 2,
+    /// <summary>An export was authorized and started; <see cref="ContactAuditEvent.Count"/> is the requested maximum.</summary>
     Exported = 3,
+
     Deleted = 4,
+
+    /// <summary>An export stream finished or was abandoned; <see cref="ContactAuditEvent.Count"/> is the number of contacts emitted.</summary>
+    ExportCompleted = 5,
 }
 
 /// <summary>
@@ -156,7 +176,7 @@ public interface IContactAuditSink
 public sealed record ContactWriteBatch
 {
     public const int MaximumContacts = 8;
-    public const int MaximumChanges = 16;
+    public const int MaximumChanges = ContactDelete.MaximumCascade + 16;
 
     public ContactWriteBatch(
         IEnumerable<ContactPut>? puts = null,
@@ -194,7 +214,11 @@ public sealed record ContactWriteBatch
 }
 
 /// <summary>The batch committed. <see cref="Contacts"/> follows the order of the puts; changes carry their assigned sequences.</summary>
-public sealed record ContactWriteApplied(IReadOnlyList<StoredContact> Contacts, IReadOnlyList<ContactChange> Changes);
+public sealed record ContactWriteApplied(IReadOnlyList<StoredContact> Contacts, IReadOnlyList<ContactChange> Changes)
+{
+    /// <summary>Every contact the batch removed: each deleted root followed by the tombstones it cascaded to (ordered by identifier).</summary>
+    public IReadOnlyList<ContactId> Deleted { get; init; } = [];
+}
 
 /// <summary>A fenced contact or the merge record to delete does not exist in the scope. Nothing was written.</summary>
 public sealed record ContactWriteNotFound(ContactId? Contact = null, Guid? Merge = null);
@@ -262,6 +286,12 @@ public sealed record ContactSearch
     public const int DefaultLimit = 50;
     public const int MaximumPrefixLength = 256;
     public const int MaximumSortKeyLength = 512;
+
+    /// <summary>
+    /// Default bound on rows a store examines for one page before applying the access filter. When it is reached with fewer visible
+    /// rows than <see cref="Limit"/>, the store returns a short (possibly empty) page whose cursor continues after the last examined row.
+    /// </summary>
+    public const int DefaultMaximumRowsExamined = 1000;
 
     private ContactSearch(ContactSearchMode mode, string prefix, ContactIdentityKind? kind, string? @namespace, int limit, ContactSearchCursor? after)
     {
@@ -334,7 +364,10 @@ public sealed record ContactSearch
     }
 }
 
-/// <summary>One page of contacts. <see cref="Next"/> is <see langword="null"/> at the end; pages may be short.</summary>
+/// <summary>
+/// One page of contacts. <see cref="Next"/> is <see langword="null"/> at the end; pages may be short or empty (bounded scan) while
+/// <see cref="Next"/> is set.
+/// </summary>
 public sealed record ContactPage(IReadOnlyList<StoredContact> Contacts, ContactSearchCursor? Next);
 
 /// <summary>
@@ -347,7 +380,8 @@ public sealed record ContactPage(IReadOnlyList<StoredContact> Contacts, ContactS
 /// (<see cref="ContactIdentityTaken"/>); claimed identities may repeat.</item>
 /// <item>Change events are appended in the same transaction with a gapless sequence per scope starting at 1.</item>
 /// <item>Search applies the supplied <see cref="AccessFilter"/> (over a resource with the contact's scope, identifier and labels,
-/// no team, inbox, assignee or attributes) inside the bounded keyset query, never by post-filtering an unbounded result.</item>
+/// no team, inbox, assignee or attributes) inside the bounded keyset query, never by post-filtering an unbounded result; at most a
+/// store-defined number of rows (default <see cref="ContactSearch.DefaultMaximumRowsExamined"/>) is examined per page.</item>
 /// </list>
 /// </summary>
 public interface IContactStore
@@ -362,6 +396,9 @@ public interface IContactStore
     Task<IReadOnlyList<ContactIdentityOwner>> FindByIdentityAsync(TicketScope scope, ContactIdentityAddress address, CancellationToken cancellationToken = default);
 
     Task<ContactPage> SearchAsync(TicketScope scope, ContactSearch search, AccessFilter filter, CancellationToken cancellationToken = default);
+
+    /// <summary>Up to <paramref name="limit"/> (1-<see cref="ContactDelete.MaximumCascade"/>) tombstones merged directly into <paramref name="target"/>, ordered by identifier.</summary>
+    Task<IReadOnlyList<ContactId>> ListMergedIntoAsync(TicketScope scope, ContactId target, int limit, CancellationToken cancellationToken = default);
 
     Task<ContactWriteResult> WriteAsync(TicketScope scope, ContactWriteBatch batch, CancellationToken cancellationToken = default);
 

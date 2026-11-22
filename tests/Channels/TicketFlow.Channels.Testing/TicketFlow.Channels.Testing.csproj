@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><IsTestProject>false</IsTestProject><IsPackable>false</IsPackable></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MSTest.TestFramework" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Channels/TicketFlow.Channels/TicketFlow.Channels.csproj" />
+    <ProjectReference Include="../../../src/Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
+    <ProjectReference Include="../../../src/Contacts/TicketFlow.Contacts/TicketFlow.Contacts.csproj" />
+    <ProjectReference Include="../../../src/Workspaces/TicketFlow.Workspaces/TicketFlow.Workspaces.csproj" />
+    <ProjectReference Include="../../../src/Access/TicketFlow.Access/TicketFlow.Access.csproj" />
+    <ProjectReference Include="../../../src/TicketFlow/TicketFlow.csproj" />
+    <ProjectReference Include="../../TicketFlow.Testing/TicketFlow.Testing.csproj" />
+  </ItemGroup>
+</Project>

@@ -24,7 +24,6 @@ public static class ContactsTicketFlowBuilderExtensions
             services.AddSingleton<ContactPermissionsMarker>();
             services.AddAccessPermissions(ContactPermissions.Definitions);
         }
-        services.TryAddSingleton(TimeProvider.System);
         services.TryAddScoped<IContactService, ContactService>();
         services.TryAddScoped<IContactAttributeDefinitionService, ContactAttributeDefinitionService>();
         return builder;

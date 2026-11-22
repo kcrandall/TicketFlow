@@ -86,5 +86,9 @@ public static class PostgresContactMigrations
             contact_id text NULL, related_id text NULL, merge_id uuid NULL, count integer NULL, justification text NULL,
             {ScopeKey});
         CREATE INDEX tf_contact_audit_scope ON tf_contact_audit (scope_key, occurred_at, event_id);
+        """),
+        new(2, "audit-export-completed", """
+        ALTER TABLE tf_contact_audit DROP CONSTRAINT tf_contact_audit_kind_check;
+        ALTER TABLE tf_contact_audit ADD CONSTRAINT tf_contact_audit_kind_check CHECK (kind BETWEEN 1 AND 5);
         """)]);
 }

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Optional durable PostgreSQL SLA policy, per-conversation tracker and leased due-work timer storage for TicketFlow SLAs.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Sla.Abstractions/TicketFlow.Sla.Abstractions.csproj" />
+    <ProjectReference Include="../../Access/TicketFlow.Access.Stores.Postgres/TicketFlow.Access.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../Stores/TicketFlow.Stores.Migrations.Postgres/TicketFlow.Stores.Migrations.Postgres.csproj" />
+    <PackageReference Include="Npgsql" />
+  </ItemGroup>
+</Project>

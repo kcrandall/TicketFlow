@@ -1,16 +1,15 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using TicketFlow.Access;
-using TicketFlow.Workspaces;
 
-namespace TicketFlow;
+namespace TicketFlow.Workspaces;
 
 public static class WorkspacesTicketFlowBuilderExtensions
 {
     /// <summary>
     /// Registers scoped <see cref="IWorkspaceSettingsService"/>, <see cref="IInboxService"/>, <see cref="ITeamService"/>,
     /// <see cref="IBusinessCalendarService"/> and <see cref="ITeamMembershipResolver"/>, and the workspace permissions (identical to
-    /// the built-in Access definitions, so registration is idempotent). Uses TryAdd, so application registrations win. Requires
+    /// the built-in Access definitions; registered once). Uses TryAdd, so application registrations win. Requires
     /// <c>AddAccessControl()</c> plus access stores, and selects no workspace store: call <see cref="AddInMemoryWorkspaceStores"/> for
     /// development or register durable stores.
     /// </summary>
@@ -18,7 +17,12 @@ public static class WorkspacesTicketFlowBuilderExtensions
     {
         ArgumentNullException.ThrowIfNull(builder);
         var services = builder.Services;
-        services.AddAccessPermissions(WorkspacePermissions.Definitions);
+        if (!services.Any(descriptor => descriptor.ServiceType == typeof(WorkspacePermissionsMarker)))
+        {
+            services.AddSingleton<WorkspacePermissionsMarker>();
+            services.AddAccessPermissions(WorkspacePermissions.Definitions);
+        }
+        services.TryAddSingleton(TimeProvider.System);
         services.TryAddScoped<IWorkspaceSettingsService, WorkspaceSettingsService>();
         services.TryAddScoped<IInboxService, InboxService>();
         services.TryAddScoped<ITeamService, TeamService>();
@@ -41,4 +45,6 @@ public static class WorkspacesTicketFlowBuilderExtensions
         services.TryAddSingleton<IBusinessCalendarStore, InMemoryBusinessCalendarStore>();
         return builder;
     }
+
+    private sealed class WorkspacePermissionsMarker;
 }

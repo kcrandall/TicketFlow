@@ -56,6 +56,39 @@ public sealed partial class PostgresAccessStore
         return grants;
     }
 
+    public async Task<IReadOnlyList<StoredAccessGrant>> ListForTargetAsync(AccessPartition partition, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        AccessGrantTargets.Validate(target, limit, after);
+        var (level, workspace, team, inbox) = target switch
+        {
+            TenantGrantScope => throw new ArgumentException("Tenant scopes cannot be listed by target.", nameof(target)),
+            WorkspaceGrantScope scope => ((short)2, scope.Workspace.Value, (string?)null, (string?)null),
+            TeamGrantScope scope => ((short)3, scope.Workspace.Value, scope.Team.Value, null),
+            InboxGrantScope scope => ((short)4, scope.Workspace.Value, null, scope.Inbox.Value),
+        };
+        await using var command = source.CreateCommand($"""
+            SELECT {GrantColumns} FROM tf_access_grants
+            WHERE target_key=tf_key_v1(@tenant, @project, @environment, @app, @workspace, @scope_level::text, coalesce(@team, @inbox, ''))
+              AND {ScopeWhere} AND scope_level=@scope_level AND workspace_id=@workspace
+              AND team_id IS NOT DISTINCT FROM @team AND inbox_id IS NOT DISTINCT FROM @inbox
+              AND (@after::text IS NULL OR grant_id COLLATE "C" > @after::text)
+            ORDER BY grant_id COLLATE "C" LIMIT @limit
+            """);
+        AddPartition(command, partition);
+        command.Parameters.AddWithValue("scope_level", level);
+        AddText(command, "workspace", workspace);
+        AddText(command, "team", team);
+        AddText(command, "inbox", inbox);
+        AddText(command, "after", after?.Value);
+        command.Parameters.AddWithValue("limit", limit);
+        var result = new List<StoredAccessGrant>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            result.Add(ReadGrant(reader, partition));
+        return result;
+    }
+
     public async Task<AccessWriteResult<StoredAccessGrant>> CreateAsync(AccessGrant grant, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(grant);

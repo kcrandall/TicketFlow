@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Routing and assignment for TicketFlow: access-checked policy, availability, collision and queue services, the fenced assignment engine (outbox handler) and maintenance worker, and development in-memory stores.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Routing.Abstractions/TicketFlow.Routing.Abstractions.csproj" />
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
+  </ItemGroup>
+</Project>

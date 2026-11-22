@@ -229,6 +229,93 @@ public sealed class AccessAdministrator : IAccessAdministrator
         return await CompleteAsync(change, await grants.CreateAsync(grant, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Maximum conferrals or grants in one check.</summary>
+    public const int MaximumCheckedGrants = 4096;
+
+    public async Task<AccessCheckResult> CheckCanConferAsync(PrincipalRef actor, IEnumerable<GrantConferral> conferrals, CancellationToken cancellationToken = default)
+    {
+        RequireActor(actor);
+        var items = Bounded(conferrals, nameof(conferrals));
+        if (engine.Precheck(actor, AccessPermissions.AccessManage, actor.Scope) is { } reason)
+            return Refused(["The actor is not authorized."], reason);
+        var now = engine.Now;
+        AccessContext? context = null;
+        Dictionary<RoleId, AccessRole>? custom = null;
+        var missing = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var conferral in items)
+        {
+            var grant = conferral.Grant;
+            if (grant.Effect != GrantEffect.Allow || grant.ValidUntil is { } until && until <= now)
+                continue;
+            var target = conferral.Target ?? AccessEngine.Target(actor.Scope, grant.Scope);
+            if (!InActorScope(actor, grant) || target.Scope != actor.Scope)
+                return Refused(["The grant is outside the actor's scope."], AccessDenialReason.ScopeMismatch);
+            AccessRole? role = BuiltInRoles.Find(grant.Role);
+            if (role is null && grant.Scope is not TenantGrantScope)
+            {
+                if (custom is null)
+                {
+                    custom = [];
+                    foreach (var stored in await roles.ListAsync(actor.Scope, cancellationToken).ConfigureAwait(false))
+                        custom[stored.Role.Id] = stored.Role;
+                }
+                role = custom.GetValueOrDefault(grant.Role);
+            }
+            if (role is null)
+                continue;
+            context ??= await engine.LoadAsync(actor, actor.Scope, cancellationToken).ConfigureAwait(false);
+            var permissions = role.IncludesAllPermissions ? engine.Catalog.Definitions.Select(definition => definition.Permission) : role.Permissions;
+            foreach (var permission in permissions)
+                if (!AccessEngine.Evaluate(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: grant.Scope is TenantGrantScope).Allowed)
+                    missing.Add(permission.Value);
+        }
+        return missing.Count == 0
+            ? AccessCheckPassed.Instance
+            : Refused([.. missing.Select(permission => $"The actor does not hold '{permission}' on the target.")], AccessDenialReason.NoMatchingGrant);
+    }
+
+    public async Task<AccessCheckResult> CheckCanRevokeAsync(PrincipalRef actor, IEnumerable<AccessGrant> grants, CancellationToken cancellationToken = default)
+    {
+        RequireActor(actor);
+        var items = Bounded(grants, nameof(grants));
+        if (items.Count == 0)
+            return AccessCheckPassed.Instance;
+        if (engine.Precheck(actor, AccessPermissions.AccessManage, actor.Scope) is { } reason)
+            return Refused(["The actor is not authorized."], reason);
+        var context = await engine.LoadAsync(actor, actor.Scope, cancellationToken).ConfigureAwait(false);
+        foreach (var grant in items)
+        {
+            if (!InActorScope(actor, grant))
+                return Refused(["The grant is outside the actor's scope."], AccessDenialReason.ScopeMismatch);
+            var tenant = grant.Scope is TenantGrantScope;
+            var permission = tenant ? AccessPermissions.AccessManageTenant : AccessPermissions.AccessManage;
+            var result = AccessEngine.Evaluate(context, permission, AccessEngine.Target(actor.Scope, grant.Scope), includeBreakGlass: false, tenantAllowsOnly: tenant);
+            if (result.Denial is { } denial)
+                return Refused([$"Permission '{permission}' is required on the grant's target."], denial);
+        }
+        return AccessCheckPassed.Instance;
+    }
+
+    private static List<T> Bounded<T>(IEnumerable<T> values, string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(values, parameterName);
+        var items = new List<T>();
+        foreach (var value in values)
+        {
+            ArgumentNullException.ThrowIfNull(value, parameterName);
+            items.Add(value);
+            if (items.Count > MaximumCheckedGrants)
+                throw new ArgumentException($"At most {MaximumCheckedGrants} grants can be checked at once.", parameterName);
+        }
+        return items;
+    }
+
+    private static bool InActorScope(PrincipalRef actor, AccessGrant grant) =>
+        grant.Partition == AccessPartition.From(actor.Scope) && (grant.Workspace is not { } workspace || workspace == actor.Scope.WorkspaceId);
+
+    private static AccessChangeRefused Refused(IReadOnlyList<string> errors, AccessDenialReason reason) =>
+        new(AccessChangeRefusal.Forbidden, errors);
+
     private static readonly Permission[] ManagementPermissions =
         [AccessPermissions.AccessManage, AccessPermissions.AccessManageTenant, AccessPermissions.AccessBreakGlass];
 

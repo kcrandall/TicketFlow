@@ -21,7 +21,7 @@ await new PostgresWorkspaceStore(dataSource).InitializeAsync();
 - **Workspace settings**: one revisioned record per `TicketScope` — name (≤ 128), default locale (BCP 47 style, ≤ 35), time zone
   (IANA or Windows identifier; services require it to resolve on the host) and ≤ 64 feature toggles keyed by lowercase token.
 - **Inbox**: `InboxId`, name, `ChannelBinding` (opaque `ChannelKind` token + channel configuration reference owned by channel
-  packages, E6), optional `BusinessCalendarId` (must exist in the workspace), opaque `SlaPolicyId` (E9) and `RoutingPolicyId`
+  packages, E6; unique per workspace — reuse is `WorkspaceWriteRejection.ChannelBindingInUse`), optional `BusinessCalendarId` (must exist in the workspace), opaque `SlaPolicyId` (E9) and `RoutingPolicyId`
   (E8), enabled flag, greeting/away messages (≤ 1024, line breaks allowed; customer-facing content, never logged).
 - **Team**: `TeamId`, name, description, ≤ 1000 members (`UserId`). Every membership change increments the team revision. Stores
   cap each user at `WorkspaceLimits.MaximumTeamsPerUser` (= `UserPrincipal.MaximumTeamMemberships`, 256) teams per workspace,
@@ -61,15 +61,24 @@ All services authorize through Access before touching a store; `WorkspaceRefusal
 
 `workspace:read`, `inbox:read`, `team:read` and `calendar:manage` were added to the built-in Access catalog (the `*:manage`
 permissions already existed). Every built-in role holds the three read permissions; Admin also holds `calendar:manage` (but, as
-before, not `workspace:manage`). `AddWorkspaces()` registers identical definitions, which is idempotent.
+before, not `workspace:manage`). `AddWorkspaces()` registers identical definitions once (marker-guarded). Builder extensions live in the feature namespaces `TicketFlow.Workspaces` and `TicketFlow.Workspaces.Stores.Postgres`.
 
 **Inbox membership is an Access grant**, not a parallel ACL: `AddAgentAsync` creates an inbox-scoped grant (default role Agent) with
 the deterministic identifier `InboxAgentGrants.For(workspace, inbox, agent, role)` (`tf-inbox-agent-v1-` + SHA-256 hex), so the
 administrator's authority, escalation and audit rules apply and adding twice is a conflict.
 
-**Team membership cannot escalate**: adding members (create with members, update, `AddMemberAsync`) to a team that is the subject of
-allow grants requires the actor to hold every permission of each such grant's role on its target (tenant-scoped team grants are
-checked at workspace level). Removing members needs only `team:manage`.
+**Team membership stays within access-administration authority** (`IAccessAdministrator.CheckCanConferAsync` /
+`CheckCanRevokeAsync`: standard grants only, tenant-scoped authority for tenant grants, the actor's grants loaded once, nothing
+audited):
+
+- Adding members (create with members, update, `AddMemberAsync`) requires the actor to be able to confer every allow grant whose
+  subject is the team, and every added member's own allow grant that uses `TeamInPrincipalTeamsCondition` (checked against the team's
+  resources), exactly as if it were creating those grants.
+- Removing members requires the authority to revoke every live deny grant whose subject is the team, and removed members' own deny
+  grants that use `TeamInPrincipalTeamsCondition` (`access:manage` on the target, `access:manage-tenant` for tenant grants).
+- Deleting a team requires the authority to revoke every grant whose subject is the team; after the delete those grants are revoked
+  through `IAccessAdministrator` (audited). Deleting an inbox likewise requires authority over, and then revokes, its inbox agent
+  grants (found with `IAccessGrantStore.ListForTargetAsync`); other grants naming the inbox remain.
 
 **Principals**: `ITeamMembershipResolver` is a trusted, unauthorized path for building principals:
 `await resolver.ResolveUserPrincipalAsync(scope, userId)` returns a `UserPrincipal` with the current team snapshot, so team-subject
@@ -92,14 +101,15 @@ parity over real access plans) runs against the in-memory stores and PostgreSQL.
 
 PostgreSQL: tables `tf_workspace_settings`, `tf_workspace_inboxes`, `tf_workspace_teams`, `tf_workspace_team_members` (per-user
 index) and `tf_workspace_calendars`, created only by `InitializeAsync` through the append-only `ticketflow.workspaces` migration
-catalog; `tf_key_v1` keys plus raw-column comparison; `format_version` on every row; capacity and the per-user team limit checked
+catalog (v2 adds the unique `tf_workspace_inboxes_channel_binding` index; upgrading fails if existing inboxes share a binding); `tf_key_v1` keys plus raw-column comparison; `format_version` on every row; capacity and the per-user team limit checked
 under workspace advisory locks; list filters translated with `PostgresAccessFilterTranslator` (untranslatable → no rows) and ordered
 with `COLLATE "C"`; calendar schedules stored as canonical `BusinessCalendarCodec` text; undecodable rows throw.
 
 ## Known limits
 
-- Deleting an inbox or team does not revoke grants that name it; recreating the same identifier revives them. Inbox agents cannot
-  be listed until the grant store gains a by-scope query.
+- Grant revocation after a team or inbox delete is best-effort: authority is checked first, but a grant changed concurrently between
+  the check and the revoke stays in place (and would revive if the identifier is reused). Grants naming a deleted inbox other than
+  inbox agent grants are not revoked.
 - Deleting a calendar does not check inbox references; consumers must treat a missing calendar as a configuration error.
-- The team escalation check evaluates the actor with all its grants (including break-glass), unlike the administrator, which uses
-  standard grants only.
+- Team membership checks consider the team's grants and added/removed members' own grants; grants of the member's other teams that
+  use `TeamInPrincipalTeamsCondition` are not re-checked.

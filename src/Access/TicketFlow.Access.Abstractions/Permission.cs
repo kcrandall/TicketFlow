@@ -118,6 +118,9 @@ public static class AccessPermissions
     public static Permission AccessManageTenant { get; } = new("access:manage-tenant");
     public static Permission AccessAuditRead { get; } = new("access:audit-read");
     public static Permission AccessBreakGlass { get; } = new("access:break-glass");
+    public static Permission RoutingManage { get; } = new("routing:manage");
+    public static Permission AgentStatusUpdate { get; } = new("agent-status:update");
+    public static Permission AgentStatusManage { get; } = new("agent-status:manage");
 
     /// <summary>The built-in definitions, ordered by permission.</summary>
     public static IReadOnlyList<PermissionDefinition> Definitions { get; } =
@@ -126,6 +129,8 @@ public static class AccessPermissions
         new(AccessBreakGlass, true, "Activate a time-bound break-glass grant."),
         new(AccessManage, true, "Manage workspace roles, grants and field policies."),
         new(AccessManageTenant, true, "Manage tenant-wide grants."),
+        new(AgentStatusManage, false, "Manage other agents' availability, capacity and skills."),
+        new(AgentStatusUpdate, false, "Set one's own availability status and presence."),
         new(CalendarManage, false, "Manage business calendars."),
         new(ContactExport, true, "Export contacts."),
         new(ContactMerge, true, "Merge or unmerge contacts."),
@@ -143,6 +148,7 @@ public static class AccessPermissions
         new(NoteRead, false, "Read private notes."),
         new(NoteWrite, false, "Write private notes."),
         new(ReportView, false, "View reports."),
+        new(RoutingManage, false, "Manage routing policies."),
         new(TeamManage, false, "Manage teams and membership."),
         new(TeamRead, false, "Read teams and membership."),
         new(WorkspaceManage, true, "Manage workspace settings."),

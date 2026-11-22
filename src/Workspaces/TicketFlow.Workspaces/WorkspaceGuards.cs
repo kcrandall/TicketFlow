@@ -54,6 +54,7 @@ internal static class WorkspaceGuards
         {
             WorkspaceWriteRejection.CapacityExceeded => "A workspace capacity limit would be exceeded.",
             WorkspaceWriteRejection.TeamMembershipLimitExceeded => $"A member would belong to more than {WorkspaceLimits.MaximumTeamsPerUser} teams.",
+            WorkspaceWriteRejection.ChannelBindingInUse => "Another inbox is already bound to this channel configuration.",
             _ => "The store rejected the write.",
         }]),
     };

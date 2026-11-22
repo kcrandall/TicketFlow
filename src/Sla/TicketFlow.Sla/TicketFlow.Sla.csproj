@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>SLA engine for TicketFlow: access-checked policy management, business-time clocks with pauses and escalations, the conversation outbox tracker, durable due-work scheduler, breach prediction and at-risk queries, and development in-memory stores.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Sla.Abstractions/TicketFlow.Sla.Abstractions.csproj" />
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
+  </ItemGroup>
+</Project>

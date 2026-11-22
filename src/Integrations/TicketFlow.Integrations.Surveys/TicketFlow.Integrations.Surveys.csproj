@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Bridges TicketFlow conversations to surveys: a conversation outbox handler that turns resolved status changes into survey scheduling notifications.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
+    <ProjectReference Include="../../Contacts/TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj" />
+    <ProjectReference Include="../../Surveys/TicketFlow.Surveys.Abstractions/TicketFlow.Surveys.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

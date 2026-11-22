@@ -136,6 +136,9 @@ call). Every authorization uses standard grants only; break-glass grants never c
 - No grant escalation: an allow grant requires the actor to hold every permission of the granted role on the target.
 - Updates, revokes and role changes are fenced first: a missing record is `NotFound` and a revision mismatch is `Conflict` (with
   the current revision) before any authorization decision is made on the stored record.
+- `CheckCanConferAsync(actor, GrantConferral[])` and `CheckCanRevokeAsync(actor, grants)` are read-only, unaudited checks of the same
+  authority (escalation rule for live allow grants, optionally against a narrower target; target authority for revocation), with
+  the actor's grants loaded once. Features use them before changes that extend or lift existing grants, such as team membership.
 - Audit for administrative changes is recorded after the store write (not in one transaction); if the sink throws, the change is
   applied and the call throws.
 
@@ -158,7 +161,7 @@ persist before returning and throw on failure; the engine then fails the operati
 | Contract | Key and scope | Guarantees |
 | --- | --- | --- |
 | `IAccessRoleStore` | `TicketScope` + `RoleId` | Built-in IDs rejected; create at revision 1; compare-and-set update/delete; ≤ 128 roles per workspace, checked atomically. |
-| `IAccessGrantStore` | `AccessPartition` + `GrantId` | Lists tenant grants plus grants naming the workspace, for the requested subjects (≤ 257) only; compare-and-set update/delete; ≤ 256 grants per subject, checked atomically. |
+| `IAccessGrantStore` | `AccessPartition` + `GrantId` | Lists tenant grants plus grants naming the workspace, for the requested subjects (≤ 257) only; `ListForTargetAsync` lists grants with an exact workspace/team/inbox scope (≤ 1000 per page); compare-and-set update/delete; ≤ 256 grants per subject, checked atomically. |
 | `IAccessFieldPolicyStore` | `TicketScope` + `FieldPath` | Compare-and-set; ≤ 256 policies per workspace. |
 | `IAccessAuditSink` | event ID | Durable before returning; failures throw. |
 
@@ -167,7 +170,7 @@ PostgreSQL. In-memory stores (`InMemoryAccessRoleStore`, `InMemoryAccessGrantSto
 `InMemoryAccessAuditSink`) are bounded, process-local development examples with no durability.
 
 `PostgresAccessStore.InitializeAsync` explicitly applies `PostgresAccessMigrations.Catalog` with the
-`TicketFlow.Stores.Migrations.Postgres` runner (append-only, checksummed history in `tf_store_migrations`, advisory lock; unknown
+`TicketFlow.Stores.Migrations.Postgres` runner (append-only, checksummed history in `tf_store_migrations`; v2 adds the `target_key` index for `ListForTargetAsync`, advisory lock; unknown
 future versions, edited steps and downgrades fail). Identifiers may be 256 UTF-16 units each, so every primary key and index uses
 fixed-size `tf_key_v1` SHA-256 keys generated from the raw columns (role, grant, policy, scope and subject keys); stores also compare
 the raw columns. Rows carry explicit `format_version` and numeric discriminators (subject kind, scope level, effect, grant kind);

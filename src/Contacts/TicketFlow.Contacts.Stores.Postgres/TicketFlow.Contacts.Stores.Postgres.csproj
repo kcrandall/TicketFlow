@@ -7,5 +7,6 @@
     <ProjectReference Include="../../Access/TicketFlow.Access.Stores.Postgres/TicketFlow.Access.Stores.Postgres.csproj" />
     <ProjectReference Include="../../Stores/TicketFlow.Stores.Migrations.Postgres/TicketFlow.Stores.Migrations.Postgres.csproj" />
     <PackageReference Include="Npgsql" />
+    <InternalsVisibleTo Include="TicketFlow.Contacts.Stores.Postgres.Tests" />
   </ItemGroup>
 </Project>

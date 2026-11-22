@@ -20,7 +20,8 @@ public interface IWorkspaceSettingsStore
 /// <summary>
 /// Workspace-scoped inboxes keyed by <see cref="InboxId"/>. Contract: scope-confined; creates start at revision 1; updates and deletes
 /// are compare-and-set on revision; at most <see cref="WorkspaceLimits.MaximumInboxesPerWorkspace"/> inboxes per scope, checked
-/// atomically with the insert. <see cref="ListAsync"/> returns exactly the inboxes for which
+/// atomically with the insert; at most one inbox per scope binds a given <see cref="ChannelBinding"/> (kind and configuration),
+/// otherwise creates and updates are rejected with <see cref="WorkspaceWriteRejection.ChannelBindingInUse"/>. <see cref="ListAsync"/> returns exactly the inboxes for which
 /// <see cref="AccessFilterEvaluator.Matches"/>(filter, <see cref="WorkspaceResources.Inbox"/>) is true, ordered by
 /// identifier (ordinal), applying the filter in the query rather than post-filtering an unbounded result. A store that cannot apply a
 /// filter node must return no rows.

@@ -1,0 +1,124 @@
+using System.Buffers.Text;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+using TicketFlow.Access;
+using TicketFlow.Conversations;
+using TicketFlow.Core;
+using TicketFlow.Workspaces;
+
+namespace TicketFlow.Sla;
+
+/// <summary>
+/// SLA status and risk queries. Status requires <c>sla:read</c> on the live conversation resource (existence is checked first, like
+/// the conversation service). Risk lists plan <c>sla:read</c> into the tracker store query (over the mirrored conversation Access
+/// resource) and point-check every returned row against the live conversation, so stale mirrors never leak a row.
+/// </summary>
+public sealed class SlaService : ISlaService
+{
+    private readonly IConversationStore conversations;
+    private readonly ISlaTrackerStore trackers;
+    private readonly IBusinessCalendarStore calendars;
+    private readonly IAccessEvaluator evaluator;
+    private readonly IAccessQueryPlanner planner;
+    private readonly TimeProvider time;
+
+    public SlaService(IConversationStore conversations, ISlaTrackerStore trackers, IBusinessCalendarStore calendars, IAccessEvaluator evaluator, IAccessQueryPlanner planner,
+        TimeProvider time)
+    {
+        this.conversations = conversations ?? throw new ArgumentNullException(nameof(conversations));
+        this.trackers = trackers ?? throw new ArgumentNullException(nameof(trackers));
+        this.calendars = calendars ?? throw new ArgumentNullException(nameof(calendars));
+        this.evaluator = evaluator ?? throw new ArgumentNullException(nameof(evaluator));
+        this.planner = planner ?? throw new ArgumentNullException(nameof(planner));
+        this.time = time ?? throw new ArgumentNullException(nameof(time));
+    }
+
+    public async Task<SlaResult<SlaStatusView>> GetStatusAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default)
+    {
+        var scope = RequireActor(actor);
+        if (conversation == default)
+            throw new ArgumentException("A conversation identifier is required.", nameof(conversation));
+        var stored = await conversations.GetAsync(scope, conversation, cancellationToken).ConfigureAwait(false);
+        if (stored is null)
+            return SlaNotFound.Instance;
+        if (!await PermittedAsync(actor, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
+            return SlaRefused.Forbidden;
+        var now = time.GetUtcNow();
+        var tracker = await trackers.GetAsync(scope, conversation, cancellationToken).ConfigureAwait(false);
+        if (tracker is null)
+            return new SlaValue<SlaStatusView>(new SlaStatusView(conversation, stored.Conversation.Inbox, null, null, null, false, [], false, false, null, now));
+        return new SlaValue<SlaStatusView>(await ViewAsync(scope, tracker.Tracker, now, cancellationToken).ConfigureAwait(false));
+    }
+
+    public async Task<SlaResult<SlaRiskPage>> ListAsync(PrincipalRef actor, SlaRiskQuery query, string? cursor = null, CancellationToken cancellationToken = default)
+    {
+        var scope = RequireActor(actor);
+        ArgumentNullException.ThrowIfNull(query);
+        var fingerprint = Fingerprint(query);
+        SlaRiskCursor? after = null;
+        if (cursor is not null && !TryDecodeCursor(cursor, fingerprint, out after))
+            return SlaRefused.Invalid("The cursor is invalid or belongs to a different query.");
+        var now = time.GetUtcNow();
+        var filter = await planner.PlanAsync(new AccessQuery(actor, SlaPermissions.Read, scope), cancellationToken).ConfigureAwait(false);
+        var page = await trackers.ListAsync(scope, query.WithAfter(after ?? query.After), now, filter, cancellationToken).ConfigureAwait(false);
+        var items = new List<SlaStatusView>(page.Trackers.Count);
+        foreach (var tracker in page.Trackers)
+        {
+            if (tracker.Scope != scope)
+                throw new InvalidOperationException("The SLA tracker store returned a record outside the requested scope.");
+            var stored = await conversations.GetAsync(scope, tracker.Conversation, cancellationToken).ConfigureAwait(false);
+            if (stored is null || !await PermittedAsync(actor, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
+                continue;
+            items.Add(await ViewAsync(scope, tracker.Tracker, now, cancellationToken).ConfigureAwait(false));
+        }
+        return new SlaValue<SlaRiskPage>(new SlaRiskPage(items, page.Next is { } next ? EncodeCursor(next, fingerprint) : null));
+    }
+
+    private async Task<SlaStatusView> ViewAsync(TicketScope scope, SlaTracker tracker, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        SlaClockTime? business = null;
+        if (tracker.Applied?.Calendar is { } calendarId && await calendars.GetAsync(scope, calendarId, cancellationToken).ConfigureAwait(false) is { } calendar)
+            business = SlaClockTime.Business(new BusinessCalendarCalculator(calendar.Calendar));
+        return SlaEngine.View(tracker, id => id == tracker.Applied?.Calendar ? business : null, now);
+    }
+
+    private async Task<bool> PermittedAsync(PrincipalRef actor, AccessResource resource, CancellationToken cancellationToken) =>
+        (await evaluator.AuthorizeAsync(new AccessRequest(actor, SlaPermissions.Read, resource), cancellationToken).ConfigureAwait(false)).IsPermitted;
+
+    private static TicketScope RequireActor(PrincipalRef actor)
+    {
+        if (actor.Value is null)
+            throw new ArgumentException("An actor is required.", nameof(actor));
+        return actor.Scope;
+    }
+
+    private static string Fingerprint(SlaRiskQuery query)
+    {
+        var text = string.Join('\u001F', ((int)query.Filter).ToString(CultureInfo.InvariantCulture), query.Inbox?.Value ?? "", query.Limit.ToString(CultureInfo.InvariantCulture));
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)).AsSpan(0, 8));
+    }
+
+    private static string EncodeCursor(SlaRiskCursor cursor, string fingerprint) =>
+        Base64Url.EncodeToString(Encoding.UTF8.GetBytes(string.Join('|', "v1", fingerprint, cursor.UrgencyAt.UtcTicks.ToString(CultureInfo.InvariantCulture), cursor.Conversation.Value)));
+
+    private static bool TryDecodeCursor(string token, string fingerprint, out SlaRiskCursor? cursor)
+    {
+        cursor = null;
+        try
+        {
+            if (token.Length > 2048)
+                return false;
+            var parts = Encoding.UTF8.GetString(Base64Url.DecodeFromChars(token)).Split('|', 4);
+            if (parts.Length != 4 || parts[0] != "v1" || parts[1] != fingerprint
+                || !long.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out var ticks))
+                return false;
+            cursor = new SlaRiskCursor(new DateTimeOffset(ticks, TimeSpan.Zero), new ConversationId(parts[3]));
+            return true;
+        }
+        catch (Exception error) when (error is FormatException or ArgumentException)
+        {
+            return false;
+        }
+    }
+}

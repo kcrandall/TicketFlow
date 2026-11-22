@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Channels.Testing/TicketFlow.Channels.Testing.csproj" />
+    <ProjectReference Include="../TicketFlow.Channels.StoreContracts/TicketFlow.Channels.StoreContracts.csproj" />
+  </ItemGroup>
+</Project>

@@ -79,7 +79,12 @@ and never echoes the input in errors or `ToString`.
   refused, so prefixes cannot become an oracle for masked values. Pages may be short; a contact matching several identities can
   appear on more than one page of an identity search.
 - **Export** (`contact:export`, sensitive): justified, audited (`ContactAuditKind.Exported`) before streaming, bounded by
-  `ContactsOptions.MaximumExportContacts` (default 10,000), streamed in keyset pages and masked per `contact:export`.
+  `ContactsOptions.MaximumExportContacts` (default 10,000), streamed in keyset pages and masked per `contact:export`. Every exported
+  contact's decision is audited by Access (sensitive decisions are never cached) and `ExportCompleted` records the emitted count.
+- **Identity edits** on a field masked or unreadable for the actor are refused with a uniform `Forbidden`; `IdentityTaken` is only
+  reported when the actor can read the holder with that field unmasked.
+- **Delete** authorizes `contact:delete` on every cascaded tombstone and emits a `Deleted` change per removed contact.
+- Searches examine at most 1000 rows per page (store-configurable) and return a continuation cursor when that bound is hit.
 
 ## Change events
 

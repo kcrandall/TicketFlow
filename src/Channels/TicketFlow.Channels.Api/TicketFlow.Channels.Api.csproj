@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Generic API channel for TicketFlow: inbound messages through application calls and outbound replies as HMAC-SHA256 signed webhooks with timestamps, replay protection and SSRF-safe destinations.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Channels/TicketFlow.Channels.csproj" />
+  </ItemGroup>
+</Project>

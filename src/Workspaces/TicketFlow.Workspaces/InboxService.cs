@@ -71,6 +71,11 @@ public sealed class InboxService : IInboxService
         return Map(await inboxes.UpdateAsync(actor.Scope, inbox, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
+    /// <summary>
+    /// Deletes the inbox and then revokes its inbox agent grants (<see cref="InboxAgentGrants"/>) through
+    /// <see cref="IAccessAdministrator"/>. The actor needs the authority to revoke them (checked before anything is written); other
+    /// grants that name the inbox are left in place.
+    /// </summary>
     public async Task<WorkspaceResult<StoredInbox>> DeleteAsync(PrincipalRef actor, InboxId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
@@ -79,7 +84,38 @@ public sealed class InboxService : IInboxService
             ?? ValidateRevision(expectedRevision);
         if (refused is not null)
             return refused;
-        return Map(await inboxes.DeleteAsync(actor.Scope, id, expectedRevision, cancellationToken).ConfigureAwait(false));
+        var current = await inboxes.GetAsync(actor.Scope, id, cancellationToken).ConfigureAwait(false);
+        if (Fence(current?.Revision, expectedRevision) is { } fenced)
+            return fenced;
+        var agentGrants = await AgentGrantsAsync(actor.Scope, id, cancellationToken).ConfigureAwait(false);
+        if (agentGrants.Count > 0
+            && TeamGrantPolicy.Refuse(await administrator.CheckCanRevokeAsync(actor, [.. agentGrants.Select(entry => entry.Grant)], cancellationToken).ConfigureAwait(false)) is { } forbidden)
+            return forbidden;
+        var result = await inboxes.DeleteAsync(actor.Scope, id, expectedRevision, cancellationToken).ConfigureAwait(false);
+        if (result.Value is WorkspaceWriteApplied<StoredInbox>)
+            foreach (var entry in agentGrants)
+                await administrator.RevokeGrantAsync(actor, entry.Grant.Id, entry.Revision, cancellationToken).ConfigureAwait(false);
+        return Map(result);
+    }
+
+    /// <summary>Every grant on the inbox whose identifier and shape match <see cref="InboxAgentGrants.Create"/>.</summary>
+    private async Task<List<StoredAccessGrant>> AgentGrantsAsync(TicketScope scope, InboxId inbox, CancellationToken cancellationToken)
+    {
+        var partition = AccessPartition.From(scope);
+        var target = new InboxGrantScope(scope.WorkspaceId, inbox);
+        var result = new List<StoredAccessGrant>();
+        GrantId? after = null;
+        while (true)
+        {
+            var page = await grants.ListForTargetAsync(partition, target, AccessLimits.MaximumTargetPage, after, cancellationToken).ConfigureAwait(false);
+            foreach (var entry in page)
+                if (entry.Grant.Id.Value.StartsWith(InboxAgentGrants.Prefix, StringComparison.Ordinal) && entry.Grant.Subject.Value is UserId agent
+                    && InboxAgentGrants.Matches(entry.Grant, scope, inbox, agent, entry.Grant.Role))
+                    result.Add(entry);
+            if (page.Count < AccessLimits.MaximumTargetPage)
+                return result;
+            after = page[^1].Grant.Id;
+        }
     }
 
     public async Task<WorkspaceResult<StoredAccessGrant>> AddAgentAsync(PrincipalRef actor, InboxId inbox, UserId agent, RoleId? role = null, CancellationToken cancellationToken = default)

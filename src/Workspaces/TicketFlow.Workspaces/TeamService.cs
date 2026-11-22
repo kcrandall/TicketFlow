@@ -13,18 +13,17 @@ public sealed class TeamService : ITeamService
     private readonly ITeamStore teams;
     private readonly IAccessEvaluator evaluator;
     private readonly IAccessQueryPlanner planner;
-    private readonly TeamGrantGuard guard;
+    private readonly TeamGrantPolicy policy;
 
-    public TeamService(ITeamStore teams, IAccessEvaluator evaluator, IAccessQueryPlanner planner, IAccessGrantStore grants, IAccessRoleStore roles, IPermissionCatalog catalog, TimeProvider time)
+    public TeamService(ITeamStore teams, IAccessEvaluator evaluator, IAccessQueryPlanner planner, IAccessAdministrator administrator, IAccessGrantStore grants, TimeProvider time)
     {
         this.teams = teams ?? throw new ArgumentNullException(nameof(teams));
         this.evaluator = evaluator ?? throw new ArgumentNullException(nameof(evaluator));
         this.planner = planner ?? throw new ArgumentNullException(nameof(planner));
+        ArgumentNullException.ThrowIfNull(administrator);
         ArgumentNullException.ThrowIfNull(grants);
-        ArgumentNullException.ThrowIfNull(roles);
-        ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(time);
-        guard = new(grants, roles, catalog, evaluator, time);
+        policy = new(administrator, grants, time);
     }
 
     public async Task<WorkspaceResult<StoredTeam>> GetAsync(PrincipalRef actor, TeamId id, CancellationToken cancellationToken = default)
@@ -53,8 +52,7 @@ public sealed class TeamService : ITeamService
         ArgumentNullException.ThrowIfNull(team);
         var refused = await AuthorizeAsync(evaluator, actor, WorkspacePermissions.TeamManage, WorkspaceResources.Workspace(actor.Scope), cancellationToken).ConfigureAwait(false);
         // Grants may already name the team identifier, so initial members are checked like later additions.
-        if (refused is null && team.Members.Count > 0)
-            refused = await guard.CheckAsync(actor, team.Id, cancellationToken).ConfigureAwait(false);
+        refused ??= await policy.CheckAdditionsAsync(actor, team.Id, [.. team.Members], cancellationToken).ConfigureAwait(false);
         if (refused is not null)
             return refused;
         return Map(await teams.CreateAsync(actor.Scope, team, cancellationToken).ConfigureAwait(false));
@@ -67,6 +65,11 @@ public sealed class TeamService : ITeamService
         return await ReplaceAsync(actor, team.Id, expectedRevision, _ => team, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Deletes the team and then revokes every grant whose subject is the team through <see cref="IAccessAdministrator"/>. Because the
+    /// deletion revokes them, the actor needs the authority to revoke all of them (checked before anything is written); grants that
+    /// change concurrently after the deletion are left in place.
+    /// </summary>
     public async Task<WorkspaceResult<StoredTeam>> DeleteAsync(PrincipalRef actor, TeamId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
@@ -75,7 +78,16 @@ public sealed class TeamService : ITeamService
             ?? ValidateRevision(expectedRevision);
         if (refused is not null)
             return refused;
-        return Map(await teams.DeleteAsync(actor.Scope, id, expectedRevision, cancellationToken).ConfigureAwait(false));
+        var current = await teams.GetAsync(actor.Scope, id, cancellationToken).ConfigureAwait(false);
+        if (Fence(current?.Revision, expectedRevision) is { } fenced)
+            return fenced;
+        var teamGrants = await policy.TeamGrantsAsync(actor, id, cancellationToken).ConfigureAwait(false);
+        if (await policy.CheckRevokeAsync(actor, [.. teamGrants.Select(entry => entry.Grant)], cancellationToken).ConfigureAwait(false) is { } forbidden)
+            return forbidden;
+        var result = await teams.DeleteAsync(actor.Scope, id, expectedRevision, cancellationToken).ConfigureAwait(false);
+        if (result.Value is WorkspaceWriteApplied<StoredTeam>)
+            await policy.RevokeAsync(actor, teamGrants, cancellationToken).ConfigureAwait(false);
+        return Map(result);
     }
 
     public Task<WorkspaceResult<StoredTeam>> AddMemberAsync(PrincipalRef actor, TeamId team, UserId member, long expectedRevision, CancellationToken cancellationToken = default)
@@ -95,8 +107,8 @@ public sealed class TeamService : ITeamService
     }
 
     /// <summary>
-    /// Authorizes <c>team:manage</c> on the team, fences on the loaded revision, checks added members against the team's grants and
-    /// writes with compare-and-set. A <see langword="null"/> replacement is a no-op that returns the current state unchanged.
+    /// Authorizes <c>team:manage</c> on the team, fences on the loaded revision, checks added and removed members with
+    /// <see cref="TeamGrantPolicy"/> and writes with compare-and-set. A <see langword="null"/> replacement is a no-op that returns the current state unchanged.
     /// </summary>
     private async Task<WorkspaceResult<StoredTeam>> ReplaceAsync(PrincipalRef actor, TeamId id, long expectedRevision, Func<Team, Team?> replace, CancellationToken cancellationToken)
     {
@@ -110,9 +122,12 @@ public sealed class TeamService : ITeamService
         var replacement = replace(current!.Team);
         if (replacement is null)
             return new WorkspaceSucceeded<StoredTeam>(current);
-        if (replacement.Members.Any(member => !current.Team.Members.Contains(member))
-            && await guard.CheckAsync(actor, id, cancellationToken).ConfigureAwait(false) is { } escalation)
+        UserId[] added = [.. replacement.Members.Where(member => !current.Team.Members.Contains(member))];
+        UserId[] removed = [.. current.Team.Members.Where(member => !replacement.Members.Contains(member))];
+        if (await policy.CheckAdditionsAsync(actor, id, added, cancellationToken).ConfigureAwait(false) is { } escalation)
             return escalation;
+        if (await policy.CheckRemovalsAsync(actor, id, removed, cancellationToken).ConfigureAwait(false) is { } lifted)
+            return lifted;
         return Map(await teams.UpdateAsync(actor.Scope, replacement, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 

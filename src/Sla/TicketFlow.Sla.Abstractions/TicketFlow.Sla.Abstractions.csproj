@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>SLA policies (ordered rules with first/next response and resolution targets, pause states and escalations), per-conversation SLA trackers, versioned timeline event payloads, union results and store contracts for TicketFlow.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
+    <ProjectReference Include="../../Workspaces/TicketFlow.Workspaces.Abstractions/TicketFlow.Workspaces.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Optional durable PostgreSQL routing policy, agent availability, assignment/load, queue and collision presence storage for TicketFlow routing.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Routing.Abstractions/TicketFlow.Routing.Abstractions.csproj" />
+    <ProjectReference Include="../../Access/TicketFlow.Access.Stores.Postgres/TicketFlow.Access.Stores.Postgres.csproj" />
+    <ProjectReference Include="../../Stores/TicketFlow.Stores.Migrations.Postgres/TicketFlow.Stores.Migrations.Postgres.csproj" />
+    <PackageReference Include="Npgsql" />
+  </ItemGroup>
+</Project>

@@ -42,7 +42,22 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
 
     private readonly NpgsqlDataSource source;
 
-    public PostgresContactStore(NpgsqlDataSource dataSource) => source = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
+    private readonly int maximumRowsExamined;
+
+    public PostgresContactStore(NpgsqlDataSource dataSource)
+        : this(dataSource, ContactSearch.DefaultMaximumRowsExamined)
+    {
+    }
+
+    /// <param name="dataSource">The application-owned data source.</param>
+    /// <param name="maximumRowsExamined">Rows examined per search page before the access filter (1-100,000).</param>
+    public PostgresContactStore(NpgsqlDataSource dataSource, int maximumRowsExamined)
+    {
+        source = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
+        ArgumentOutOfRangeException.ThrowIfLessThan(maximumRowsExamined, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(maximumRowsExamined, 100_000);
+        this.maximumRowsExamined = maximumRowsExamined;
+    }
 
     /// <summary>
     /// Explicitly applies <see cref="PostgresContactMigrations.Catalog"/> through <see cref="PostgresMigrationRunner"/> (advisory-locked,
@@ -64,14 +79,9 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(address);
-        await using var command = source.CreateCommand($"""
-            SELECT contact_id, verified, source, verified_at FROM tf_contact_identities
-            WHERE identity_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@kind::text,@namespace,@value)
-              AND {ScopeWhere} AND kind=@kind AND namespace=@namespace AND value=@value
-            ORDER BY verified DESC, contact_id LIMIT {IContactStore.MaximumIdentityOwners}
-            """);
-        AddScope(command, scope);
-        BindAddress(command, address);
+        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = FindByIdentityCommand(scope, address);
+        command.Connection = connection;
         var owners = new List<ContactIdentityOwner>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -80,19 +90,67 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
         return owners;
     }
 
+    /// <summary>The identity lookup statement (exposed internally so tests can EXPLAIN the exact SQL).</summary>
+    internal static NpgsqlCommand FindByIdentityCommand(TicketScope scope, ContactIdentityAddress address)
+    {
+        var command = new NpgsqlCommand($"""
+            SELECT contact_id, verified, source, verified_at FROM tf_contact_identities
+            WHERE identity_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@kind::text,@namespace,@value)
+              AND {ScopeWhere} AND kind=@kind AND namespace=@namespace AND value=@value
+            ORDER BY verified DESC, contact_id LIMIT {IContactStore.MaximumIdentityOwners}
+            """);
+        AddScope(command, scope);
+        BindAddress(command, address);
+        return command;
+    }
+
     public async Task<ContactPage> SearchAsync(TicketScope scope, ContactSearch search, AccessFilter filter, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(search);
         ArgumentNullException.ThrowIfNull(filter);
-        var translated = PostgresAccessFilterTranslator.Translate(filter, FilterColumns).OrDenyAll();
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = new NpgsqlCommand { Connection = connection };
+        List<(string Key, ContactId Id, bool Visible)> examined = [];
+        await using (var command = SearchCommand(scope, search, filter, maximumRowsExamined))
+        {
+            command.Connection = connection;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                examined.Add(Decode(() => (reader.GetString(0), new ContactId(reader.GetString(1)), reader.GetBoolean(2)), "search row"));
+        }
+
+        var visible = new List<(string Key, ContactId Id)>();
+        foreach (var row in examined)
+        {
+            if (!row.Visible)
+                continue;
+            visible.Add((row.Key, row.Id));
+            if (visible.Count == search.Limit)
+                break;
+        }
+        var distinct = visible.Select(row => row.Id).Distinct().ToList();
+        var contacts = await LoadAsync(connection, null, scope, distinct, cancellationToken).ConfigureAwait(false);
+        var page = distinct.Where(contacts.ContainsKey).Select(id => contacts[id]).Where(stored => stored.Contact.MergedInto is null).ToList();
+        ContactSearchCursor? next = visible.Count == search.Limit
+            ? new ContactSearchCursor(visible[^1].Key, visible[^1].Id)
+            : examined.Count == maximumRowsExamined ? new ContactSearchCursor(examined[^1].Key, examined[^1].Id) : null;
+        return new ContactPage(page, next);
+    }
+
+    /// <summary>
+    /// The search statement (exposed internally so tests can EXPLAIN the exact SQL). An inner keyset query reads at most
+    /// <paramref name="maximumRowsExamined"/> rows in index order; the translated access filter is evaluated per examined row, and the
+    /// caller keeps the first visible rows, continuing after the last examined row when the scan bound is reached.
+    /// </summary>
+    internal static NpgsqlCommand SearchCommand(TicketScope scope, ContactSearch search, AccessFilter filter, int maximumRowsExamined)
+    {
+        var translated = PostgresAccessFilterTranslator.Translate(filter, FilterColumns).OrDenyAll();
+        var command = new NpgsqlCommand();
         AddScope(command, scope);
         foreach (var parameter in translated.Parameters)
             command.Parameters.Add(parameter.Clone());
-        command.Parameters.AddWithValue("limit", search.Limit);
-        var prefix = search.Prefix.Length == 0 ? string.Empty : $" AND {{0}} >= @prefix COLLATE \"C\" AND {{0}} < @prefix_high COLLATE \"C\" AND starts_with({{0}}, @prefix)";
+        command.Parameters.AddWithValue("scan", maximumRowsExamined);
+        var prefix = search.Prefix.Length == 0 ? string.Empty : " AND {0} >= @prefix COLLATE \"C\" AND {0} < @prefix_high COLLATE \"C\" AND starts_with({0}, @prefix)";
         if (search.Prefix.Length > 0)
         {
             AddText(command, "prefix", search.Prefix);
@@ -105,15 +163,16 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
             AddText(command, "after_id", cursor.Contact.Value);
         }
 
-        List<(string Key, ContactId Id)> rows = [];
         if (search.Mode == ContactSearchMode.Name)
         {
             command.CommandText = $"""
-                SELECT c.name_folded, c.contact_id FROM tf_contacts c {FilterJoin}
-                WHERE c.scope_key={ScopeKey} AND c.tenant_id=@tenant AND c.project_id=@project AND c.environment_id=@environment AND c.app_id=@app
-                  AND c.workspace_id=@workspace AND c.merged_into IS NULL{string.Format(prefix, "c.name_folded")}{string.Format(after, "c.name_folded", "c.contact_id")}
-                  AND ({translated.Sql})
-                ORDER BY c.name_folded, c.contact_id LIMIT @limit
+                SELECT c.sort_key, c.contact_id, ({translated.Sql}) IS TRUE FROM (
+                    SELECT s.name_folded AS sort_key, s.contact_id, s.tenant_id, s.project_id, s.environment_id, s.app_id, s.workspace_id, s.labels
+                    FROM tf_contacts s
+                    WHERE s.scope_key={ScopeKey} AND s.tenant_id=@tenant AND s.project_id=@project AND s.environment_id=@environment AND s.app_id=@app
+                      AND s.workspace_id=@workspace AND s.merged_into IS NULL{string.Format(prefix, "s.name_folded")}{string.Format(after, "s.name_folded", "s.contact_id")}
+                    ORDER BY s.name_folded, s.contact_id LIMIT @scan) c {FilterJoin}
+                ORDER BY c.sort_key, c.contact_id
                 """;
         }
         else
@@ -123,23 +182,38 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
             if (search.Namespace is not null)
                 AddText(command, "namespace", search.Namespace);
             command.CommandText = $"""
-                SELECT i.value, i.contact_id FROM tf_contact_identities i
-                JOIN tf_contacts c ON c.contact_key=i.contact_key AND c.contact_id=i.contact_id {FilterJoin}
-                WHERE i.scope_key={ScopeKey} AND i.tenant_id=@tenant AND i.project_id=@project AND i.environment_id=@environment AND i.app_id=@app
-                  AND i.workspace_id=@workspace AND i.kind=@kind{ns}{string.Format(prefix, "i.value")}{string.Format(after, "i.value", "i.contact_id")}
-                  AND c.merged_into IS NULL AND ({translated.Sql})
-                ORDER BY i.value, i.contact_id LIMIT @limit
+                SELECT c.sort_key, c.contact_id, ({translated.Sql}) IS TRUE FROM (
+                    SELECT i.value AS sort_key, i.contact_id, s.tenant_id, s.project_id, s.environment_id, s.app_id, s.workspace_id, s.labels
+                    FROM tf_contact_identities i JOIN tf_contacts s ON s.contact_key=i.contact_key AND s.contact_id=i.contact_id
+                    WHERE i.scope_key={ScopeKey} AND i.tenant_id=@tenant AND i.project_id=@project AND i.environment_id=@environment AND i.app_id=@app
+                      AND i.workspace_id=@workspace AND i.kind=@kind{ns}{string.Format(prefix, "i.value")}{string.Format(after, "i.value", "i.contact_id")}
+                      AND s.merged_into IS NULL
+                    ORDER BY i.value, i.contact_id LIMIT @scan) c {FilterJoin}
+                ORDER BY c.sort_key, c.contact_id
                 """;
         }
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                rows.Add(Decode(() => (reader.GetString(0), new ContactId(reader.GetString(1))), "search row"));
+        return command;
+    }
 
-        var distinct = rows.Select(row => row.Id).Distinct().ToList();
-        var contacts = await LoadAsync(connection, null, scope, distinct, cancellationToken).ConfigureAwait(false);
-        var page = distinct.Where(contacts.ContainsKey).Select(id => contacts[id]).Where(stored => stored.Contact.MergedInto is null).ToList();
-        var next = rows.Count == search.Limit ? new ContactSearchCursor(rows[^1].Key, rows[^1].Id) : null;
-        return new ContactPage(page, next);
+    public async Task<IReadOnlyList<ContactId>> ListMergedIntoAsync(TicketScope scope, ContactId target, int limit, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        RequireId(target);
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, ContactDelete.MaximumCascade);
+        await using var command = source.CreateCommand($"""
+            SELECT contact_id FROM tf_contacts
+            WHERE merged_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@target) AND merged_into=@target AND {ScopeWhere}
+            ORDER BY contact_id LIMIT @limit
+            """);
+        AddScope(command, scope);
+        AddText(command, "target", target.Value);
+        command.Parameters.AddWithValue("limit", limit);
+        var ids = new List<ContactId>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            ids.Add(Decode(() => new ContactId(reader.GetString(0)), "tombstone"));
+        return ids;
     }
 
     public async Task<ContactMergeRecord?> GetMergeAsync(TicketScope scope, Guid mergeId, CancellationToken cancellationToken = default)
@@ -169,13 +243,9 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
         ArgumentOutOfRangeException.ThrowIfNegative(afterSequence);
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IContactStore.MaximumChangesPerRead);
-        await using var command = source.CreateCommand($"""
-            SELECT sequence, event_id, kind, contact_id, related_id, merge_id, occurred_at, format_version FROM tf_contact_changes
-            WHERE scope_key={ScopeKey} AND {ScopeWhere} AND sequence > @after ORDER BY sequence LIMIT @limit
-            """);
-        AddScope(command, scope);
-        command.Parameters.AddWithValue("after", afterSequence);
-        command.Parameters.AddWithValue("limit", limit);
+        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = ReadChangesCommand(scope, afterSequence, limit);
+        command.Connection = connection;
         var changes = new List<ContactChange>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -188,6 +258,19 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
                     reader.IsDBNull(4) ? null : new ContactId(reader.GetString(4)), reader.IsDBNull(5) ? null : reader.GetGuid(5)));
             }, "change"));
         return changes;
+    }
+
+    /// <summary>The outbox read statement (exposed internally so tests can EXPLAIN the exact SQL).</summary>
+    internal static NpgsqlCommand ReadChangesCommand(TicketScope scope, long afterSequence, int limit)
+    {
+        var command = new NpgsqlCommand($"""
+            SELECT sequence, event_id, kind, contact_id, related_id, merge_id, occurred_at, format_version FROM tf_contact_changes
+            WHERE scope_key={ScopeKey} AND {ScopeWhere} AND sequence > @after ORDER BY sequence LIMIT @limit
+            """);
+        AddScope(command, scope);
+        command.Parameters.AddWithValue("after", afterSequence);
+        command.Parameters.AddWithValue("limit", limit);
+        return command;
     }
 
     public async Task RecordAsync(ContactAuditEvent auditEvent, CancellationToken cancellationToken = default)

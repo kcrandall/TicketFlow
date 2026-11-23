@@ -29,7 +29,8 @@ public sealed class EnvelopeFlowRoundTripTests
         var email = fixture.Email.Sent.Single();
         Assert.AreEqual("support@acme.example", email.From.Address);
         Assert.AreEqual("ada@example.com", email.To.Single().Address);
-        Assert.AreEqual("Re: Order 42", email.Subject);
+        Assert.AreEqual($"Re: Order 42 [Ticket #{conversation.Value}]", email.Subject);
+        Assert.AreEqual(conversation.Value, email.Headers.Single(header => header.Name == ChannelTicketTag.ConversationHeaderName).Value);
         Assert.AreEqual("It ships today.", email.TextBody);
         Assert.AreEqual("<m1@mail.example>", email.Headers.Single(header => header.Name == "In-Reply-To").Value);
         Assert.AreEqual("<m1@mail.example>", email.Headers.Single(header => header.Name == "References").Value);
@@ -38,16 +39,22 @@ public sealed class EnvelopeFlowRoundTripTests
         Assert.AreEqual(MessageDeliveryState.Sent, sent.Delivery.State);
         Assert.AreEqual("<out-1@ticketflow.example>", sent.ExternalId);
 
-        // The customer answers our Message-Id; the second reply carries the whole chain.
+        // The customer answers our Message-Id; the second reply carries the whole chain without duplicating the ticket tag.
         await fixture.Handler.HandleAsync(fixture.Message("mailgun", "acct", "<m2@mail.example>", "ada@example.com", "support@acme.example", "Thanks!",
-            inReplyTo: "<out-1@ticketflow.example>", subject: "Re: Order 42"));
+            inReplyTo: "<out-1@ticketflow.example>", subject: email.Subject));
         Assert.AreEqual(3, (await fixture.MessagesAsync(conversation)).Count);
+
+        // Even if a client strips In-Reply-To/References, the [Ticket #<id>] subject tag keeps the reply in the same thread.
+        await fixture.Handler.HandleAsync(fixture.Message("mailgun", "acct", "<m3@mail.example>", "ada@example.com", "support@acme.example", "One more question",
+            subject: email.Subject));
+        Assert.AreEqual(4, (await fixture.MessagesAsync(conversation)).Count);
+
         await fixture.ReplyAsync(conversation, "You're welcome.");
         await fixture.Host.DispatchAsync();
         var second = fixture.Email.Sent[1];
-        Assert.AreEqual("<m2@mail.example>", second.Headers.Single(header => header.Name == "In-Reply-To").Value);
-        Assert.AreEqual("<m1@mail.example> <out-1@ticketflow.example> <m2@mail.example>", second.Headers.Single(header => header.Name == "References").Value);
-        Assert.AreEqual("Re: Order 42", second.Subject);
+        Assert.AreEqual("<m3@mail.example>", second.Headers.Single(header => header.Name == "In-Reply-To").Value);
+        Assert.AreEqual("<m1@mail.example> <out-1@ticketflow.example> <m2@mail.example> <m3@mail.example>", second.Headers.Single(header => header.Name == "References").Value);
+        Assert.AreEqual($"Re: Order 42 [Ticket #{conversation.Value}]", second.Subject);
 
         await fixture.Handler.HandleAsync(fixture.Receipt("mailgun", "acct", "<out-1@ticketflow.example>", InboundDeliveryState.Delivered));
         await fixture.Handler.HandleAsync(fixture.Receipt("mailgun", "acct", "<out-1@ticketflow.example>", InboundDeliveryState.Accepted));

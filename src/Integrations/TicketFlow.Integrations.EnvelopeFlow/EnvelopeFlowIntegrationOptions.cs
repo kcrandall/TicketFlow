@@ -44,6 +44,9 @@ public sealed class EnvelopeFlowIntegrationOptions
     /// <summary>Email subject used when the conversation has none (a <c>Re: </c> prefix is added).</summary>
     public string DefaultEmailSubject { get; set; } = "Your conversation";
 
+    /// <summary>Appends <c>[Ticket #&lt;conversationId&gt;]</c> to outbound email subjects and emits <c>X-TicketFlow-Conversation</c> (default true).</summary>
+    public bool IncludeTicketTagInEmailSubject { get; set; } = true;
+
     /// <summary>Quote the customer's last WhatsApp message in replies (default false).</summary>
     public bool QuoteWhatsAppReplies { get; set; }
 

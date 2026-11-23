@@ -173,4 +173,31 @@ public sealed class InboundPipelineTests
         Assert.AreEqual(now, state.LastIncomingAt);
         Assert.AreEqual("new@x", state.LastIncomingExternalId);
     }
+
+    [TestMethod]
+    public async Task EmailRepliesFallBackToSubjectTicketTagAndEnforceContactAndClosedBoundaries()
+    {
+        await using var host = await HostAsync(EmailChannel());
+        var first = Recorded(await host.Pipeline.ReceiveAsync(host.Worker, host.Email("<root@x>", subject: "Order 42")));
+        var taggedSubject = ChannelTicketTag.FormatSubject("Order 42", first.Conversation, includeReplyPrefix: true);
+        Assert.AreEqual($"Re: Order 42 [Ticket #{first.Conversation.Value}]", taggedSubject);
+
+        // No In-Reply-To / References headers: correlates by [Ticket #<id>] for the same contact.
+        var byTag = Recorded(await host.Pipeline.ReceiveAsync(host.Worker, host.Email("<reply-no-headers@x>", subject: taggedSubject)));
+        Assert.AreEqual(first.Conversation, byTag.Conversation);
+        Assert.IsFalse(byTag.StartedConversation);
+        Assert.AreEqual("Order 42", (await host.States.GetAsync(host.Scope, first.Conversation))!.State.Subject);
+
+        // Another contact cannot inject into the conversation by copying the subject ticket tag.
+        var spoofed = Recorded(await host.Pipeline.ReceiveAsync(host.Worker, host.Email("<spoof@x>", from: "mallory@example.com", subject: taggedSubject)));
+        Assert.AreNotEqual(first.Conversation, spoofed.Conversation);
+        Assert.IsTrue(spoofed.StartedConversation);
+        Assert.AreEqual(2, (await MessagesAsync(host, first.Conversation)).Count);
+
+        // Closed conversations are never reopened via subject tag either.
+        Assert.IsInstanceOfType<ConversationApplied>((await host.Conversations.ChangeStatusAsync(host.Owner, first.Conversation, ConversationStatus.Closed)).Value);
+        var afterClose = Recorded(await host.Pipeline.ReceiveAsync(host.Worker, host.Email("<after-close@x>", subject: taggedSubject)));
+        Assert.AreNotEqual(first.Conversation, afterClose.Conversation);
+        Assert.IsTrue(afterClose.StartedConversation);
+    }
 }

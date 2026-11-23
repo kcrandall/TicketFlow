@@ -27,6 +27,13 @@ public sealed class ChannelsOptions
     /// <summary>References sent with a reply (root plus the newest; 1-32, default 20).</summary>
     public int MaximumReplyReferences { get; set; } = 20;
 
+    /// <summary>
+    /// Allows inbound messages without matching <c>In-Reply-To</c>/<c>References</c> headers to correlate by an embedded
+    /// <c>[Ticket #&lt;conversationId&gt;]</c> subject tag when the conversation is in the same inbox, belongs to the same contact,
+    /// and is not closed (default true).
+    /// </summary>
+    public bool EnableSubjectTicketTagCorrelation { get; set; } = true;
+
     internal void Validate()
     {
         if (MaximumSendAttempts is < 1 or > 50 || !Enum.IsDefined(ClaimedIdentityMatching) || MaximumReplyReferences is < 1 or > 32

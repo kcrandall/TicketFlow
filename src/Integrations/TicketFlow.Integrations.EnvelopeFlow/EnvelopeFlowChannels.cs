@@ -65,6 +65,11 @@ public sealed class EnvelopeFlowEmailChannel(IEmailTransport transport, IEnvelop
         var references = message.Thread.References.Append(message.Thread.InReplyTo).OfType<string>().Distinct(StringComparer.Ordinal).Select(Bracket).ToList();
         if (references.Count > 0)
             headers.Add(new EmailHeader("References", string.Join(' ', references)));
+        if (options.IncludeTicketTagInEmailSubject)
+            headers.Add(new EmailHeader(ChannelTicketTag.ConversationHeaderName, message.Conversation.Value));
+        var subject = options.IncludeTicketTagInEmailSubject
+            ? ChannelTicketTag.FormatSubject(message.Thread.Subject, message.Conversation, includeReplyPrefix: true, fallbackSubject: options.DefaultEmailSubject)
+            : "Re: " + (message.Thread.Subject ?? options.DefaultEmailSubject);
         EmailMessage email;
         try
         {
@@ -73,7 +78,7 @@ public sealed class EnvelopeFlowEmailChannel(IEmailTransport transport, IEnvelop
                 From = new EmailAddress(sender.FromAddress, sender.FromDisplayName),
                 To = [new EmailAddress(message.Recipient.Value)],
                 ReplyTo = sender.ReplyToAddress is null ? [] : [new EmailAddress(sender.ReplyToAddress)],
-                Subject = "Re: " + (message.Thread.Subject ?? options.DefaultEmailSubject),
+                Subject = subject,
                 TextBody = message.ContentType == MessageContentType.Html ? null : message.Body,
                 HtmlBody = message.ContentType == MessageContentType.Html ? message.Body : null,
                 Headers = headers,

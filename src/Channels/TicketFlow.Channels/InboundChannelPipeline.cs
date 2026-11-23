@@ -200,7 +200,7 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
         return new InboundRecorded(applied.Conversation, incoming.Id, started, applied.Replayed);
     }
 
-    /// <summary>Reference chain first (In-Reply-To, then References newest first), then the channel thread; same contact, not closed.</summary>
+    /// <summary>Reference chain first (In-Reply-To, then References newest first), then channel thread, then subject ticket tag; same contact, not closed.</summary>
     private async Task<ConversationId?> CorrelateAsync(PrincipalRef actor, TicketScope scope, InboxId inbox, ContactId contact, InboundChannelMessage message, CancellationToken cancellationToken)
     {
         List<string>? references = null;
@@ -231,42 +231,58 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
             && stored.Conversation.Contact == contact && stored.Conversation.Status.Value is not ClosedStatus)
             return referenced;
 
-        if (message.ExternalThreadId is not { } threadId)
-            return null;
-        ChannelThreadRef thread;
-        try
+        if (message.ExternalThreadId is { } threadId)
         {
-            thread = new ChannelThreadRef(message.Channel.Value, threadId);
-        }
-        catch (ArgumentException)
-        {
-            return null;
-        }
-        // Per-contact lookup first: a shared thread (a Slack thread with several speakers) keeps one conversation per contact.
-        var candidates = await states.FindByThreadAsync(scope, inbox, message.Channel, threadId, contact, cancellationToken).ConfigureAwait(false);
-        if (candidates.Count > 0)
-        {
-            StoredConversation? newest = null;
-            if (candidates.Count == 1)
+            ChannelThreadRef thread;
+            try
             {
-                if (await conversationStore.GetAsync(scope, candidates[0], cancellationToken).ConfigureAwait(false) is { } owned
-                    && owned.Conversation.Contact == contact && owned.Conversation.Status.Value is not ClosedStatus)
-                    newest = owned;
+                thread = new ChannelThreadRef(message.Channel.Value, threadId);
             }
-            else
+            catch (ArgumentException)
             {
-                var loaded = await conversationStore.GetManyAsync(scope, candidates, cancellationToken).ConfigureAwait(false);
-                for (var i = 0; i < candidates.Count; i++)
-                    if (loaded.TryGetValue(candidates[i], out var owned)
-                        && owned.Conversation.Contact == contact && owned.Conversation.Status.Value is not ClosedStatus
-                        && (newest is null || owned.Conversation.CreatedAt > newest.Conversation.CreatedAt))
+                return await CorrelateBySubjectTagAsync(scope, inbox, contact, message, cancellationToken).ConfigureAwait(false);
+            }
+            // Per-contact lookup first: a shared thread (a Slack thread with several speakers) keeps one conversation per contact.
+            var candidates = await states.FindByThreadAsync(scope, inbox, message.Channel, threadId, contact, cancellationToken).ConfigureAwait(false);
+            if (candidates.Count > 0)
+            {
+                StoredConversation? newest = null;
+                if (candidates.Count == 1)
+                {
+                    if (await conversationStore.GetAsync(scope, candidates[0], cancellationToken).ConfigureAwait(false) is { } owned
+                        && owned.Conversation.Contact == contact && owned.Conversation.Status.Value is not ClosedStatus)
                         newest = owned;
+                }
+                else
+                {
+                    var loaded = await conversationStore.GetManyAsync(scope, candidates, cancellationToken).ConfigureAwait(false);
+                    for (var i = 0; i < candidates.Count; i++)
+                        if (loaded.TryGetValue(candidates[i], out var owned)
+                            && owned.Conversation.Contact == contact && owned.Conversation.Status.Value is not ClosedStatus
+                            && (newest is null || owned.Conversation.CreatedAt > newest.Conversation.CreatedAt))
+                            newest = owned;
+                }
+                if (newest is not null)
+                    return newest.Id;
             }
-            if (newest is not null)
-                return newest.Id;
+            var found = await conversations.FindByThreadAsync(actor, inbox, thread, cancellationToken).ConfigureAwait(false);
+            if (found.Value is ConversationView view && view.Contact == contact)
+                return view.Id;
         }
-        var found = await conversations.FindByThreadAsync(actor, inbox, thread, cancellationToken).ConfigureAwait(false);
-        return found.Value is ConversationView view && view.Contact == contact ? view.Id : null;
+
+        return await CorrelateBySubjectTagAsync(scope, inbox, contact, message, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<ConversationId?> CorrelateBySubjectTagAsync(TicketScope scope, InboxId inbox, ContactId contact, InboundChannelMessage message, CancellationToken cancellationToken)
+    {
+        if (!options.EnableSubjectTicketTagCorrelation || !ChannelTicketTag.TryExtract(message.Subject, out var taggedId))
+            return null;
+        if (await conversationStore.GetAsync(scope, taggedId, cancellationToken).ConfigureAwait(false) is { } tagged
+            && tagged.Conversation.Inbox == inbox
+            && tagged.Conversation.Contact == contact
+            && tagged.Conversation.Status.Value is not ClosedStatus)
+            return taggedId;
+        return null;
     }
 
     /// <summary>
@@ -368,12 +384,12 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
         }
     }
 
-    /// <summary>The thread subject without leading reply/forward prefixes.</summary>
+    /// <summary>The thread subject without leading reply/forward prefixes or embedded ticket tags.</summary>
     internal static string? ThreadSubject(string? subject)
     {
         if (string.IsNullOrWhiteSpace(subject))
             return null;
-        var value = subject.Trim();
+        var value = ChannelTicketTag.Strip(subject);
         while (true)
         {
             var stripped = false;

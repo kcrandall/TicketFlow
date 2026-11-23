@@ -157,9 +157,12 @@ public sealed class IdentityFlowVisitorTokenValidator : IVisitorTokenValidator, 
                 var before = await configuration.GetConfigurationAsync(cancellationToken).ConfigureAwait(false);
                 configuration.RequestRefresh();
                 var current = await configuration.GetConfigurationAsync(cancellationToken).ConfigureAwait(false);
-                for (var attempt = 0; ReferenceEquals(current, before) && attempt < 12; attempt++)
+                // ConfigurationManager enforces a minimum 1-second cooldown after its initial fetch before
+                // honoring RequestRefresh(), so poll up to ~2 seconds while returning immediately once refreshed.
+                for (var attempt = 0; ReferenceEquals(current, before) && attempt < 22; attempt++)
                 {
                     await Task.Delay(attempt < 2 ? 10 : attempt < 4 ? 50 : 100, cancellationToken).ConfigureAwait(false);
+                    configuration.RequestRefresh();
                     current = await configuration.GetConfigurationAsync(cancellationToken).ConfigureAwait(false);
                 }
                 if (!ReferenceEquals(current, before))

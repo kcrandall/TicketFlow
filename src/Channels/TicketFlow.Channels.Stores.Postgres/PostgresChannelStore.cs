@@ -139,7 +139,7 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         return endpoints;
     }
 
-    public async Task<ChannelWriteResult<StoredChannelEndpoint>> CreateAsync(TicketScope scope, ChannelEndpoint endpoint, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredChannelEndpoint, ChannelWriteRejection>> CreateAsync(TicketScope scope, ChannelEndpoint endpoint, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(endpoint);
@@ -162,20 +162,20 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
             }
             catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == "tf_channel_endpoints_address")
             {
-                return new ChannelWriteRejected(ChannelWriteRejection.AddressTaken);
+                return new StoreRejected<ChannelWriteRejection>(ChannelWriteRejection.AddressTaken);
             }
         }
         if (insertedRevision is { } rev)
         {
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new ChannelWriteApplied<StoredChannelEndpoint>(new StoredChannelEndpoint(scope, endpoint, rev));
+            return new StoreApplied<StoredChannelEndpoint>(new StoredChannelEndpoint(scope, endpoint, rev));
         }
         return existingRevision is { } existing
-            ? new ChannelWriteConflict(existing)
-            : new ChannelWriteRejected(ChannelWriteRejection.CapacityExceeded);
+            ? new StoreConflict(existing)
+            : new StoreRejected<ChannelWriteRejection>(ChannelWriteRejection.CapacityExceeded);
     }
 
-    public async Task<ChannelWriteResult<StoredChannelEndpoint>> UpdateAsync(TicketScope scope, ChannelEndpoint endpoint, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredChannelEndpoint, ChannelWriteRejection>> UpdateAsync(TicketScope scope, ChannelEndpoint endpoint, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(endpoint);
@@ -192,17 +192,17 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         try
         {
             if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                return new ChannelWriteApplied<StoredChannelEndpoint>(new StoredChannelEndpoint(scope, endpoint, revision));
+                return new StoreApplied<StoredChannelEndpoint>(new StoredChannelEndpoint(scope, endpoint, revision));
         }
         catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == "tf_channel_endpoints_address")
         {
-            return new ChannelWriteRejected(ChannelWriteRejection.AddressTaken);
+            return new StoreRejected<ChannelWriteRejection>(ChannelWriteRejection.AddressTaken);
         }
         var current = await LoadEndpointAsync(connection, null, scope, endpoint.Kind, endpoint.ConfigurationId, cancellationToken).ConfigureAwait(false);
-        return current is null ? ChannelWriteNotFound.Instance : new ChannelWriteConflict(current.Revision);
+        return current is null ? StoreNotFound.Instance : new StoreConflict(current.Revision);
     }
 
-    public async Task<ChannelWriteResult<StoredChannelEndpoint>> DeleteAsync(TicketScope scope, ChannelKind kind, string configurationId, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredChannelEndpoint, ChannelWriteRejection>> DeleteAsync(TicketScope scope, ChannelKind kind, string configurationId, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(configurationId);
@@ -219,9 +219,9 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         AddInt64(command, "revision", expectedRevision);
         await using (var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false))
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new ChannelWriteApplied<StoredChannelEndpoint>(ReadEndpoint(reader, scope));
+                return new StoreApplied<StoredChannelEndpoint>(ReadEndpoint(reader, scope));
         var current = await LoadEndpointAsync(connection, null, scope, kind, configurationId, cancellationToken).ConfigureAwait(false);
-        return current is null ? ChannelWriteNotFound.Instance : new ChannelWriteConflict(current.Revision);
+        return current is null ? StoreNotFound.Instance : new StoreConflict(current.Revision);
     }
 
     private static async Task<StoredChannelEndpoint?> LoadEndpointAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, TicketScope scope, ChannelKind kind,
@@ -278,7 +278,7 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadState(reader, scope) : null;
     }
 
-    public async Task<ChannelWriteResult<StoredChannelConversationState>> WriteAsync(TicketScope scope, ChannelConversationState state, long? expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredChannelConversationState, ChannelWriteRejection>> WriteAsync(TicketScope scope, ChannelConversationState state, long? expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(state);
@@ -314,9 +314,9 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         if (expectedRevision is { } expected)
             AddInt64(command, "revision", expected);
         if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-            return new ChannelWriteApplied<StoredChannelConversationState>(new StoredChannelConversationState(scope, state, revision));
+            return new StoreApplied<StoredChannelConversationState>(new StoredChannelConversationState(scope, state, revision));
         var current = await LoadStateAsync(connection, scope, state.Conversation, cancellationToken).ConfigureAwait(false);
-        return current is null ? ChannelWriteNotFound.Instance : new ChannelWriteConflict(current.Revision);
+        return current is null ? StoreNotFound.Instance : new StoreConflict(current.Revision);
     }
 
     public async Task<IReadOnlyList<ConversationId>> FindByThreadAsync(TicketScope scope, InboxId inbox, ChannelKind channel, string externalThreadId, ContactId contact,
@@ -536,7 +536,7 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadDispatch(reader, scope) : null;
     }
 
-    public async Task<ChannelWriteResult<StoredChannelDispatch>> WriteAsync(TicketScope scope, ChannelDispatch dispatch, long? expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredChannelDispatch, ChannelWriteRejection>> WriteAsync(TicketScope scope, ChannelDispatch dispatch, long? expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(dispatch);
@@ -571,9 +571,9 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         if (expectedRevision is { } expected)
             AddInt64(command, "revision", expected);
         if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-            return new ChannelWriteApplied<StoredChannelDispatch>(new StoredChannelDispatch(scope, dispatch, revision));
+            return new StoreApplied<StoredChannelDispatch>(new StoredChannelDispatch(scope, dispatch, revision));
         var current = await LoadDispatchAsync(connection, scope, dispatch.Conversation, dispatch.Message, cancellationToken).ConfigureAwait(false);
-        return current is null ? ChannelWriteNotFound.Instance : new ChannelWriteConflict(current.Revision);
+        return current is null ? StoreNotFound.Instance : new StoreConflict(current.Revision);
     }
 
     private static async Task<StoredChannelDispatch?> LoadDispatchAsync(NpgsqlConnection connection, TicketScope scope, ConversationId conversation, MessageId message, CancellationToken cancellationToken)

@@ -651,7 +651,7 @@ public sealed partial class ConversationService : IConversationService
 
     private static TicketScope RequireActor(PrincipalRef actor)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("An actor is required.", nameof(actor));
         return actor.Scope;
     }

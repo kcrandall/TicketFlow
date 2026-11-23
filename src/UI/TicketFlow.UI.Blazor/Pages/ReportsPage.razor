@@ -101,11 +101,11 @@ else if (overview is not null)
         var query = new ReportQuery(From, To);
         switch (await reporting.GetOverviewAsync(Actor, query, Aborted))
         {
-            case ReportSucceeded<ReportOverview> value:
+            case TicketValue<ReportOverview> value:
                 overview = value.Value;
                 break;
-            case ReportRefused refused:
-                error = UiOutcome.Refused(refused.Reason, refused.Errors);
+            case TicketFailure failure:
+                error = UiOutcome.FromFailure(failure);
                 return;
         }
         var granularity = To - From > TimeSpan.FromDays(120) ? ReportGranularity.Week : ReportGranularity.Day;
@@ -115,9 +115,9 @@ else if (overview is not null)
         var priorityTask = BreakdownAsync(reporting, Actor, query, ReportDimension.Priority, value => string.IsNullOrEmpty(value) ? "No priority" : char.ToUpperInvariant(value[0]) + value[1..], Aborted);
         await Task.WhenAll(trendTask, boardTask, channelTask, priorityTask);
 
-        if (await trendTask is ReportSucceeded<ReportTrend> series)
+        if (await trendTask is TicketValue<ReportTrend> series)
             trend = UiCharts.Daily(series.Value, [(ReportMetric.ConversationCreated, "Created"), (ReportMetric.ConversationResolved, "Resolved"), (ReportMetric.MessageReceived, "Messages received")]);
-        if (await boardTask is ReportSucceeded<ReportLeaderboard> board)
+        if (await boardTask is TicketValue<ReportLeaderboard> board)
             leaderboard = [.. board.Value.Rows];
         byChannel = await channelTask;
         byPriority = await priorityTask;
@@ -126,7 +126,7 @@ else if (overview is not null)
 
     private static async Task<List<BarList.Item>> BreakdownAsync(IReportingService reporting, PrincipalRef actor, ReportQuery query, ReportDimension dimension, Func<string, string> label, CancellationToken cancellationToken)
     {
-        if (await reporting.GetTrendsAsync(actor, new ReportTrendQuery(query, [ReportMetric.ConversationCreated], ReportGranularity.Month, dimension), cancellationToken) is not ReportSucceeded<ReportTrend> trend)
+        if (await reporting.GetTrendsAsync(actor, new ReportTrendQuery(query, [ReportMetric.ConversationCreated], ReportGranularity.Month, dimension), cancellationToken) is not TicketValue<ReportTrend> trend)
             return [];
         return [.. trend.Value.Points.GroupBy(point => point.Group ?? "").Select(group => (group.Key, Count: group.Sum(point => point.Count))).OrderByDescending(pair => pair.Count).Take(6)
             .Select((pair, index) => new BarList.Item(label(pair.Key), pair.Count, pair.Count.ToString(CultureInfo.InvariantCulture), $"var(--chart-{index % 5 + 1})"))];

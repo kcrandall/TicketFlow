@@ -149,7 +149,7 @@ public sealed class AssistService : IAssistService
 
     private async Task<AssistResult<T>> RunAsync<T>(PrincipalRef actor, ConversationId conversation, AssistContextRequest contextRequest, Call<T> call, CancellationToken cancellationToken)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("An actor is required.", nameof(actor));
         var built = await contextBuilder.BuildAsync(actor, conversation, contextRequest, cancellationToken).ConfigureAwait(false);
         var context = built switch

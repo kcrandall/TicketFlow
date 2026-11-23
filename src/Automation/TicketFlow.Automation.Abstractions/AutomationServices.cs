@@ -3,44 +3,6 @@ using TicketFlow.Core;
 
 namespace TicketFlow.Automation;
 
-public sealed record AutomationValue<T>(T Value);
-
-/// <summary>The rule, macro, canned response or conversation does not exist in the actor's scope (or is not visible to the actor).</summary>
-public sealed record AutomationNotFound
-{
-    private AutomationNotFound()
-    {
-    }
-
-    public static AutomationNotFound Instance { get; } = new();
-}
-
-/// <summary>The expected revision did not match.</summary>
-public sealed record AutomationConflict(long CurrentRevision);
-
-public enum AutomationRefusal
-{
-    /// <summary>Access denied the operation.</summary>
-    Forbidden = 1,
-
-    /// <summary>The input is invalid; see <see cref="AutomationRefused.Errors"/>.</summary>
-    Invalid = 2,
-
-    /// <summary>A store limit or uniqueness rule refused the write.</summary>
-    Rejected = 3,
-}
-
-/// <summary>The operation was refused. <see cref="Errors"/> are non-sensitive messages.</summary>
-public sealed record AutomationRefused(AutomationRefusal Reason, IReadOnlyList<string> Errors)
-{
-    public static AutomationRefused Forbidden { get; } = new(AutomationRefusal.Forbidden, []);
-
-    public static AutomationRefused Invalid(string error) => new(AutomationRefusal.Invalid, [error]);
-}
-
-/// <summary>Outcome of an automation service operation. Switch over every case without a discard arm.</summary>
-public union AutomationResult<T>(AutomationValue<T>, AutomationNotFound, AutomationConflict, AutomationRefused);
-
 /// <summary>How a rule related to an event in a dry run. Never renumber.</summary>
 public enum AutomationMatch
 {
@@ -137,21 +99,21 @@ public sealed record AutomationReplayResult(ConversationId Conversation, IReadOn
 /// </summary>
 public interface IAutomationRuleService
 {
-    Task<AutomationResult<StoredAutomationRule>> GetAsync(PrincipalRef actor, AutomationRuleId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredAutomationRule>> GetAsync(PrincipalRef actor, AutomationRuleId id, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<IReadOnlyList<StoredAutomationRule>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredAutomationRule>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<StoredAutomationRule>> CreateAsync(PrincipalRef actor, AutomationRule rule, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredAutomationRule>> CreateAsync(PrincipalRef actor, AutomationRule rule, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<StoredAutomationRule>> UpdateAsync(PrincipalRef actor, AutomationRule rule, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredAutomationRule>> UpdateAsync(PrincipalRef actor, AutomationRule rule, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<StoredAutomationRule>> DeleteAsync(PrincipalRef actor, AutomationRuleId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredAutomationRule>> DeleteAsync(PrincipalRef actor, AutomationRuleId id, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<AutomationDryRunResult>> DryRunAsync(PrincipalRef actor, AutomationDryRunRequest request, CancellationToken cancellationToken = default);
+    Task<TicketResult<AutomationDryRunResult>> DryRunAsync(PrincipalRef actor, AutomationDryRunRequest request, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<AutomationReplayResult>> ReplayAsync(PrincipalRef actor, AutomationReplayRequest request, CancellationToken cancellationToken = default);
+    Task<TicketResult<AutomationReplayResult>> ReplayAsync(PrincipalRef actor, AutomationReplayRequest request, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<AutomationExecutionPage>> ListExecutionsAsync(PrincipalRef actor, AutomationExecutionQuery query, CancellationToken cancellationToken = default);
+    Task<TicketResult<AutomationExecutionPage>> ListExecutionsAsync(PrincipalRef actor, AutomationExecutionQuery query, CancellationToken cancellationToken = default);
 }
 
 /// <summary>The result of a macro run: one outcome per action, in order; execution stops at the first refused or failed action.</summary>
@@ -165,17 +127,17 @@ public sealed record MacroRunResult(MacroId Macro, ConversationId Conversation, 
 /// </summary>
 public interface IMacroService
 {
-    Task<AutomationResult<StoredMacro>> GetAsync(PrincipalRef actor, MacroId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredMacro>> GetAsync(PrincipalRef actor, MacroId id, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<IReadOnlyList<StoredMacro>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredMacro>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<StoredMacro>> CreateAsync(PrincipalRef actor, Macro macro, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredMacro>> CreateAsync(PrincipalRef actor, Macro macro, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<StoredMacro>> UpdateAsync(PrincipalRef actor, Macro macro, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredMacro>> UpdateAsync(PrincipalRef actor, Macro macro, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<StoredMacro>> DeleteAsync(PrincipalRef actor, MacroId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredMacro>> DeleteAsync(PrincipalRef actor, MacroId id, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<MacroRunResult>> RunAsync(PrincipalRef actor, MacroId id, ConversationId conversation, CancellationToken cancellationToken = default);
+    Task<TicketResult<MacroRunResult>> RunAsync(PrincipalRef actor, MacroId id, ConversationId conversation, CancellationToken cancellationToken = default);
 }
 
 /// <summary>A canned response rendered for one conversation and principal. Masked values were never substituted.</summary>
@@ -191,18 +153,18 @@ public sealed record RenderedCannedResponse(CannedResponseId Response, string Lo
 /// </summary>
 public interface ICannedResponseService
 {
-    Task<AutomationResult<StoredCannedResponse>> GetAsync(PrincipalRef actor, CannedResponseId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredCannedResponse>> GetAsync(PrincipalRef actor, CannedResponseId id, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<StoredCannedResponse>> FindByShortcutAsync(PrincipalRef actor, string shortcut, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredCannedResponse>> FindByShortcutAsync(PrincipalRef actor, string shortcut, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<CannedResponsePage>> ListAsync(PrincipalRef actor, CannedResponseQuery query, CancellationToken cancellationToken = default);
+    Task<TicketResult<CannedResponsePage>> ListAsync(PrincipalRef actor, CannedResponseQuery query, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<StoredCannedResponse>> CreateAsync(PrincipalRef actor, CannedResponse response, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredCannedResponse>> CreateAsync(PrincipalRef actor, CannedResponse response, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<StoredCannedResponse>> UpdateAsync(PrincipalRef actor, CannedResponse response, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredCannedResponse>> UpdateAsync(PrincipalRef actor, CannedResponse response, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<StoredCannedResponse>> DeleteAsync(PrincipalRef actor, CannedResponseId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredCannedResponse>> DeleteAsync(PrincipalRef actor, CannedResponseId id, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AutomationResult<RenderedCannedResponse>> RenderAsync(PrincipalRef actor, CannedResponseId id, ConversationId conversation, string? locale = null,
+    Task<TicketResult<RenderedCannedResponse>> RenderAsync(PrincipalRef actor, CannedResponseId id, ConversationId conversation, string? locale = null,
         CancellationToken cancellationToken = default);
 }

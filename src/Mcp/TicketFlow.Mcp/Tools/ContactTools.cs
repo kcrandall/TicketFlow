@@ -79,7 +79,7 @@ public sealed class ContactTools(TicketFlowToolContext context)
         {
             var id = new ContactId(contactId);
             var read = await Service.GetAsync(principal, id, cancellationToken);
-            if (read is not ContactApplied<ContactView> applied)
+            if (read is not TicketValue<ContactView> applied)
                 return Map(read, Contact);
             var current = applied.Value;
             var profile = new ContactProfile(displayName ?? current.Profile.DisplayName, current.Profile.AvatarRef, locale ?? current.Profile.Locale,
@@ -187,9 +187,9 @@ public sealed class ContactTools(TicketFlowToolContext context)
     private static LinkSuggestionOutput Suggestion(ContactLinkSuggestionView view) => new(view.Id, view.Revision, view.Candidate.Value, view.Account.Value,
         TicketFlowToolJson.Token(view.EvidenceKind), view.EvidenceVerified, TicketFlowToolJson.Token(view.Status), view.CreatedAt, view.UpdatedAt, view.Merge);
 
-    private static object Map<T>(ContactResult<T> result, Func<T, object> success) => result switch
+    private static object Map<T>(TicketResult<T, ContactRefused> result, Func<T, object> success) => result switch
     {
-        ContactApplied<T> applied => success(applied.Value),
+        TicketValue<T> applied => success(applied.Value),
         ContactRefused refused => ToolViews.Refused(refused),
     };
 }

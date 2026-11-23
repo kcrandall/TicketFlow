@@ -97,15 +97,15 @@ public sealed class ChannelHost : IAsyncDisposable
         await GrantAsync(new UserId("viewer"), BuiltInRoles.Viewer);
         var worker = new AccessRole(new RoleId("channel-worker"), "Channel worker",
             [ConversationPermissions.Create, ConversationPermissions.Ingest, ContactPermissions.Read, ContactPermissions.Create]);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await Services.GetRequiredService<IAccessRoleStore>().CreateAsync(Scope, worker)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await Services.GetRequiredService<IAccessRoleStore>().CreateAsync(Scope, worker)).Value);
         await GrantAsync(new ApiClientId("channels"), worker);
 
         var inboxes = Services.GetRequiredService<IInboxStore>();
         foreach (var (inbox, kind, configuration) in new[] { ("email-inbox", "email", "cfg-email"), ("wa-inbox", "whatsapp", "cfg-wa"), ("sms-inbox", "sms", "cfg-sms") })
         {
-            Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await inboxes.CreateAsync(Scope,
+            Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await inboxes.CreateAsync(Scope,
                 new Inbox(new InboxId(inbox), inbox, new ChannelBinding(new ChannelKind(kind), configuration)))).Value);
-            Assert.IsInstanceOfType<ChannelValue<StoredChannelEndpoint>>((await Endpoints.CreateAsync(Owner,
+            Assert.IsInstanceOfType<TicketValue<StoredChannelEndpoint>>((await Endpoints.CreateAsync(Owner,
                 new ChannelEndpoint(new ChannelKind(kind), configuration, new InboxId(inbox), $"{kind}:{configuration}"))).Value);
         }
         await Outbox.RegisterAsync();
@@ -115,7 +115,7 @@ public sealed class ChannelHost : IAsyncDisposable
     {
         var grant = new AccessGrant(new GrantId($"channel-seed-{nextGrant++:D4}"), AccessPartition.From(Scope), subject, role.Id,
             grantScope ?? new WorkspaceGrantScope(Scope.WorkspaceId), GrantEffect.Allow, null);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await Services.GetRequiredService<IAccessGrantStore>().CreateAsync(grant)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await Services.GetRequiredService<IAccessGrantStore>().CreateAsync(grant)).Value);
     }
 
     /// <summary>
@@ -147,7 +147,7 @@ public sealed class ChannelHost : IAsyncDisposable
         new(Scope, new ChannelKind("whatsapp"), "cfg-wa", messageId, new ChannelSenderEvidence(ContactIdentityKind.WhatsApp, from, verified: true),
             receivedAt ?? Clock.GetUtcNow(), bodyText: body, externalThreadId: from);
 
-    public static T Is<T>(object? value) where T : class
+    public static T Is<T>(object? value)
     {
         Assert.IsInstanceOfType<T>(value);
         return (T)value!;

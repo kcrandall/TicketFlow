@@ -102,7 +102,7 @@ public sealed partial class PostgresRoutingStore
         return await ReadAgentsAsync(command, scope, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RoutingWriteResult<StoredAgentProfile>> SaveSettingsAsync(TicketScope scope, AgentRoutingSettings settings, long? expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAgentProfile, RoutingWriteRejection>> SaveSettingsAsync(TicketScope scope, AgentRoutingSettings settings, long? expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(settings);
@@ -131,11 +131,11 @@ public sealed partial class PostgresRoutingStore
             if (insertedRevision is { } rev)
             {
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new RoutingWriteApplied<StoredAgentProfile>(new StoredAgentProfile(scope, settings, AgentPresence.Offline(changedAt!.Value), false, rev));
+                return new StoreApplied<StoredAgentProfile>(new StoredAgentProfile(scope, settings, AgentPresence.Offline(changedAt!.Value), false, rev));
             }
             return existingRevision is { } existing
-                ? new RoutingWriteConflict(existing)
-                : new RoutingWriteRejected(RoutingWriteRejection.CapacityExceeded);
+                ? new StoreConflict(existing)
+                : new StoreRejected<RoutingWriteRejection>(RoutingWriteRejection.CapacityExceeded);
         }
         else
         {
@@ -151,15 +151,15 @@ public sealed partial class PostgresRoutingStore
                 AddLong(update, "expected", expectedRevision.Value);
                 await using var reader = await update.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
                 if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                    return new RoutingWriteApplied<StoredAgentProfile>(ReadAgent(reader, scope));
+                    return new StoreApplied<StoredAgentProfile>(ReadAgent(reader, scope));
             }
             return await LoadAgentRevisionAsync(connection, scope, settings.Agent, cancellationToken).ConfigureAwait(false) is { } current
-                ? new RoutingWriteConflict(current)
-                : RoutingWriteNotFound.Instance;
+                ? new StoreConflict(current)
+                : StoreNotFound.Instance;
         }
     }
 
-    public async Task<RoutingWriteResult<StoredAgentProfile>> SetStatusAsync(TicketScope scope, UserId agent, AgentStatus status, TimeSpan presenceTtl, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAgentProfile, RoutingWriteRejection>> SetStatusAsync(TicketScope scope, UserId agent, AgentStatus status, TimeSpan presenceTtl, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireAgent(agent);
@@ -185,11 +185,11 @@ public sealed partial class PostgresRoutingStore
         AddInterval(command, "ttl", presenceTtl);
         await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
-            ? new RoutingWriteApplied<StoredAgentProfile>(ReadAgent(reader, scope))
-            : RoutingWriteNotFound.Instance;
+            ? new StoreApplied<StoredAgentProfile>(ReadAgent(reader, scope))
+            : StoreNotFound.Instance;
     }
 
-    public async Task<RoutingWriteResult<StoredAgentProfile>> HeartbeatAsync(TicketScope scope, UserId agent, TimeSpan presenceTtl, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAgentProfile, RoutingWriteRejection>> HeartbeatAsync(TicketScope scope, UserId agent, TimeSpan presenceTtl, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireAgent(agent);
@@ -208,14 +208,14 @@ public sealed partial class PostgresRoutingStore
             AddInterval(command, "ttl", presenceTtl);
             await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new RoutingWriteApplied<StoredAgentProfile>(ReadAgent(reader, scope));
+                return new StoreApplied<StoredAgentProfile>(ReadAgent(reader, scope));
         }
         return await LoadAgentAsync(connection, null, scope, agent, false, cancellationToken).ConfigureAwait(false) is { } profile
-            ? new RoutingWriteApplied<StoredAgentProfile>(profile)
-            : RoutingWriteNotFound.Instance;
+            ? new StoreApplied<StoredAgentProfile>(profile)
+            : StoreNotFound.Instance;
     }
 
-    public async Task<RoutingWriteResult<StoredAgentProfile>> DeleteAsync(TicketScope scope, UserId agent, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAgentProfile, RoutingWriteRejection>> DeleteAsync(TicketScope scope, UserId agent, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireAgent(agent);
@@ -227,11 +227,11 @@ public sealed partial class PostgresRoutingStore
             AddLong(delete, "expected", expectedRevision);
             await using var reader = await delete.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new RoutingWriteApplied<StoredAgentProfile>(ReadAgent(reader, scope));
+                return new StoreApplied<StoredAgentProfile>(ReadAgent(reader, scope));
         }
         return await LoadAgentRevisionAsync(connection, scope, agent, cancellationToken).ConfigureAwait(false) is { } current
-            ? new RoutingWriteConflict(current)
-            : RoutingWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
     public async Task<IReadOnlyList<AgentPresenceExpired>> ExpirePresenceAsync(int limit, CancellationToken cancellationToken = default)

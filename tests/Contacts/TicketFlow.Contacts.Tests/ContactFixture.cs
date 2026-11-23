@@ -98,13 +98,13 @@ internal sealed class ContactFixture : IDisposable
     public async Task GrantAsync(GrantSubject subject, AccessRole role, GrantEffect effect = GrantEffect.Allow, AccessCondition? condition = null)
     {
         var grant = new AccessGrant(new GrantId($"seed-{nextGrant++:D4}"), AccessPartition.From(Scope), subject, role.Id, new WorkspaceGrantScope(Scope.WorkspaceId), effect, condition);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await Grants.CreateAsync(grant)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await Grants.CreateAsync(grant)).Value);
     }
 
     public async Task<AccessRole> CustomRoleAsync(string id, params Permission[] permissions)
     {
         var role = new AccessRole(new RoleId(id), id, permissions);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
         return role;
     }
 
@@ -116,10 +116,10 @@ internal sealed class ContactFixture : IDisposable
     }
 
     public async Task PolicyAsync(AccessFieldPolicy policy) =>
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessFieldPolicy>>((await Policies.CreateAsync(Scope, policy)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessFieldPolicy>>((await Policies.CreateAsync(Scope, policy)).Value);
 
     public async Task DefineAsync(ContactAttributeDefinition definition) =>
-        Assert.IsInstanceOfType<ContactApplied<StoredContactAttributeDefinition>>((await Definitions.CreateAsync(Owner, definition)).Value);
+        Assert.IsInstanceOfType<TicketValue<StoredContactAttributeDefinition>>((await Definitions.CreateAsync(Owner, definition)).Value);
 
     public static ContactIdentityAddress Email(string value) => ContactIdentityAddress.Parse(ContactIdentityKind.Email, value);
 
@@ -137,15 +137,15 @@ internal sealed class ContactFixture : IDisposable
         return Applied(result);
     }
 
-    public static T Applied<T>(ContactResult<T> result) => result switch
+    public static T Applied<T>(TicketResult<T, ContactRefused> result) => result switch
     {
-        ContactApplied<T> applied => applied.Value,
+        TicketValue<T> applied => applied.Value,
         ContactRefused refused => throw new AssertFailedException($"Expected applied but was refused: {refused.Reason} {string.Join("; ", refused.Errors)}"),
     };
 
-    public static string Describe<T>(ContactResult<T> result) => result switch
+    public static string Describe<T>(TicketResult<T, ContactRefused> result) => result switch
     {
-        ContactApplied<T> => "applied",
+        TicketValue<T> => "applied",
         ContactRefused refused => $"refused:{refused.Reason}" + (refused.CurrentRevision is { } revision ? $":{revision}" : ""),
     };
 

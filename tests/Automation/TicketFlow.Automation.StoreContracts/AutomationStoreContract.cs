@@ -14,12 +14,12 @@ public static class AutomationStoreContract
 {
     public static readonly DateTimeOffset At = TestClock.DefaultStart;
 
-    public static string Describe<T>(AutomationWriteResult<T> result) => result switch
+    public static string Describe<T>(StoreWriteResult<T, AutomationWriteRejection> result) => result switch
     {
-        AutomationWriteApplied<T> => "applied",
-        AutomationWriteNotFound => "not-found",
-        AutomationWriteConflict conflict => $"conflict:{conflict.CurrentRevision}",
-        AutomationWriteRejected rejected => $"rejected:{rejected.Reason}",
+        StoreApplied<T> => "applied",
+        StoreNotFound => "not-found",
+        StoreConflict conflict => $"conflict:{conflict.CurrentRevision}",
+        StoreRejected<AutomationWriteRejection> rejected => $"rejected:{rejected.Reason}",
     };
 
     public static AutomationRule Rule(string id, int priority = 100, string name = "Tag VIP", bool scheduled = false) => new(new AutomationRuleId(id), name,
@@ -44,7 +44,7 @@ public static class AutomationStoreContract
     {
         var scope = TestScopes.Create(workspaceId: "rules-" + Guid.NewGuid().ToString("N")[..8]);
         Assert.AreEqual(0, await primary.GetRuleSetVersionAsync(scope));
-        var created = Assert.IsInstanceOfType<AutomationWriteApplied<StoredAutomationRule>>((await primary.CreateAsync(scope, Rule("b", 10), null)).Value).Value;
+        var created = Assert.IsInstanceOfType<StoreApplied<StoredAutomationRule>>((await primary.CreateAsync(scope, Rule("b", 10), null)).Value).Value;
         Assert.AreEqual(1, created.Revision);
         var afterCreate = await competing.GetRuleSetVersionAsync(scope);
         Assert.IsTrue(afterCreate > 0);
@@ -57,7 +57,7 @@ public static class AutomationStoreContract
         Assert.AreEqual(Rule("b", 10), listed[2].Rule);
 
         var beforeUpdate = await primary.GetRuleSetVersionAsync(scope);
-        var updated = Assert.IsInstanceOfType<AutomationWriteApplied<StoredAutomationRule>>((await competing.UpdateAsync(scope, Rule("b", 1, "Renamed"), 1, null)).Value).Value;
+        var updated = Assert.IsInstanceOfType<StoreApplied<StoredAutomationRule>>((await competing.UpdateAsync(scope, Rule("b", 1, "Renamed"), 1, null)).Value).Value;
         Assert.AreEqual(2, updated.Revision);
         Assert.IsTrue(await primary.GetRuleSetVersionAsync(scope) > beforeUpdate, "Updates move the version.");
         Assert.AreEqual("conflict:2", Describe(await primary.UpdateAsync(scope, Rule("b", 1), 1, null)));
@@ -154,7 +154,7 @@ public static class AutomationStoreContract
         Assert.AreEqual(0, (await competing.FindManyAsync(TestScopes.LevelVariants(scope)[1], new ConversationId("c1"), "evt:1", [new AutomationRuleId("r1")])).Count);
 
         var progress = execution.WithProgress([new AutomationActionApplied([5, 6])]);
-        var updated = Assert.IsInstanceOfType<AutomationWriteApplied<StoredAutomationExecution>>((await competing.UpdateAsync(scope, progress, 1)).Value).Value;
+        var updated = Assert.IsInstanceOfType<StoreApplied<StoredAutomationExecution>>((await competing.UpdateAsync(scope, progress, 1)).Value).Value;
         Assert.AreEqual(2, updated.Revision);
         Assert.AreEqual("conflict:2", Describe(await primary.UpdateAsync(scope, progress, 1)));
         var cause = await primary.FindCauseAsync(scope, new ConversationId("c1"), 6);

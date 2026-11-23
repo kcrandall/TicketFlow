@@ -16,18 +16,16 @@ public sealed class SlaTrackerTests
 
     private static void AdvanceTo(SlaFixture fixture, DateTimeOffset instant) => fixture.Clock.Advance(instant - fixture.Clock.GetUtcNow());
 
-    private static Task<SlaResult<SlaStatusView>> StatusAsync(SlaFixture fixture, PrincipalRef actor, string id) =>
+    private static Task<TicketResult<SlaStatusView>> StatusAsync(SlaFixture fixture, PrincipalRef actor, string id) =>
         fixture.InScopeAsync(services => services.GetRequiredService<ISlaService>().GetStatusAsync(actor, new ConversationId(id)));
 
-    private static Task<SlaResult<SlaRiskPage>> ListAsync(SlaFixture fixture, PrincipalRef actor, SlaRiskQuery query, string? cursor = null) =>
+    private static Task<TicketResult<SlaRiskPage>> ListAsync(SlaFixture fixture, PrincipalRef actor, SlaRiskQuery query, string? cursor = null) =>
         fixture.InScopeAsync(services => services.GetRequiredService<ISlaService>().ListAsync(actor, query, cursor));
 
-    private static T Value<T>(SlaResult<T> result) => result switch
+    private static T Value<T>(TicketResult<T> result) => result switch
     {
-        SlaValue<T> value => value.Value,
-        SlaNotFound => throw new AssertFailedException("Expected a value but was not found."),
-        SlaConflict conflict => throw new AssertFailedException($"Expected a value but was conflict {conflict.CurrentRevision}."),
-        SlaRefused refused => throw new AssertFailedException($"Expected a value but was refused: {refused.Reason}."),
+        TicketValue<T> value => value.Value,
+        TicketFailure failure => throw new AssertFailedException($"Expected a value but was {failure.Kind} {failure.CurrentRevision}."),
     };
 
     private static string[] Ids(SlaRiskPage page) => [.. page.Items.Select(item => item.Conversation.Value)];
@@ -50,8 +48,8 @@ public sealed class SlaTrackerTests
         Assert.AreEqual(Monday(15), firstResponse.DueAt);
         Assert.AreEqual(TimeSpan.FromHours(4), firstResponse.Remaining);
         Assert.IsFalse(status.AtRisk || status.Breached);
-        Assert.IsInstanceOfType<SlaRefused>((await StatusAsync(fixture, fixture.Agent, "c1")).Value, "agents need sla:read");
-        Assert.IsInstanceOfType<SlaNotFound>((await StatusAsync(fixture, fixture.Supervisor, "missing")).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await StatusAsync(fixture, fixture.Agent, "c1")).Value, "agents need sla:read").Kind);
+        Assert.AreEqual(TicketFailureKind.NotFound, Assert.IsInstanceOfType<TicketFailure>((await StatusAsync(fixture, fixture.Supervisor, "missing")).Value).Kind);
 
         // Saturday: nothing is due over the weekend.
         AdvanceTo(fixture, Friday.AddDays(1));
@@ -141,15 +139,15 @@ public sealed class SlaTrackerTests
         CollectionAssert.AreEqual(new[] { "c1", "c2", "c3" }, Ids(Value(await ListAsync(fixture, fixture.Supervisor, new SlaRiskQuery(SlaRiskFilter.Breached)))));
         CollectionAssert.AreEqual(new[] { "c2", "c3" }, Ids(Value(await ListAsync(fixture, fixture.BillingLead, new SlaRiskQuery()))), "team-scoped grants filter rows");
         Assert.AreEqual(0, Value(await ListAsync(fixture, fixture.Agent, new SlaRiskQuery())).Items.Count, "no sla:read, no rows");
-        Assert.IsInstanceOfType<SlaRefused>((await StatusAsync(fixture, fixture.BillingLead, "c1")).Value);
-        Assert.IsInstanceOfType<SlaValue<SlaStatusView>>((await StatusAsync(fixture, fixture.BillingLead, "c2")).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await StatusAsync(fixture, fixture.BillingLead, "c1")).Value).Kind);
+        Assert.IsInstanceOfType<TicketValue<SlaStatusView>>((await StatusAsync(fixture, fixture.BillingLead, "c2")).Value);
 
         var first = Value(await ListAsync(fixture, fixture.Supervisor, new SlaRiskQuery(limit: 2)));
         CollectionAssert.AreEqual(new[] { "c1", "c2" }, Ids(first));
         Assert.IsNotNull(first.NextCursor);
         CollectionAssert.AreEqual(new[] { "c3" }, Ids(Value(await ListAsync(fixture, fixture.Supervisor, new SlaRiskQuery(limit: 2), first.NextCursor))));
-        Assert.IsInstanceOfType<SlaRefused>((await ListAsync(fixture, fixture.Supervisor, new SlaRiskQuery(SlaRiskFilter.AtRisk, limit: 2), first.NextCursor)).Value,
-            "cursors are bound to their query");
+        Assert.AreEqual(TicketFailureKind.Invalid, Assert.IsInstanceOfType<TicketFailure>((await ListAsync(fixture, fixture.Supervisor, new SlaRiskQuery(SlaRiskFilter.AtRisk, limit: 2), first.NextCursor)).Value,
+            "cursors are bound to their query").Kind);
 
         // Moving a conversation out of the team updates the mirrored access snapshot.
         Assert.IsInstanceOfType<ConversationApplied>((await fixture.CommandAsync(service => service.SetTeamAsync(fixture.Owner, new ConversationId("c3"), null))).Value);
@@ -224,14 +222,14 @@ public sealed class SlaTrackerTests
         await fixture.InScopeAsync(async services =>
         {
             var policies = services.GetRequiredService<ISlaPolicyService>();
-            Assert.IsInstanceOfType<SlaRefused>((await policies.ListAsync(fixture.Agent)).Value);
+            Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await policies.ListAsync(fixture.Agent)).Value).Kind);
             Assert.AreEqual(1, Value(await policies.ListAsync(fixture.Supervisor)).Count);
             var standard = Value(await policies.GetAsync(fixture.Supervisor, new SlaPolicyId("standard")));
-            Assert.IsInstanceOfType<SlaRefused>((await policies.UpdateAsync(fixture.Supervisor, standard.Policy, standard.Revision)).Value, "sla:read cannot manage");
-            Assert.IsInstanceOfType<SlaConflict>((await policies.UpdateAsync(fixture.Owner, standard.Policy, standard.Revision + 1)).Value);
+            Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await policies.UpdateAsync(fixture.Supervisor, standard.Policy, standard.Revision)).Value, "sla:read cannot manage").Kind);
+            Assert.AreEqual(TicketFailureKind.Conflict, Assert.IsInstanceOfType<TicketFailure>((await policies.UpdateAsync(fixture.Owner, standard.Policy, standard.Revision + 1)).Value).Kind);
             Assert.AreEqual(2, Value(await policies.UpdateAsync(fixture.Owner, standard.Policy, standard.Revision)).Revision);
-            Assert.IsInstanceOfType<SlaNotFound>((await policies.GetAsync(fixture.Owner, new SlaPolicyId("missing"))).Value);
-            Assert.IsInstanceOfType<SlaValue<StoredSlaPolicy>>((await policies.DeleteAsync(fixture.Owner, new SlaPolicyId("standard"), 2)).Value);
+            Assert.AreEqual(TicketFailureKind.NotFound, Assert.IsInstanceOfType<TicketFailure>((await policies.GetAsync(fixture.Owner, new SlaPolicyId("missing"))).Value).Kind);
+            Assert.IsInstanceOfType<TicketValue<StoredSlaPolicy>>((await policies.DeleteAsync(fixture.Owner, new SlaPolicyId("standard"), 2)).Value);
             return 0;
         });
         Assert.IsTrue(fixture.Get<IPermissionCatalog>().Contains(SlaPermissions.Read));
@@ -247,7 +245,7 @@ public sealed class SlaTrackerTests
         public Task<StoredSlaTracker?> GetAsync(TicketScope scope, ConversationId conversation, CancellationToken cancellationToken = default) =>
             Inner.GetAsync(scope, conversation, cancellationToken);
 
-        public async Task<SlaWriteResult<StoredSlaTracker>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, SlaTimerClaim? release = null,
+        public async Task<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, SlaTimerClaim? release = null,
             CancellationToken cancellationToken = default)
         {
             if (FailNextAcknowledgement && tracker.Pending.Count == 0 && expectedRevision is not null
@@ -259,7 +257,7 @@ public sealed class SlaTrackerTests
             return await Inner.WriteAsync(scope, tracker, expectedRevision, release, cancellationToken);
         }
 
-        public Task<SlaWriteResult<StoredSlaTracker>> DeleteAsync(TicketScope scope, ConversationId conversation, long expectedRevision, CancellationToken cancellationToken = default) =>
+        public Task<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>> DeleteAsync(TicketScope scope, ConversationId conversation, long expectedRevision, CancellationToken cancellationToken = default) =>
             Inner.DeleteAsync(scope, conversation, expectedRevision, cancellationToken);
 
         public Task<IReadOnlyList<SlaTimerClaim>> ClaimDueAsync(int limit, TimeSpan lease, CancellationToken cancellationToken = default) =>

@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using TicketFlow.Core;
 
 namespace TicketFlow.Assist;
@@ -133,14 +134,96 @@ public sealed record AssistQuotaExceeded(AssistQuotaKind Kind, DateTimeOffset Re
 /// <summary>Outcome of an atomic quota reservation. Switch over every case without a discard arm.</summary>
 public union AssistReservationResult(AssistUsageReserved, AssistQuotaExceeded);
 
-/// <summary>The settings write was applied.</summary>
-public sealed record AssistWriteApplied<T>(T Value);
+/// <summary>Non-boxing outcome of a revision-fenced settings write. Switch over every case without a discard arm.</summary>
+[Union]
+public readonly struct AssistWriteResult<T> : IUnion, IEquatable<AssistWriteResult<T>>
+{
+    private readonly byte tag;
+    private readonly T? value;
+    private readonly long currentRevision;
 
-/// <summary>The expected revision did not match; nothing was written.</summary>
-public sealed record AssistWriteConflict(long CurrentRevision);
+    public AssistWriteResult(StoreApplied<T> applied)
+    {
+        tag = 1;
+        value = applied.Value;
+    }
 
-/// <summary>Outcome of a revision-fenced settings write. Switch over every case without a discard arm.</summary>
-public union AssistWriteResult<T>(AssistWriteApplied<T>, AssistWriteConflict);
+    public AssistWriteResult(StoreConflict conflict)
+    {
+        if (conflict.CurrentRevision is { } revision)
+        {
+            tag = 2;
+            currentRevision = revision;
+        }
+        else
+        {
+            tag = 3;
+        }
+    }
+
+    public bool HasValue => tag != 0;
+
+    public object? Value => tag switch
+    {
+        1 => new StoreApplied<T>(value!),
+        2 => new StoreConflict(currentRevision),
+        3 => new StoreConflict(null),
+        _ => null,
+    };
+
+    public bool TryGetValue(out StoreApplied<T> applied)
+    {
+        if (tag == 1)
+        {
+            applied = new StoreApplied<T>(value!);
+            return true;
+        }
+        applied = default;
+        return false;
+    }
+
+    public bool TryGetValue(out StoreConflict conflict)
+    {
+        if (tag == 2)
+        {
+            conflict = new StoreConflict(currentRevision);
+            return true;
+        }
+        if (tag == 3)
+        {
+            conflict = new StoreConflict(null);
+            return true;
+        }
+        conflict = default;
+        return false;
+    }
+
+    public bool Equals(AssistWriteResult<T> other) => tag == other.tag && tag switch
+    {
+        1 => EqualityComparer<T>.Default.Equals(value, other.value),
+        2 => currentRevision == other.currentRevision,
+        3 => true,
+        _ => true,
+    };
+
+    public override bool Equals(object? obj) => obj is AssistWriteResult<T> other && Equals(other);
+
+    public override int GetHashCode() => tag switch
+    {
+        1 => HashCode.Combine(tag, value),
+        2 => HashCode.Combine(tag, currentRevision),
+        3 => tag.GetHashCode(),
+        _ => 0,
+    };
+
+    public static bool operator ==(AssistWriteResult<T> left, AssistWriteResult<T> right) => left.Equals(right);
+
+    public static bool operator !=(AssistWriteResult<T> left, AssistWriteResult<T> right) => !left.Equals(right);
+
+    public static implicit operator AssistWriteResult<T>(StoreApplied<T> applied) => new(applied);
+
+    public static implicit operator AssistWriteResult<T>(StoreConflict conflict) => new(conflict);
+}
 
 /// <summary>
 /// Aggregated usage of one feature and model in a time range. <see cref="ReservedTokens"/> are held by unsettled reservations;

@@ -32,7 +32,7 @@ public static class AccessFilteredReportParity
         await roles.CreateAsync(scope, RandomAccessFixture.DeletedRole);
         await roles.DeleteAsync(scope, RandomAccessFixture.DeletedRole.Id, 1);
         foreach (var grant in RandomAccessFixture.Grants(random, scope, clock.GetUtcNow(), 40))
-            Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await grants.CreateAsync(grant)).Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await grants.CreateAsync(grant)).Value);
         var planner = request.ServiceProvider.GetRequiredService<IAccessQueryPlanner>();
         var evaluator = request.ServiceProvider.GetRequiredService<IAccessEvaluator>();
 
@@ -60,7 +60,7 @@ public static class AccessFilteredReportParity
         {
             var filter = await planner.PlanAsync(new AccessQuery(principal, permission, scope));
             async Task<bool> AllowedAsync(AccessResource resource) => (await evaluator.AuthorizeAsync(new AccessRequest(principal, permission, resource))).IsPermitted;
-            var label = $"seed {seed} for {principal.Value!.GetType().Name}";
+            var label = $"seed {seed} for {principal.GetType().Name}";
 
             long expectedRollups = 0;
             var expectedFacts = new List<Guid>();

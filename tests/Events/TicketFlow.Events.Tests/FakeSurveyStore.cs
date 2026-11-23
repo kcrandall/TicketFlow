@@ -41,15 +41,15 @@ internal sealed class FakeSurveyStore : ISurveyStore
 
     public Task<StoredSurvey?> GetSurveyAsync(TicketScope scope, SurveyId id, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<IReadOnlyList<StoredSurvey>> ListSurveysAsync(TicketScope scope, CancellationToken cancellationToken = default) => throw new NotSupportedException();
-    public Task<SurveyWriteResult<StoredSurvey>> CreateSurveyAsync(TicketScope scope, SurveyDefinition survey, CancellationToken cancellationToken = default) => throw new NotSupportedException();
-    public Task<SurveyWriteResult<StoredSurvey>> UpdateSurveyAsync(TicketScope scope, SurveyDefinition survey, long expectedRevision, CancellationToken cancellationToken = default) => throw new NotSupportedException();
-    public Task<SurveyWriteResult<StoredSurvey>> DeleteSurveyAsync(TicketScope scope, SurveyId id, long expectedRevision, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<StoreWriteResult<StoredSurvey, SurveyWriteRejection>> CreateSurveyAsync(TicketScope scope, SurveyDefinition survey, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<StoreWriteResult<StoredSurvey, SurveyWriteRejection>> UpdateSurveyAsync(TicketScope scope, SurveyDefinition survey, long expectedRevision, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<StoreWriteResult<StoredSurvey, SurveyWriteRejection>> DeleteSurveyAsync(TicketScope scope, SurveyId id, long expectedRevision, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<InvitationCreateResult> CreateInvitationAsync(TicketScope scope, SurveyInvitation invitation, TimeSpan contactCooldown, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<StoredInvitation?> GetInvitationAsync(TicketScope scope, SurveyInvitationId id, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<StoredInvitation?> FindInvitationByTokenAsync(TicketScope scope, SurveyTokenHash tokenHash, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<IReadOnlyList<StoredInvitation>> ListDueInvitationsAsync(TicketScope scope, DateTimeOffset now, int limit, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<IReadOnlyList<StoredInvitation>> ClaimDueInvitationsAsync(TicketScope scope, DateTimeOffset now, TimeSpan lease, int limit, CancellationToken cancellationToken = default) => throw new NotSupportedException();
-    public Task<SurveyWriteResult<StoredInvitation>> UpdateInvitationAsync(TicketScope scope, SurveyInvitation invitation, long expectedRevision, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public Task<StoreWriteResult<StoredInvitation, SurveyWriteRejection>> UpdateInvitationAsync(TicketScope scope, SurveyInvitation invitation, long expectedRevision, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<ResponseRecordResult> RecordResponseAsync(TicketScope scope, SurveyResponse response, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<SurveyAggregateResult> AggregateAsync(TicketScope scope, SurveyAggregateQuery query, AccessFilter filter, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 }

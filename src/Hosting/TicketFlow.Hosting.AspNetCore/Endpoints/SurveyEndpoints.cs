@@ -61,18 +61,7 @@ internal static class SurveyEndpoints
         return group;
     }
 
-    private static IResult Map<T>(HttpContext http, SurveyResult<T> result, Func<T, IResult> success) => result switch
-    {
-        SurveySucceeded<T> succeeded => success(succeeded.Value),
-        SurveyRefused refused => TicketFlowHttp.Refused(http, refused.Reason switch
-        {
-            SurveyRefusal.Forbidden => RefusalKind.Forbidden,
-            SurveyRefusal.Invalid => RefusalKind.Invalid,
-            SurveyRefusal.NotFound => RefusalKind.NotFound,
-            SurveyRefusal.Conflict => RefusalKind.Conflict,
-            _ => RefusalKind.Rejected,
-        }, refused.Errors, refused.CurrentRevision),
-    };
+    private static IResult Map<T>(HttpContext http, TicketResult<T> result, Func<T, IResult> success) => TicketFlowHttp.Map(http, result, success);
 
     private static SurveyDefinition Survey(string id, SurveyRequest request)
     {

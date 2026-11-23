@@ -133,10 +133,10 @@ public sealed class WorkerLoopTests
         {
             var services = serviceScope.ServiceProvider;
             await GrantOwnerAsync(services, scope);
-            Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await services.GetRequiredService<IInboxStore>().CreateAsync(scope,
+            Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await services.GetRequiredService<IInboxStore>().CreateAsync(scope,
                 new Inbox(new InboxId("support"), "Support", new ChannelBinding(new ChannelKind("email"), "cfg")))).Value);
             var owner = new UserPrincipal(scope, new UserId("owner"));
-            var contact = As<ContactApplied<ContactView>>((await services.GetRequiredService<IContactService>().CreateAsync(owner, new ContactDraft(ContactProfile.Empty))).Value);
+            var contact = As<TicketValue<ContactView>>((await services.GetRequiredService<IContactService>().CreateAsync(owner, new ContactDraft(ContactProfile.Empty))).Value);
             Assert.IsInstanceOfType<ConversationApplied>((await services.GetRequiredService<IConversationService>().StartAsync(owner,
                 new StartConversationRequest(new InboxId("support"), contact.Value.Id))).Value);
         }
@@ -267,9 +267,9 @@ public sealed class WorkerLoopTests
             await services.GetRequiredService<IWorkspaceSettingsStore>().CreateAsync(scope, new WorkspaceSettings("Acme", "en", "UTC"));
             var owner = new UserPrincipal(scope, new UserId("owner"));
             var contacts = services.GetRequiredService<IContactService>();
-            var first = As<ContactApplied<ContactView>>((await contacts.CreateAsync(owner, new ContactDraft(ContactProfile.Empty))).Value).Value;
-            var second = As<ContactApplied<ContactView>>((await contacts.CreateAsync(owner, new ContactDraft(ContactProfile.Empty))).Value).Value;
-            Assert.IsInstanceOfType<ContactApplied<ContactMergeOutcome>>((await contacts.MergeAsync(owner,
+            var first = As<TicketValue<ContactView>>((await contacts.CreateAsync(owner, new ContactDraft(ContactProfile.Empty))).Value).Value;
+            var second = As<TicketValue<ContactView>>((await contacts.CreateAsync(owner, new ContactDraft(ContactProfile.Empty))).Value).Value;
+            Assert.IsInstanceOfType<TicketValue<ContactMergeOutcome>>((await contacts.MergeAsync(owner,
                 new ContactMergeRequest(first.Id, first.Revision, second.Id, second.Revision, justification: "duplicate"))).Value);
         }
         await host.StartAsync();
@@ -286,7 +286,7 @@ public sealed class WorkerLoopTests
     }
 
     private static async Task GrantOwnerAsync(IServiceProvider services, TicketScope scope) =>
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await services.GetRequiredService<IAccessGrantStore>().CreateAsync(new AccessGrant(new GrantId("owner"),
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await services.GetRequiredService<IAccessGrantStore>().CreateAsync(new AccessGrant(new GrantId("owner"),
             AccessPartition.From(scope), new UserId("owner"), BuiltInRoles.Owner.Id, new WorkspaceGrantScope(scope.WorkspaceId)))).Value);
 
     private static T As<T>(object? value) => value is T typed ? typed : throw new AssertFailedException($"Expected {typeof(T).Name} but got {value?.GetType().Name ?? "null"}.");

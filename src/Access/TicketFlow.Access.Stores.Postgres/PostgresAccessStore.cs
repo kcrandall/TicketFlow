@@ -106,13 +106,13 @@ public sealed partial class PostgresAccessStore : IAccessRoleStore, IAccessGrant
         (long)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
 
     /// <summary>Distinguishes a missed compare-and-set: not found, or conflict with the current revision.</summary>
-    private static async Task<AccessWriteResult<T>> MissAsync<T>(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, Action<NpgsqlCommand> bind, CancellationToken cancellationToken)
+    private static async Task<StoreWriteResult<T, AccessWriteRejection>> MissAsync<T>(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, Action<NpgsqlCommand> bind, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(sql, connection, transaction);
         bind(command);
         var current = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return current is long revision ? new AccessWriteConflict(revision) : AccessWriteNotFound.Instance;
+        return current is long revision ? new StoreConflict(revision) : StoreNotFound.Instance;
     }
 
     private static InvalidOperationException StoredDataError(Exception error, string description) =>

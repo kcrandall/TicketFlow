@@ -33,12 +33,12 @@ public sealed partial class PostgresAccessStore
         return roles;
     }
 
-    public async Task<AccessWriteResult<StoredAccessRole>> CreateAsync(TicketScope scope, AccessRole role, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAccessRole, AccessWriteRejection>> CreateAsync(TicketScope scope, AccessRole role, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(role);
         if (role.IsBuiltIn || BuiltInRoles.IsBuiltIn(role.Id))
-            return new AccessWriteRejected(AccessWriteRejection.BuiltInRoleImmutable);
+            return new StoreRejected<AccessWriteRejection>(AccessWriteRejection.BuiltInRoleImmutable);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await LockAsync(connection, transaction, cancellationToken, "roles", scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value).ConfigureAwait(false);
@@ -50,8 +50,8 @@ public sealed partial class PostgresAccessStore
                 await using var existing = new NpgsqlCommand($"SELECT revision FROM tf_access_roles WHERE {RoleKey}", connection, transaction);
                 BindRoleKey(existing, scope, role.Id);
                 if (await existing.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                    return new AccessWriteConflict(revision);
-                return new AccessWriteRejected(AccessWriteRejection.CapacityExceeded);
+                    return new StoreConflict(revision);
+                return new StoreRejected<AccessWriteRejection>(AccessWriteRejection.CapacityExceeded);
             }
         }
         await using (var insert = new NpgsqlCommand("""
@@ -65,16 +65,16 @@ public sealed partial class PostgresAccessStore
                 return await MissAsync<StoredAccessRole>(connection, transaction, $"SELECT revision FROM tf_access_roles WHERE {RoleKey}", command => BindRoleKey(command, scope, role.Id), cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new AccessWriteApplied<StoredAccessRole>(new(scope, role, 1));
+        return new StoreApplied<StoredAccessRole>(new(scope, role, 1));
     }
 
-    public async Task<AccessWriteResult<StoredAccessRole>> UpdateAsync(TicketScope scope, AccessRole role, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAccessRole, AccessWriteRejection>> UpdateAsync(TicketScope scope, AccessRole role, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(role);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         if (role.IsBuiltIn || BuiltInRoles.IsBuiltIn(role.Id))
-            return new AccessWriteRejected(AccessWriteRejection.BuiltInRoleImmutable);
+            return new StoreRejected<AccessWriteRejection>(AccessWriteRejection.BuiltInRoleImmutable);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using (var update = new NpgsqlCommand($"""
             UPDATE tf_access_roles SET name=@name, permissions=@permissions, revision=revision+1
@@ -84,23 +84,23 @@ public sealed partial class PostgresAccessStore
             BindRole(update, scope, role);
             AddLong(update, "expected", expectedRevision);
             if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                return new AccessWriteApplied<StoredAccessRole>(new(scope, role, revision));
+                return new StoreApplied<StoredAccessRole>(new(scope, role, revision));
         }
         await using var current = new NpgsqlCommand($"SELECT revision FROM tf_access_roles WHERE {RoleKey}", connection);
         BindRoleKey(current, scope, role.Id);
         return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
-            ? new AccessWriteConflict(existing)
-            : AccessWriteNotFound.Instance;
+            ? new StoreConflict(existing)
+            : StoreNotFound.Instance;
     }
 
-    public async Task<AccessWriteResult<StoredAccessRole>> DeleteAsync(TicketScope scope, RoleId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAccessRole, AccessWriteRejection>> DeleteAsync(TicketScope scope, RoleId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         if (!id.IsInitialized)
             throw new ArgumentException("A role identifier is required.", nameof(id));
         if (BuiltInRoles.IsBuiltIn(id))
-            return new AccessWriteRejected(AccessWriteRejection.BuiltInRoleImmutable);
+            return new StoreRejected<AccessWriteRejection>(AccessWriteRejection.BuiltInRoleImmutable);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using (var delete = new NpgsqlCommand($"DELETE FROM tf_access_roles WHERE {RoleKey} AND revision=@expected RETURNING {RoleColumns}", connection))
         {
@@ -108,13 +108,13 @@ public sealed partial class PostgresAccessStore
             AddLong(delete, "expected", expectedRevision);
             await using var reader = await delete.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new AccessWriteApplied<StoredAccessRole>(ReadRole(reader, scope));
+                return new StoreApplied<StoredAccessRole>(ReadRole(reader, scope));
         }
         await using var current = new NpgsqlCommand($"SELECT revision FROM tf_access_roles WHERE {RoleKey}", connection);
         BindRoleKey(current, scope, id);
         return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
-            ? new AccessWriteConflict(existing)
-            : AccessWriteNotFound.Instance;
+            ? new StoreConflict(existing)
+            : StoreNotFound.Instance;
     }
 
     private static void BindRoleKey(NpgsqlCommand command, TicketScope scope, RoleId id)

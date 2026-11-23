@@ -77,7 +77,7 @@ public sealed class PostgresAccessFilterTests
         await store.CreateAsync(scope, RandomAccessFixture.DeletedRole);
         await store.DeleteAsync(scope, RandomAccessFixture.DeletedRole.Id, 1);
         foreach (var grant in RandomAccessFixture.Grants(random, scope, clock.GetUtcNow(), 40))
-            Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await store.CreateAsync(grant)).Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await store.CreateAsync(grant)).Value);
         var resources = RandomAccessFixture.Resources(random, scope, 150);
         await InsertAsync(database.First, resources);
 
@@ -101,7 +101,7 @@ public sealed class PostgresAccessFilterTests
                     if (decision.IsPermitted)
                         expected.Add(resource.ResourceId!);
                 }
-                Assert.IsTrue(expected.SetEquals(selected), $"seed {seed}: {permission} for {principal.Value!.GetType().Name}: expected {expected.Count}, SQL {selected.Count}");
+                Assert.IsTrue(expected.SetEquals(selected), $"seed {seed}: {permission} for {principal.GetType().Name}: expected {expected.Count}, SQL {selected.Count}");
                 permitted += expected.Count;
             }
         }

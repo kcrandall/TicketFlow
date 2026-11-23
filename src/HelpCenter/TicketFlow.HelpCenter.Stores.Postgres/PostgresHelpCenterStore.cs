@@ -64,7 +64,7 @@ public sealed partial class PostgresHelpCenterStore : IHelpCenterStore, IArticle
         return await ReadListAsync(command, reader => ReadPortal(reader, scope), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<HelpCenterWriteResult<StoredPortal>> CreatePortalAsync(TicketScope scope, Portal portal, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredPortal, HelpCenterWriteRejection>> CreatePortalAsync(TicketScope scope, Portal portal, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(portal);
@@ -72,11 +72,11 @@ public sealed partial class PostgresHelpCenterStore : IHelpCenterStore, IArticle
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await LockAsync(connection, transaction, scope, cancellationToken).ConfigureAwait(false);
         if (await PortalRevisionAsync(connection, transaction, scope, portal.Id, cancellationToken).ConfigureAwait(false) is { } existing)
-            return new HelpCenterWriteConflict(existing);
+            return new StoreConflict(existing);
         if (await ScalarAsync<long>(connection, transaction, $"SELECT count(*) FROM tf_helpcenter_portals WHERE {ScopeKeyWhere}", command => AddScope(command, scope), cancellationToken).ConfigureAwait(false) >= HelpCenterLimits.MaximumPortalsPerWorkspace)
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.CapacityExceeded);
+            return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.CapacityExceeded);
         if (await SlugTakenAsync(connection, transaction, scope, portal, cancellationToken).ConfigureAwait(false))
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.SlugConflict);
+            return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.SlugConflict);
         await using (var insert = new NpgsqlCommand($"""
             INSERT INTO tf_helpcenter_portals({ScopeColumns}, portal_id, format_version, slug, name, default_locale, supported_locales, visibility, custom_domain, revision)
             VALUES({ScopeParameters}, @portal, 1, @slug, @name, @default, @locales, @visibility, @domain, 1)
@@ -86,10 +86,10 @@ public sealed partial class PostgresHelpCenterStore : IHelpCenterStore, IArticle
             await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new HelpCenterWriteApplied<StoredPortal>(new(scope, portal, 1));
+        return new StoreApplied<StoredPortal>(new(scope, portal, 1));
     }
 
-    public async Task<HelpCenterWriteResult<StoredPortal>> UpdatePortalAsync(TicketScope scope, Portal portal, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredPortal, HelpCenterWriteRejection>> UpdatePortalAsync(TicketScope scope, Portal portal, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(portal);
@@ -101,7 +101,7 @@ public sealed partial class PostgresHelpCenterStore : IHelpCenterStore, IArticle
         if (Miss<StoredPortal>(current, expectedRevision) is { } miss)
             return miss;
         if (await SlugTakenAsync(connection, transaction, scope, portal, cancellationToken).ConfigureAwait(false))
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.SlugConflict);
+            return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.SlugConflict);
         await using (var update = new NpgsqlCommand($"""
             UPDATE tf_helpcenter_portals SET slug=@slug, name=@name, default_locale=@default, supported_locales=@locales, visibility=@visibility,
                 custom_domain=@domain, revision=revision+1
@@ -112,10 +112,10 @@ public sealed partial class PostgresHelpCenterStore : IHelpCenterStore, IArticle
             await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new HelpCenterWriteApplied<StoredPortal>(new(scope, portal, expectedRevision + 1));
+        return new StoreApplied<StoredPortal>(new(scope, portal, expectedRevision + 1));
     }
 
-    public async Task<HelpCenterWriteResult<StoredPortal>> DeletePortalAsync(TicketScope scope, PortalId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredPortal, HelpCenterWriteRejection>> DeletePortalAsync(TicketScope scope, PortalId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         Require(id.IsInitialized, nameof(id));
@@ -135,7 +135,7 @@ public sealed partial class PostgresHelpCenterStore : IHelpCenterStore, IArticle
             SELECT EXISTS (SELECT 1 FROM tf_helpcenter_collections WHERE {PortalKeyWhere}) OR EXISTS (SELECT 1 FROM tf_helpcenter_articles WHERE {PortalKeyWhere})
             """, Bind, cancellationToken).ConfigureAwait(false);
         if (used)
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.NotEmpty);
+            return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.NotEmpty);
         StoredPortal? removed;
         await using (var delete = new NpgsqlCommand($"DELETE FROM tf_helpcenter_portals WHERE {PortalKeyWhere} RETURNING {PortalColumns}", connection, transaction))
         {
@@ -143,7 +143,7 @@ public sealed partial class PostgresHelpCenterStore : IHelpCenterStore, IArticle
             removed = await ReadSingleAsync(delete, reader => ReadPortal(reader, scope), cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new HelpCenterWriteApplied<StoredPortal>(removed!);
+        return new StoreApplied<StoredPortal>(removed!);
     }
 
     private static Task<long?> PortalRevisionAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, TicketScope scope, PortalId id, CancellationToken cancellationToken) =>
@@ -236,10 +236,10 @@ public sealed partial class PostgresHelpCenterStore : IHelpCenterStore, IArticle
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static HelpCenterWriteResult<T>? Miss<T>(long? current, long expectedRevision) => current switch
+    private static StoreWriteResult<T, HelpCenterWriteRejection>? Miss<T>(long? current, long expectedRevision) => current switch
     {
-        null => HelpCenterWriteNotFound.Instance,
-        { } revision when revision != expectedRevision => new HelpCenterWriteConflict(revision),
+        null => StoreNotFound.Instance,
+        { } revision when revision != expectedRevision => new StoreConflict(revision),
         _ => null,
     };
 

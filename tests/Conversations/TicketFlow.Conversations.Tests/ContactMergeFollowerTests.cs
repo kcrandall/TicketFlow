@@ -14,7 +14,7 @@ public sealed class ContactMergeFollowerTests
         await fixture.StartAsync("of-grace-2", contact: "grace");
         await fixture.StartAsync("of-ada", contact: "ada");
 
-        var merge = (ContactApplied<ContactMergeOutcome>)(await fixture.ContactsService.MergeAsync(fixture.Owner,
+        var merge = (TicketValue<ContactMergeOutcome>)(await fixture.ContactsService.MergeAsync(fixture.Owner,
             new ContactMergeRequest(new ContactId("ada"), 1, new ContactId("grace"), 1))).Value!;
         foreach (var id in new[] { "of-grace", "of-grace-2" })
         {
@@ -32,7 +32,7 @@ public sealed class ContactMergeFollowerTests
         Assert.IsTrue(position > 0);
         Assert.AreEqual(2L, ConversationFixture.View(await fixture.Conversations.GetAsync(fixture.Owner, new ConversationId("of-grace"))).Revision);
 
-        Assert.IsInstanceOfType<ContactApplied<ContactUnmergeOutcome>>((await fixture.ContactsService.UnmergeAsync(fixture.Owner, merge.Value.MergeId)).Value);
+        Assert.IsInstanceOfType<TicketValue<ContactUnmergeOutcome>>((await fixture.ContactsService.UnmergeAsync(fixture.Owner, merge.Value.MergeId)).Value);
         var restored = ConversationFixture.View(await fixture.Conversations.GetAsync(fixture.Owner, new ConversationId("of-grace")));
         Assert.AreEqual(new ContactId("grace"), restored.Contact);
         var events = ConversationFixture.Page(await fixture.Conversations.ReadTimelineAsync(fixture.Owner, new ConversationId("of-grace"))).Events.Select(item => item.Event.Event.Value?.ToString());
@@ -48,19 +48,19 @@ public sealed class ContactMergeFollowerTests
     public async Task ChainedMergesUnwindNewestFirst()
     {
         using var fixture = await ConversationFixture.CreateAsync();
-        Assert.IsInstanceOfType<ContactApplied<ContactView>>((await fixture.ContactsService.CreateAsync(fixture.Owner,
+        Assert.IsInstanceOfType<TicketValue<ContactView>>((await fixture.ContactsService.CreateAsync(fixture.Owner,
             new ContactDraft(new ContactProfile("Lin"), Id: new ContactId("lin")))).Value);
         await fixture.StartAsync("of-grace", contact: "grace");
-        var first = (ContactApplied<ContactMergeOutcome>)(await fixture.ContactsService.MergeAsync(fixture.Owner,
+        var first = (TicketValue<ContactMergeOutcome>)(await fixture.ContactsService.MergeAsync(fixture.Owner,
             new ContactMergeRequest(new ContactId("ada"), 1, new ContactId("grace"), 1))).Value!;
         var adaRevision = first.Value.Target.Revision;
-        var second = (ContactApplied<ContactMergeOutcome>)(await fixture.ContactsService.MergeAsync(fixture.Owner,
+        var second = (TicketValue<ContactMergeOutcome>)(await fixture.ContactsService.MergeAsync(fixture.Owner,
             new ContactMergeRequest(new ContactId("lin"), 1, new ContactId("ada"), adaRevision))).Value!;
         Assert.AreEqual(new ContactId("lin"), ConversationFixture.View(await fixture.Conversations.GetAsync(fixture.Owner, new ConversationId("of-grace"))).Contact);
 
-        Assert.IsInstanceOfType<ContactApplied<ContactUnmergeOutcome>>((await fixture.ContactsService.UnmergeAsync(fixture.Owner, second.Value.MergeId)).Value);
+        Assert.IsInstanceOfType<TicketValue<ContactUnmergeOutcome>>((await fixture.ContactsService.UnmergeAsync(fixture.Owner, second.Value.MergeId)).Value);
         Assert.AreEqual(new ContactId("ada"), ConversationFixture.View(await fixture.Conversations.GetAsync(fixture.Owner, new ConversationId("of-grace"))).Contact);
-        Assert.IsInstanceOfType<ContactApplied<ContactUnmergeOutcome>>((await fixture.ContactsService.UnmergeAsync(fixture.Owner, first.Value.MergeId)).Value);
+        Assert.IsInstanceOfType<TicketValue<ContactUnmergeOutcome>>((await fixture.ContactsService.UnmergeAsync(fixture.Owner, first.Value.MergeId)).Value);
         var view = ConversationFixture.View(await fixture.Conversations.GetAsync(fixture.Owner, new ConversationId("of-grace")));
         Assert.AreEqual(new ContactId("grace"), view.Contact);
         Assert.AreEqual(0, (await fixture.Store.GetAsync(fixture.Scope, new ConversationId("of-grace")))!.Conversation.ContactRedirects.Count);

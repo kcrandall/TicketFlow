@@ -34,24 +34,24 @@ public sealed class SlaService : ISlaService
         this.time = time ?? throw new ArgumentNullException(nameof(time));
     }
 
-    public async Task<SlaResult<SlaStatusView>> GetStatusAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<SlaStatusView>> GetStatusAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         if (conversation == default)
             throw new ArgumentException("A conversation identifier is required.", nameof(conversation));
         var stored = await conversations.GetAsync(scope, conversation, cancellationToken).ConfigureAwait(false);
         if (stored is null)
-            return SlaNotFound.Instance;
+            return TicketFailure.NotFound;
         if (!await PermittedAsync(actor, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
-            return SlaRefused.Forbidden;
+            return TicketFailure.Forbidden;
         var now = time.GetUtcNow();
         var tracker = await trackers.GetAsync(scope, conversation, cancellationToken).ConfigureAwait(false);
         if (tracker is null)
-            return new SlaValue<SlaStatusView>(new SlaStatusView(conversation, stored.Conversation.Inbox, null, null, null, false, [], false, false, null, now));
-        return new SlaValue<SlaStatusView>(await ViewAsync(scope, tracker.Tracker, now, calendarCache: null, cancellationToken).ConfigureAwait(false));
+            return new TicketValue<SlaStatusView>(new SlaStatusView(conversation, stored.Conversation.Inbox, null, null, null, false, [], false, false, null, now));
+        return new TicketValue<SlaStatusView>(await ViewAsync(scope, tracker.Tracker, now, calendarCache: null, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<SlaResult<SlaRiskPage>> ListAsync(PrincipalRef actor, SlaRiskQuery query, string? cursor = null, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<SlaRiskPage>> ListAsync(PrincipalRef actor, SlaRiskQuery query, string? cursor = null, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
@@ -61,13 +61,13 @@ public sealed class SlaService : ISlaService
         {
             fingerprint = Fingerprint(query);
             if (!TryDecodeCursor(cursor, fingerprint, out after))
-                return SlaRefused.Invalid("The cursor is invalid or belongs to a different query.");
+                return TicketFailure.Invalid("The cursor is invalid or belongs to a different query.");
         }
         var now = time.GetUtcNow();
         var filter = await planner.PlanAsync(new AccessQuery(actor, SlaPermissions.Read, scope), cancellationToken).ConfigureAwait(false);
         var page = await trackers.ListAsync(scope, query.WithAfter(after ?? query.After), now, filter, cancellationToken).ConfigureAwait(false);
         if (page.Trackers.Count == 0)
-            return new SlaValue<SlaRiskPage>(new SlaRiskPage([], page.Next is { } emptyNext ? EncodeCursor(emptyNext, fingerprint ?? Fingerprint(query)) : null));
+            return new TicketValue<SlaRiskPage>(new SlaRiskPage([], page.Next is { } emptyNext ? EncodeCursor(emptyNext, fingerprint ?? Fingerprint(query)) : null));
 
         var ids = new ConversationId[page.Trackers.Count];
         for (var i = 0; i < page.Trackers.Count; i++)
@@ -92,7 +92,7 @@ public sealed class SlaService : ISlaService
                 continue;
             items.Add(await ViewAsync(scope, tracker.Tracker, now, calendarCache, cancellationToken).ConfigureAwait(false));
         }
-        return new SlaValue<SlaRiskPage>(new SlaRiskPage(items, page.Next is { } next ? EncodeCursor(next, fingerprint ?? Fingerprint(query)) : null));
+        return new TicketValue<SlaRiskPage>(new SlaRiskPage(items, page.Next is { } next ? EncodeCursor(next, fingerprint ?? Fingerprint(query)) : null));
     }
 
     private async Task<SlaStatusView> ViewAsync(TicketScope scope, SlaTracker tracker, DateTimeOffset now, Dictionary<BusinessCalendarId, SlaClockTime?>? calendarCache,
@@ -119,7 +119,7 @@ public sealed class SlaService : ISlaService
 
     private static TicketScope RequireActor(PrincipalRef actor)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("An actor is required.", nameof(actor));
         return actor.Scope;
     }

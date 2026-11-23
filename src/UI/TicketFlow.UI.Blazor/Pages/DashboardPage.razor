@@ -210,13 +210,13 @@ else if (stats is not null)
         if (pending.Count > 0)
             await Task.WhenAll(pending);
 
-        if (overviewTask is not null && await overviewTask is ReportSucceeded<ReportOverview> current)
+        if (overviewTask is not null && await overviewTask is TicketValue<ReportOverview> current)
             overview = current.Value;
-        if (previousTask is not null && await previousTask is ReportSucceeded<ReportOverview> before)
+        if (previousTask is not null && await previousTask is TicketValue<ReportOverview> before)
             previous = before.Value;
-        if (trendTask is not null && await trendTask is ReportSucceeded<ReportTrend> series)
+        if (trendTask is not null && await trendTask is TicketValue<ReportTrend> series)
             trend = UiCharts.Daily(series.Value, [(ReportMetric.ConversationCreated, "Created"), (ReportMetric.ConversationResolved, "Resolved")]);
-        if (channelTask is not null && await channelTask is ReportSucceeded<ReportTrend> byChannel)
+        if (channelTask is not null && await channelTask is TicketValue<ReportTrend> byChannel)
             channels = [.. byChannel.Value.Points.GroupBy(point => point.Group ?? "other").Select(group => (group.Key, Count: group.Sum(point => point.Count)))
                 .OrderByDescending(pair => pair.Count).Take(5).Select((pair, index) => new BarList.Item(UiFormat.Channel(pair.Key), pair.Count, pair.Count.ToString(CultureInfo.InvariantCulture), $"var(--chart-{index + 1})"))];
 
@@ -246,7 +246,7 @@ else if (stats is not null)
                 conversations[item.Id] = item;
         }
 
-        if (slaTask is not null && await slaTask is SlaValue<SlaRiskPage> slaPage)
+        if (slaTask is not null && await slaTask is TicketValue<SlaRiskPage> slaPage)
         {
             risk = [.. slaPage.Value.Items];
             if (Service<IConversationService>() is { } lookupService)

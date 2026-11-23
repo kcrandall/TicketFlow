@@ -63,7 +63,7 @@ internal sealed class SlaFixture : IDisposable
         using (var scope = fixture.Provider.CreateScope())
         {
             var policies = scope.ServiceProvider.GetRequiredService<ISlaPolicyService>();
-            Assert.IsInstanceOfType<SlaValue<StoredSlaPolicy>>((await policies.CreateAsync(fixture.Owner, new SlaPolicy(new SlaPolicyId("standard"), "Standard",
+            Assert.IsInstanceOfType<TicketValue<StoredSlaPolicy>>((await policies.CreateAsync(fixture.Owner, new SlaPolicy(new SlaPolicyId("standard"), "Standard",
                 [new SlaRule("default", SlaCondition.Always, new SlaTargets(TimeSpan.FromHours(4), TimeSpan.FromHours(8), TimeSpan.FromDays(3)), SlaClockBasis.BusinessHours,
                     [new SlaEscalation(SlaMetric.FirstResponse, 75, [new NotifyTeamAction(new TeamId("billing"))])])]))).Value);
             await scope.ServiceProvider.GetRequiredService<ConversationOutboxDispatcher>().RegisterAsync();
@@ -73,7 +73,7 @@ internal sealed class SlaFixture : IDisposable
         await fixture.Get<IInboxStore>().CreateAsync(fixture.Scope, new Inbox(new InboxId("plain"), "No SLA", new ChannelBinding(new ChannelKind("email"), "cfg2")));
         await fixture.Get<ITeamStore>().CreateAsync(fixture.Scope, new Team(new TeamId("billing"), "Billing"));
         using (var scope = fixture.Provider.CreateScope())
-            Assert.IsInstanceOfType<ContactApplied<ContactView>>((await scope.ServiceProvider.GetRequiredService<IContactService>().CreateAsync(fixture.Owner,
+            Assert.IsInstanceOfType<TicketValue<ContactView>>((await scope.ServiceProvider.GetRequiredService<IContactService>().CreateAsync(fixture.Owner,
                 new ContactDraft(new ContactProfile("ada"), Id: new ContactId("ada")))).Value);
         return fixture;
     }
@@ -92,13 +92,13 @@ internal sealed class SlaFixture : IDisposable
     {
         var grant = new AccessGrant(new GrantId($"seed-{nextGrant++:D4}"), AccessPartition.From(Scope), subject, role.Id, scope ?? new WorkspaceGrantScope(Scope.WorkspaceId),
             GrantEffect.Allow, null);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await Get<IAccessGrantStore>().CreateAsync(grant)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await Get<IAccessGrantStore>().CreateAsync(grant)).Value);
     }
 
     public async Task<AccessRole> CustomRoleAsync(string id, params Permission[] permissions)
     {
         var role = new AccessRole(new RoleId(id), id, permissions);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await Get<IAccessRoleStore>().CreateAsync(Scope, role)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await Get<IAccessRoleStore>().CreateAsync(Scope, role)).Value);
         return role;
     }
 

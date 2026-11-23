@@ -106,14 +106,14 @@
         var responsesTask = service.ListResponsesAsync(Actor, new SurveyResponseQuery(from, to, limit: 50), Aborted);
         await Task.WhenAll(inboxesTask, surveysTask, totalTask, agentsTask, responsesTask);
 
-        if (await surveysTask is SurveySucceeded<IReadOnlyList<StoredSurvey>> list)
+        if (await surveysTask is TicketValue<IReadOnlyList<StoredSurvey>> list)
             surveys = [.. list.Value];
-        if (await totalTask is SurveySucceeded<SurveyAggregateResult> total)
+        if (await totalTask is TicketValue<SurveyAggregateResult> total)
             foreach (var row in total.Value.Rows)
                 (csatResponses, csatPositive, csatNegative, csatScore) = (csatResponses + row.Responses, csatPositive + row.Positive, csatNegative + row.Negative, csatScore + row.ScoreSum);
 
-        var agentRows = await agentsTask is SurveySucceeded<SurveyAggregateResult> agents ? agents.Value.Rows : [];
-        if (await responsesTask is SurveySucceeded<SurveyResponseViewPage> page)
+        var agentRows = await agentsTask is TicketValue<SurveyAggregateResult> agents ? agents.Value.Rows : [];
+        if (await responsesTask is TicketValue<SurveyResponseViewPage> page)
         {
             responses = [.. page.Value.Items.Take(8)];
             Span<int> scoreCounts = stackalloc int[6];

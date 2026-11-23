@@ -29,7 +29,7 @@ public sealed class InboundPipelineTests
 
         var contact = await host.Contacts.GetAsync(host.Owner, view.Contact) switch
         {
-            ContactApplied<ContactView> applied => applied.Value,
+            TicketValue<ContactView> applied => applied.Value,
             ContactRefused refused => throw new AssertFailedException(refused.Reason.ToString()),
         };
         Assert.AreEqual("Ada", contact.Profile.DisplayName);
@@ -122,7 +122,7 @@ public sealed class InboundPipelineTests
         Assert.AreEqual("+15550001111", view.ChannelThread!.ExternalThreadId);
         var contact = await host.Contacts.GetAsync(host.Owner, view.Contact) switch
         {
-            ContactApplied<ContactView> applied => applied.Value,
+            TicketValue<ContactView> applied => applied.Value,
             ContactRefused refused => throw new AssertFailedException(refused.Reason.ToString()),
         };
         Assert.IsTrue(contact.Identities.Single().Verification.IsVerified);
@@ -157,8 +157,8 @@ public sealed class InboundPipelineTests
         await using var host = await HostAsync(EmailChannel());
         var first = Recorded(await host.Pipeline.ReceiveAsync(host.Worker, host.Email("<m1@x>")));
         var view = await ViewAsync(host, first.Conversation);
-        var contact = (ContactApplied<ContactView>)(await host.Contacts.GetAsync(host.Owner, view.Contact)).Value!;
-        Assert.IsInstanceOfType<ContactApplied<ContactView>>((await host.Contacts.UpdateAsync(host.Owner, view.Contact, contact.Value.Revision, [new SetContactBlocked(true)])).Value);
+        var contact = (TicketValue<ContactView>)(await host.Contacts.GetAsync(host.Owner, view.Contact)).Value!;
+        Assert.IsInstanceOfType<TicketValue<ContactView>>((await host.Contacts.UpdateAsync(host.Owner, view.Contact, contact.Value.Revision, [new SetContactBlocked(true)])).Value);
         Assert.AreEqual(InboundRejection.ContactBlocked, Rejection(await host.Pipeline.ReceiveAsync(host.Worker, host.Email("<m2@x>"))));
     }
 

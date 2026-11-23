@@ -29,7 +29,7 @@ public sealed class TicketFlowActor
     public PrincipalRef Principal => principal ?? throw new InvalidOperationException("The actor was not resolved.");
 
     /// <summary>The user identifier for user principals, otherwise <see langword="null"/>.</summary>
-    public UserId? UserId => principal?.Value is UserPrincipal user ? user.UserId : null;
+    public UserId? UserId => principal is UserPrincipal user ? user.UserId : null;
 
     internal int FailureStatus { get; }
     internal string? FailureCode { get; }
@@ -42,7 +42,7 @@ public sealed class TicketFlowActor
             return new TicketFlowActor(null, null, status == StatusCodes.Status404NotFound ? StatusCodes.Status401Unauthorized : status, code);
         var resolver = context.RequestServices.GetRequiredService<ITicketFlowPrincipalResolver>();
         var principal = await resolver.ResolveAsync(context, resolved, context.RequestAborted).ConfigureAwait(false);
-        if (principal is not { } value || value.Value is null)
+        if (principal is not { } value)
             return new TicketFlowActor(null, null, StatusCodes.Status401Unauthorized, "unauthenticated");
         if (value.Scope != resolved)
             return new TicketFlowActor(null, null, StatusCodes.Status401Unauthorized, "scope-mismatch");

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using TicketFlow.Routing.Tests;
 using TicketFlow.Testing;
+using TicketFlow.Core;
 
 namespace TicketFlow.Routing.Stores.Postgres.Tests;
 
@@ -85,7 +86,7 @@ public sealed class PostgresRoutingEngineTests
             Assert.AreEqual(1, (await fixture.Maintenance.RunOnceAsync()).Routed);
             Assert.AreEqual(new Core.UserId("dee"), await fixture.AssigneeAsync("w1"));
 
-            Assert.IsInstanceOfType<RoutingValue<StoredAgentProfile>>((await fixture.Availability.SetStatusAsync(fixture.Lead, new Core.UserId("dee"), AgentStatus.Offline)).Value);
+            Assert.IsInstanceOfType<TicketValue<StoredAgentProfile>>((await fixture.Availability.SetStatusAsync(fixture.Lead, new Core.UserId("dee"), AgentStatus.Offline)).Value);
             Assert.AreEqual(1, (await fixture.Maintenance.RunOnceAsync()).Reassigned);
             // The conversation team is tier2 (dee only), so it waits in the queue.
             Assert.IsNull(await fixture.AssigneeAsync("w1"));

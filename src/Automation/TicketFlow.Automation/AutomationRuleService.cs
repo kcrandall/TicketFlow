@@ -21,66 +21,66 @@ public sealed class AutomationRuleService(IAutomationRuleStore rules, IAutomatio
     private readonly AutomationOptions options = (options ?? throw new ArgumentNullException(nameof(options))).Value;
     private readonly TimeProvider time = time ?? throw new ArgumentNullException(nameof(time));
 
-    public async Task<AutomationResult<StoredAutomationRule>> GetAsync(PrincipalRef actor, AutomationRuleId id, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredAutomationRule>> GetAsync(PrincipalRef actor, AutomationRuleId id, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         RequireId(id);
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.Read, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
-        return await rules.GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is { } stored ? new AutomationValue<StoredAutomationRule>(stored) : AutomationNotFound.Instance;
+            return TicketFailure.Forbidden;
+        return await rules.GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is { } stored ? new TicketValue<StoredAutomationRule>(stored) : TicketFailure.NotFound;
     }
 
-    public async Task<AutomationResult<IReadOnlyList<StoredAutomationRule>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<IReadOnlyList<StoredAutomationRule>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.Read, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
-        return new AutomationValue<IReadOnlyList<StoredAutomationRule>>(await rules.ListAsync(scope, cancellationToken).ConfigureAwait(false));
+            return TicketFailure.Forbidden;
+        return new TicketValue<IReadOnlyList<StoredAutomationRule>>(await rules.ListAsync(scope, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<AutomationResult<StoredAutomationRule>> CreateAsync(PrincipalRef actor, AutomationRule rule, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredAutomationRule>> CreateAsync(PrincipalRef actor, AutomationRule rule, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(rule);
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.Manage, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         if (!TryNextRun(rule, out var next, out var error))
-            return AutomationRefused.Invalid(error!);
+            return TicketFailure.Invalid(error!);
         return AutomationGuards.Map(await rules.CreateAsync(scope, rule, next, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<AutomationResult<StoredAutomationRule>> UpdateAsync(PrincipalRef actor, AutomationRule rule, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredAutomationRule>> UpdateAsync(PrincipalRef actor, AutomationRule rule, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(rule);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.Manage, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         if (!TryNextRun(rule, out var next, out var error))
-            return AutomationRefused.Invalid(error!);
+            return TicketFailure.Invalid(error!);
         return AutomationGuards.Map(await rules.UpdateAsync(scope, rule, expectedRevision, next, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<AutomationResult<StoredAutomationRule>> DeleteAsync(PrincipalRef actor, AutomationRuleId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredAutomationRule>> DeleteAsync(PrincipalRef actor, AutomationRuleId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         RequireId(id);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.Manage, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return AutomationGuards.Map(await rules.DeleteAsync(scope, id, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<AutomationResult<AutomationDryRunResult>> DryRunAsync(PrincipalRef actor, AutomationDryRunRequest request, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<AutomationDryRunResult>> DryRunAsync(PrincipalRef actor, AutomationDryRunRequest request, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(request);
         if (request.Conversation == default || request.Event is null)
             throw new ArgumentException("A conversation and an event are required.", nameof(request));
         if (request.MessageBody is { Length: > ConversationMessageLimits.MaximumBodyBytes })
-            return AutomationRefused.Invalid("The message body is too long.");
+            return TicketFailure.Invalid("The message body is too long.");
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.Read, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         var message = request.MessageBody is { } body
             ? new AutomationMessageFacts(request.Event.Kind == AutomationEventKind.MessageSent ? MessageDirection.Outgoing : MessageDirection.Incoming, body)
             : null;
@@ -90,17 +90,17 @@ public sealed class AutomationRuleService(IAutomationRuleStore rules, IAutomatio
             needs |= AutomationContextNeedsHelper.ForRule(candidates[i]);
         var (context, failure) = await contexts.BuildInternalAsync(actor, request.Conversation, request.Event, message, needs, cache: null, cancellationToken).ConfigureAwait(false);
         if (context is null)
-            return failure == AutomationContextFailure.Forbidden ? AutomationRefused.Forbidden : AutomationNotFound.Instance;
+            return failure == AutomationContextFailure.Forbidden ? TicketFailure.Forbidden : TicketFailure.NotFound;
         var (previews, stopped) = await PreviewAsync(scope, candidates, context, includeDisabledDraft: request.Draft is not null, cancellationToken).ConfigureAwait(false);
-        return new AutomationValue<AutomationDryRunResult>(new AutomationDryRunResult(request.Conversation, previews, stopped, context.Now));
+        return new TicketValue<AutomationDryRunResult>(new AutomationDryRunResult(request.Conversation, previews, stopped, context.Now));
     }
 
-    public async Task<AutomationResult<AutomationReplayResult>> ReplayAsync(PrincipalRef actor, AutomationReplayRequest request, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<AutomationReplayResult>> ReplayAsync(PrincipalRef actor, AutomationReplayRequest request, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(request);
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.Read, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         var candidates = await SelectAsync(scope, request.Rules, cancellationToken).ConfigureAwait(false);
         var candidateIds = new AutomationRuleId[candidates.Count];
         var needs = AutomationContextNeeds.None;
@@ -123,7 +123,7 @@ public sealed class AutomationRuleService(IAutomationRuleStore rules, IAutomatio
                 ConversationNotFound or ConversationRefused => null,
             };
             if (timeline is null)
-                return page.Value is ConversationRefused ? AutomationRefused.Forbidden : AutomationNotFound.Instance;
+                return page.Value is ConversationRefused ? TicketFailure.Forbidden : TicketFailure.NotFound;
             for (var v = 0; v < timeline.Events.Count; v++)
             {
                 if (++scanned > AutomationReplayRequest.MaximumEvents)
@@ -168,7 +168,7 @@ public sealed class AutomationRuleService(IAutomationRuleStore rules, IAutomatio
                         var (built, failure) = await contexts.BuildInternalAsync(actor, request.Conversation, automationEvent, message, needs, cache: null, cancellationToken)
                             .ConfigureAwait(false);
                         if (built is null)
-                            return failure == AutomationContextFailure.Forbidden ? AutomationRefused.Forbidden : AutomationNotFound.Instance;
+                            return failure == AutomationContextFailure.Forbidden ? TicketFailure.Forbidden : TicketFailure.NotFound;
                         baseContext = built;
                     }
                     var context = baseContext with { Event = automationEvent, Message = message, Now = time.GetUtcNow() };
@@ -184,16 +184,16 @@ public sealed class AutomationRuleService(IAutomationRuleStore rules, IAutomatio
                 break;
             after = next;
         }
-        return new AutomationValue<AutomationReplayResult>(new AutomationReplayResult(request.Conversation, items, truncated));
+        return new TicketValue<AutomationReplayResult>(new AutomationReplayResult(request.Conversation, items, truncated));
     }
 
-    public async Task<AutomationResult<AutomationExecutionPage>> ListExecutionsAsync(PrincipalRef actor, AutomationExecutionQuery query, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<AutomationExecutionPage>> ListExecutionsAsync(PrincipalRef actor, AutomationExecutionQuery query, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.Read, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
-        return new AutomationValue<AutomationExecutionPage>(await executions.ListAsync(scope, query, cancellationToken).ConfigureAwait(false));
+            return TicketFailure.Forbidden;
+        return new TicketValue<AutomationExecutionPage>(await executions.ListAsync(scope, query, cancellationToken).ConfigureAwait(false));
     }
 
     private async Task<IReadOnlyList<AutomationRule>> SelectAsync(TicketScope scope, IReadOnlyList<AutomationRuleId>? ids, CancellationToken cancellationToken)

@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
 using ModelContextProtocol.Protocol;
+using TicketFlow.Core;
 
 namespace TicketFlow.Mcp;
 
@@ -49,6 +50,22 @@ public sealed record TicketFlowToolError(string Code, string Message, IReadOnlyL
     public static TicketFlowToolError Invalid(IReadOnlyList<string>? errors) => new("invalid", "The request is invalid.", errors is { Count: > 0 } ? errors : null);
 
     public static TicketFlowToolError Rejected(IReadOnlyList<string>? errors) => new("rejected", "A store limit or contract rule refused the operation.", errors is { Count: > 0 } ? errors : null);
+
+    public static TicketFlowToolError FromFailure(TicketFailure failure, string notFoundWhat = "The record") => failure.Kind switch
+    {
+        TicketFailureKind.Forbidden => Forbidden(),
+        TicketFailureKind.Invalid => Invalid(failure.Errors),
+        TicketFailureKind.NotFound => NotFound(notFoundWhat),
+        TicketFailureKind.Conflict => Conflict(failure.CurrentRevision),
+        TicketFailureKind.Rejected => Rejected(failure.Errors),
+        _ => throw new ArgumentOutOfRangeException(nameof(failure)),
+    };
+
+    public static object Map<T>(TicketResult<T> result, Func<T, object> success, string notFoundWhat = "The record") => result switch
+    {
+        TicketValue<T> ok => success(ok.Value),
+        TicketFailure failure => FromFailure(failure, notFoundWhat),
+    };
 }
 
 /// <summary>JSON conventions of TicketFlow tool results: source-generated web casing, omitted nulls, camelCase tokens, opaque cursors.</summary>

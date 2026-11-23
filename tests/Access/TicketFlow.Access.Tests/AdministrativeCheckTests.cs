@@ -8,7 +8,7 @@ public sealed class AdministrativeCheckTests
     private static string Describe(AccessCheckResult result) => result switch
     {
         AccessCheckPassed => "passed",
-        AccessChangeRefused refused => $"refused:{refused.Reason}",
+        TicketFailure refused => $"refused:{refused.Kind}",
     };
 
     [TestMethod]

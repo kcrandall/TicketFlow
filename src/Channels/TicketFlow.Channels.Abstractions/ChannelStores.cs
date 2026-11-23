@@ -175,20 +175,6 @@ public sealed record ChannelDispatch
 
 public sealed record StoredChannelDispatch(TicketScope Scope, ChannelDispatch Dispatch, long Revision);
 
-public sealed record ChannelWriteApplied<T>(T Value);
-
-public sealed record ChannelWriteNotFound
-{
-    private ChannelWriteNotFound()
-    {
-    }
-
-    public static ChannelWriteNotFound Instance { get; } = new();
-}
-
-/// <summary>The revision did not match, an immutable field differed, or a create found an existing record at <see cref="CurrentRevision"/>.</summary>
-public sealed record ChannelWriteConflict(long CurrentRevision);
-
 public enum ChannelWriteRejection
 {
     /// <summary>The endpoint address is already bound in the partition for the kind.</summary>
@@ -196,11 +182,6 @@ public enum ChannelWriteRejection
 
     CapacityExceeded = 2,
 }
-
-public sealed record ChannelWriteRejected(ChannelWriteRejection Reason);
-
-/// <summary>Outcome of a channel store write. Switch over every case without a discard arm.</summary>
-public union ChannelWriteResult<T>(ChannelWriteApplied<T>, ChannelWriteNotFound, ChannelWriteConflict, ChannelWriteRejected);
 
 /// <summary>
 /// Channel endpoints keyed by (scope, kind, configuration id). Contract: scope-confined reads and writes; creates start at revision 1
@@ -225,11 +206,11 @@ public interface IChannelEndpointStore
     /// </summary>
     Task<IReadOnlyList<StoredChannelEndpoint>> ListByAddressPrefixAsync(AccessPartition partition, ChannelKind kind, string prefix, int limit, CancellationToken cancellationToken = default);
 
-    Task<ChannelWriteResult<StoredChannelEndpoint>> CreateAsync(TicketScope scope, ChannelEndpoint endpoint, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredChannelEndpoint, ChannelWriteRejection>> CreateAsync(TicketScope scope, ChannelEndpoint endpoint, CancellationToken cancellationToken = default);
 
-    Task<ChannelWriteResult<StoredChannelEndpoint>> UpdateAsync(TicketScope scope, ChannelEndpoint endpoint, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredChannelEndpoint, ChannelWriteRejection>> UpdateAsync(TicketScope scope, ChannelEndpoint endpoint, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<ChannelWriteResult<StoredChannelEndpoint>> DeleteAsync(TicketScope scope, ChannelKind kind, string configurationId, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredChannelEndpoint, ChannelWriteRejection>> DeleteAsync(TicketScope scope, ChannelKind kind, string configurationId, long expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -248,7 +229,7 @@ public interface IChannelConversationStateStore
 
     Task<StoredChannelConversationState?> GetAsync(TicketScope scope, ConversationId conversation, CancellationToken cancellationToken = default);
 
-    Task<ChannelWriteResult<StoredChannelConversationState>> WriteAsync(TicketScope scope, ChannelConversationState state, long? expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredChannelConversationState, ChannelWriteRejection>> WriteAsync(TicketScope scope, ChannelConversationState state, long? expectedRevision, CancellationToken cancellationToken = default);
 
     /// <summary>Removes the state (for example after the conversation was deleted); <see langword="false"/> when absent.</summary>
     Task<bool> DeleteAsync(TicketScope scope, ConversationId conversation, CancellationToken cancellationToken = default);
@@ -286,7 +267,7 @@ public interface IChannelDispatchStore
 {
     Task<StoredChannelDispatch?> GetAsync(TicketScope scope, ConversationId conversation, MessageId message, CancellationToken cancellationToken = default);
 
-    Task<ChannelWriteResult<StoredChannelDispatch>> WriteAsync(TicketScope scope, ChannelDispatch dispatch, long? expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredChannelDispatch, ChannelWriteRejection>> WriteAsync(TicketScope scope, ChannelDispatch dispatch, long? expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

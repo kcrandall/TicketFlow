@@ -26,7 +26,7 @@ public sealed class InMemorySlaPolicyStore : ISlaPolicyStore
             return Task.FromResult<IReadOnlyList<StoredSlaPolicy>>([.. policies.Where(pair => pair.Key.Scope == scope).OrderBy(pair => pair.Key.Id, StringComparer.Ordinal).Select(pair => pair.Value)]);
     }
 
-    public Task<SlaWriteResult<StoredSlaPolicy>> CreateAsync(TicketScope scope, SlaPolicy policy, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>> CreateAsync(TicketScope scope, SlaPolicy policy, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(policy);
@@ -34,16 +34,16 @@ public sealed class InMemorySlaPolicyStore : ISlaPolicyStore
         lock (gate)
         {
             if (policies.TryGetValue((scope, policy.Id.Value), out var existing))
-                return Task.FromResult<SlaWriteResult<StoredSlaPolicy>>(new SlaWriteConflict(existing.Revision));
+                return Task.FromResult<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>>(new StoreConflict(existing.Revision));
             if (policies.Keys.Count(key => key.Scope == scope) >= ISlaPolicyStore.MaximumPoliciesPerWorkspace)
-                return Task.FromResult<SlaWriteResult<StoredSlaPolicy>>(new SlaWriteRejected(SlaWriteRejection.CapacityExceeded));
+                return Task.FromResult<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>>(new StoreRejected<SlaWriteRejection>(SlaWriteRejection.CapacityExceeded));
             var stored = new StoredSlaPolicy(scope, policy, 1);
             policies[(scope, policy.Id.Value)] = stored;
-            return Task.FromResult<SlaWriteResult<StoredSlaPolicy>>(new SlaWriteApplied<StoredSlaPolicy>(stored));
+            return Task.FromResult<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>>(new StoreApplied<StoredSlaPolicy>(stored));
         }
     }
 
-    public Task<SlaWriteResult<StoredSlaPolicy>> UpdateAsync(TicketScope scope, SlaPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>> UpdateAsync(TicketScope scope, SlaPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(policy);
@@ -51,27 +51,27 @@ public sealed class InMemorySlaPolicyStore : ISlaPolicyStore
         lock (gate)
         {
             if (!policies.TryGetValue((scope, policy.Id.Value), out var existing))
-                return Task.FromResult<SlaWriteResult<StoredSlaPolicy>>(SlaWriteNotFound.Instance);
+                return Task.FromResult<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Task.FromResult<SlaWriteResult<StoredSlaPolicy>>(new SlaWriteConflict(existing.Revision));
+                return Task.FromResult<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>>(new StoreConflict(existing.Revision));
             var stored = new StoredSlaPolicy(scope, policy, existing.Revision + 1);
             policies[(scope, policy.Id.Value)] = stored;
-            return Task.FromResult<SlaWriteResult<StoredSlaPolicy>>(new SlaWriteApplied<StoredSlaPolicy>(stored));
+            return Task.FromResult<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>>(new StoreApplied<StoredSlaPolicy>(stored));
         }
     }
 
-    public Task<SlaWriteResult<StoredSlaPolicy>> DeleteAsync(TicketScope scope, SlaPolicyId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>> DeleteAsync(TicketScope scope, SlaPolicyId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
             if (!policies.TryGetValue((scope, id.Value), out var existing))
-                return Task.FromResult<SlaWriteResult<StoredSlaPolicy>>(SlaWriteNotFound.Instance);
+                return Task.FromResult<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Task.FromResult<SlaWriteResult<StoredSlaPolicy>>(new SlaWriteConflict(existing.Revision));
+                return Task.FromResult<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>>(new StoreConflict(existing.Revision));
             policies.Remove((scope, id.Value));
-            return Task.FromResult<SlaWriteResult<StoredSlaPolicy>>(new SlaWriteApplied<StoredSlaPolicy>(existing));
+            return Task.FromResult<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>>(new StoreApplied<StoredSlaPolicy>(existing));
         }
     }
 }
@@ -95,7 +95,7 @@ public sealed class InMemorySlaTrackerStore(TimeProvider? time = null) : ISlaTra
             return Task.FromResult(entries.GetValueOrDefault((scope, conversation.Value))?.Stored);
     }
 
-    public Task<SlaWriteResult<StoredSlaTracker>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, SlaTimerClaim? release = null,
+    public Task<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, SlaTimerClaim? release = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -108,13 +108,13 @@ public sealed class InMemorySlaTrackerStore(TimeProvider? time = null) : ISlaTra
             var key = (scope, tracker.Conversation.Value);
             entries.TryGetValue(key, out var existing);
             if (expectedRevision is null && existing is not null)
-                return Task.FromResult<SlaWriteResult<StoredSlaTracker>>(new SlaWriteConflict(existing.Stored.Revision));
+                return Task.FromResult<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>>(new StoreConflict(existing.Stored.Revision));
             if (expectedRevision is { } expected)
             {
                 if (existing is null)
-                    return Task.FromResult<SlaWriteResult<StoredSlaTracker>>(SlaWriteNotFound.Instance);
+                    return Task.FromResult<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>>(StoreNotFound.Instance);
                 if (existing.Stored.Revision != expected)
-                    return Task.FromResult<SlaWriteResult<StoredSlaTracker>>(new SlaWriteConflict(existing.Stored.Revision));
+                    return Task.FromResult<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>>(new StoreConflict(existing.Stored.Revision));
                 if (existing.Stored.Tracker.Inbox != tracker.Inbox)
                     throw new ArgumentException("A tracker's inbox cannot change.", nameof(tracker));
             }
@@ -122,22 +122,22 @@ public sealed class InMemorySlaTrackerStore(TimeProvider? time = null) : ISlaTra
             var fence = existing?.Fence ?? 0;
             var lease = release is not null && release.Fence == fence ? null : existing?.LeaseUntil;
             entries[key] = new Entry(stored, tracker.Schedule.NextCheckAt, lease, fence);
-            return Task.FromResult<SlaWriteResult<StoredSlaTracker>>(new SlaWriteApplied<StoredSlaTracker>(stored));
+            return Task.FromResult<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>>(new StoreApplied<StoredSlaTracker>(stored));
         }
     }
 
-    public Task<SlaWriteResult<StoredSlaTracker>> DeleteAsync(TicketScope scope, ConversationId conversation, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>> DeleteAsync(TicketScope scope, ConversationId conversation, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
             if (!entries.TryGetValue((scope, conversation.Value), out var existing))
-                return Task.FromResult<SlaWriteResult<StoredSlaTracker>>(SlaWriteNotFound.Instance);
+                return Task.FromResult<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>>(StoreNotFound.Instance);
             if (existing.Stored.Revision != expectedRevision)
-                return Task.FromResult<SlaWriteResult<StoredSlaTracker>>(new SlaWriteConflict(existing.Stored.Revision));
+                return Task.FromResult<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>>(new StoreConflict(existing.Stored.Revision));
             entries.Remove((scope, conversation.Value));
-            return Task.FromResult<SlaWriteResult<StoredSlaTracker>>(new SlaWriteApplied<StoredSlaTracker>(existing.Stored));
+            return Task.FromResult<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>>(new StoreApplied<StoredSlaTracker>(existing.Stored));
         }
     }
 

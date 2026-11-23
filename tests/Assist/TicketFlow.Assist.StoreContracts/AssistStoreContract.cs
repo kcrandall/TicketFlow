@@ -21,8 +21,8 @@ public static class AssistStoreContract
 
     public static string W(AssistWriteResult<StoredAssistSettings> result) => result switch
     {
-        AssistWriteApplied<StoredAssistSettings> applied => $"applied:{applied.Value.Revision}",
-        AssistWriteConflict conflict => $"conflict:{conflict.CurrentRevision}",
+        StoreApplied<StoredAssistSettings> applied => $"applied:{applied.Value.Revision}",
+        StoreConflict conflict => $"conflict:{conflict.CurrentRevision}",
     };
 
     public static async Task VerifySettingsAsync(IAssistStore store, IAssistStore competing)

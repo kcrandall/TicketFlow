@@ -47,7 +47,7 @@ public sealed class InMemorySurveyStore : ISurveyStore
             return Task.FromResult<IReadOnlyList<StoredSurvey>>(Find(scope) is { } state ? [.. state.Surveys.Values] : []);
     }
 
-    public Task<SurveyWriteResult<StoredSurvey>> CreateSurveyAsync(TicketScope scope, SurveyDefinition survey, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredSurvey, SurveyWriteRejection>> CreateSurveyAsync(TicketScope scope, SurveyDefinition survey, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(survey);
@@ -55,20 +55,20 @@ public sealed class InMemorySurveyStore : ISurveyStore
         {
             var state = State(scope);
             if (state.Surveys.TryGetValue(survey.Id, out var existing))
-                return Write<StoredSurvey>(new SurveyWriteConflict(existing.Revision));
+                return Write<StoredSurvey>(new StoreConflict(existing.Revision));
             if (records >= maximumRecords || state.Surveys.Count >= SurveyLimits.MaximumSurveysPerWorkspace)
             {
                 Prune(scope, state);
-                return Write<StoredSurvey>(new SurveyWriteRejected(SurveyWriteRejection.CapacityExceeded));
+                return Write<StoredSurvey>(new StoreRejected<SurveyWriteRejection>(SurveyWriteRejection.CapacityExceeded));
             }
             var stored = new StoredSurvey(scope, survey, 1);
             state.Surveys.Add(survey.Id, stored);
             records++;
-            return Write<StoredSurvey>(new SurveyWriteApplied<StoredSurvey>(stored));
+            return Write<StoredSurvey>(new StoreApplied<StoredSurvey>(stored));
         }
     }
 
-    public Task<SurveyWriteResult<StoredSurvey>> UpdateSurveyAsync(TicketScope scope, SurveyDefinition survey, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredSurvey, SurveyWriteRejection>> UpdateSurveyAsync(TicketScope scope, SurveyDefinition survey, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(survey);
@@ -76,16 +76,16 @@ public sealed class InMemorySurveyStore : ISurveyStore
         lock (gate)
         {
             if (Find(scope) is not { } state || !state.Surveys.TryGetValue(survey.Id, out var existing))
-                return Write<StoredSurvey>(SurveyWriteNotFound.Instance);
+                return Write<StoredSurvey>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Write<StoredSurvey>(new SurveyWriteConflict(existing.Revision));
+                return Write<StoredSurvey>(new StoreConflict(existing.Revision));
             var stored = new StoredSurvey(scope, survey, checked(existing.Revision + 1));
             state.Surveys[survey.Id] = stored;
-            return Write<StoredSurvey>(new SurveyWriteApplied<StoredSurvey>(stored));
+            return Write<StoredSurvey>(new StoreApplied<StoredSurvey>(stored));
         }
     }
 
-    public Task<SurveyWriteResult<StoredSurvey>> DeleteSurveyAsync(TicketScope scope, SurveyId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredSurvey, SurveyWriteRejection>> DeleteSurveyAsync(TicketScope scope, SurveyId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         Require(id.IsInitialized, nameof(id));
@@ -93,15 +93,15 @@ public sealed class InMemorySurveyStore : ISurveyStore
         lock (gate)
         {
             if (Find(scope) is not { } state || !state.Surveys.TryGetValue(id, out var existing))
-                return Write<StoredSurvey>(SurveyWriteNotFound.Instance);
+                return Write<StoredSurvey>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Write<StoredSurvey>(new SurveyWriteConflict(existing.Revision));
+                return Write<StoredSurvey>(new StoreConflict(existing.Revision));
             if (state.Invitations.Values.Any(invitation => invitation.Invitation.Survey == id))
-                return Write<StoredSurvey>(new SurveyWriteRejected(SurveyWriteRejection.InUse));
+                return Write<StoredSurvey>(new StoreRejected<SurveyWriteRejection>(SurveyWriteRejection.InUse));
             state.Surveys.Remove(id);
             records--;
             Prune(scope, state);
-            return Write<StoredSurvey>(new SurveyWriteApplied<StoredSurvey>(existing));
+            return Write<StoredSurvey>(new StoreApplied<StoredSurvey>(existing));
         }
     }
 
@@ -193,7 +193,7 @@ public sealed class InMemorySurveyStore : ISurveyStore
             .OrderBy(stored => stored.Invitation.SendAfter).ThenBy(stored => stored.Invitation.Id)
             .Take(limit)];
 
-    public Task<SurveyWriteResult<StoredInvitation>> UpdateInvitationAsync(TicketScope scope, SurveyInvitation invitation, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredInvitation, SurveyWriteRejection>> UpdateInvitationAsync(TicketScope scope, SurveyInvitation invitation, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(invitation);
@@ -201,20 +201,20 @@ public sealed class InMemorySurveyStore : ISurveyStore
         lock (gate)
         {
             if (Find(scope) is not { } state || !state.Invitations.TryGetValue(invitation.Id, out var existing))
-                return Write<StoredInvitation>(SurveyWriteNotFound.Instance);
+                return Write<StoredInvitation>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Write<StoredInvitation>(new SurveyWriteConflict(existing.Revision));
+                return Write<StoredInvitation>(new StoreConflict(existing.Revision));
             var old = existing.Invitation;
             if (old.Survey != invitation.Survey || old.Kind != invitation.Kind || old.Conversation != invitation.Conversation || old.Contact != invitation.Contact
                 || (invitation.TokenHash is { } taken && state.ByToken.TryGetValue(taken, out var holder) && holder != invitation.Id))
-                return Write<StoredInvitation>(new SurveyWriteRejected(SurveyWriteRejection.InUse));
+                return Write<StoredInvitation>(new StoreRejected<SurveyWriteRejection>(SurveyWriteRejection.InUse));
             if (old.TokenHash is { } previous)
                 state.ByToken.Remove(previous);
             if (invitation.TokenHash is { } hash)
                 state.ByToken[hash] = invitation.Id;
             var stored = new StoredInvitation(scope, invitation, checked(existing.Revision + 1));
             state.Invitations[invitation.Id] = stored;
-            return Write<StoredInvitation>(new SurveyWriteApplied<StoredInvitation>(stored));
+            return Write<StoredInvitation>(new StoreApplied<StoredInvitation>(stored));
         }
     }
 
@@ -306,7 +306,7 @@ public sealed class InMemorySurveyStore : ISurveyStore
         invitation.Survey == response.Survey && invitation.Kind == response.Kind && invitation.Conversation == response.Conversation && invitation.Contact == response.Contact
         && invitation.Inbox == response.Inbox && invitation.Team == response.Team && invitation.Agent == response.Agent;
 
-    private static Task<SurveyWriteResult<T>> Write<T>(SurveyWriteResult<T> result) => Task.FromResult(result);
+    private static Task<StoreWriteResult<T, SurveyWriteRejection>> Write<T>(StoreWriteResult<T, SurveyWriteRejection> result) => Task.FromResult(result);
 
     private static void Require(bool initialized, string parameterName)
     {

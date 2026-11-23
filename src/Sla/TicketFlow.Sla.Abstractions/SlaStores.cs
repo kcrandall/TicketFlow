@@ -4,33 +4,11 @@ using TicketFlow.Workspaces;
 
 namespace TicketFlow.Sla;
 
-/// <summary>The store write was applied; <see cref="Value"/> is the stored state (for deletes, the removed state).</summary>
-public sealed record SlaWriteApplied<T>(T Value);
-
-/// <summary>No record exists for the key in the requested scope. Nothing was written.</summary>
-public sealed record SlaWriteNotFound
-{
-    private SlaWriteNotFound()
-    {
-    }
-
-    public static SlaWriteNotFound Instance { get; } = new();
-}
-
-/// <summary>The expected revision did not match, or a create found an existing record. Nothing was written.</summary>
-public sealed record SlaWriteConflict(long CurrentRevision);
-
 public enum SlaWriteRejection
 {
     /// <summary>A per-workspace capacity would be exceeded.</summary>
     CapacityExceeded = 1,
 }
-
-/// <summary>The store refused the write for a contract reason. Nothing was written.</summary>
-public sealed record SlaWriteRejected(SlaWriteRejection Reason);
-
-/// <summary>Outcome of an SLA store write. Switch over every case without a discard arm.</summary>
-public union SlaWriteResult<T>(SlaWriteApplied<T>, SlaWriteNotFound, SlaWriteConflict, SlaWriteRejected);
 
 /// <summary>
 /// Workspace-scoped SLA policies keyed by <see cref="SlaPolicyId"/>. Contract: scope-confined; creates start at revision 1 (conflict
@@ -46,11 +24,11 @@ public interface ISlaPolicyStore
     /// <summary>Policies in <paramref name="scope"/> ordered by identifier (ordinal).</summary>
     Task<IReadOnlyList<StoredSlaPolicy>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default);
 
-    Task<SlaWriteResult<StoredSlaPolicy>> CreateAsync(TicketScope scope, SlaPolicy policy, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>> CreateAsync(TicketScope scope, SlaPolicy policy, CancellationToken cancellationToken = default);
 
-    Task<SlaWriteResult<StoredSlaPolicy>> UpdateAsync(TicketScope scope, SlaPolicy policy, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>> UpdateAsync(TicketScope scope, SlaPolicy policy, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<SlaWriteResult<StoredSlaPolicy>> DeleteAsync(TicketScope scope, SlaPolicyId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>> DeleteAsync(TicketScope scope, SlaPolicyId id, long expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -178,10 +156,10 @@ public interface ISlaTrackerStore
     /// cleared only when <paramref name="release"/> is the current claim (same fence); otherwise a live lease held by another worker is
     /// left untouched.
     /// </summary>
-    Task<SlaWriteResult<StoredSlaTracker>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, SlaTimerClaim? release = null,
+    Task<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, SlaTimerClaim? release = null,
         CancellationToken cancellationToken = default);
 
-    Task<SlaWriteResult<StoredSlaTracker>> DeleteAsync(TicketScope scope, ConversationId conversation, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>> DeleteAsync(TicketScope scope, ConversationId conversation, long expectedRevision, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<SlaTimerClaim>> ClaimDueAsync(int limit, TimeSpan lease, CancellationToken cancellationToken = default);
 

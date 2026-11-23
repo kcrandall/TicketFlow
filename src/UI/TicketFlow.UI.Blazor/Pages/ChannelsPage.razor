@@ -74,8 +74,8 @@
             return;
         var endpoints = Service<IChannelEndpointService>();
         var widgets = Service<ILiveChatWidgetService>();
-        var endpointTasks = new Task<ChannelResult<StoredChannelEndpoint>>?[Inboxes.Count];
-        var widgetTasks = new Task<LiveChatResult<StoredLiveChatWidget>>?[Inboxes.Count];
+        var endpointTasks = new Task<TicketResult<StoredChannelEndpoint>>?[Inboxes.Count];
+        var widgetTasks = new Task<TicketResult<StoredLiveChatWidget, LiveChatRefused>>?[Inboxes.Count];
         var pending = new List<Task>(Inboxes.Count * 2);
         for (var i = 0; i < Inboxes.Count; i++)
         {
@@ -95,8 +95,8 @@
             await Task.WhenAll(pending);
         for (var i = 0; i < Inboxes.Count; i++)
         {
-            StoredChannelEndpoint? endpoint = endpointTasks[i] is { } et && await et is ChannelValue<StoredChannelEndpoint> found ? found.Value : null;
-            StoredLiveChatWidget? widget = widgetTasks[i] is { } wt && await wt is LiveChatValue<StoredLiveChatWidget> stored ? stored.Value : null;
+            StoredChannelEndpoint? endpoint = endpointTasks[i] is { } et && await et is TicketValue<StoredChannelEndpoint> found ? found.Value : null;
+            StoredLiveChatWidget? widget = widgetTasks[i] is { } wt && await wt is TicketValue<StoredLiveChatWidget> stored ? stored.Value : null;
             items.Add(new Item(Inboxes[i], endpoint, widget));
         }
     }

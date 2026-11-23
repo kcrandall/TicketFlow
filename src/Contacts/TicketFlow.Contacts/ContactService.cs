@@ -50,7 +50,7 @@ public sealed partial class ContactService : IContactService
         this.time = time ?? throw new ArgumentNullException(nameof(time));
     }
 
-    public async Task<ContactResult<ContactView>> CreateAsync(PrincipalRef actor, ContactDraft draft, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ContactView, ContactRefused>> CreateAsync(PrincipalRef actor, ContactDraft draft, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(draft);
@@ -76,7 +76,7 @@ public sealed partial class ContactService : IContactService
             .ConfigureAwait(false);
     }
 
-    public async Task<ContactResult<ContactView>> GetAsync(PrincipalRef actor, ContactId id, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ContactView, ContactRefused>> GetAsync(PrincipalRef actor, ContactId id, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         RequireId(id);
@@ -89,7 +89,7 @@ public sealed partial class ContactService : IContactService
         if (stored.Contact.MergedInto is { } mergedInto)
             return new ContactRefused(ContactRefusal.Merged, [], stored.Revision, mergedInto);
         var masking = await MaskingAsync(scope, ContactPermissions.Read, cancellationToken).ConfigureAwait(false);
-        return new ContactApplied<ContactView>(masking.Project(stored, decision));
+        return new TicketValue<ContactView>(masking.Project(stored, decision));
     }
 
     /// <summary>One decision context and one masking load for the whole batch (list rendering).</summary>
@@ -130,7 +130,7 @@ public sealed partial class ContactService : IContactService
         return views;
     }
 
-    public async Task<ContactResult<ContactView>> UpdateAsync(PrincipalRef actor, ContactId id, long expectedRevision, IEnumerable<ContactEdit> edits, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ContactView, ContactRefused>> UpdateAsync(PrincipalRef actor, ContactId id, long expectedRevision, IEnumerable<ContactEdit> edits, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         RequireId(id);
@@ -181,7 +181,7 @@ public sealed partial class ContactService : IContactService
             .ConfigureAwait(false);
     }
 
-    public async Task<ContactResult<ContactId>> DeleteAsync(PrincipalRef actor, ContactId id, long expectedRevision, string? justification = null, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ContactId, ContactRefused>> DeleteAsync(PrincipalRef actor, ContactId id, long expectedRevision, string? justification = null, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         RequireId(id);
@@ -295,7 +295,7 @@ public sealed partial class ContactService : IContactService
 
     private static TicketScope RequireActor(PrincipalRef actor)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("An actor is required.", nameof(actor));
         return actor.Scope;
     }
@@ -431,13 +431,13 @@ public sealed partial class ContactService : IContactService
     private static (Contact? Contact, ContactRefused? Refused) Refuse(ContactRefused refused) => (null, refused);
 
     /// <summary>Writes a batch, notifies observers after commit and maps store outcomes to refusals.</summary>
-    private async Task<ContactResult<T>> WriteAsync<T>(PrincipalRef actor, TicketScope scope, ContactWriteBatch batch, Func<ContactWriteApplied, Task<T>> onApplied, CancellationToken cancellationToken)
+    private async Task<TicketResult<T, ContactRefused>> WriteAsync<T>(PrincipalRef actor, TicketScope scope, ContactWriteBatch batch, Func<ContactWriteApplied, Task<T>> onApplied, CancellationToken cancellationToken)
     {
         var result = await store.WriteAsync(scope, batch, cancellationToken).ConfigureAwait(false);
         if (result.Value is ContactWriteApplied applied)
         {
             await NotifyAsync(applied.Changes, cancellationToken).ConfigureAwait(false);
-            return new ContactApplied<T>(await onApplied(applied).ConfigureAwait(false));
+            return new TicketValue<T>(await onApplied(applied).ConfigureAwait(false));
         }
         return result.Value is ContactIdentityTaken taken ? await TakenAsync(actor, taken, cancellationToken).ConfigureAwait(false) : Refusal(result);
     }

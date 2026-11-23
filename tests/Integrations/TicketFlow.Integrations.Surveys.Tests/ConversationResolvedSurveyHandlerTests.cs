@@ -32,7 +32,7 @@ public sealed class ConversationResolvedSurveyHandlerTests
         });
         var store = host.Services.GetRequiredService<ISurveyStore>();
         var question = new SurveyQuestion(new SurveyLocale("en"), "How did we do?");
-        Assert.IsInstanceOfType<SurveyWriteApplied<StoredSurvey>>((await store.CreateSurveyAsync(host.Scope, new SurveyDefinition(new SurveyId("csat"), "CSAT", SurveyKind.Csat,
+        Assert.IsInstanceOfType<StoreApplied<StoredSurvey>>((await store.CreateSurveyAsync(host.Scope, new SurveyDefinition(new SurveyId("csat"), "CSAT", SurveyKind.Csat,
             new SurveyLocale("en"), [question, new SurveyQuestion(new SurveyLocale("pt-BR"), "Como foi?")], new SurveyTriggerPolicy(TimeSpan.Zero, TimeSpan.Zero, TimeSpan.FromDays(7))))).Value);
         return (host, sender);
     }
@@ -76,8 +76,8 @@ public sealed class ConversationResolvedSurveyHandlerTests
         await using var _ = host;
         var conversation = await ConversationAsync(host);
         var view = ChannelHost.Is<ConversationView>((await host.Conversations.GetAsync(host.Owner, conversation)).Value);
-        var contact = ChannelHost.Is<ContactApplied<ContactView>>((await host.Contacts.GetAsync(host.Owner, view.Contact)).Value).Value;
-        Assert.IsInstanceOfType<ContactApplied<ContactView>>((await host.Contacts.UpdateAsync(host.Owner, view.Contact, contact.Revision,
+        var contact = ChannelHost.Is<TicketValue<ContactView>>((await host.Contacts.GetAsync(host.Owner, view.Contact)).Value).Value;
+        Assert.IsInstanceOfType<TicketValue<ContactView>>((await host.Contacts.UpdateAsync(host.Owner, view.Contact, contact.Revision,
             [new SetContactProfile(new ContactProfile("Ada", locale: "pt-BR"))])).Value);
         Assert.IsInstanceOfType<ConversationApplied>((await host.Conversations.ChangeStatusAsync(host.Owner, conversation, ConversationStatus.Pending)).Value);
         await host.DispatchAsync();

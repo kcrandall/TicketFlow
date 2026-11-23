@@ -73,7 +73,7 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
             return Task.FromResult<IReadOnlyList<StoredPortal>>(Find(scope) is { } state ? [.. state.Portals.Values] : []);
     }
 
-    public Task<HelpCenterWriteResult<StoredPortal>> CreatePortalAsync(TicketScope scope, Portal portal, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredPortal, HelpCenterWriteRejection>> CreatePortalAsync(TicketScope scope, Portal portal, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(portal);
@@ -83,15 +83,15 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
             try
             {
                 if (state.Portals.TryGetValue(portal.Id, out var existing))
-                    return Result<StoredPortal>(new HelpCenterWriteConflict(existing.Revision));
+                    return Result<StoredPortal>(new StoreConflict(existing.Revision));
                 if (records >= maximumRecords || state.Portals.Count >= HelpCenterLimits.MaximumPortalsPerWorkspace)
-                    return Result<StoredPortal>(new HelpCenterWriteRejected(HelpCenterWriteRejection.CapacityExceeded));
+                    return Result<StoredPortal>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.CapacityExceeded));
                 if (state.Portals.Values.Any(other => other.Portal.Slug == portal.Slug))
-                    return Result<StoredPortal>(new HelpCenterWriteRejected(HelpCenterWriteRejection.SlugConflict));
+                    return Result<StoredPortal>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.SlugConflict));
                 var stored = new StoredPortal(scope, portal, 1);
                 state.Portals.Add(portal.Id, stored);
                 records++;
-                return Result<StoredPortal>(new HelpCenterWriteApplied<StoredPortal>(stored));
+                return Result<StoredPortal>(new StoreApplied<StoredPortal>(stored));
             }
             finally
             {
@@ -100,7 +100,7 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
         }
     }
 
-    public Task<HelpCenterWriteResult<StoredPortal>> UpdatePortalAsync(TicketScope scope, Portal portal, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredPortal, HelpCenterWriteRejection>> UpdatePortalAsync(TicketScope scope, Portal portal, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(portal);
@@ -108,18 +108,18 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
         lock (gate)
         {
             if (Find(scope) is not { } state || !state.Portals.TryGetValue(portal.Id, out var existing))
-                return Result<StoredPortal>(HelpCenterWriteNotFound.Instance);
+                return Result<StoredPortal>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result<StoredPortal>(new HelpCenterWriteConflict(existing.Revision));
+                return Result<StoredPortal>(new StoreConflict(existing.Revision));
             if (state.Portals.Values.Any(other => other.Portal.Id != portal.Id && other.Portal.Slug == portal.Slug))
-                return Result<StoredPortal>(new HelpCenterWriteRejected(HelpCenterWriteRejection.SlugConflict));
+                return Result<StoredPortal>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.SlugConflict));
             var stored = new StoredPortal(scope, portal, checked(existing.Revision + 1));
             state.Portals[portal.Id] = stored;
-            return Result<StoredPortal>(new HelpCenterWriteApplied<StoredPortal>(stored));
+            return Result<StoredPortal>(new StoreApplied<StoredPortal>(stored));
         }
     }
 
-    public Task<HelpCenterWriteResult<StoredPortal>> DeletePortalAsync(TicketScope scope, PortalId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredPortal, HelpCenterWriteRejection>> DeletePortalAsync(TicketScope scope, PortalId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         Require(id.IsInitialized, nameof(id));
@@ -127,15 +127,15 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
         lock (gate)
         {
             if (Find(scope) is not { } state || !state.Portals.TryGetValue(id, out var existing))
-                return Result<StoredPortal>(HelpCenterWriteNotFound.Instance);
+                return Result<StoredPortal>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result<StoredPortal>(new HelpCenterWriteConflict(existing.Revision));
+                return Result<StoredPortal>(new StoreConflict(existing.Revision));
             if (state.Collections.Values.Any(collection => collection.Collection.Portal == id) || state.Articles.Values.Any(article => article.Record.Article.Portal == id))
-                return Result<StoredPortal>(new HelpCenterWriteRejected(HelpCenterWriteRejection.NotEmpty));
+                return Result<StoredPortal>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.NotEmpty));
             state.Portals.Remove(id);
             records--;
             Prune(scope, state);
-            return Result<StoredPortal>(new HelpCenterWriteApplied<StoredPortal>(existing));
+            return Result<StoredPortal>(new StoreApplied<StoredPortal>(existing));
         }
     }
 
@@ -163,7 +163,7 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
         }
     }
 
-    public Task<HelpCenterWriteResult<StoredCollection>> CreateCollectionAsync(TicketScope scope, HelpCollection collection, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredCollection, HelpCenterWriteRejection>> CreateCollectionAsync(TicketScope scope, HelpCollection collection, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(collection);
@@ -173,24 +173,24 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
             try
             {
                 if (state.Collections.TryGetValue(collection.Id, out var existing))
-                    return Result<StoredCollection>(new HelpCenterWriteConflict(existing.Revision));
+                    return Result<StoredCollection>(new StoreConflict(existing.Revision));
                 if (!state.Portals.ContainsKey(collection.Portal))
-                    return Result<StoredCollection>(new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidReference));
+                    return Result<StoredCollection>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidReference));
                 var depth = 1;
                 if (collection.Parent is { } parentId)
                 {
                     if (!state.Collections.TryGetValue(parentId, out var parent) || parent.Collection.Portal != collection.Portal)
-                        return Result<StoredCollection>(new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidReference));
+                        return Result<StoredCollection>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidReference));
                     depth = parent.Depth + 1;
                     if (depth > HelpCenterLimits.MaximumCollectionDepth)
-                        return Result<StoredCollection>(new HelpCenterWriteRejected(HelpCenterWriteRejection.DepthExceeded));
+                        return Result<StoredCollection>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.DepthExceeded));
                 }
                 if (records >= maximumRecords || state.Collections.Values.Count(other => other.Collection.Portal == collection.Portal) >= HelpCenterLimits.MaximumCollectionsPerPortal)
-                    return Result<StoredCollection>(new HelpCenterWriteRejected(HelpCenterWriteRejection.CapacityExceeded));
+                    return Result<StoredCollection>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.CapacityExceeded));
                 var stored = new StoredCollection(scope, collection, depth, 1);
                 state.Collections.Add(collection.Id, stored);
                 records++;
-                return Result<StoredCollection>(new HelpCenterWriteApplied<StoredCollection>(stored));
+                return Result<StoredCollection>(new StoreApplied<StoredCollection>(stored));
             }
             finally
             {
@@ -199,7 +199,7 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
         }
     }
 
-    public Task<HelpCenterWriteResult<StoredCollection>> UpdateCollectionAsync(TicketScope scope, HelpCollection collection, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredCollection, HelpCenterWriteRejection>> UpdateCollectionAsync(TicketScope scope, HelpCollection collection, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(collection);
@@ -207,18 +207,18 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
         lock (gate)
         {
             if (Find(scope) is not { } state || !state.Collections.TryGetValue(collection.Id, out var existing))
-                return Result<StoredCollection>(HelpCenterWriteNotFound.Instance);
+                return Result<StoredCollection>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result<StoredCollection>(new HelpCenterWriteConflict(existing.Revision));
+                return Result<StoredCollection>(new StoreConflict(existing.Revision));
             if (existing.Collection.Portal != collection.Portal || existing.Collection.Parent != collection.Parent)
-                return Result<StoredCollection>(new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidReference));
+                return Result<StoredCollection>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidReference));
             var stored = existing with { Collection = collection, Revision = checked(existing.Revision + 1) };
             state.Collections[collection.Id] = stored;
-            return Result<StoredCollection>(new HelpCenterWriteApplied<StoredCollection>(stored));
+            return Result<StoredCollection>(new StoreApplied<StoredCollection>(stored));
         }
     }
 
-    public Task<HelpCenterWriteResult<StoredCollection>> DeleteCollectionAsync(TicketScope scope, CollectionId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredCollection, HelpCenterWriteRejection>> DeleteCollectionAsync(TicketScope scope, CollectionId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         Require(id.IsInitialized, nameof(id));
@@ -226,14 +226,14 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
         lock (gate)
         {
             if (Find(scope) is not { } state || !state.Collections.TryGetValue(id, out var existing))
-                return Result<StoredCollection>(HelpCenterWriteNotFound.Instance);
+                return Result<StoredCollection>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result<StoredCollection>(new HelpCenterWriteConflict(existing.Revision));
+                return Result<StoredCollection>(new StoreConflict(existing.Revision));
             if (state.Collections.Values.Any(other => other.Collection.Parent == id) || state.Articles.Values.Any(article => article.Record.Article.Collection == id))
-                return Result<StoredCollection>(new HelpCenterWriteRejected(HelpCenterWriteRejection.NotEmpty));
+                return Result<StoredCollection>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.NotEmpty));
             state.Collections.Remove(id);
             records--;
-            return Result<StoredCollection>(new HelpCenterWriteApplied<StoredCollection>(existing));
+            return Result<StoredCollection>(new StoreApplied<StoredCollection>(existing));
         }
     }
 
@@ -269,7 +269,7 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
         }
     }
 
-    public Task<HelpCenterWriteResult<StoredArticle>> CreateArticleAsync(TicketScope scope, ArticleRecord record, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredArticle, HelpCenterWriteRejection>> CreateArticleAsync(TicketScope scope, ArticleRecord record, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(record);
@@ -280,18 +280,18 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
             {
                 var article = record.Article;
                 if (state.Articles.TryGetValue(article.Id, out var existing))
-                    return Result<StoredArticle>(new HelpCenterWriteConflict(existing.Revision));
+                    return Result<StoredArticle>(new StoreConflict(existing.Revision));
                 if (record.State == ArticleState.Published || record.PublishedRevision is not null)
-                    return Result<StoredArticle>(new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidRevision));
+                    return Result<StoredArticle>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidRevision));
                 if (InvalidReferences(state, article))
-                    return Result<StoredArticle>(new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidReference));
+                    return Result<StoredArticle>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidReference));
                 if (records >= maximumRecords || state.Articles.Values.Count(other => other.Record.Article.Portal == article.Portal) >= HelpCenterLimits.MaximumArticlesPerPortal)
-                    return Result<StoredArticle>(new HelpCenterWriteRejected(HelpCenterWriteRejection.CapacityExceeded));
+                    return Result<StoredArticle>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.CapacityExceeded));
                 var stored = new StoredArticle(scope, record, 1);
                 state.Articles.Add(article.Id, stored);
                 state.Revisions.Add(article.Id, []);
                 records++;
-                return Result<StoredArticle>(new HelpCenterWriteApplied<StoredArticle>(stored));
+                return Result<StoredArticle>(new StoreApplied<StoredArticle>(stored));
             }
             finally
             {
@@ -300,7 +300,7 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
         }
     }
 
-    public Task<HelpCenterWriteResult<StoredArticle>> UpdateArticleAsync(TicketScope scope, ArticleRecord record, long expectedRevision, ArticleRevision? appendRevision = null, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredArticle, HelpCenterWriteRejection>> UpdateArticleAsync(TicketScope scope, ArticleRecord record, long expectedRevision, ArticleRevision? appendRevision = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(record);
@@ -309,22 +309,22 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
         {
             var article = record.Article;
             if (Find(scope) is not { } state || !state.Articles.TryGetValue(article.Id, out var existing))
-                return Result<StoredArticle>(HelpCenterWriteNotFound.Instance);
+                return Result<StoredArticle>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result<StoredArticle>(new HelpCenterWriteConflict(existing.Revision));
+                return Result<StoredArticle>(new StoreConflict(existing.Revision));
             if (existing.Record.Article.Portal != article.Portal || InvalidReferences(state, article))
-                return Result<StoredArticle>(new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidReference));
+                return Result<StoredArticle>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidReference));
             var revisions = state.Revisions[article.Id];
             if (appendRevision is not null)
             {
                 if (appendRevision.Article != article.Id || appendRevision.Number != revisions.Count + 1)
-                    return Result<StoredArticle>(new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidRevision));
+                    return Result<StoredArticle>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidRevision));
                 if (records >= maximumRecords)
-                    return Result<StoredArticle>(new HelpCenterWriteRejected(HelpCenterWriteRejection.CapacityExceeded));
+                    return Result<StoredArticle>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.CapacityExceeded));
             }
             var available = revisions.Count + (appendRevision is null ? 0 : 1);
             if (record.PublishedRevision is { } live && live > available)
-                return Result<StoredArticle>(new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidRevision));
+                return Result<StoredArticle>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidRevision));
 
             List<PublishedRow> rows = [];
             if (record.State == ArticleState.Published)
@@ -336,7 +336,7 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
                     var taken = state.Published.Where(pair => pair.Key != article.Id).SelectMany(pair => pair.Value)
                         .Any(row => row.Article.Portal == article.Portal && row.Article.Content.Locale == content.Locale && row.Article.Content.Slug == content.Slug);
                     if (taken)
-                        return Result<StoredArticle>(new HelpCenterWriteRejected(HelpCenterWriteRejection.SlugConflict));
+                        return Result<StoredArticle>(new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.SlugConflict));
                     rows.Add(new(new PublishedArticle(scope, article.Id, article.Portal, article.Collection, article.Position, revision.Number, revision.PublishedAt, content), translation.PlainText));
                 }
             }
@@ -352,11 +352,11 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
                 state.Published[article.Id] = rows;
             var stored = new StoredArticle(scope, record, checked(existing.Revision + 1));
             state.Articles[article.Id] = stored;
-            return Result<StoredArticle>(new HelpCenterWriteApplied<StoredArticle>(stored));
+            return Result<StoredArticle>(new StoreApplied<StoredArticle>(stored));
         }
     }
 
-    public Task<HelpCenterWriteResult<StoredArticle>> DeleteArticleAsync(TicketScope scope, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredArticle, HelpCenterWriteRejection>> DeleteArticleAsync(TicketScope scope, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         Require(id.IsInitialized, nameof(id));
@@ -364,16 +364,16 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
         lock (gate)
         {
             if (Find(scope) is not { } state || !state.Articles.TryGetValue(id, out var existing))
-                return Result<StoredArticle>(HelpCenterWriteNotFound.Instance);
+                return Result<StoredArticle>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result<StoredArticle>(new HelpCenterWriteConflict(existing.Revision));
+                return Result<StoredArticle>(new StoreConflict(existing.Revision));
             state.Articles.Remove(id);
             records -= 1 + state.Revisions[id].Count;
             state.Revisions.Remove(id);
             state.Published.Remove(id);
             if (state.Feedback.Remove(id, out var feedback))
                 markers -= feedback.Votes.Count + feedback.ViewMarkers.Count;
-            return Result<StoredArticle>(new HelpCenterWriteApplied<StoredArticle>(existing));
+            return Result<StoredArticle>(new StoreApplied<StoredArticle>(existing));
         }
     }
 
@@ -570,7 +570,7 @@ public sealed class InMemoryHelpCenterStore : IHelpCenterStore, IArticleFeedback
 
     // ---------------------------------------------------------------- helpers
 
-    private static Task<HelpCenterWriteResult<T>> Result<T>(HelpCenterWriteResult<T> result) => Task.FromResult(result);
+    private static Task<StoreWriteResult<T, HelpCenterWriteRejection>> Result<T>(StoreWriteResult<T, HelpCenterWriteRejection> result) => Task.FromResult(result);
 
     private static void Require(bool initialized, string parameterName)
     {

@@ -44,7 +44,7 @@ public sealed class ReportingService : IReportingService
         this.options.Validate();
     }
 
-    public async Task<ReportResult<ReportOverview>> GetOverviewAsync(PrincipalRef actor, ReportQuery query, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ReportOverview>> GetOverviewAsync(PrincipalRef actor, ReportQuery query, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
@@ -85,7 +85,7 @@ public sealed class ReportingService : IReportingService
         else if (satisfactionGroup is not null)
             overall = ReportSatisfaction.Empty;
         var totals = new Totals(aggregate.Rows, 0, aggregate.Rows.Count);
-        return new ReportSucceeded<ReportOverview>(new ReportOverview(range[0], range[1],
+        return new TicketValue<ReportOverview>(new ReportOverview(range[0], range[1],
             totals.Count(ReportMetric.ConversationCreated), totals.Count(ReportMetric.ConversationResolved), totals.Count(ReportMetric.ConversationReopened),
             totals.Count(ReportMetric.MessageReceived), totals.Count(ReportMetric.MessageSent), totals.Count(ReportMetric.Assignment), totals.Count(ReportMetric.Handoff),
             totals.Count(ReportMetric.TeamTransfer), backlog,
@@ -94,7 +94,7 @@ public sealed class ReportingService : IReportingService
             totals.Count(ReportMetric.SlaAchieved), totals.Count(ReportMetric.SlaBreached), overall, aggregate.Truncated));
     }
 
-    public async Task<ReportResult<ReportLeaderboard>> GetLeaderboardAsync(PrincipalRef actor, ReportLeaderboardQuery query, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ReportLeaderboard>> GetLeaderboardAsync(PrincipalRef actor, ReportLeaderboardQuery query, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
@@ -102,7 +102,7 @@ public sealed class ReportingService : IReportingService
         var range = ReportBuckets.Range(query.Query.From, query.Query.To);
         var filter = await ViewFilterAsync(actor, cancellationToken).ConfigureAwait(false);
         if (filter is DenyAllFilter)
-            return new ReportSucceeded<ReportLeaderboard>(new(range[0], range[1], [], false));
+            return new TicketValue<ReportLeaderboard>(new(range[0], range[1], [], false));
         var restriction = query.Query.Filter;
         var wantSatisfaction = restriction.Inbox is null && restriction.Team is null && restriction.Channel is null && restriction.Priority is null && restriction.Label is null;
         var aggregateTask = store.AggregateAsync(scope, new ReportAggregateQuery(range, LeaderboardMetrics, restriction, ReportDimension.Agent, histograms: true), filter,
@@ -152,11 +152,11 @@ public sealed class ReportingService : IReportingService
             ReportLeaderboardSort.ResponseMedian => rows.OrderBy(row => row.Response.Median is null).ThenBy(row => row.Response.Median),
             _ => throw new InvalidOperationException("Unknown leaderboard sort."),
         };
-        return new ReportSucceeded<ReportLeaderboard>(new(range[0], range[1],
+        return new TicketValue<ReportLeaderboard>(new(range[0], range[1],
             [.. ordered.ThenBy(row => row.Agent.Value, StringComparer.Ordinal).Take(query.Limit)], aggregate.Truncated));
     }
 
-    public async Task<ReportResult<ReportTrend>> GetTrendsAsync(PrincipalRef actor, ReportTrendQuery query, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ReportTrend>> GetTrendsAsync(PrincipalRef actor, ReportTrendQuery query, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
@@ -173,7 +173,7 @@ public sealed class ReportingService : IReportingService
         }
         catch (ArgumentException)
         {
-            return new ReportRefused(ReportRefusal.Invalid, [$"The range spans more than {ReportBuckets.MaximumBuckets} buckets."]);
+            return new TicketFailure(TicketFailureKind.Invalid, [$"The range spans more than {ReportBuckets.MaximumBuckets} buckets."]);
         }
         ReportAggregateResult aggregate = new([], false);
         if (filter is not DenyAllFilter)
@@ -226,10 +226,10 @@ public sealed class ReportingService : IReportingService
             }
             points.Add(new ReportTrendPoint(boundaries[bucket], DisplayGroup(query.GroupBy, group), metric, count, sum, median, p90));
         }
-        return new ReportSucceeded<ReportTrend>(new ReportTrend(boundaries[0], boundaries[^1], zoneId, query.Granularity, boundaries, points, aggregate.Truncated));
+        return new TicketValue<ReportTrend>(new ReportTrend(boundaries[0], boundaries[^1], zoneId, query.Granularity, boundaries, points, aggregate.Truncated));
     }
 
-    public async Task<ReportResult<ReportExportSummary>> ExportAsync(PrincipalRef actor, ReportExportQuery query, TextWriter output, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ReportExportSummary>> ExportAsync(PrincipalRef actor, ReportExportQuery query, TextWriter output, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
@@ -238,7 +238,7 @@ public sealed class ReportingService : IReportingService
         // report:export is sensitive: planning it records an audit event (who exported, outcome) before any row is read.
         var export = await planner.PlanAsync(new AccessQuery(actor, ReportPermissions.Export, scope), cancellationToken).ConfigureAwait(false);
         if (export is DenyAllFilter)
-            return new ReportRefused(ReportRefusal.Forbidden, [$"Permission '{ReportPermissions.Export}' is required."]);
+            return new TicketFailure(TicketFailureKind.Forbidden, [$"Permission '{ReportPermissions.Export}' is required."]);
         var view = await ViewFilterAsync(actor, cancellationToken).ConfigureAwait(false);
         AccessFilter filter;
         try
@@ -297,13 +297,13 @@ public sealed class ReportingService : IReportingService
             buffer.Clear();
         }
         await output.FlushAsync(cancellationToken).ConfigureAwait(false);
-        return new ReportSucceeded<ReportExportSummary>(new ReportExportSummary(rows, truncated));
+        return new TicketValue<ReportExportSummary>(new ReportExportSummary(rows, truncated));
     }
 
     /// <summary>The <c>report:view</c> plan, widened by <c>report:view-own</c> to rows attributed to the calling user.</summary>
     private async Task<AccessFilter> ViewFilterAsync(PrincipalRef actor, CancellationToken cancellationToken)
     {
-        if (actor.Value is not UserPrincipal user)
+        if (actor is not UserPrincipal user)
             return await planner.PlanAsync(new AccessQuery(actor, ReportPermissions.View, actor.Scope), cancellationToken).ConfigureAwait(false);
         var viewTask = planner.PlanAsync(new AccessQuery(actor, ReportPermissions.View, actor.Scope), cancellationToken);
         var ownTask = planner.PlanAsync(new AccessQuery(actor, ReportPermissions.ViewOwn, actor.Scope), cancellationToken);
@@ -468,7 +468,7 @@ public sealed class ReportingService : IReportingService
 
     private static void RequireActor(PrincipalRef actor)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("An actor is required.", nameof(actor));
     }
 

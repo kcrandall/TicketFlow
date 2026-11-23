@@ -116,7 +116,7 @@ else
     {
         if (Service<IHelpCenterService>() is not { } service)
             return;
-        if (await service.ListPortalsAsync(Actor, Aborted) is HelpCenterSucceeded<IReadOnlyList<StoredPortal>> list)
+        if (await service.ListPortalsAsync(Actor, Aborted) is TicketValue<IReadOnlyList<StoredPortal>> list)
             portals = [.. list.Value];
         portal = portals.FirstOrDefault(item => item.Portal.Id.Value == Query("portal")) ?? portals.FirstOrDefault();
         if (portal is null)
@@ -125,13 +125,13 @@ else
         var articlesTask = service.ListArticlesAsync(Actor, new ArticleListQuery(portal.Portal.Id, limit: 100), Aborted);
         await Task.WhenAll(collectionsTask, articlesTask);
 
-        if (await collectionsTask is HelpCenterSucceeded<IReadOnlyList<StoredCollection>> collectionList)
+        if (await collectionsTask is TicketValue<IReadOnlyList<StoredCollection>> collectionList)
         {
             collections = [.. collectionList.Value.OrderBy(item => item.Collection.Position)];
             foreach (var c in collections)
                 collectionNames[c.Collection.Id] = c.Collection.Translations[0].Name;
         }
-        if (await articlesTask is HelpCenterSucceeded<HelpCenterPage<StoredArticle>> page)
+        if (await articlesTask is TicketValue<HelpCenterPage<StoredArticle>> page)
         {
             articles = [.. page.Value.Items.OrderByDescending(article => article.Record.UpdatedAt)];
             var stateFilter = Query("state") switch

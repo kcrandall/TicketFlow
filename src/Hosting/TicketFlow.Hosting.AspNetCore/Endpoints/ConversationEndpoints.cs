@@ -138,13 +138,7 @@ internal static class ConversationEndpoints
         ConversationRefused refused => Refused(http, refused),
     };
 
-    private static IResult Map<T>(HttpContext http, ConversationResult<T> result, Func<T, IResult> success) => result switch
-    {
-        ConversationValue<T> value => success(value.Value),
-        ConversationNotFound => TicketFlowHttp.NotFound(),
-        ConversationConflict conflict => TicketFlowHttp.Conflict(http, conflict.CurrentRevision),
-        ConversationRefused refused => Refused(http, refused),
-    };
+    private static IResult Map<T>(HttpContext http, TicketResult<T> result, Func<T, IResult> success) => TicketFlowHttp.Map(http, result, success);
 
     internal static IResult Refused(HttpContext http, ConversationRefused refused) => TicketFlowHttp.Refused(http, refused.Reason switch
     {

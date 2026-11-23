@@ -80,7 +80,7 @@ public sealed class ChannelReplyService : IChannelReplyService
 
     private async Task<(StoredConversation? Stored, ConversationRefused? Refusal)> AuthorizeAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("A principal is required.", nameof(actor));
         if (conversation == default)
             throw new ArgumentException("A conversation identifier is required.", nameof(conversation));

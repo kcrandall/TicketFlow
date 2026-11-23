@@ -135,18 +135,7 @@ internal static class RoutingEndpoints
         return group;
     }
 
-    private static IResult Map<T>(HttpContext http, RoutingResult<T> result, Func<T, IResult> success) => result switch
-    {
-        RoutingValue<T> value => success(value.Value),
-        RoutingNotFound => TicketFlowHttp.NotFound(),
-        RoutingConflict conflict => TicketFlowHttp.Conflict(http, conflict.CurrentRevision),
-        RoutingRefused refused => TicketFlowHttp.Refused(http, refused.Reason switch
-        {
-            RoutingRefusal.Forbidden => RefusalKind.Forbidden,
-            RoutingRefusal.Invalid => RefusalKind.Invalid,
-            _ => RefusalKind.Rejected,
-        }, refused.Errors),
-    };
+    private static IResult Map<T>(HttpContext http, TicketResult<T> result, Func<T, IResult> success) => TicketFlowHttp.Map(http, result, success);
 
     private static AgentProfileResponse Dto(StoredAgentProfile profile, TimeProvider time) => Dto(profile, time.GetUtcNow());
 

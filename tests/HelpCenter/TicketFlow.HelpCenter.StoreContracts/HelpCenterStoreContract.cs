@@ -16,17 +16,17 @@ public static class HelpCenterStoreContract
     public static readonly AccessActor Author = new(AccessActorKind.User, "author");
     public static readonly DateTimeOffset Now = new(2026, 3, 1, 12, 0, 0, TimeSpan.Zero);
 
-    public static string Describe<T>(HelpCenterWriteResult<T> result, Func<T, long> revision) => result switch
+    public static string Describe<T>(StoreWriteResult<T, HelpCenterWriteRejection> result, Func<T, long> revision) => result switch
     {
-        HelpCenterWriteApplied<T> applied => $"applied:{revision(applied.Value)}",
-        HelpCenterWriteNotFound => "not-found",
-        HelpCenterWriteConflict conflict => $"conflict:{conflict.CurrentRevision}",
-        HelpCenterWriteRejected rejected => $"rejected:{rejected.Reason}",
+        StoreApplied<T> applied => $"applied:{revision(applied.Value)}",
+        StoreNotFound => "not-found",
+        StoreConflict conflict => $"conflict:{conflict.CurrentRevision}",
+        StoreRejected<HelpCenterWriteRejection> rejected => $"rejected:{rejected.Reason}",
     };
 
-    public static string P(HelpCenterWriteResult<StoredPortal> result) => Describe(result, stored => stored.Revision);
-    public static string C(HelpCenterWriteResult<StoredCollection> result) => Describe(result, stored => stored.Revision);
-    public static string A(HelpCenterWriteResult<StoredArticle> result) => Describe(result, stored => stored.Revision);
+    public static string P(StoreWriteResult<StoredPortal, HelpCenterWriteRejection> result) => Describe(result, stored => stored.Revision);
+    public static string C(StoreWriteResult<StoredCollection, HelpCenterWriteRejection> result) => Describe(result, stored => stored.Revision);
+    public static string A(StoreWriteResult<StoredArticle, HelpCenterWriteRejection> result) => Describe(result, stored => stored.Revision);
 
     public static TicketScope NewScope() => TestScopes.Create(workspaceId: "hc-" + Guid.NewGuid().ToString("N"));
 
@@ -56,8 +56,8 @@ public static class HelpCenterStoreContract
     public static async Task<StoredArticle> PublishAsync(IHelpCenterStore store, TicketScope scope, Article article, long expectedRevision, int number)
     {
         var result = await store.UpdateArticleAsync(scope, Published(article, number), expectedRevision, RevisionOf(article, number));
-        Assert.IsInstanceOfType<HelpCenterWriteApplied<StoredArticle>>(result.Value, A(result));
-        return ((HelpCenterWriteApplied<StoredArticle>)result.Value!).Value;
+        Assert.IsInstanceOfType<StoreApplied<StoredArticle>>(result.Value, A(result));
+        return ((StoreApplied<StoredArticle>)result.Value!).Value;
     }
 
     public static async Task VerifyPortalsAsync(IHelpCenterStore primary, IHelpCenterStore competing)

@@ -28,7 +28,7 @@ public sealed class BreakGlassAndAuditTests
         using var _ = fixture;
         var agent = fixture.User("agent");
         await fixture.GrantAsync(agent.UserId, BuiltInRoles.Agent);
-        string Refusal(AccessChangeResult<StoredAccessGrant> result) => AccessFixture.Describe(result);
+        string Refusal(TicketResult<AccessChangeApplied<StoredAccessGrant>> result) => AccessFixture.Describe(result);
 
         Assert.AreEqual("refused:Invalid", Refusal(await fixture.Admin.ActivateBreakGlassAsync(Request(fixture, responder, reason: "because"))));
         Assert.AreEqual("refused:Invalid", Refusal(await fixture.Admin.ActivateBreakGlassAsync(Request(fixture, responder, reason: "          x"))));
@@ -57,7 +57,7 @@ public sealed class BreakGlassAndAuditTests
         Assert.IsEmpty(fixture.Audit.Snapshot());
 
         var activation = await fixture.Admin.ActivateBreakGlassAsync(Request(fixture, responder, scope: new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("billing"))));
-        var stored = ((AccessChangeApplied<StoredAccessGrant>)activation.Value!).Value.Grant;
+        var stored = ((TicketValue<AccessChangeApplied<StoredAccessGrant>>)activation.Value!).Value.Value.Grant;
         Assert.AreEqual(GrantKind.BreakGlass, stored.Kind);
         Assert.AreEqual(fixture.Clock.GetUtcNow(), stored.ValidFrom);
         Assert.AreEqual(fixture.Clock.GetUtcNow().AddMinutes(30), stored.ValidUntil);

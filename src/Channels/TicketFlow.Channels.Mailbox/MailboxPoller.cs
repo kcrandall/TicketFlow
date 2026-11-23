@@ -217,7 +217,7 @@ public sealed class MailboxPoller(
 
     public async Task<MailboxPollResult> PollAsync(PrincipalRef ingestor, MailboxEndpointConfig config, CancellationToken cancellationToken = default)
     {
-        if (ingestor.Value is null)
+        if (ingestor is null)
             throw new ArgumentException("An ingestor principal is required.", nameof(ingestor));
         ArgumentNullException.ThrowIfNull(config);
 

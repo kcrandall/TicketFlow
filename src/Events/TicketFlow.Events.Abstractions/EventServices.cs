@@ -160,42 +160,6 @@ public interface IEventPublisher
     Task<EventAppendResult> PublishAsync(TicketScope scope, IReadOnlyList<IntegrationEventDraft> drafts, CancellationToken cancellationToken = default);
 }
 
-public enum EventRefusal
-{
-    /// <summary>The actor lacks the required permission.</summary>
-    Forbidden = 1,
-
-    /// <summary>The request is invalid (see errors).</summary>
-    Invalid = 2,
-
-    /// <summary>The workspace subscription limit was reached or the identifier exists.</summary>
-    Rejected = 3,
-}
-
-public sealed record EventSucceeded<T>(T Value);
-
-public sealed record EventNotFound
-{
-    private EventNotFound()
-    {
-    }
-
-    public static EventNotFound Instance { get; } = new();
-}
-
-public sealed record EventConflict(long CurrentRevision);
-
-public sealed record EventRefused(EventRefusal Reason, IReadOnlyList<string> Errors)
-{
-    public EventRefused(EventRefusal reason, params string[] errors)
-        : this(reason, (IReadOnlyList<string>)errors)
-    {
-    }
-}
-
-/// <summary>Outcome of a subscription command or read. Switch over every case without a discard arm.</summary>
-public union EventResult<T>(EventSucceeded<T>, EventNotFound, EventConflict, EventRefused);
-
 /// <summary>A subscription with its delivery state, as shown to managers.</summary>
 public sealed record EventSubscriptionView(StoredEventSubscription Subscription, EventDeliveryState? Delivery, EventLogHead Head);
 
@@ -206,18 +170,18 @@ public sealed record EventSubscriptionView(StoredEventSubscription Subscription,
 /// </summary>
 public interface IEventSubscriptionService
 {
-    Task<EventResult<EventSubscriptionView>> CreateAsync(PrincipalRef actor, EventSubscription subscription, EventSubscriptionStart? start = null, CancellationToken cancellationToken = default);
+    Task<TicketResult<EventSubscriptionView>> CreateAsync(PrincipalRef actor, EventSubscription subscription, EventSubscriptionStart? start = null, CancellationToken cancellationToken = default);
 
-    Task<EventResult<EventSubscriptionView>> UpdateAsync(PrincipalRef actor, EventSubscription subscription, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<EventSubscriptionView>> UpdateAsync(PrincipalRef actor, EventSubscription subscription, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<EventResult<EventSubscriptionId>> DeleteAsync(PrincipalRef actor, EventSubscriptionId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<EventSubscriptionId>> DeleteAsync(PrincipalRef actor, EventSubscriptionId id, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<EventResult<EventSubscriptionView>> GetAsync(PrincipalRef actor, EventSubscriptionId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<EventSubscriptionView>> GetAsync(PrincipalRef actor, EventSubscriptionId id, CancellationToken cancellationToken = default);
 
-    Task<EventResult<IReadOnlyList<EventSubscriptionView>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<EventSubscriptionView>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
     /// <summary>Redelivers events after <paramref name="afterSequence"/> (clears dead letters from there on).</summary>
-    Task<EventResult<EventSubscriptionView>> ReplayAsync(PrincipalRef actor, EventSubscriptionId id, long afterSequence, CancellationToken cancellationToken = default);
+    Task<TicketResult<EventSubscriptionView>> ReplayAsync(PrincipalRef actor, EventSubscriptionId id, long afterSequence, CancellationToken cancellationToken = default);
 
-    Task<EventResult<IReadOnlyList<EventDeadLetter>>> ListDeadLettersAsync(PrincipalRef actor, EventSubscriptionId id, long afterSequence = 0, int limit = 50, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<EventDeadLetter>>> ListDeadLettersAsync(PrincipalRef actor, EventSubscriptionId id, long afterSequence = 0, int limit = 50, CancellationToken cancellationToken = default);
 }

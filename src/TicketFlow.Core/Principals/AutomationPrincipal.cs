@@ -1,16 +1,13 @@
 namespace TicketFlow.Core;
 
 /// <summary>An automation rule or macro acting within a scope. Grants for automation are configured explicitly.</summary>
-public sealed record AutomationPrincipal
+public sealed record AutomationPrincipal : PrincipalRef
 {
     public AutomationPrincipal(TicketScope scope, string automationId)
+        : base(scope)
     {
-        ArgumentNullException.ThrowIfNull(scope);
-        Scope = scope;
         AutomationId = TicketScope.RequireIdentifier(automationId, nameof(automationId));
     }
-
-    public TicketScope Scope { get; }
 
     /// <summary>The rule or macro identifier that produced the action.</summary>
     public string AutomationId { get; }

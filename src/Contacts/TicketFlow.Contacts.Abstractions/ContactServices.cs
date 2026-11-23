@@ -103,11 +103,6 @@ public sealed record ContactRefused(ContactRefusal Reason, IReadOnlyList<string>
     public static ContactRefused Invalid(string error) => new(ContactRefusal.Invalid, [error]);
 }
 
-public sealed record ContactApplied<T>(T Value);
-
-/// <summary>Outcome of a contact command or read. Switch over every case without a discard arm.</summary>
-public union ContactResult<T>(ContactApplied<T>, ContactRefused);
-
 public enum ContactMatchStrength
 {
     /// <summary>A verified identity of the contact matched verified or claimed evidence.</summary>
@@ -240,10 +235,10 @@ public sealed record ContactUnmergeOutcome(ContactView Target, ContactView Sourc
 public interface IContactService
 {
     /// <summary>Requires <c>contact:create</c>.</summary>
-    Task<ContactResult<ContactView>> CreateAsync(PrincipalRef actor, ContactDraft draft, CancellationToken cancellationToken = default);
+    Task<TicketResult<ContactView, ContactRefused>> CreateAsync(PrincipalRef actor, ContactDraft draft, CancellationToken cancellationToken = default);
 
     /// <summary>Requires <c>contact:read</c>. A merge tombstone yields <see cref="ContactRefusal.Merged"/> with the surviving contact.</summary>
-    Task<ContactResult<ContactView>> GetAsync(PrincipalRef actor, ContactId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<ContactView, ContactRefused>> GetAsync(PrincipalRef actor, ContactId id, CancellationToken cancellationToken = default);
 
     /// <summary>Maximum identifiers accepted by <see cref="GetManyAsync"/>.</summary>
     public const int MaximumBatch = 100;
@@ -261,16 +256,16 @@ public interface IContactService
             throw new ArgumentException($"At most {MaximumBatch} contacts per batch.", nameof(ids));
         var views = new List<ContactView>();
         foreach (var id in distinct)
-            if (await GetAsync(actor, id, cancellationToken).ConfigureAwait(false) is ContactApplied<ContactView> applied)
+            if (await GetAsync(actor, id, cancellationToken).ConfigureAwait(false) is TicketValue<ContactView> applied)
                 views.Add(applied.Value);
         return views;
     }
 
     /// <summary>Requires <c>contact:update</c>; edits apply atomically in order, fenced on <paramref name="expectedRevision"/>.</summary>
-    Task<ContactResult<ContactView>> UpdateAsync(PrincipalRef actor, ContactId id, long expectedRevision, IEnumerable<ContactEdit> edits, CancellationToken cancellationToken = default);
+    Task<TicketResult<ContactView, ContactRefused>> UpdateAsync(PrincipalRef actor, ContactId id, long expectedRevision, IEnumerable<ContactEdit> edits, CancellationToken cancellationToken = default);
 
     /// <summary>Requires <c>contact:delete</c>; audited. Also removes merge history naming the contact.</summary>
-    Task<ContactResult<ContactId>> DeleteAsync(PrincipalRef actor, ContactId id, long expectedRevision, string? justification = null, CancellationToken cancellationToken = default);
+    Task<TicketResult<ContactId, ContactRefused>> DeleteAsync(PrincipalRef actor, ContactId id, long expectedRevision, string? justification = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Inbound resolve-or-create. Requires <c>contact:read</c> to match and <c>contact:create</c> to create. Verified holders match
@@ -291,24 +286,24 @@ public interface IContactService
     Task<ContactExportResult> ExportAsync(PrincipalRef actor, ContactExportRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>Requires <c>contact:merge</c> on both contacts; audited; emits change events.</summary>
-    Task<ContactResult<ContactMergeOutcome>> MergeAsync(PrincipalRef actor, ContactMergeRequest request, CancellationToken cancellationToken = default);
+    Task<TicketResult<ContactMergeOutcome, ContactRefused>> MergeAsync(PrincipalRef actor, ContactMergeRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>Requires <c>contact:merge</c> on the target; audited; emits change events.</summary>
-    Task<ContactResult<ContactUnmergeOutcome>> UnmergeAsync(PrincipalRef actor, Guid mergeId, CancellationToken cancellationToken = default);
+    Task<TicketResult<ContactUnmergeOutcome, ContactRefused>> UnmergeAsync(PrincipalRef actor, Guid mergeId, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Access-checked attribute definition management. Reads require <c>contact:read</c>; writes require <c>contact-attribute:manage</c>.</summary>
 public interface IContactAttributeDefinitionService
 {
-    Task<ContactResult<IReadOnlyList<StoredContactAttributeDefinition>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredContactAttributeDefinition>, ContactRefused>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
-    Task<ContactResult<StoredContactAttributeDefinition>> CreateAsync(PrincipalRef actor, ContactAttributeDefinition definition, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredContactAttributeDefinition, ContactRefused>> CreateAsync(PrincipalRef actor, ContactAttributeDefinition definition, CancellationToken cancellationToken = default);
 
     /// <summary>Changes the display name or sensitivity; the type is immutable.</summary>
-    Task<ContactResult<StoredContactAttributeDefinition>> UpdateAsync(PrincipalRef actor, ContactAttributeDefinition definition, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredContactAttributeDefinition, ContactRefused>> UpdateAsync(PrincipalRef actor, ContactAttributeDefinition definition, long expectedRevision, CancellationToken cancellationToken = default);
 
     /// <summary>Values stored under a deleted definition stay stored but are omitted from views.</summary>
-    Task<ContactResult<StoredContactAttributeDefinition>> DeleteAsync(PrincipalRef actor, string key, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredContactAttributeDefinition, ContactRefused>> DeleteAsync(PrincipalRef actor, string key, long expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

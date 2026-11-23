@@ -25,43 +25,43 @@ internal sealed class InMemoryRevisioned<TValue>(int capacityPerScope)
             yield return (pair.Key, pair.Value.Value, pair.Value.Revision);
     }
 
-    public AutomationWriteResult<TStored> Create<TStored>(TicketScope scope, string id, TValue value, Func<TValue, long, TStored> wrap, Func<AutomationWriteRejection?>? check = null)
+    public StoreWriteResult<TStored, AutomationWriteRejection> Create<TStored>(TicketScope scope, string id, TValue value, Func<TValue, long, TStored> wrap, Func<AutomationWriteRejection?>? check = null)
     {
         if (!buckets.TryGetValue(scope, out var bucket))
             buckets[scope] = bucket = new Dictionary<string, (TValue, long)>(StringComparer.Ordinal);
         if (bucket.TryGetValue(id, out var existing))
-            return new AutomationWriteConflict(existing.Revision);
+            return new StoreConflict(existing.Revision);
         if (bucket.Count >= capacityPerScope)
-            return new AutomationWriteRejected(AutomationWriteRejection.CapacityExceeded);
+            return new StoreRejected<AutomationWriteRejection>(AutomationWriteRejection.CapacityExceeded);
         if (check?.Invoke() is { } rejection)
-            return new AutomationWriteRejected(rejection);
+            return new StoreRejected<AutomationWriteRejection>(rejection);
         bucket[id] = (value, 1);
-        return new AutomationWriteApplied<TStored>(wrap(value, 1));
+        return new StoreApplied<TStored>(wrap(value, 1));
     }
 
-    public AutomationWriteResult<TStored> Update<TStored>(TicketScope scope, string id, TValue value, long expectedRevision, Func<TValue, long, TStored> wrap,
+    public StoreWriteResult<TStored, AutomationWriteRejection> Update<TStored>(TicketScope scope, string id, TValue value, long expectedRevision, Func<TValue, long, TStored> wrap,
         Func<AutomationWriteRejection?>? check = null)
     {
         if (!buckets.TryGetValue(scope, out var bucket) || !bucket.TryGetValue(id, out var existing))
-            return AutomationWriteNotFound.Instance;
+            return StoreNotFound.Instance;
         if (existing.Revision != expectedRevision)
-            return new AutomationWriteConflict(existing.Revision);
+            return new StoreConflict(existing.Revision);
         if (check?.Invoke() is { } rejection)
-            return new AutomationWriteRejected(rejection);
+            return new StoreRejected<AutomationWriteRejection>(rejection);
         bucket[id] = (value, existing.Revision + 1);
-        return new AutomationWriteApplied<TStored>(wrap(value, existing.Revision + 1));
+        return new StoreApplied<TStored>(wrap(value, existing.Revision + 1));
     }
 
-    public AutomationWriteResult<TStored> Delete<TStored>(TicketScope scope, string id, long expectedRevision, Func<TValue, long, TStored> wrap)
+    public StoreWriteResult<TStored, AutomationWriteRejection> Delete<TStored>(TicketScope scope, string id, long expectedRevision, Func<TValue, long, TStored> wrap)
     {
         if (!buckets.TryGetValue(scope, out var bucket) || !bucket.TryGetValue(id, out var existing))
-            return AutomationWriteNotFound.Instance;
+            return StoreNotFound.Instance;
         if (existing.Revision != expectedRevision)
-            return new AutomationWriteConflict(existing.Revision);
+            return new StoreConflict(existing.Revision);
         bucket.Remove(id);
         if (bucket.Count == 0)
             buckets.Remove(scope);
-        return new AutomationWriteApplied<TStored>(wrap(existing.Value, existing.Revision));
+        return new StoreApplied<TStored>(wrap(existing.Value, existing.Revision));
     }
 }
 
@@ -98,7 +98,7 @@ public sealed class InMemoryAutomationRuleStore(TimeProvider? time = null) : IAu
                 .Select(entry => new StoredAutomationRule(scope, entry.Value, entry.Revision))]);
     }
 
-    public Task<AutomationWriteResult<StoredAutomationRule>> CreateAsync(TicketScope scope, AutomationRule rule, DateTimeOffset? nextRunAt, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAutomationRule, AutomationWriteRejection>> CreateAsync(TicketScope scope, AutomationRule rule, DateTimeOffset? nextRunAt, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(rule);
@@ -106,7 +106,7 @@ public sealed class InMemoryAutomationRuleStore(TimeProvider? time = null) : IAu
         lock (rules.Gate)
         {
             var result = rules.Create(scope, rule.Id.Value, rule, (value, revision) => new StoredAutomationRule(scope, value, revision));
-            if (result.Value is AutomationWriteApplied<StoredAutomationRule>)
+            if (result.Value is StoreApplied<StoredAutomationRule>)
             {
                 SetTimer(scope, rule.Id.Value, nextRunAt);
                 versions[scope] = versions.GetValueOrDefault(scope) + 1;
@@ -115,7 +115,7 @@ public sealed class InMemoryAutomationRuleStore(TimeProvider? time = null) : IAu
         }
     }
 
-    public Task<AutomationWriteResult<StoredAutomationRule>> UpdateAsync(TicketScope scope, AutomationRule rule, long expectedRevision, DateTimeOffset? nextRunAt,
+    public Task<StoreWriteResult<StoredAutomationRule, AutomationWriteRejection>> UpdateAsync(TicketScope scope, AutomationRule rule, long expectedRevision, DateTimeOffset? nextRunAt,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -124,7 +124,7 @@ public sealed class InMemoryAutomationRuleStore(TimeProvider? time = null) : IAu
         lock (rules.Gate)
         {
             var result = rules.Update(scope, rule.Id.Value, rule, expectedRevision, (value, revision) => new StoredAutomationRule(scope, value, revision));
-            if (result.Value is AutomationWriteApplied<StoredAutomationRule>)
+            if (result.Value is StoreApplied<StoredAutomationRule>)
             {
                 SetTimer(scope, rule.Id.Value, nextRunAt);
                 versions[scope] = versions.GetValueOrDefault(scope) + 1;
@@ -133,14 +133,14 @@ public sealed class InMemoryAutomationRuleStore(TimeProvider? time = null) : IAu
         }
     }
 
-    public Task<AutomationWriteResult<StoredAutomationRule>> DeleteAsync(TicketScope scope, AutomationRuleId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAutomationRule, AutomationWriteRejection>> DeleteAsync(TicketScope scope, AutomationRuleId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
         lock (rules.Gate)
         {
             var result = rules.Delete(scope, id.Value, expectedRevision, (value, revision) => new StoredAutomationRule(scope, value, revision));
-            if (result.Value is AutomationWriteApplied<StoredAutomationRule>)
+            if (result.Value is StoreApplied<StoredAutomationRule>)
             {
                 timers.Remove((scope, id.Value));
                 versions[scope] = versions.GetValueOrDefault(scope) + 1;
@@ -246,15 +246,15 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
         }
     }
 
-    public Task<AutomationWriteResult<StoredAutomationExecution>> UpdateAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
+    public Task<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>> UpdateAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
         CancellationToken cancellationToken = default) =>
         UpdateCore(scope, execution, expectedRevision, execution?.ProducedSequences, cancellationToken);
 
-    public Task<AutomationWriteResult<StoredAutomationExecution>> UpdateProgressAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
+    public Task<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>> UpdateProgressAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
         IReadOnlyList<long> newSequences, CancellationToken cancellationToken = default) =>
         UpdateCore(scope, execution, expectedRevision, newSequences ?? throw new ArgumentNullException(nameof(newSequences)), cancellationToken);
 
-    private Task<AutomationWriteResult<StoredAutomationExecution>> UpdateCore(TicketScope scope, AutomationExecution execution, long expectedRevision,
+    private Task<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>> UpdateCore(TicketScope scope, AutomationExecution execution, long expectedRevision,
         IReadOnlyList<long>? sequences, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -263,9 +263,9 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
         lock (gate)
         {
             if (!scopes.TryGetValue(scope, out var bucket) || !bucket.Executions.TryGetValue(execution.Id, out var existing))
-                return Task.FromResult<AutomationWriteResult<StoredAutomationExecution>>(AutomationWriteNotFound.Instance);
+                return Task.FromResult<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Task.FromResult<AutomationWriteResult<StoredAutomationExecution>>(new AutomationWriteConflict(existing.Revision));
+                return Task.FromResult<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>>(new StoreConflict(existing.Revision));
             if (existing.Execution.Rule != execution.Rule || existing.Execution.Conversation != execution.Conversation || existing.Execution.TriggerKey != execution.TriggerKey)
                 throw new ArgumentException("An execution's rule, conversation and trigger key are immutable.", nameof(execution));
             var stored = new StoredAutomationExecution(scope, execution, existing.Revision + 1);
@@ -274,7 +274,7 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
                 bucket.FinishedByAge.Enqueue(execution.Id, execution.StartedAt);
             if (sequences is { Count: > 0 })
                 Index(scope, execution, sequences);
-            return Task.FromResult<AutomationWriteResult<StoredAutomationExecution>>(new AutomationWriteApplied<StoredAutomationExecution>(stored));
+            return Task.FromResult<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>>(new StoreApplied<StoredAutomationExecution>(stored));
         }
     }
 
@@ -494,7 +494,7 @@ public sealed class InMemoryMacroStore : IMacroStore
         }
     }
 
-    public Task<AutomationWriteResult<StoredMacro>> CreateAsync(TicketScope scope, Macro macro, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredMacro, AutomationWriteRejection>> CreateAsync(TicketScope scope, Macro macro, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(macro);
@@ -503,7 +503,7 @@ public sealed class InMemoryMacroStore : IMacroStore
             return Task.FromResult(macros.Create(scope, macro.Id.Value, macro, (value, revision) => new StoredMacro(scope, value, revision)));
     }
 
-    public Task<AutomationWriteResult<StoredMacro>> UpdateAsync(TicketScope scope, Macro macro, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredMacro, AutomationWriteRejection>> UpdateAsync(TicketScope scope, Macro macro, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(macro);
@@ -512,7 +512,7 @@ public sealed class InMemoryMacroStore : IMacroStore
             return Task.FromResult(macros.Update(scope, macro.Id.Value, macro, expectedRevision, (value, revision) => new StoredMacro(scope, value, revision)));
     }
 
-    public Task<AutomationWriteResult<StoredMacro>> DeleteAsync(TicketScope scope, MacroId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredMacro, AutomationWriteRejection>> DeleteAsync(TicketScope scope, MacroId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
@@ -559,7 +559,7 @@ public sealed class InMemoryCannedResponseStore : ICannedResponseStore
         }
     }
 
-    public Task<AutomationWriteResult<StoredCannedResponse>> CreateAsync(TicketScope scope, CannedResponse response, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredCannedResponse, AutomationWriteRejection>> CreateAsync(TicketScope scope, CannedResponse response, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(response);
@@ -569,7 +569,7 @@ public sealed class InMemoryCannedResponseStore : ICannedResponseStore
                 () => ShortcutTaken(scope, response) ? AutomationWriteRejection.DuplicateShortcut : null));
     }
 
-    public Task<AutomationWriteResult<StoredCannedResponse>> UpdateAsync(TicketScope scope, CannedResponse response, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredCannedResponse, AutomationWriteRejection>> UpdateAsync(TicketScope scope, CannedResponse response, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(response);
@@ -579,7 +579,7 @@ public sealed class InMemoryCannedResponseStore : ICannedResponseStore
                 () => ShortcutTaken(scope, response) ? AutomationWriteRejection.DuplicateShortcut : null));
     }
 
-    public Task<AutomationWriteResult<StoredCannedResponse>> DeleteAsync(TicketScope scope, CannedResponseId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredCannedResponse, AutomationWriteRejection>> DeleteAsync(TicketScope scope, CannedResponseId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();

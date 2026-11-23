@@ -78,7 +78,7 @@ public static partial class UiActions
             return UiOutcome.Invalid("Choose a different contact to merge.");
         return await contacts.GetAsync(context.Actor, source, context.Aborted) switch
         {
-            ContactApplied<ContactView> duplicate => new UiActionResult(new UiOutcome(UiOutcomeKind.Info, "Confirm the merge", ["Review the duplicate below; the merge applies to exactly this version of both contacts."]),
+            TicketValue<ContactView> duplicate => new UiActionResult(new UiOutcome(UiOutcomeKind.Info, "Confirm the merge", ["Review the duplicate below; the merge applies to exactly this version of both contacts."]),
                 new MergePreview(duplicate.Value)),
             ContactRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors, refused.CurrentRevision),
         };

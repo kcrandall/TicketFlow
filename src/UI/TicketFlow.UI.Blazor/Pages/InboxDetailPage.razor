@@ -79,7 +79,7 @@ else
     {
         if (Service<IInboxService>() is not { } service || Id is null)
             return;
-        if (await service.GetAsync(Actor, new InboxId(Id), Aborted) is not WorkspaceSucceeded<StoredInbox> found)
+        if (await service.GetAsync(Actor, new InboxId(Id), Aborted) is not TicketValue<StoredInbox> found)
             return;
         inbox = found.Value;
         var optionsTask = InboxFields.LoadOptionsAsync(Session);
@@ -87,7 +87,7 @@ else
         if (grantsTask is not null)
             await Task.WhenAll(optionsTask, grantsTask);
         (calendars, slaNames, routingNames) = await optionsTask;
-        if (grantsTask is not null && await grantsTask is AccessListed<IReadOnlyList<StoredAccessGrant>> listed)
+        if (grantsTask is not null && await grantsTask is TicketValue<IReadOnlyList<StoredAccessGrant>> listed)
             foreach (var grant in listed.Value)
                 if (grant.Grant.Subject.Value is UserId user)
                     agents.Add((user, grant.Grant.Role.Value));

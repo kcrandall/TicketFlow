@@ -176,7 +176,7 @@ public sealed class ServiceTests
         Assert.AreEqual((5L, true), (truncated.Rows, truncated.Truncated));
 
         var refused = await fixture.ReportAsync(service => service.ExportAsync(fixture.Supervisor, new ReportExportQuery(Week), new StringWriter()));
-        Assert.AreEqual(ReportRefusal.Forbidden, ((ReportRefused)refused.Value!).Reason);
+        Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)refused.Value!).Kind);
         Assert.IsTrue(fixture.Get<InMemoryAccessAuditSink>().Snapshot().Any(item => item.Permission == ReportPermissions.Export && item.Actor.Id == "supervisor"),
             "refused export plans are audited too");
     }

@@ -105,7 +105,7 @@ public sealed class TicketFlowUISession
 
     public T? PageStateAs<T>() where T : class => PageState as T;
 
-    public UserId? UserId => principal?.Value is UserPrincipal user ? user.UserId : null;
+    public UserId? UserId => principal is UserPrincipal user ? user.UserId : null;
 
     public IReadOnlySet<Permission> Permissions => permissions;
 
@@ -242,7 +242,7 @@ public sealed class TicketFlowUISession
         if (workspace is not { } id || partitions is null || resolver is null || await partitions.ResolveAsync(http, http.RequestAborted).ConfigureAwait(false) is not { } partition)
             return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, null, null, none, theme);
         var scope = partition.InWorkspace(id);
-        if (await resolver.ResolveAsync(http, scope, http.RequestAborted).ConfigureAwait(false) is not { Value: not null } principal || principal.Scope != scope)
+        if (await resolver.ResolveAsync(http, scope, http.RequestAborted).ConfigureAwait(false) is not { } principal || principal.Scope != scope)
             return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, scope, null, none, theme);
         return new TicketFlowUISession(http, options, UiSessionState.Ready, scope, principal, none, theme);
     }
@@ -422,13 +422,12 @@ public sealed class UiSensitivePermissionCache(TimeProvider time)
     private static readonly IReadOnlySet<Permission> Empty = new HashSet<Permission>();
     private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, IReadOnlySet<Permission> Permissions)> entries = new(StringComparer.Ordinal);
 
-    public static string Key(PrincipalRef principal) => principal.Value switch
+    public static string Key(PrincipalRef principal) => principal switch
     {
         UserPrincipal user => $"{principal.Scope}|u|{user.UserId.Value}|{string.Join(',', user.Teams.Select(team => team.Value).Order(StringComparer.Ordinal))}",
         ApiClientPrincipal client => $"{principal.Scope}|c|{client.ClientId.Value}",
         AutomationPrincipal automation => $"{principal.Scope}|a|{automation.AutomationId}",
         SystemPrincipal system => $"{principal.Scope}|s|{system.Component}",
-        _ => $"{principal.Scope}|?",
     };
 
     public bool TryGet(string key, out IReadOnlySet<Permission> permissions)

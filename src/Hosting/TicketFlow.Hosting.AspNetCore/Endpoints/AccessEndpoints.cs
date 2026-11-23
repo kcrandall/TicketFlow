@@ -130,32 +130,13 @@ internal static class AccessEndpoints
         return group;
     }
 
-    private static IResult List<T>(HttpContext http, AccessListResult<T> result, Func<T, IResult> success) => result switch
-    {
-        AccessListed<T> listed => success(listed.Value),
-        AccessChangeRefused refused => Refused(http, refused),
-    };
+    private static IResult List<T>(HttpContext http, TicketResult<T> result, Func<T, IResult> success) =>
+        TicketFlowHttp.Map(http, result, success);
 
-    private static IResult Refused(HttpContext http, AccessChangeRefused refused) => TicketFlowHttp.Refused(http, refused.Reason switch
+    private static IResult Map<T>(HttpContext http, TicketResult<AccessChangeApplied<T>> result, Func<T, IResult> success) => result switch
     {
-        AccessChangeRefusal.Forbidden => RefusalKind.Forbidden,
-        AccessChangeRefusal.Invalid => RefusalKind.Invalid,
-        AccessChangeRefusal.NotFound => RefusalKind.NotFound,
-        AccessChangeRefusal.Conflict => RefusalKind.Conflict,
-        _ => RefusalKind.Rejected,
-    }, refused.Errors, refused.CurrentRevision);
-
-    private static IResult Map<T>(HttpContext http, AccessChangeResult<T> result, Func<T, IResult> success) => result switch
-    {
-        AccessChangeApplied<T> applied => success(applied.Value),
-        AccessChangeRefused refused => TicketFlowHttp.Refused(http, refused.Reason switch
-        {
-            AccessChangeRefusal.Forbidden => RefusalKind.Forbidden,
-            AccessChangeRefusal.Invalid => RefusalKind.Invalid,
-            AccessChangeRefusal.NotFound => RefusalKind.NotFound,
-            AccessChangeRefusal.Conflict => RefusalKind.Conflict,
-            _ => RefusalKind.Rejected,
-        }, refused.Errors, refused.CurrentRevision),
+        TicketValue<AccessChangeApplied<T>> applied => success(applied.Value.Value),
+        TicketFailure failure => TicketFlowHttp.Failure(http, failure),
     };
 
     private static RoleResponse Role(AccessRole role, long? revision) =>

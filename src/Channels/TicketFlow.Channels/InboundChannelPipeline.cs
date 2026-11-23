@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -61,7 +62,7 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
 
     public async Task<InboundResult> ReceiveAsync(PrincipalRef actor, InboundChannelMessage message, CancellationToken cancellationToken = default)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("A principal is required.", nameof(actor));
         ArgumentNullException.ThrowIfNull(message);
         if (actor.Scope != message.Scope)
@@ -81,17 +82,14 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
             return InboundRejected.Of(InboundRejection.InboxDisabled, "The inbox is disabled.");
         var inboxId = inbox.Inbox.Id;
 
-        ContactIdentityAddress address;
-        switch (ContactIdentityAddress.Normalize(message.Sender.Kind, message.Sender.Value, message.Sender.Namespace, options.DefaultCallingCode))
+        var normalized = ContactIdentityAddress.Normalize(message.Sender.Kind, message.Sender.Value, message.Sender.Namespace, options.DefaultCallingCode);
+        if (normalized is ContactAddressInvalid invalidAddress)
+            return InboundRejected.Of(InboundRejection.InvalidSender, $"The sender address is invalid ({invalidAddress.Error}).");
+        var address = normalized switch
         {
-            case ContactIdentityAddress normalized:
-                address = normalized;
-                break;
-            case ContactAddressInvalid invalid:
-                return InboundRejected.Of(InboundRejection.InvalidSender, $"The sender address is invalid ({invalid.Error}).");
-            default:
-                throw new InvalidOperationException("Unknown normalization outcome.");
-        }
+            ContactIdentityAddress value => value,
+            ContactAddressInvalid => throw new UnreachableException(),
+        };
         var recipient = ChannelRecipient.From(address);
 
         IncomingMessageDraft draft;
@@ -117,8 +115,9 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
         var evidence = new ContactIdentityEvidence(address, message.Sender.Verified
             ? new IdentityVerified(source, receivedAt)
             : new IdentityClaimed(source, receivedAt));
+        var resolved = await contacts.ResolveAsync(actor, new ContactResolveRequest([evidence], Profile(message), options.ClaimedIdentityMatching), cancellationToken).ConfigureAwait(false);
         ContactView contact;
-        switch (await contacts.ResolveAsync(actor, new ContactResolveRequest([evidence], Profile(message), options.ClaimedIdentityMatching), cancellationToken).ConfigureAwait(false))
+        switch (resolved)
         {
             case ContactMatched matched:
                 contact = matched.Contact;
@@ -133,7 +132,7 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
                     ? InboundRejected.Of(InboundRejection.Forbidden)
                     : InboundRejected.Of(InboundRejection.Invalid, "The contact could not be resolved.");
             default:
-                throw new InvalidOperationException("Unknown resolution outcome.");
+                throw new UnreachableException();
         }
         if (contact.Blocked)
         {
@@ -294,7 +293,7 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
             if (current is not null && Same(current.State, next))
                 break;
             var written = await states.WriteAsync(scope, next, current?.Revision, cancellationToken).ConfigureAwait(false);
-            if (written.Value is not ChannelWriteConflict)
+            if (written.Value is not StoreConflict)
                 break;
         }
 

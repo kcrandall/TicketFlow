@@ -27,10 +27,10 @@ public interface IAssistService
 public interface IAssistAdministration
 {
     /// <summary>The effective settings: the stored record, or the application defaults at revision 0.</summary>
-    Task<AssistAdminResult<StoredAssistSettings>> GetSettingsAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredAssistSettings>> GetSettingsAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
     /// <summary>Stores settings fenced on <paramref name="expectedRevision"/> (0 creates). Every named model must be registered.</summary>
-    Task<AssistAdminResult<StoredAssistSettings>> UpdateSettingsAsync(PrincipalRef actor, AssistSettings settings, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredAssistSettings>> UpdateSettingsAsync(PrincipalRef actor, AssistSettings settings, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AssistAdminResult<AssistUsageSummary>> GetUsageAsync(PrincipalRef actor, DateTimeOffset from, DateTimeOffset to, CancellationToken cancellationToken = default);
+    Task<TicketResult<AssistUsageSummary>> GetUsageAsync(PrincipalRef actor, DateTimeOffset from, DateTimeOffset to, CancellationToken cancellationToken = default);
 }

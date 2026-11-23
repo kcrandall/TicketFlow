@@ -7,25 +7,23 @@ namespace TicketFlow.Core;
 /// An application-authenticated human user (agent) with an optional, bounded snapshot of team memberships taken when the
 /// principal was resolved. The snapshot is evidence for authorization conditions, not a live membership query.
 /// </summary>
-public sealed record UserPrincipal
+public sealed record UserPrincipal : PrincipalRef
 {
     /// <summary>Maximum number of team memberships carried in one snapshot.</summary>
     public const int MaximumTeamMemberships = 256;
 
     public UserPrincipal(TicketScope scope, UserId userId, IEnumerable<TeamId>? teams = null)
+        : base(scope)
     {
-        ArgumentNullException.ThrowIfNull(scope);
         if (userId == default)
             throw new ArgumentException("A user identifier is required.", nameof(userId));
-        Scope = scope;
         UserId = userId;
         Teams = SnapshotTeams(teams);
     }
 
-    public TicketScope Scope { get; }
     public UserId UserId { get; }
 
-    /// <summary>Team memberships within <see cref="Scope"/>'s workspace at resolution time.</summary>
+    /// <summary>Team memberships within <see cref="PrincipalRef.Scope"/>'s workspace at resolution time.</summary>
     public IReadOnlySet<TeamId> Teams { get; }
 
     public bool Equals(UserPrincipal? other) =>

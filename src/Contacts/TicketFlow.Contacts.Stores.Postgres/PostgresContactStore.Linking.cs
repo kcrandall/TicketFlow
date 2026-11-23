@@ -56,7 +56,7 @@ public sealed partial class PostgresContactStore
         }
     }
 
-    public async Task<ContactLinkingWriteResult<StoredContactLinkingPolicy>> PutPolicyAsync(TicketScope scope, ContactLinkingPolicy policy, long? expectedRevision,
+    public async Task<StoreWriteResult<StoredContactLinkingPolicy, ContactWriteRejection>> PutPolicyAsync(TicketScope scope, ContactLinkingPolicy policy, long? expectedRevision,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -81,13 +81,13 @@ public sealed partial class PostgresContactStore
             if (expectedRevision is { } expected)
                 AddBigInt(write, "expected", expected);
             if (await write.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                return new LinkingWriteApplied<StoredContactLinkingPolicy>(new(scope, policy, revision), expectedRevision is null);
+                return new StoreApplied<StoredContactLinkingPolicy>(new(scope, policy, revision));
         }
         await using var current = new NpgsqlCommand($"SELECT revision FROM tf_contact_linking_policies WHERE scope_key={ScopeKey} AND {ScopeWhere}", connection);
         AddScope(current, scope);
         return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
-            ? new LinkingWriteConflict(existing)
-            : LinkingWriteNotFound.Instance;
+            ? new StoreConflict(existing)
+            : StoreNotFound.Instance;
     }
 
     public async Task<StoredContactLinkSuggestion?> GetSuggestionAsync(TicketScope scope, Guid id, CancellationToken cancellationToken = default)
@@ -97,7 +97,7 @@ public sealed partial class PostgresContactStore
         return await GetSuggestionAsync(connection, null, scope, id, lockRow: false, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<ContactLinkingWriteResult<StoredContactLinkSuggestion>> CreateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredLinkSuggestionWrite, ContactWriteRejection>> CreateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(suggestion);
@@ -125,7 +125,7 @@ public sealed partial class PostgresContactStore
                 var existing = ReadSuggestion(reader, scope, 0);
                 await reader.CloseAsync().ConfigureAwait(false);
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new LinkingWriteApplied<StoredContactLinkSuggestion>(existing, false);
+                return new StoreApplied<StoredLinkSuggestionWrite>(new(existing, false));
             }
         }
         await using (var insert = new NpgsqlCommand($"""
@@ -143,15 +143,15 @@ public sealed partial class PostgresContactStore
             if (await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1)
             {
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new LinkingWriteApplied<StoredContactLinkSuggestion>(new(scope, suggestion, 1));
+                return new StoreApplied<StoredLinkSuggestionWrite>(new(new(scope, suggestion, 1), true));
             }
         }
         if (await GetSuggestionAsync(connection, transaction, scope, suggestion.Id, lockRow: false, cancellationToken).ConfigureAwait(false) is { } duplicate)
-            return new LinkingWriteConflict(duplicate.Revision);
-        return new ContactWriteRejected(ContactWriteRejection.CapacityExceeded);
+            return new StoreConflict(duplicate.Revision);
+        return new StoreRejected<ContactWriteRejection>(ContactWriteRejection.CapacityExceeded);
     }
 
-    public async Task<ContactLinkingWriteResult<StoredContactLinkSuggestion>> UpdateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, long expectedRevision,
+    public async Task<StoreWriteResult<StoredContactLinkSuggestion, ContactWriteRejection>> UpdateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, long expectedRevision,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -161,9 +161,9 @@ public sealed partial class PostgresContactStore
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         var existing = await GetSuggestionAsync(connection, transaction, scope, suggestion.Id, lockRow: true, cancellationToken).ConfigureAwait(false);
         if (existing is null)
-            return LinkingWriteNotFound.Instance;
+            return StoreNotFound.Instance;
         if (existing.Revision != expectedRevision)
-            return new LinkingWriteConflict(existing.Revision);
+            return new StoreConflict(existing.Revision);
         var before = existing.Suggestion;
         if (before.Candidate != suggestion.Candidate || before.Account != suggestion.Account || before.Evidence != suggestion.Evidence
             || before.EvidenceVerified != suggestion.EvidenceVerified || before.CreatedAt != suggestion.CreatedAt || before.CreatedBy != suggestion.CreatedBy)
@@ -180,7 +180,7 @@ public sealed partial class PostgresContactStore
             await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new LinkingWriteApplied<StoredContactLinkSuggestion>(new(scope, suggestion, checked(expectedRevision + 1)), false);
+        return new StoreApplied<StoredContactLinkSuggestion>(new(scope, suggestion, checked(expectedRevision + 1)));
     }
 
     public async Task<ContactLinkSuggestionStorePage> ListSuggestionsAsync(TicketScope scope, ContactLinkSuggestionQuery query, AccessFilter filter, CancellationToken cancellationToken = default)

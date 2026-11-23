@@ -105,7 +105,7 @@ public sealed class PostgresWorkspaceStoreTests
         var sibling = new TicketScope(Long(101), Long(102), Long(103), Long(104), new WorkspaceId(Long(106)));
         var calendarId = new BusinessCalendarId(Long(110));
         var calendar = new BusinessCalendar(calendarId, "Long", "Europe/London", [new(DayOfWeek.Monday, BusinessHours.From(9, 0, 17, 0))], [CalendarDateOverride.Holiday(new(2026, 12, 25))]);
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredBusinessCalendar>>((await database.Store.CreateAsync(scope, calendar)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredBusinessCalendar>>((await database.Store.CreateAsync(scope, calendar)).Value);
         Assert.AreEqual(calendar, (await database.Competing.GetAsync(scope, calendarId))!.Calendar);
         Assert.AreEqual(calendarId, (await database.Competing.ListCalendarsAsync(scope)).Single().Calendar.Id);
         Assert.IsNull(await database.Competing.GetAsync(sibling, calendarId));
@@ -115,7 +115,7 @@ public sealed class PostgresWorkspaceStoreTests
         {
             var inbox = new Inbox(new InboxId(id), "Long", new ChannelBinding(new ChannelKind(new string('k', ChannelKind.MaximumLength)), Long(130 + index)), calendarId,
                 new SlaPolicyId(Long(140)), new RoutingPolicyId(Long(141)));
-            Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await database.Store.CreateAsync(scope, inbox)).Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await database.Store.CreateAsync(scope, inbox)).Value);
             WorkspaceStoreContract.AssertInbox(inbox, (await database.Competing.GetAsync(scope, inbox.Id))!.Inbox);
         }
         var firstPage = await database.Competing.ListInboxesAsync(scope, new ScopeFilter(scope), new(2));
@@ -130,7 +130,7 @@ public sealed class PostgresWorkspaceStoreTests
         foreach (var id in teamIds)
         {
             var team = new Team(new TeamId(id), "Long", "Long team", [member, new UserId(Long(151)), new UserId(Long(152))]);
-            Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredTeam>>((await database.Store.CreateAsync(scope, team)).Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredTeam>>((await database.Store.CreateAsync(scope, team)).Value);
             Assert.AreEqual(team, (await database.Competing.GetAsync(scope, team.Id))!.Team);
         }
         CollectionAssert.AreEqual(teamIds, (await database.Competing.ListTeamsForUserAsync(scope, member)).Select(team => team.Value).ToArray());
@@ -141,9 +141,9 @@ public sealed class PostgresWorkspaceStoreTests
         Assert.AreEqual(3, teamsRest.Items[0].MemberCount);
 
         var updated = new Team(new TeamId(teamIds[0]), "Long", null, [new UserId(Long(153))]);
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredTeam>>((await database.Competing.UpdateAsync(scope, updated, 1)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredTeam>>((await database.Competing.UpdateAsync(scope, updated, 1)).Value);
         CollectionAssert.AreEqual(teamIds.Skip(1).ToArray(), (await database.Store.ListTeamsForUserAsync(scope, member)).Select(team => team.Value).ToArray());
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredTeam>>((await database.Store.DeleteAsync(scope, new TeamId(teamIds[1]), 1)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredTeam>>((await database.Store.DeleteAsync(scope, new TeamId(teamIds[1]), 1)).Value);
         CollectionAssert.AreEqual(new[] { teamIds[2] }, (await database.Store.ListTeamsForUserAsync(scope, member)).Select(team => team.Value).ToArray());
     }
 
@@ -160,7 +160,7 @@ public sealed class PostgresWorkspaceStoreTests
         await database.Store.InitializeAsync();
         Assert.AreEqual("Legacy", (await database.Store.GetAsync(scope, new InboxId("legacy")))!.Inbox.Name);
         var duplicate = new Inbox(new InboxId("new"), "New", new ChannelBinding(new ChannelKind("email"), "mailbox"));
-        Assert.AreEqual(WorkspaceWriteRejection.ChannelBindingInUse, ((WorkspaceWriteRejected)(await database.Competing.CreateAsync(scope, duplicate)).Value!).Reason);
+        Assert.AreEqual(WorkspaceWriteRejection.ChannelBindingInUse, ((StoreRejected<WorkspaceWriteRejection>)(await database.Competing.CreateAsync(scope, duplicate)).Value!).Reason);
     }
 
     [TestMethod]
@@ -208,7 +208,7 @@ public sealed class PostgresWorkspaceStoreTests
         var hostile = "x'); DROP TABLE tf_workspace_inboxes; --";
         var scope = TestScopes.Create(tenantId: hostile, workspaceId: hostile);
         var inbox = new Inbox(new InboxId(hostile), hostile, new ChannelBinding(new ChannelKind("email"), hostile), greetingMessage: hostile);
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await database.Store.CreateAsync(scope, inbox)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await database.Store.CreateAsync(scope, inbox)).Value);
         var filter = new AndFilter([new ScopeFilter(scope), new InboxInFilter([new InboxId(hostile)]), new NotFilter(new AttributeEqualsFilter("tier", hostile))]);
         // The attribute is unknown for inboxes, so ¬(tier = x) is unknown and excludes the row; the inbox filter alone includes it.
         Assert.IsEmpty((await database.Store.ListInboxesAsync(scope, filter, new())).Items);
@@ -232,13 +232,13 @@ public sealed class PostgresWorkspaceStoreTests
         await provider.GetRequiredService<IAccessGrantStore>().CreateAsync(new AccessGrant(new GrantId("g-admin"), AccessPartition.From(scope), admin.UserId, BuiltInRoles.Admin.Id, new WorkspaceGrantScope(scope.WorkspaceId)));
         var teams = request.ServiceProvider.GetRequiredService<ITeamService>();
         var created = await teams.CreateAsync(admin, new Team(new TeamId("billing"), "Billing", null, [new UserId("ada")]));
-        Assert.IsInstanceOfType<WorkspaceSucceeded<StoredTeam>>(created.Value);
+        Assert.IsInstanceOfType<TicketValue<StoredTeam>>(created.Value);
         var principal = await request.ServiceProvider.GetRequiredService<ITeamMembershipResolver>().ResolveUserPrincipalAsync(scope, new UserId("ada"));
         CollectionAssert.AreEqual(new[] { new TeamId("billing") }, principal.Teams.ToArray());
         var inboxes = request.ServiceProvider.GetRequiredService<IInboxService>();
-        Assert.IsInstanceOfType<WorkspaceSucceeded<StoredInbox>>((await inboxes.CreateAsync(admin, WorkspaceStoreContract.SampleInbox("email"))).Value);
-        Assert.IsInstanceOfType<WorkspaceSucceeded<StoredAccessGrant>>((await inboxes.AddAgentAsync(admin, new InboxId("email"), new UserId("ada"))).Value);
-        var listed = (WorkspaceSucceeded<WorkspacePage<StoredInbox>>)(await inboxes.ListAsync(principal)).Value!;
+        Assert.IsInstanceOfType<TicketValue<StoredInbox>>((await inboxes.CreateAsync(admin, WorkspaceStoreContract.SampleInbox("email"))).Value);
+        Assert.IsInstanceOfType<TicketValue<StoredAccessGrant>>((await inboxes.AddAgentAsync(admin, new InboxId("email"), new UserId("ada"))).Value);
+        var listed = (TicketValue<WorkspacePage<StoredInbox>>)(await inboxes.ListAsync(principal)).Value!;
         CollectionAssert.AreEqual(new[] { "email" }, listed.Value.Items.Select(item => item.Inbox.Id.Value).ToArray());
     }
 }

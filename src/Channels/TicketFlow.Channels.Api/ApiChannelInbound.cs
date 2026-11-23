@@ -36,7 +36,7 @@ public sealed class ApiChannelInbound(IInboundChannelPipeline pipeline, IChannel
 
     public Task<InboundResult> ReceiveAsync(PrincipalRef actor, string configurationId, ApiInboundMessage message, CancellationToken cancellationToken = default)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("A principal is required.", nameof(actor));
         ArgumentNullException.ThrowIfNull(message);
         InboundChannelMessage normalized;
@@ -55,7 +55,7 @@ public sealed class ApiChannelInbound(IInboundChannelPipeline pipeline, IChannel
     public Task<DeliveryReportResult> ReportDeliveryAsync(PrincipalRef actor, string configurationId, string externalMessageId, ChannelDeliveryState state,
         string? failureCode = null, CancellationToken cancellationToken = default)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("A principal is required.", nameof(actor));
         ChannelDeliveryReport report;
         try

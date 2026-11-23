@@ -50,7 +50,7 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
                 .OrderBy(stored => stored.Endpoint.Address, StringComparer.Ordinal).Take(limit)]);
     }
 
-    public Task<ChannelWriteResult<StoredChannelEndpoint>> CreateAsync(TicketScope scope, ChannelEndpoint endpoint, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredChannelEndpoint, ChannelWriteRejection>> CreateAsync(TicketScope scope, ChannelEndpoint endpoint, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(endpoint);
@@ -58,18 +58,18 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
         {
             var key = (scope, endpoint.Kind, endpoint.ConfigurationId);
             if (endpoints.TryGetValue(key, out var existing))
-                return Result<StoredChannelEndpoint>(new ChannelWriteConflict(existing.Revision));
+                return Result<StoredChannelEndpoint>(new StoreConflict(existing.Revision));
             if (AddressTaken(scope, endpoint, null))
-                return Result<StoredChannelEndpoint>(new ChannelWriteRejected(ChannelWriteRejection.AddressTaken));
+                return Result<StoredChannelEndpoint>(new StoreRejected<ChannelWriteRejection>(ChannelWriteRejection.AddressTaken));
             if (endpoints.Keys.Count(item => item.Scope == scope) >= IChannelEndpointStore.MaximumEndpointsPerScope || endpoints.Count >= MaximumRecords)
-                return Result<StoredChannelEndpoint>(new ChannelWriteRejected(ChannelWriteRejection.CapacityExceeded));
+                return Result<StoredChannelEndpoint>(new StoreRejected<ChannelWriteRejection>(ChannelWriteRejection.CapacityExceeded));
             var stored = new StoredChannelEndpoint(scope, endpoint, 1);
             endpoints[key] = stored;
-            return Result<StoredChannelEndpoint>(new ChannelWriteApplied<StoredChannelEndpoint>(stored));
+            return Result<StoredChannelEndpoint>(new StoreApplied<StoredChannelEndpoint>(stored));
         }
     }
 
-    public Task<ChannelWriteResult<StoredChannelEndpoint>> UpdateAsync(TicketScope scope, ChannelEndpoint endpoint, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredChannelEndpoint, ChannelWriteRejection>> UpdateAsync(TicketScope scope, ChannelEndpoint endpoint, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(endpoint);
@@ -77,18 +77,18 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
         {
             var key = (scope, endpoint.Kind, endpoint.ConfigurationId);
             if (!endpoints.TryGetValue(key, out var existing))
-                return Result<StoredChannelEndpoint>(ChannelWriteNotFound.Instance);
+                return Result<StoredChannelEndpoint>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result<StoredChannelEndpoint>(new ChannelWriteConflict(existing.Revision));
+                return Result<StoredChannelEndpoint>(new StoreConflict(existing.Revision));
             if (AddressTaken(scope, endpoint, key))
-                return Result<StoredChannelEndpoint>(new ChannelWriteRejected(ChannelWriteRejection.AddressTaken));
+                return Result<StoredChannelEndpoint>(new StoreRejected<ChannelWriteRejection>(ChannelWriteRejection.AddressTaken));
             var stored = new StoredChannelEndpoint(scope, endpoint, existing.Revision + 1);
             endpoints[key] = stored;
-            return Result<StoredChannelEndpoint>(new ChannelWriteApplied<StoredChannelEndpoint>(stored));
+            return Result<StoredChannelEndpoint>(new StoreApplied<StoredChannelEndpoint>(stored));
         }
     }
 
-    public Task<ChannelWriteResult<StoredChannelEndpoint>> DeleteAsync(TicketScope scope, ChannelKind kind, string configurationId, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredChannelEndpoint, ChannelWriteRejection>> DeleteAsync(TicketScope scope, ChannelKind kind, string configurationId, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(configurationId);
@@ -96,11 +96,11 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
         {
             var key = (scope, kind, configurationId);
             if (!endpoints.TryGetValue(key, out var existing))
-                return Result<StoredChannelEndpoint>(ChannelWriteNotFound.Instance);
+                return Result<StoredChannelEndpoint>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result<StoredChannelEndpoint>(new ChannelWriteConflict(existing.Revision));
+                return Result<StoredChannelEndpoint>(new StoreConflict(existing.Revision));
             endpoints.Remove(key);
-            return Result<StoredChannelEndpoint>(new ChannelWriteApplied<StoredChannelEndpoint>(existing));
+            return Result<StoredChannelEndpoint>(new StoreApplied<StoredChannelEndpoint>(existing));
         }
     }
 
@@ -111,7 +111,7 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
             return Task.FromResult(states.GetValueOrDefault((scope, conversation)));
     }
 
-    public Task<ChannelWriteResult<StoredChannelConversationState>> WriteAsync(TicketScope scope, ChannelConversationState state, long? expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredChannelConversationState, ChannelWriteRejection>> WriteAsync(TicketScope scope, ChannelConversationState state, long? expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(state);
@@ -120,14 +120,14 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
             var key = (scope, state.Conversation);
             states.TryGetValue(key, out var existing);
             if (existing is null && expectedRevision is not null)
-                return Result<StoredChannelConversationState>(ChannelWriteNotFound.Instance);
+                return Result<StoredChannelConversationState>(StoreNotFound.Instance);
             if (existing is not null && (existing.Revision != expectedRevision || existing.State.Inbox != state.Inbox || existing.State.Channel != state.Channel))
-                return Result<StoredChannelConversationState>(new ChannelWriteConflict(existing.Revision));
+                return Result<StoredChannelConversationState>(new StoreConflict(existing.Revision));
             if (existing is null && states.Count >= MaximumRecords)
-                return Result<StoredChannelConversationState>(new ChannelWriteRejected(ChannelWriteRejection.CapacityExceeded));
+                return Result<StoredChannelConversationState>(new StoreRejected<ChannelWriteRejection>(ChannelWriteRejection.CapacityExceeded));
             var stored = new StoredChannelConversationState(scope, state, (existing?.Revision ?? 0) + 1);
             states[key] = stored;
-            return Result<StoredChannelConversationState>(new ChannelWriteApplied<StoredChannelConversationState>(stored));
+            return Result<StoredChannelConversationState>(new StoreApplied<StoredChannelConversationState>(stored));
         }
     }
 
@@ -207,7 +207,7 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
             return Task.FromResult(dispatches.GetValueOrDefault((scope, conversation, message)));
     }
 
-    public Task<ChannelWriteResult<StoredChannelDispatch>> WriteAsync(TicketScope scope, ChannelDispatch dispatch, long? expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredChannelDispatch, ChannelWriteRejection>> WriteAsync(TicketScope scope, ChannelDispatch dispatch, long? expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(dispatch);
@@ -216,14 +216,14 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
             var key = (scope, dispatch.Conversation, dispatch.Message);
             dispatches.TryGetValue(key, out var existing);
             if (existing is null && expectedRevision is not null)
-                return Result<StoredChannelDispatch>(ChannelWriteNotFound.Instance);
+                return Result<StoredChannelDispatch>(StoreNotFound.Instance);
             if (existing is not null && (existing.Revision != expectedRevision || existing.Dispatch.Inbox != dispatch.Inbox || existing.Dispatch.Channel != dispatch.Channel))
-                return Result<StoredChannelDispatch>(new ChannelWriteConflict(existing.Revision));
+                return Result<StoredChannelDispatch>(new StoreConflict(existing.Revision));
             if (existing is null && dispatches.Count >= MaximumRecords)
-                return Result<StoredChannelDispatch>(new ChannelWriteRejected(ChannelWriteRejection.CapacityExceeded));
+                return Result<StoredChannelDispatch>(new StoreRejected<ChannelWriteRejection>(ChannelWriteRejection.CapacityExceeded));
             var stored = new StoredChannelDispatch(scope, dispatch, (existing?.Revision ?? 0) + 1);
             dispatches[key] = stored;
-            return Result<StoredChannelDispatch>(new ChannelWriteApplied<StoredChannelDispatch>(stored));
+            return Result<StoredChannelDispatch>(new StoreApplied<StoredChannelDispatch>(stored));
         }
     }
 
@@ -231,5 +231,5 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
         endpoint.Address is { } address && endpoints.Any(pair => (self is null || pair.Key != self.Value) && pair.Value.Endpoint.Kind == endpoint.Kind
             && AccessPartition.From(pair.Key.Scope) == AccessPartition.From(scope) && string.Equals(pair.Value.Endpoint.Address, address, StringComparison.Ordinal));
 
-    private static Task<ChannelWriteResult<T>> Result<T>(ChannelWriteResult<T> result) => Task.FromResult(result);
+    private static Task<StoreWriteResult<T, ChannelWriteRejection>> Result<T>(StoreWriteResult<T, ChannelWriteRejection> result) => Task.FromResult(result);
 }

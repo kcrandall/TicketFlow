@@ -22,7 +22,7 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
     public Task<IReadOnlyList<StoredAccessGrant>> TeamGrantsAsync(PrincipalRef actor, TeamId team, CancellationToken cancellationToken) =>
         grants.ListForSubjectsAsync(AccessPartition.From(actor.Scope), actor.Scope.WorkspaceId, [team], cancellationToken);
 
-    public async Task<WorkspaceRefused?> CheckMembershipChangeAsync(PrincipalRef actor, TeamId team, IReadOnlyCollection<UserId> added, IReadOnlyCollection<UserId> removed, CancellationToken cancellationToken)
+    public async Task<TicketFailure?> CheckMembershipChangeAsync(PrincipalRef actor, TeamId team, IReadOnlyCollection<UserId> added, IReadOnlyCollection<UserId> removed, CancellationToken cancellationToken)
     {
         if (added.Count == 0 && removed.Count == 0)
             return null;
@@ -45,7 +45,7 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
         return null;
     }
 
-    public async Task<WorkspaceRefused?> CheckAdditionsAsync(PrincipalRef actor, TeamId team, IReadOnlyCollection<UserId> added, CancellationToken cancellationToken)
+    public async Task<TicketFailure?> CheckAdditionsAsync(PrincipalRef actor, TeamId team, IReadOnlyCollection<UserId> added, CancellationToken cancellationToken)
     {
         if (added.Count == 0)
             return null;
@@ -55,7 +55,7 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
         return await CheckAdditionsWithGrantsAsync(actor, team, teamGrantsTask.Result, addedGrantsTask.Result, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<WorkspaceRefused?> CheckAdditionsWithGrantsAsync(PrincipalRef actor, TeamId team, IReadOnlyList<StoredAccessGrant> teamGrants, List<AccessGrant> memberGrants, CancellationToken cancellationToken)
+    private async Task<TicketFailure?> CheckAdditionsWithGrantsAsync(PrincipalRef actor, TeamId team, IReadOnlyList<StoredAccessGrant> teamGrants, List<AccessGrant> memberGrants, CancellationToken cancellationToken)
     {
         var teamResource = new AccessResource(actor.Scope, team: team);
         var conferrals = new List<GrantConferral>(teamGrants.Count);
@@ -74,7 +74,7 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
         return null;
     }
 
-    private async Task<WorkspaceRefused?> CheckRemovalsWithGrantsAsync(PrincipalRef actor, IReadOnlyList<StoredAccessGrant> teamGrants, List<AccessGrant> memberGrants, CancellationToken cancellationToken)
+    private async Task<TicketFailure?> CheckRemovalsWithGrantsAsync(PrincipalRef actor, IReadOnlyList<StoredAccessGrant> teamGrants, List<AccessGrant> memberGrants, CancellationToken cancellationToken)
     {
         var now = time.GetUtcNow();
         var revoked = new List<AccessGrant>(teamGrants.Count);
@@ -93,7 +93,7 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
         return await CheckRevokeAsync(actor, revoked, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<WorkspaceRefused?> CheckRevokeAsync(PrincipalRef actor, IReadOnlyCollection<AccessGrant> revoked, CancellationToken cancellationToken)
+    public async Task<TicketFailure?> CheckRevokeAsync(PrincipalRef actor, IReadOnlyCollection<AccessGrant> revoked, CancellationToken cancellationToken)
     {
         foreach (var batch in revoked.Chunk(CheckBatch))
             if (Refuse(await administrator.CheckCanRevokeAsync(actor, batch, cancellationToken).ConfigureAwait(false)) is { } refused)
@@ -112,10 +112,10 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
         return administrator.RevokeGrantsAsync(actor, targets, cancellationToken);
     }
 
-    public static WorkspaceRefused? Refuse(AccessCheckResult result) => result switch
+    public static TicketFailure? Refuse(AccessCheckResult result) => result switch
     {
         AccessCheckPassed => null,
-        AccessChangeRefused refused => new WorkspaceRefused(WorkspaceRefusal.Forbidden, refused.Errors),
+        TicketFailure refused => new TicketFailure(TicketFailureKind.Forbidden, refused.Errors),
     };
 
     private async Task<List<AccessGrant>> MemberGrantsAsync(PrincipalRef actor, IReadOnlyCollection<UserId> members, CancellationToken cancellationToken)

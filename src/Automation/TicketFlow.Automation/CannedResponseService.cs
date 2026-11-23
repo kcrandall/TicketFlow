@@ -19,69 +19,69 @@ public sealed class CannedResponseService(ICannedResponseStore responses, IAcces
     private readonly IConversationStore conversations = conversations ?? throw new ArgumentNullException(nameof(conversations));
     private readonly AutomationContextBuilder contexts = contexts ?? throw new ArgumentNullException(nameof(contexts));
 
-    public async Task<AutomationResult<StoredCannedResponse>> GetAsync(PrincipalRef actor, CannedResponseId id, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredCannedResponse>> GetAsync(PrincipalRef actor, CannedResponseId id, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         RequireId(id);
         if (!await CanReadAsync(actor, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return await responses.GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is { } stored
-            ? new AutomationValue<StoredCannedResponse>(stored)
-            : AutomationNotFound.Instance;
+            ? new TicketValue<StoredCannedResponse>(stored)
+            : TicketFailure.NotFound;
     }
 
-    public async Task<AutomationResult<StoredCannedResponse>> FindByShortcutAsync(PrincipalRef actor, string shortcut, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredCannedResponse>> FindByShortcutAsync(PrincipalRef actor, string shortcut, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(shortcut);
         if (!await CanReadAsync(actor, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         if (shortcut.Length is 0 or > CannedResponse.MaximumShortcutLength)
-            return AutomationNotFound.Instance;
+            return TicketFailure.NotFound;
         return await responses.FindByShortcutAsync(scope, shortcut, cancellationToken).ConfigureAwait(false) is { } stored
-            ? new AutomationValue<StoredCannedResponse>(stored)
-            : AutomationNotFound.Instance;
+            ? new TicketValue<StoredCannedResponse>(stored)
+            : TicketFailure.NotFound;
     }
 
-    public async Task<AutomationResult<CannedResponsePage>> ListAsync(PrincipalRef actor, CannedResponseQuery query, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<CannedResponsePage>> ListAsync(PrincipalRef actor, CannedResponseQuery query, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
         if (!await CanReadAsync(actor, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
-        return new AutomationValue<CannedResponsePage>(await responses.ListAsync(scope, query, cancellationToken).ConfigureAwait(false));
+            return TicketFailure.Forbidden;
+        return new TicketValue<CannedResponsePage>(await responses.ListAsync(scope, query, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<AutomationResult<StoredCannedResponse>> CreateAsync(PrincipalRef actor, CannedResponse response, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredCannedResponse>> CreateAsync(PrincipalRef actor, CannedResponse response, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(response);
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.CannedResponseManage, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return AutomationGuards.Map(await responses.CreateAsync(scope, response, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<AutomationResult<StoredCannedResponse>> UpdateAsync(PrincipalRef actor, CannedResponse response, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredCannedResponse>> UpdateAsync(PrincipalRef actor, CannedResponse response, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(response);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.CannedResponseManage, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return AutomationGuards.Map(await responses.UpdateAsync(scope, response, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<AutomationResult<StoredCannedResponse>> DeleteAsync(PrincipalRef actor, CannedResponseId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredCannedResponse>> DeleteAsync(PrincipalRef actor, CannedResponseId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         RequireId(id);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.CannedResponseManage, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return AutomationGuards.Map(await responses.DeleteAsync(scope, id, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<AutomationResult<RenderedCannedResponse>> RenderAsync(PrincipalRef actor, CannedResponseId id, ConversationId conversation, string? locale = null,
+    public async Task<TicketResult<RenderedCannedResponse>> RenderAsync(PrincipalRef actor, CannedResponseId id, ConversationId conversation, string? locale = null,
         CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
@@ -96,29 +96,29 @@ public sealed class CannedResponseService(ICannedResponseStore responses, IAcces
             }
             catch (ArgumentException)
             {
-                return AutomationRefused.Invalid("The locale is invalid.");
+                return TicketFailure.Invalid("The locale is invalid.");
             }
         }
         var stored = await conversations.GetAsync(scope, conversation, cancellationToken).ConfigureAwait(false);
         if (stored is null)
-            return AutomationNotFound.Instance;
+            return TicketFailure.NotFound;
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AccessPermissions.ConversationReply, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         if (await responses.GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is not { } response)
-            return AutomationNotFound.Instance;
+            return TicketFailure.NotFound;
         var needs = AutomationContextNeedsHelper.ForCannedResponse(response.Response, needsContactLocale: locale is null);
         var (context, failure) = await contexts.BuildInternalAsync(actor, conversation, AutomationEvent.MessageSent(), null, needs, cache: null, cancellationToken)
             .ConfigureAwait(false);
         if (context is null)
-            return failure == AutomationContextFailure.Forbidden ? AutomationRefused.Forbidden : AutomationNotFound.Instance;
-        var agentName = (needs & AutomationContextNeeds.AgentName) != 0 && actor.Value is UserPrincipal user && agents is not null
+            return failure == AutomationContextFailure.Forbidden ? TicketFailure.Forbidden : TicketFailure.NotFound;
+        var agentName = (needs & AutomationContextNeeds.AgentName) != 0 && actor is UserPrincipal user && agents is not null
             ? await agents.GetDisplayNameAsync(scope, user.UserId, cancellationToken).ConfigureAwait(false)
             : null;
         var variant = response.Response.Select(locale ?? context.Contact?.Locale);
         var body = variant.Template.Render(AutomationTemplateValues.Resolver(context, agentName), response.Response.Escaping);
         if (body is null)
-            return AutomationRefused.Invalid("The rendered response exceeds the output limit.");
-        return new AutomationValue<RenderedCannedResponse>(new RenderedCannedResponse(id, variant.Locale, response.Response.ContentType, body));
+            return TicketFailure.Invalid("The rendered response exceeds the output limit.");
+        return new TicketValue<RenderedCannedResponse>(new RenderedCannedResponse(id, variant.Locale, response.Response.ContentType, body));
     }
 
     private async Task<bool> CanReadAsync(PrincipalRef actor, CancellationToken cancellationToken)

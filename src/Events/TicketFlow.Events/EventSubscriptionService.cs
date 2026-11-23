@@ -32,7 +32,7 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
         this.time = time ?? throw new ArgumentNullException(nameof(time));
     }
 
-    public async Task<EventResult<EventSubscriptionView>> CreateAsync(PrincipalRef actor, EventSubscription subscription, EventSubscriptionStart? start = null,
+    public async Task<TicketResult<EventSubscriptionView>> CreateAsync(PrincipalRef actor, EventSubscription subscription, EventSubscriptionStart? start = null,
         CancellationToken cancellationToken = default)
     {
         var scope = actor.Scope;
@@ -52,7 +52,7 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
             .ConfigureAwait(false);
     }
 
-    public async Task<EventResult<EventSubscriptionView>> UpdateAsync(PrincipalRef actor, EventSubscription subscription, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<EventSubscriptionView>> UpdateAsync(PrincipalRef actor, EventSubscription subscription, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = actor.Scope;
         ArgumentNullException.ThrowIfNull(subscription);
@@ -60,49 +60,49 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
             return refused;
         var current = await store.GetAsync(scope, subscription.Id, cancellationToken).ConfigureAwait(false);
         if (current is null)
-            return EventNotFound.Instance;
+            return TicketFailure.NotFound;
         if (current.Revision != expectedRevision)
-            return new EventConflict(current.Revision);
+            return TicketFailure.Conflict(current.Revision);
         if (Invalid(scope, subscription) is { } invalid)
             return invalid;
         return await ViewAsync(await store.UpdateAsync(scope, subscription, expectedRevision, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<EventResult<EventSubscriptionId>> DeleteAsync(PrincipalRef actor, EventSubscriptionId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<EventSubscriptionId>> DeleteAsync(PrincipalRef actor, EventSubscriptionId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = actor.Scope;
         if (!await PermittedAsync(actor, EventPermissions.Manage, cancellationToken).ConfigureAwait(false))
-            return new EventRefused(EventRefusal.Forbidden);
+            return TicketFailure.Forbidden;
         var current = await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
         if (current is null)
-            return EventNotFound.Instance;
+            return TicketFailure.NotFound;
         if (current.Revision != expectedRevision)
-            return new EventConflict(current.Revision);
+            return TicketFailure.Conflict(current.Revision);
         return await store.DeleteAsync(scope, id, expectedRevision, cancellationToken).ConfigureAwait(false) switch
         {
-            EventWriteApplied<StoredEventSubscription> => new EventSucceeded<EventSubscriptionId>(id),
-            EventWriteNotFound => EventNotFound.Instance,
-            EventWriteConflict conflict => new EventConflict(conflict.CurrentRevision),
-            EventWriteRejected rejected => new EventRefused(EventRefusal.Rejected, rejected.Reason.ToString()),
+            StoreApplied<StoredEventSubscription> => new TicketValue<EventSubscriptionId>(id),
+            StoreNotFound => TicketFailure.NotFound,
+            StoreConflict conflict => TicketFailure.Conflict(conflict.CurrentRevision),
+            StoreRejected<EventWriteRejection> rejected => TicketFailure.Rejected(rejected.Reason.ToString()),
         };
     }
 
-    public async Task<EventResult<EventSubscriptionView>> GetAsync(PrincipalRef actor, EventSubscriptionId id, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<EventSubscriptionView>> GetAsync(PrincipalRef actor, EventSubscriptionId id, CancellationToken cancellationToken = default)
     {
         if (!await PermittedAsync(actor, EventPermissions.Read, cancellationToken).ConfigureAwait(false))
-            return new EventRefused(EventRefusal.Forbidden);
+            return TicketFailure.Forbidden;
         var rowTask = store.GetWithStateAsync(actor.Scope, id, cancellationToken);
         var headTask = log.GetHeadAsync(actor.Scope, cancellationToken);
         await Task.WhenAll(rowTask, headTask).ConfigureAwait(false);
         if (rowTask.Result is not { } row)
-            return EventNotFound.Instance;
-        return new EventSucceeded<EventSubscriptionView>(new EventSubscriptionView(row.Subscription, row.State, headTask.Result));
+            return TicketFailure.NotFound;
+        return new TicketValue<EventSubscriptionView>(new EventSubscriptionView(row.Subscription, row.State, headTask.Result));
     }
 
-    public async Task<EventResult<IReadOnlyList<EventSubscriptionView>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<IReadOnlyList<EventSubscriptionView>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
     {
         if (!await PermittedAsync(actor, EventPermissions.Read, cancellationToken).ConfigureAwait(false))
-            return new EventRefused(EventRefusal.Forbidden);
+            return TicketFailure.Forbidden;
         var listTask = store.ListWithStateAsync(actor.Scope, cancellationToken);
         var headTask = log.GetHeadAsync(actor.Scope, cancellationToken);
         await Task.WhenAll(listTask, headTask).ConfigureAwait(false);
@@ -111,42 +111,42 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
         var views = new EventSubscriptionView[rows.Count];
         for (var i = 0; i < rows.Count; i++)
             views[i] = new EventSubscriptionView(rows[i].Subscription, rows[i].State, head);
-        return new EventSucceeded<IReadOnlyList<EventSubscriptionView>>(views);
+        return new TicketValue<IReadOnlyList<EventSubscriptionView>>(views);
     }
 
-    public async Task<EventResult<EventSubscriptionView>> ReplayAsync(PrincipalRef actor, EventSubscriptionId id, long afterSequence, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<EventSubscriptionView>> ReplayAsync(PrincipalRef actor, EventSubscriptionId id, long afterSequence, CancellationToken cancellationToken = default)
     {
         if (afterSequence < 0)
-            return new EventRefused(EventRefusal.Invalid, "The replay position cannot be negative.");
+            return TicketFailure.Invalid("The replay position cannot be negative.");
         if (!await PermittedAsync(actor, EventPermissions.Manage, cancellationToken).ConfigureAwait(false))
-            return new EventRefused(EventRefusal.Forbidden);
+            return TicketFailure.Forbidden;
         var current = await store.GetAsync(actor.Scope, id, cancellationToken).ConfigureAwait(false);
         if (current is null)
-            return EventNotFound.Instance;
+            return TicketFailure.NotFound;
         var head = await log.GetHeadAsync(actor.Scope, cancellationToken).ConfigureAwait(false);
         if (!await store.ReplayAsync(actor.Scope, id, Math.Min(afterSequence, head.Last), time.GetUtcNow(), cancellationToken).ConfigureAwait(false))
-            return EventNotFound.Instance;
-        return new EventSucceeded<EventSubscriptionView>(await ViewAsync(current, head, cancellationToken).ConfigureAwait(false));
+            return TicketFailure.NotFound;
+        return new TicketValue<EventSubscriptionView>(await ViewAsync(current, head, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<EventResult<IReadOnlyList<EventDeadLetter>>> ListDeadLettersAsync(PrincipalRef actor, EventSubscriptionId id, long afterSequence = 0, int limit = 50,
+    public async Task<TicketResult<IReadOnlyList<EventDeadLetter>>> ListDeadLettersAsync(PrincipalRef actor, EventSubscriptionId id, long afterSequence = 0, int limit = 50,
         CancellationToken cancellationToken = default)
     {
         if (afterSequence < 0 || limit is < 1 or > IEventSubscriptionStore.MaximumDeadLetterRead)
-            return new EventRefused(EventRefusal.Invalid, "Dead letters are read after a non-negative sequence, 1-200 at a time.");
+            return TicketFailure.Invalid("Dead letters are read after a non-negative sequence, 1-200 at a time.");
         if (!await PermittedAsync(actor, EventPermissions.Manage, cancellationToken).ConfigureAwait(false))
-            return new EventRefused(EventRefusal.Forbidden);
+            return TicketFailure.Forbidden;
         if (await store.GetAsync(actor.Scope, id, cancellationToken).ConfigureAwait(false) is null)
-            return EventNotFound.Instance;
-        return new EventSucceeded<IReadOnlyList<EventDeadLetter>>(await store.ListDeadLettersAsync(actor.Scope, id, afterSequence, limit, cancellationToken).ConfigureAwait(false));
+            return TicketFailure.NotFound;
+        return new TicketValue<IReadOnlyList<EventDeadLetter>>(await store.ListDeadLettersAsync(actor.Scope, id, afterSequence, limit, cancellationToken).ConfigureAwait(false));
     }
 
-    private async Task<EventRefused?> RefuseAsync(PrincipalRef actor, EventSubscription subscription, CancellationToken cancellationToken)
+    private async Task<TicketFailure?> RefuseAsync(PrincipalRef actor, EventSubscription subscription, CancellationToken cancellationToken)
     {
         if (!await PermittedAsync(actor, EventPermissions.Manage, cancellationToken).ConfigureAwait(false))
-            return new EventRefused(EventRefusal.Forbidden);
+            return TicketFailure.Forbidden;
         if (subscription.Privacy == EventPrivacy.Content && !await PermittedAsync(actor, EventPermissions.Content, cancellationToken).ConfigureAwait(false))
-            return new EventRefused(EventRefusal.Forbidden, "Content subscriptions require events:content.");
+            return TicketFailure.ForbiddenWith(["Content subscriptions require events:content."]);
         // Confused deputy: the actor must be able to confer every live allow grant of the principal it delegates delivery to.
         var scope = actor.Scope;
         GrantSubject subject = subscription.Principal;
@@ -156,26 +156,26 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
         return await administrator.CheckCanConferAsync(actor, principalGrants.Select(stored => new GrantConferral(stored.Grant)), cancellationToken).ConfigureAwait(false) switch
         {
             AccessCheckPassed => null,
-            AccessChangeRefused => new EventRefused(EventRefusal.Forbidden, "The actor cannot delegate the access of the subscription principal."),
+            TicketFailure => TicketFailure.ForbiddenWith(["The actor cannot delegate the access of the subscription principal."]),
         };
     }
 
-    private EventRefused? Invalid(TicketScope scope, EventSubscription subscription)
+    private TicketFailure? Invalid(TicketScope scope, EventSubscription subscription)
     {
         if (!sinks.TryGetValue(subscription.Sink.Kind, out var sink))
-            return new EventRefused(EventRefusal.Invalid, "The sink kind is not registered.");
-        return sink.IsValidTarget(scope, subscription.Sink.Target) ? null : new EventRefused(EventRefusal.Invalid, "The sink target is invalid for this workspace.");
+            return TicketFailure.Invalid("The sink kind is not registered.");
+        return sink.IsValidTarget(scope, subscription.Sink.Target) ? null : TicketFailure.Invalid("The sink target is invalid for this workspace.");
     }
 
     private async Task<bool> PermittedAsync(PrincipalRef actor, Permission permission, CancellationToken cancellationToken) =>
         (await access.AuthorizeAsync(new AccessRequest(actor, permission, EventPermissions.Workspace(actor.Scope)), cancellationToken).ConfigureAwait(false)).IsPermitted;
 
-    private async Task<EventResult<EventSubscriptionView>> ViewAsync(EventWriteResult<StoredEventSubscription> result, CancellationToken cancellationToken) => result switch
+    private async Task<TicketResult<EventSubscriptionView>> ViewAsync(StoreWriteResult<StoredEventSubscription, EventWriteRejection> result, CancellationToken cancellationToken) => result switch
     {
-        EventWriteApplied<StoredEventSubscription> applied => new EventSucceeded<EventSubscriptionView>(await ViewAsync(applied.Value, head: null, cancellationToken).ConfigureAwait(false)),
-        EventWriteNotFound => EventNotFound.Instance,
-        EventWriteConflict conflict => new EventConflict(conflict.CurrentRevision),
-        EventWriteRejected rejected => new EventRefused(EventRefusal.Rejected, rejected.Reason.ToString()),
+        StoreApplied<StoredEventSubscription> applied => new TicketValue<EventSubscriptionView>(await ViewAsync(applied.Value, head: null, cancellationToken).ConfigureAwait(false)),
+        StoreNotFound => TicketFailure.NotFound,
+        StoreConflict conflict => TicketFailure.Conflict(conflict.CurrentRevision),
+        StoreRejected<EventWriteRejection> rejected => TicketFailure.Rejected(rejected.Reason.ToString()),
     };
 
     private async Task<EventSubscriptionView> ViewAsync(StoredEventSubscription stored, EventLogHead? head, CancellationToken cancellationToken)

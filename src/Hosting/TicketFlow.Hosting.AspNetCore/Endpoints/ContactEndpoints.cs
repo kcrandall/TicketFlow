@@ -156,9 +156,9 @@ internal static class ContactEndpoints
         }
     }
 
-    internal static IResult Map<T>(HttpContext http, ContactResult<T> result, Func<T, IResult> success) => result switch
+    internal static IResult Map<T>(HttpContext http, TicketResult<T, ContactRefused> result, Func<T, IResult> success) => result switch
     {
-        ContactApplied<T> applied => success(applied.Value),
+        TicketValue<T> applied => success(applied.Value),
         ContactRefused refused => Refused(http, refused),
     };
 

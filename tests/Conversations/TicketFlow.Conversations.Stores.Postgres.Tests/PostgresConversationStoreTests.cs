@@ -213,12 +213,12 @@ public sealed class PostgresConversationStoreTests
         public Task<IReadOnlyList<StoredAccessFieldPolicy>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<StoredAccessFieldPolicy>>([]);
 
-        public Task<AccessWriteResult<StoredAccessFieldPolicy>> CreateAsync(TicketScope scope, AccessFieldPolicy policy, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> CreateAsync(TicketScope scope, AccessFieldPolicy policy, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
-        public Task<AccessWriteResult<StoredAccessFieldPolicy>> UpdateAsync(TicketScope scope, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default) =>
+        public Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> UpdateAsync(TicketScope scope, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
-        public Task<AccessWriteResult<StoredAccessFieldPolicy>> DeleteAsync(TicketScope scope, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default) =>
+        public Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> DeleteAsync(TicketScope scope, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
     }
 }

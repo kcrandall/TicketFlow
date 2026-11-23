@@ -1,5 +1,6 @@
 using TicketFlow.Access;
 using TicketFlow.Conversations;
+using TicketFlow.Core;
 using TicketFlow.HelpCenter;
 
 namespace TicketFlow.Assist.Tests;
@@ -106,7 +107,7 @@ public sealed class ContextTests
         var reader = await fixture.UserWithAsync("team-agent", ConversationPermissions.Read, ConversationPermissions.NoteRead);
         var assist = await fixture.CustomRoleAsync("assist-team", AssistPermissions.Use);
         var grant = new AccessGrant(new GrantId("team-assist"), AccessPartition.From(fixture.Scope), new Core.UserId("team-agent"), assist.Id, new TeamGrantScope(fixture.Scope.WorkspaceId, new Core.TeamId("billing")));
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await fixture.Grants.CreateAsync(grant)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await fixture.Grants.CreateAsync(grant)).Value);
 
         Assert.AreEqual("refused:Forbidden", AssistFixture.Describe(await fixture.Assist.SummarizeAsync(reader, new AssistSummaryRequest(AssistFixture.C1))));
         AssistFixture.Applied(await fixture.Conversations.SetTeamAsync(fixture.Owner, AssistFixture.C1, new Core.TeamId("billing")));

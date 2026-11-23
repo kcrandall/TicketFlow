@@ -34,33 +34,33 @@ public interface IHelpCenterStore
     /// <summary>Every portal in the scope (bounded), ordered by identifier (ordinal).</summary>
     Task<IReadOnlyList<StoredPortal>> ListPortalsAsync(TicketScope scope, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterWriteResult<StoredPortal>> CreatePortalAsync(TicketScope scope, Portal portal, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredPortal, HelpCenterWriteRejection>> CreatePortalAsync(TicketScope scope, Portal portal, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterWriteResult<StoredPortal>> UpdatePortalAsync(TicketScope scope, Portal portal, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredPortal, HelpCenterWriteRejection>> UpdatePortalAsync(TicketScope scope, Portal portal, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterWriteResult<StoredPortal>> DeletePortalAsync(TicketScope scope, PortalId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredPortal, HelpCenterWriteRejection>> DeletePortalAsync(TicketScope scope, PortalId id, long expectedRevision, CancellationToken cancellationToken = default);
 
     Task<StoredCollection?> GetCollectionAsync(TicketScope scope, CollectionId id, CancellationToken cancellationToken = default);
 
     /// <summary>Every collection of the portal (bounded), ordered by (depth, position, identifier).</summary>
     Task<IReadOnlyList<StoredCollection>> ListCollectionsAsync(TicketScope scope, PortalId portal, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterWriteResult<StoredCollection>> CreateCollectionAsync(TicketScope scope, HelpCollection collection, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredCollection, HelpCenterWriteRejection>> CreateCollectionAsync(TicketScope scope, HelpCollection collection, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterWriteResult<StoredCollection>> UpdateCollectionAsync(TicketScope scope, HelpCollection collection, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredCollection, HelpCenterWriteRejection>> UpdateCollectionAsync(TicketScope scope, HelpCollection collection, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterWriteResult<StoredCollection>> DeleteCollectionAsync(TicketScope scope, CollectionId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredCollection, HelpCenterWriteRejection>> DeleteCollectionAsync(TicketScope scope, CollectionId id, long expectedRevision, CancellationToken cancellationToken = default);
 
     Task<StoredArticle?> GetArticleAsync(TicketScope scope, ArticleId id, CancellationToken cancellationToken = default);
 
     Task<HelpCenterPage<StoredArticle>> ListArticlesAsync(TicketScope scope, ArticleListQuery query, CancellationToken cancellationToken = default);
 
     /// <summary>Creates an article. A record that is <see cref="ArticleState.Published"/> or references a revision is rejected (<see cref="HelpCenterWriteRejection.InvalidRevision"/>).</summary>
-    Task<HelpCenterWriteResult<StoredArticle>> CreateArticleAsync(TicketScope scope, ArticleRecord record, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredArticle, HelpCenterWriteRejection>> CreateArticleAsync(TicketScope scope, ArticleRecord record, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterWriteResult<StoredArticle>> UpdateArticleAsync(TicketScope scope, ArticleRecord record, long expectedRevision, ArticleRevision? appendRevision = null, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredArticle, HelpCenterWriteRejection>> UpdateArticleAsync(TicketScope scope, ArticleRecord record, long expectedRevision, ArticleRevision? appendRevision = null, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterWriteResult<StoredArticle>> DeleteArticleAsync(TicketScope scope, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredArticle, HelpCenterWriteRejection>> DeleteArticleAsync(TicketScope scope, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default);
 
     Task<ArticleRevision?> GetRevisionAsync(TicketScope scope, ArticleId article, int number, CancellationToken cancellationToken = default);
 

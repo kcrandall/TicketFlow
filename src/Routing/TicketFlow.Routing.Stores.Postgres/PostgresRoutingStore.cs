@@ -94,7 +94,7 @@ public sealed partial class PostgresRoutingStore : IRoutingPolicyStore, IAgentAv
         return policies;
     }
 
-    public async Task<RoutingWriteResult<StoredRoutingPolicy>> CreateAsync(TicketScope scope, RoutingPolicy policy, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredRoutingPolicy, RoutingWriteRejection>> CreateAsync(TicketScope scope, RoutingPolicy policy, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(policy);
@@ -118,14 +118,14 @@ public sealed partial class PostgresRoutingStore : IRoutingPolicyStore, IAgentAv
         if (insertedRevision is { } rev)
         {
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new RoutingWriteApplied<StoredRoutingPolicy>(new StoredRoutingPolicy(scope, policy, rev));
+            return new StoreApplied<StoredRoutingPolicy>(new StoredRoutingPolicy(scope, policy, rev));
         }
         return existingRevision is { } existing
-            ? new RoutingWriteConflict(existing)
-            : new RoutingWriteRejected(RoutingWriteRejection.CapacityExceeded);
+            ? new StoreConflict(existing)
+            : new StoreRejected<RoutingWriteRejection>(RoutingWriteRejection.CapacityExceeded);
     }
 
-    public async Task<RoutingWriteResult<StoredRoutingPolicy>> UpdateAsync(TicketScope scope, RoutingPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredRoutingPolicy, RoutingWriteRejection>> UpdateAsync(TicketScope scope, RoutingPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(policy);
@@ -142,14 +142,14 @@ public sealed partial class PostgresRoutingStore : IRoutingPolicyStore, IAgentAv
             AddText(update, "document", document);
             AddLong(update, "expected", expectedRevision);
             if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                return new RoutingWriteApplied<StoredRoutingPolicy>(new StoredRoutingPolicy(scope, policy, revision));
+                return new StoreApplied<StoredRoutingPolicy>(new StoredRoutingPolicy(scope, policy, revision));
         }
         return await LoadPolicyRevisionAsync(connection, scope, policy.Id, cancellationToken).ConfigureAwait(false) is { } current
-            ? new RoutingWriteConflict(current)
-            : RoutingWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
-    public async Task<RoutingWriteResult<StoredRoutingPolicy>> DeleteAsync(TicketScope scope, RoutingPolicyId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredRoutingPolicy, RoutingWriteRejection>> DeleteAsync(TicketScope scope, RoutingPolicyId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequirePolicy(id);
@@ -164,11 +164,11 @@ public sealed partial class PostgresRoutingStore : IRoutingPolicyStore, IAgentAv
             AddLong(delete, "expected", expectedRevision);
             await using var reader = await delete.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new RoutingWriteApplied<StoredRoutingPolicy>(ReadPolicy(reader, scope));
+                return new StoreApplied<StoredRoutingPolicy>(ReadPolicy(reader, scope));
         }
         return await LoadPolicyRevisionAsync(connection, scope, id, cancellationToken).ConfigureAwait(false) is { } current
-            ? new RoutingWriteConflict(current)
-            : RoutingWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
     private static async Task<long?> LoadPolicyRevisionAsync(NpgsqlConnection connection, TicketScope scope, RoutingPolicyId id, CancellationToken cancellationToken)

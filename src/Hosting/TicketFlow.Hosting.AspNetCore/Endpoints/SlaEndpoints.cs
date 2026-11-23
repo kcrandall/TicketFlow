@@ -49,18 +49,7 @@ internal static class SlaEndpoints
         return group;
     }
 
-    private static IResult Map<T>(HttpContext http, SlaResult<T> result, Func<T, IResult> success) => result switch
-    {
-        SlaValue<T> value => success(value.Value),
-        SlaNotFound => TicketFlowHttp.NotFound(),
-        SlaConflict conflict => TicketFlowHttp.Conflict(http, conflict.CurrentRevision),
-        SlaRefused refused => TicketFlowHttp.Refused(http, refused.Reason switch
-        {
-            SlaRefusal.Forbidden => RefusalKind.Forbidden,
-            SlaRefusal.Invalid => RefusalKind.Invalid,
-            _ => RefusalKind.Rejected,
-        }, refused.Errors),
-    };
+    private static IResult Map<T>(HttpContext http, TicketResult<T> result, Func<T, IResult> success) => TicketFlowHttp.Map(http, result, success);
 
     internal static SlaStatusResponse Dto(SlaStatusView view) => new(
         view.Conversation.Value,

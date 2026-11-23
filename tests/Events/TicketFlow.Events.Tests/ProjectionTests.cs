@@ -162,9 +162,9 @@ public sealed class ProjectionTests
         var merge = await fixture.InScopeAsync(async provider =>
         {
             var contacts = provider.GetRequiredService<IContactService>();
-            var target = ((ContactApplied<ContactView>)(await contacts.GetAsync(fixture.Owner, new ContactId("ada"))).Value!).Value;
-            var source = ((ContactApplied<ContactView>)(await contacts.GetAsync(fixture.Owner, new ContactId("dup"))).Value!).Value;
-            var merged = (ContactApplied<ContactMergeOutcome>)(await contacts.MergeAsync(fixture.Owner,
+            var target = ((TicketValue<ContactView>)(await contacts.GetAsync(fixture.Owner, new ContactId("ada"))).Value!).Value;
+            var source = ((TicketValue<ContactView>)(await contacts.GetAsync(fixture.Owner, new ContactId("dup"))).Value!).Value;
+            var merged = (TicketValue<ContactMergeOutcome>)(await contacts.MergeAsync(fixture.Owner,
                 new ContactMergeRequest(target.Id, target.Revision, source.Id, source.Revision, justification: "duplicate"))).Value!;
             await contacts.UnmergeAsync(fixture.Owner, merged.Value.MergeId);
             return merged.Value.MergeId;

@@ -70,7 +70,7 @@ internal static class RealtimeDeliveryPolicy
         switch (subscriber)
         {
             case VisitorSubscriber visitor:
-                return topic.Value is VisitorSessionTopic own && own.Session == visitor.Session
+                return topic is VisitorSessionTopic own && own.Session == visitor.Session
                     ? (new SubscriptionGrant(null, time.GetUtcNow()), default)
                     : (null, RealtimeRefusal.Forbidden);
             case AgentSubscriber agent:
@@ -90,7 +90,7 @@ internal static class RealtimeDeliveryPolicy
                         var filter = await planner.PlanAsync(new AccessQuery(agent.Principal, ConversationPermissions.Read, queue.Scope), cancellationToken).ConfigureAwait(false);
                         return (new SubscriptionGrant(filter, time.GetUtcNow()), default);
                     case AgentTopic agentTopic:
-                        return agent.Principal.Value is UserPrincipal user && user.UserId == agentTopic.Agent
+                        return agent.Principal is UserPrincipal user && user.UserId == agentTopic.Agent
                             ? (new SubscriptionGrant(null, time.GetUtcNow()), default)
                             : (null, RealtimeRefusal.Forbidden);
                     case VisitorSessionTopic:
@@ -137,7 +137,7 @@ internal static class RealtimeDeliveryPolicy
             case VisitorSessionEndedEvent:
                 return (true, null);
             case AgentStatusChangedEvent status:
-                return (true, topic.Value is AgentTopic own && own.Agent == status.Agent ? realtimeEvent : (RealtimeEvent?)null);
+                return (true, topic is AgentTopic own && own.Agent == status.Agent ? realtimeEvent : (RealtimeEvent?)null);
             case ConversationChangedEvent:
             case PresenceChangedEvent:
             case ReplyLockChangedEvent:
@@ -152,7 +152,7 @@ internal static class RealtimeDeliveryPolicy
 
     public static bool HasNotes(RealtimeEvent realtimeEvent)
     {
-        if (realtimeEvent.Value is not ConversationChangedEvent changed)
+        if (realtimeEvent is not ConversationChangedEvent changed)
             return false;
         var events = changed.Events;
         for (var i = 0; i < events.Count; i++)
@@ -176,7 +176,7 @@ internal static class RealtimeDeliveryPolicy
     /// <summary>The event after note stripping for a principal already allowed to read the conversation.</summary>
     public static async ValueTask<RealtimeEvent?> StripNotesAsync(RealtimeEvent realtimeEvent, Func<ValueTask<bool>> noteReadable)
     {
-        if (realtimeEvent.Value is ConversationChangedEvent changed && HasNotes(realtimeEvent)
+        if (realtimeEvent is ConversationChangedEvent changed && HasNotes(realtimeEvent)
             && !await noteReadable().ConfigureAwait(false))
             return StripNotes(changed);
         return realtimeEvent;

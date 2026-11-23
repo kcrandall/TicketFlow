@@ -121,9 +121,9 @@ else
             await Task.WhenAll(articleTask, portalsTask);
         else
             await portalsTask;
-        if (articleTask is not null && await articleTask is HelpCenterSucceeded<StoredArticle> found)
+        if (articleTask is not null && await articleTask is TicketValue<StoredArticle> found)
             stored = found.Value;
-        if (await portalsTask is HelpCenterSucceeded<IReadOnlyList<StoredPortal>> list)
+        if (await portalsTask is TicketValue<IReadOnlyList<StoredPortal>> list)
             portals = [.. list.Value];
         var portal = stored?.Record.Article.Portal ?? portals.FirstOrDefault(item => item.Portal.Id.Value == Query("portal"))?.Portal.Id ?? portals.FirstOrDefault()?.Portal.Id;
 
@@ -140,13 +140,13 @@ else
         if (pending.Count > 0)
             await Task.WhenAll(pending);
 
-        if (collectionsTask is not null && await collectionsTask is HelpCenterSucceeded<IReadOnlyList<StoredCollection>> collectionList)
+        if (collectionsTask is not null && await collectionsTask is TicketValue<IReadOnlyList<StoredCollection>> collectionList)
             collections = [.. collectionList.Value];
-        if (previewTask is not null && await previewTask is HelpCenterSucceeded<ArticlePreview> rendered)
+        if (previewTask is not null && await previewTask is TicketValue<ArticlePreview> rendered)
             preview = rendered.Value;
-        if (feedbackTask is not null && await feedbackTask is HelpCenterSucceeded<ArticleFeedbackCounts> counts)
+        if (feedbackTask is not null && await feedbackTask is TicketValue<ArticleFeedbackCounts> counts)
             feedback = counts.Value;
-        if (revisionsTask is not null && await revisionsTask is HelpCenterSucceeded<HelpCenterPage<ArticleRevision>> history)
+        if (revisionsTask is not null && await revisionsTask is TicketValue<HelpCenterPage<ArticleRevision>> history)
             revisions = [.. history.Value.Items];
     }
 }

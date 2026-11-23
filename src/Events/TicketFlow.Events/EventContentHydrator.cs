@@ -234,7 +234,7 @@ public sealed class EventContentHydrator(IConversationService? conversations = n
         try
         {
             var res = await surveys!.GetResponseAsync(principal, new SurveyInvitationId(id), cancellationToken).ConfigureAwait(false);
-            return (id, res.Value is SurveySucceeded<SurveyResponseView> ok ? ok.Value : null);
+            return (id, res.Value is TicketValue<SurveyResponseView> ok ? ok.Value : null);
         }
         finally
         {
@@ -330,7 +330,7 @@ public sealed class EventContentHydrator(IConversationService? conversations = n
 
     private async Task<(ContactEventContent Content, IReadOnlyList<string> Masked)?> LoadContactAsync(ApiClientPrincipal principal, ContactId contact, CancellationToken cancellationToken)
     {
-        if (contacts is null || (await contacts.GetAsync(principal, contact, cancellationToken).ConfigureAwait(false)).Value is not ContactApplied<ContactView> applied)
+        if (contacts is null || (await contacts.GetAsync(principal, contact, cancellationToken).ConfigureAwait(false)).Value is not TicketValue<ContactView> applied)
             return null;
         var view = applied.Value;
         return (new ContactEventContent(view.Profile.DisplayName,

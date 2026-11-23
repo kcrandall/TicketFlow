@@ -229,7 +229,7 @@ public sealed class ReviewRegressionTests
     private static async Task<Guid> MergeGraceIntoAdaAsync(ConversationFixture fixture)
     {
         var merge = await fixture.ContactsService.MergeAsync(fixture.Owner, new ContactMergeRequest(new ContactId("ada"), 1, new ContactId("grace"), 1));
-        return ((ContactApplied<ContactMergeOutcome>)merge.Value!).Value.MergeId;
+        return ((TicketValue<ContactMergeOutcome>)merge.Value!).Value.MergeId;
     }
 
     private static ConversationContactMergeFollower Follower(ConversationFixture fixture, IConversationStore store) =>
@@ -347,12 +347,12 @@ public sealed class ReviewRegressionTests
         public Task<IReadOnlyList<StoredAccessGrant>> ListForTargetAsync(AccessPartition partition, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default) =>
             inner.ListForTargetAsync(partition, target, limit, after, cancellationToken);
 
-        public Task<AccessWriteResult<StoredAccessGrant>> CreateAsync(AccessGrant grant, CancellationToken cancellationToken = default) => inner.CreateAsync(grant, cancellationToken);
+        public Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> CreateAsync(AccessGrant grant, CancellationToken cancellationToken = default) => inner.CreateAsync(grant, cancellationToken);
 
-        public Task<AccessWriteResult<StoredAccessGrant>> UpdateAsync(AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default) =>
+        public Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> UpdateAsync(AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default) =>
             inner.UpdateAsync(grant, expectedRevision, cancellationToken);
 
-        public Task<AccessWriteResult<StoredAccessGrant>> DeleteAsync(AccessPartition partition, GrantId id, long expectedRevision, CancellationToken cancellationToken = default) =>
+        public Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> DeleteAsync(AccessPartition partition, GrantId id, long expectedRevision, CancellationToken cancellationToken = default) =>
             inner.DeleteAsync(partition, id, expectedRevision, cancellationToken);
     }
 
@@ -370,13 +370,13 @@ public sealed class ReviewRegressionTests
             return inner.ListAsync(scope, cancellationToken);
         }
 
-        public Task<AccessWriteResult<StoredAccessFieldPolicy>> CreateAsync(TicketScope scope, AccessFieldPolicy policy, CancellationToken cancellationToken = default) =>
+        public Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> CreateAsync(TicketScope scope, AccessFieldPolicy policy, CancellationToken cancellationToken = default) =>
             inner.CreateAsync(scope, policy, cancellationToken);
 
-        public Task<AccessWriteResult<StoredAccessFieldPolicy>> UpdateAsync(TicketScope scope, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default) =>
+        public Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> UpdateAsync(TicketScope scope, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default) =>
             inner.UpdateAsync(scope, policy, expectedRevision, cancellationToken);
 
-        public Task<AccessWriteResult<StoredAccessFieldPolicy>> DeleteAsync(TicketScope scope, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default) =>
+        public Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> DeleteAsync(TicketScope scope, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default) =>
             inner.DeleteAsync(scope, field, expectedRevision, cancellationToken);
     }
 }

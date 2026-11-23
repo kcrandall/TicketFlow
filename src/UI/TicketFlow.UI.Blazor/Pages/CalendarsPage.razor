@@ -98,7 +98,7 @@
 
     protected override async Task OnInitializedAsync()
     {
-        if (Service<IBusinessCalendarService>() is { } service && await service.ListAsync(Actor, Aborted) is WorkspaceSucceeded<IReadOnlyList<StoredBusinessCalendar>> list)
+        if (Service<IBusinessCalendarService>() is { } service && await service.ListAsync(Actor, Aborted) is TicketValue<IReadOnlyList<StoredBusinessCalendar>> list)
             calendars = list.Value;
     }
 }

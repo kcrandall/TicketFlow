@@ -72,7 +72,7 @@ internal static class TicketFlowToolListFilter
             return null;
         var workspace = new WorkspaceId(options.DefaultWorkspace);
         if (await resolver.ResolveAsync(new TicketFlowMcpCaller(user, services), workspace, cancellationToken).ConfigureAwait(false) is not { } principal
-            || principal.Value is null || principal.Scope.WorkspaceId != workspace)
+            || principal is null || principal.Scope.WorkspaceId != workspace)
             return null;
         if (permissions is null || permissions.Count == 0)
             return new Dictionary<string, bool?>(StringComparer.Ordinal);

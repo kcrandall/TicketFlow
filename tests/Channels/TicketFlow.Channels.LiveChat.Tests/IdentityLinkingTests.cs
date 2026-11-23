@@ -19,7 +19,7 @@ public sealed class IdentityLinkingTests
         if (grantLinking)
         {
             var role = new AccessRole(new RoleId("visitor-linker"), "Visitor linker", [ContactPermissions.Link, ContactPermissions.Merge]);
-            Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await host.Host.Services.GetRequiredService<IAccessRoleStore>().CreateAsync(host.Scope, role)).Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await host.Host.Services.GetRequiredService<IAccessRoleStore>().CreateAsync(host.Scope, role)).Value);
             await host.Host.GrantAsync(new ApiClientId("channels"), role);
         }
         return host;
@@ -35,7 +35,7 @@ public sealed class IdentityLinkingTests
     public async Task IdentifyMergesTheAnonymousContactAndItsConversationsIntoTheAccountContact()
     {
         await using var host = await CreateAsync();
-        var account = ((ContactApplied<ContactView>)(await host.Host.Contacts.CreateAsync(host.Host.Owner, new ContactDraft(new ContactProfile(),
+        var account = ((TicketValue<ContactView>)(await host.Host.Contacts.CreateAsync(host.Host.Owner, new ContactDraft(new ContactProfile(),
             [new ContactIdentity(Account, new IdentityVerified("shop-login", host.Host.Clock.GetUtcNow()))]))).Value!).Value;
         var grant = await host.StartAsync();
         var first = Value(await host.Visitors.SendMessageAsync(grant.Context, new VisitorMessageDraft("c1", "Where is my order?")));
@@ -58,7 +58,7 @@ public sealed class IdentityLinkingTests
         var audit = host.Host.Services.GetRequiredService<InMemoryContactStore>().AuditEvents;
         var merge = audit.Single(item => item.Kind == ContactAuditKind.Merged).Merge!.Value;
         Assert.AreEqual(AccessActorKind.ApiClient, audit.Single(item => item.Kind == ContactAuditKind.Linked).Actor.Kind);
-        Assert.IsInstanceOfType<ContactApplied<ContactUnmergeOutcome>>((await host.Host.Contacts.UnmergeAsync(host.Host.Owner, merge)).Value);
+        Assert.IsInstanceOfType<TicketValue<ContactUnmergeOutcome>>((await host.Host.Contacts.UnmergeAsync(host.Host.Owner, merge)).Value);
         Assert.AreEqual(anonymous, await ContactOfAsync(host, first.Conversation));
     }
 

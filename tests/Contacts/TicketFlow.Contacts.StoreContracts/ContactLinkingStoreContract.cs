@@ -13,12 +13,17 @@ public static class ContactLinkingStoreContract
 {
     private static readonly AccessActor Actor = new(AccessActorKind.User, "owner");
 
-    public static string Describe<T>(ContactLinkingWriteResult<T> result) => result switch
+    public static string Describe<T>(StoreWriteResult<T, ContactWriteRejection> result) => result switch
     {
-        LinkingWriteApplied<T> applied => applied.Created ? "created" : "applied",
-        LinkingWriteNotFound => "not-found",
-        LinkingWriteConflict conflict => $"conflict:{conflict.CurrentRevision}",
-        ContactWriteRejected rejected => $"rejected:{rejected.Reason}",
+        StoreApplied<T> applied => applied.Value switch
+        {
+            StoredLinkSuggestionWrite write => write.Created ? "created" : "applied",
+            StoredContactLinkingPolicy policy => policy.Revision == 1 ? "created" : "applied",
+            _ => "applied",
+        },
+        StoreNotFound => "not-found",
+        StoreConflict conflict => $"conflict:{conflict.CurrentRevision}",
+        StoreRejected<ContactWriteRejection> rejected => $"rejected:{rejected.Reason}",
     };
 
     public static ContactLinkSuggestion Suggestion(string candidate, string account, Guid? id = null) =>
@@ -54,7 +59,7 @@ public static class ContactLinkingStoreContract
         Assert.AreEqual("created", Describe(await primary.CreateSuggestionAsync(scope, first)));
         var duplicate = await competing.CreateSuggestionAsync(scope, Suggestion("anon-1", "account"));
         Assert.AreEqual("applied", Describe(duplicate), "one pending suggestion per pair");
-        Assert.AreEqual(first.Id, ((LinkingWriteApplied<StoredContactLinkSuggestion>)duplicate.Value!).Value.Suggestion.Id);
+        Assert.AreEqual(first.Id, ((StoreApplied<StoredLinkSuggestionWrite>)duplicate.Value!).Value.Suggestion.Suggestion.Id);
         Assert.AreEqual("conflict:1", Describe(await competing.CreateSuggestionAsync(scope, Suggestion("anon-2", "account", first.Id))), "identifiers are unique");
         Assert.AreEqual("created", Describe(await primary.CreateSuggestionAsync(scope, Suggestion("anon-2", "account"))));
         Assert.AreEqual("created", Describe(await primary.CreateSuggestionAsync(scope, Suggestion("anon-3", "account"))));

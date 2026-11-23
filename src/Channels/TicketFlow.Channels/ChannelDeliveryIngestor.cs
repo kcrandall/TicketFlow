@@ -11,7 +11,7 @@ public sealed class ChannelDeliveryIngestor(IChannelEndpointStore endpoints, ICo
 
     public async Task<DeliveryReportResult> ReportAsync(PrincipalRef actor, ChannelDeliveryReport report, CancellationToken cancellationToken = default)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("A principal is required.", nameof(actor));
         ArgumentNullException.ThrowIfNull(report);
         if (actor.Scope != report.Scope)

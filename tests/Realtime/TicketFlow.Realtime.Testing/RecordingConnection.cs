@@ -27,7 +27,7 @@ public sealed class RecordingConnection(string id, RealtimeSubscriber subscriber
     public IReadOnlyList<T> Events<T>() where T : class
     {
         Idle();
-        return [.. received.Select(item => item.Event.Value).OfType<T>()];
+        return [.. received.Select(item => item.Event).OfType<T>()];
     }
 
     public void Clear()

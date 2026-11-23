@@ -286,7 +286,7 @@ public sealed class ServiceTests
         Assert.AreEqual("refused:Forbidden", AssistFixture.Describe(await fixture.Administration.UpdateSettingsAsync(agent, new AssistSettings(true, 10, 1), 0)));
         Assert.AreEqual("refused:Forbidden", AssistFixture.Describe(await fixture.Administration.GetUsageAsync(agent, fixture.Clock.GetUtcNow().AddDays(-1), fixture.Clock.GetUtcNow())));
 
-        var defaults = ((AssistValue<StoredAssistSettings>)(await fixture.Administration.GetSettingsAsync(fixture.Owner)).Value!).Value;
+        var defaults = ((TicketValue<StoredAssistSettings>)(await fixture.Administration.GetSettingsAsync(fixture.Owner)).Value!).Value;
         Assert.AreEqual(0, defaults.Revision);
         Assert.AreEqual(2_000_000, defaults.Settings.DailyTokenLimit);
         var settings = new AssistSettings(true, 50_000, 10, new Dictionary<AssistFeature, string> { [AssistFeature.ConversationSummary] = "scripted-small" });
@@ -297,7 +297,7 @@ public sealed class ServiceTests
 
         fixture.Model.Reply(SummaryJson);
         Assert.AreEqual("scripted-small", AssistFixture.Succeeded(await fixture.Assist.SummarizeAsync(agent, new AssistSummaryRequest(AssistFixture.C1))).Model, "workspace override wins");
-        var usage = ((AssistValue<AssistUsageSummary>)(await fixture.Administration.GetUsageAsync(fixture.Owner, fixture.Clock.GetUtcNow().AddDays(-1), fixture.Clock.GetUtcNow().AddDays(1))).Value!).Value;
+        var usage = ((TicketValue<AssistUsageSummary>)(await fixture.Administration.GetUsageAsync(fixture.Owner, fixture.Clock.GetUtcNow().AddDays(-1), fixture.Clock.GetUtcNow().AddDays(1))).Value!).Value;
         Assert.AreEqual(AssistFeature.ConversationSummary, usage.Totals.Single().Feature);
         Assert.AreEqual("refused:Invalid", AssistFixture.Describe(await fixture.Administration.GetUsageAsync(fixture.Owner, fixture.Clock.GetUtcNow(), fixture.Clock.GetUtcNow().AddDays(100))));
     }

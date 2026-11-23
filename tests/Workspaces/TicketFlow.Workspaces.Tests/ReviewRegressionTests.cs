@@ -42,7 +42,7 @@ public sealed class ReviewRegressionTests
         await fixture.GrantAsync(supervisor.UserId, BuiltInRoles.Supervisor);
         Value(await fixture.Teams.CreateAsync(admin, new Team(new TeamId("night"), "Night", null, [new UserId("ada")])));
         var now = fixture.Clock.GetUtcNow();
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await fixture.Grants.CreateAsync(new AccessGrant(new GrantId("old-deny"), fixture.Partition,
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await fixture.Grants.CreateAsync(new AccessGrant(new GrantId("old-deny"), fixture.Partition,
             new TeamId("night"), BuiltInRoles.Agent.Id, fixture.Workspace, GrantEffect.Deny, validFrom: now.AddDays(-2), validUntil: now.AddDays(-1)))).Value);
         Assert.AreEqual(2L, Value(await fixture.Teams.RemoveMemberAsync(supervisor, new TeamId("night"), new UserId("ada"), 1)).Revision);
     }
@@ -83,7 +83,7 @@ public sealed class ReviewRegressionTests
         await fixture.GrantAsync(admin.UserId, BuiltInRoles.Admin);
         await fixture.GrantAsync(responder.UserId, BuiltInRoles.Viewer);
         var now = fixture.Clock.GetUtcNow();
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await fixture.Grants.CreateAsync(new AccessGrant(new GrantId("bg"), fixture.Partition, responder.UserId,
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await fixture.Grants.CreateAsync(new AccessGrant(new GrantId("bg"), fixture.Partition, responder.UserId,
             BuiltInRoles.Supervisor.Id, fixture.Workspace, validFrom: now, validUntil: now.AddHours(1), justification: "Incident 12 staffing", kind: GrantKind.BreakGlass))).Value);
         Value(await fixture.Teams.CreateAsync(admin, new Team(new TeamId("agents"), "Agents")));
         Value(await fixture.Teams.CreateAsync(admin, new Team(new TeamId("empty"), "Empty")));

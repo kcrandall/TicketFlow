@@ -63,7 +63,7 @@ public sealed class EnvelopeFlowRoundTripTests
         var conversation = await fixture.SingleConversationAsync("sms-inbox");
         Assert.AreEqual(2, (await fixture.MessagesAsync(conversation)).Count);
         var view = ChannelHost.Is<ConversationView>((await fixture.Host.Conversations.GetAsync(fixture.Host.Owner, conversation)).Value);
-        var contact = ChannelHost.Is<ContactApplied<ContactView>>((await fixture.Host.Contacts.GetAsync(fixture.Host.Owner, view.Contact)).Value).Value;
+        var contact = ChannelHost.Is<TicketValue<ContactView>>((await fixture.Host.Contacts.GetAsync(fixture.Host.Owner, view.Contact)).Value).Value;
         Assert.IsFalse(contact.Identities.Single().Verification.IsVerified, "SMS sender numbers are claims.");
 
         var reply = await fixture.ReplyAsync(conversation, "Yes!");
@@ -201,7 +201,7 @@ public sealed class EnvelopeFlowRoundTripTests
             options.WhatsAppTemplate = ("csat_invite", "en");
         });
         var store = fixture.Host.Services.GetRequiredService<ISurveyStore>();
-        Assert.IsInstanceOfType<SurveyWriteApplied<StoredSurvey>>((await store.CreateSurveyAsync(fixture.Host.Scope, new SurveyDefinition(new SurveyId("csat"), "CSAT",
+        Assert.IsInstanceOfType<StoreApplied<StoredSurvey>>((await store.CreateSurveyAsync(fixture.Host.Scope, new SurveyDefinition(new SurveyId("csat"), "CSAT",
             SurveyKind.Csat, new SurveyLocale("en"), [new SurveyQuestion(new SurveyLocale("en"), "How did we do?")],
             new SurveyTriggerPolicy(TimeSpan.Zero, TimeSpan.Zero, TimeSpan.FromDays(7))))).Value);
 

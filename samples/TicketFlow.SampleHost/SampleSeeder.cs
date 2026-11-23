@@ -78,7 +78,7 @@ public static class SampleSeeder
         if (await helpCenter.CreateArticleAsync(admin, new Article(new ArticleId("reset-password"), new PortalId("help"),
             [new ArticleTranslation(new HelpCenterLocale("en"), "Reset your password", new HelpCenterSlug("reset-password"),
                 "Open **Settings → Security** and choose *Forgot password*. We email you a reset link.", "How to reset your password", ["account"])]), cancellationToken)
-            is { Value: HelpCenterSucceeded<StoredArticle> created })
+            is TicketValue<StoredArticle> created)
             await helpCenter.PublishArticleAsync(admin, created.Value.Id, created.Value.Revision, cancellationToken);
 
         await services.GetRequiredService<ISurveyService>().CreateSurveyAsync(admin, new SurveyDefinition(new SurveyId("csat"), "Customer satisfaction", SurveyKind.Csat,

@@ -20,7 +20,7 @@ public sealed class FilterParityTests
         fixture.Clock.Advance(TimeSpan.FromMinutes(random.Next(24 * 60)));
         await fixture.CustomRoleAsync(RandomAccessFixture.CustomRole.Id.Value, [.. RandomAccessFixture.CustomRole.Permissions]);
         await fixture.CustomRoleAsync(RandomAccessFixture.DeletedRole.Id.Value, [.. RandomAccessFixture.DeletedRole.Permissions]);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await fixture.Roles.DeleteAsync(fixture.Scope, RandomAccessFixture.DeletedRole.Id, 1)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await fixture.Roles.DeleteAsync(fixture.Scope, RandomAccessFixture.DeletedRole.Id, 1)).Value);
         var grants = RandomAccessFixture.Grants(random, fixture.Scope, fixture.Clock.GetUtcNow(), 40);
         foreach (var grant in grants)
             await fixture.SeedAsync(grant);
@@ -35,7 +35,7 @@ public sealed class FilterParityTests
                 {
                     var decision = await fixture.AuthorizeAsync(principal, permission, resource);
                     Assert.AreEqual(decision.IsPermitted, AccessFilterEvaluator.Matches(filter, resource),
-                        $"seed {seed}: {principal.Value!.GetType().Name} {permission} {resource.ResourceId} {AccessFixture.Describe(decision)}");
+                        $"seed {seed}: {principal.GetType().Name} {permission} {resource.ResourceId} {AccessFixture.Describe(decision)}");
                     if (decision.IsPermitted)
                         permitted++;
                     else

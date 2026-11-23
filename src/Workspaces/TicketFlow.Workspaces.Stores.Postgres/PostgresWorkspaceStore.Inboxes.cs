@@ -46,7 +46,7 @@ public sealed partial class PostgresWorkspaceStore
         return Page(rows, page);
     }
 
-    public async Task<WorkspaceWriteResult<StoredInbox>> CreateAsync(TicketScope scope, Inbox inbox, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredInbox, WorkspaceWriteRejection>> CreateAsync(TicketScope scope, Inbox inbox, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(inbox);
@@ -62,9 +62,9 @@ public sealed partial class PostgresWorkspaceStore
             await using var reader = await check.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
             if (!reader.IsDBNull(0))
-                return new WorkspaceWriteConflict(reader.GetInt64(0));
+                return new StoreConflict(reader.GetInt64(0));
             if (reader.GetInt64(1) >= WorkspaceLimits.MaximumInboxesPerWorkspace)
-                return new WorkspaceWriteRejected(WorkspaceWriteRejection.CapacityExceeded);
+                return new StoreRejected<WorkspaceWriteRejection>(WorkspaceWriteRejection.CapacityExceeded);
         }
         await using (var insert = new NpgsqlCommand("""
             INSERT INTO tf_workspace_inboxes(tenant_id, project_id, environment_id, app_id, workspace_id, inbox_id, format_version, name, channel_kind,
@@ -79,14 +79,14 @@ public sealed partial class PostgresWorkspaceStore
             }
             catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == BindingIndex)
             {
-                return new WorkspaceWriteRejected(WorkspaceWriteRejection.ChannelBindingInUse);
+                return new StoreRejected<WorkspaceWriteRejection>(WorkspaceWriteRejection.ChannelBindingInUse);
             }
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new WorkspaceWriteApplied<StoredInbox>(new(scope, inbox, 1));
+        return new StoreApplied<StoredInbox>(new(scope, inbox, 1));
     }
 
-    public async Task<WorkspaceWriteResult<StoredInbox>> UpdateAsync(TicketScope scope, Inbox inbox, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredInbox, WorkspaceWriteRejection>> UpdateAsync(TicketScope scope, Inbox inbox, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(inbox);
@@ -103,21 +103,21 @@ public sealed partial class PostgresWorkspaceStore
             try
             {
                 if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                    return new WorkspaceWriteApplied<StoredInbox>(new(scope, inbox, revision));
+                    return new StoreApplied<StoredInbox>(new(scope, inbox, revision));
             }
             catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == BindingIndex)
             {
-                return new WorkspaceWriteRejected(WorkspaceWriteRejection.ChannelBindingInUse);
+                return new StoreRejected<WorkspaceWriteRejection>(WorkspaceWriteRejection.ChannelBindingInUse);
             }
         }
         await using var current = new NpgsqlCommand(InboxRevision, connection);
         BindInboxKey(current, scope, inbox.Id);
         return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
-            ? new WorkspaceWriteConflict(existing)
-            : WorkspaceWriteNotFound.Instance;
+            ? new StoreConflict(existing)
+            : StoreNotFound.Instance;
     }
 
-    public async Task<WorkspaceWriteResult<StoredInbox>> DeleteAsync(TicketScope scope, InboxId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredInbox, WorkspaceWriteRejection>> DeleteAsync(TicketScope scope, InboxId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireInbox(id);
@@ -129,13 +129,13 @@ public sealed partial class PostgresWorkspaceStore
             AddLong(delete, "expected", expectedRevision);
             await using var reader = await delete.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new WorkspaceWriteApplied<StoredInbox>(ReadInbox(reader, scope));
+                return new StoreApplied<StoredInbox>(ReadInbox(reader, scope));
         }
         await using var current = new NpgsqlCommand(InboxRevision, connection);
         BindInboxKey(current, scope, id);
         return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
-            ? new WorkspaceWriteConflict(existing)
-            : WorkspaceWriteNotFound.Instance;
+            ? new StoreConflict(existing)
+            : StoreNotFound.Instance;
     }
 
     private const string BindingIndex = "tf_workspace_inboxes_channel_binding";

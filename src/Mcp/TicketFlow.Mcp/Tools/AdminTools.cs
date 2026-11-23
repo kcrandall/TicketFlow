@@ -116,19 +116,11 @@ public sealed class AdminTools(TicketFlowToolContext context)
         [Description("Channel configuration id.")] string configurationId,
         [Description(WorkspaceHelp)] string? workspace = null,
         CancellationToken cancellationToken = default) =>
-        context.RunAsync(workspace, async principal => await context.Service<IChannelEndpointService>().GetAsync(principal, new ChannelKind(kind), configurationId, cancellationToken) switch
-        {
-            ChannelValue<StoredChannelEndpoint> value => new ChannelEndpointOutput(value.Value.Endpoint.Kind.Value, value.Value.Endpoint.ConfigurationId,
-                value.Value.Endpoint.Inbox.Value, value.Value.Endpoint.Address, value.Value.Revision),
-            ChannelNotFound => TicketFlowToolError.NotFound("The channel endpoint"),
-            ChannelConflict conflict => TicketFlowToolError.Conflict(conflict.CurrentRevision),
-            ChannelRefused refused => refused.Reason switch
-            {
-                ChannelRefusal.Forbidden => TicketFlowToolError.Forbidden(),
-                ChannelRefusal.Invalid => TicketFlowToolError.Invalid(refused.Errors),
-                _ => TicketFlowToolError.Rejected(refused.Errors),
-            },
-        }, cancellationToken);
+        context.RunAsync(workspace, async principal => TicketFlowToolError.Map(
+            await context.Service<IChannelEndpointService>().GetAsync(principal, new ChannelKind(kind), configurationId, cancellationToken),
+            value => new ChannelEndpointOutput(value.Endpoint.Kind.Value, value.Endpoint.ConfigurationId,
+                value.Endpoint.Inbox.Value, value.Endpoint.Address, value.Revision),
+            notFoundWhat: "The channel endpoint"), cancellationToken);
 
     private static InboxOutput Inbox(StoredInbox stored) => new(stored.Inbox.Id.Value, stored.Inbox.Name,
         new ChannelBindingOutput(stored.Inbox.Channel.Kind.Value, stored.Inbox.Channel.ConfigurationId), stored.Inbox.Calendar?.Value, stored.Inbox.SlaPolicy?.Value,
@@ -137,16 +129,5 @@ public sealed class AdminTools(TicketFlowToolContext context)
     private static TeamOutput Team(StoredTeam stored) => new(stored.Team.Id.Value, stored.Team.Name, stored.Team.Description,
         [.. stored.Team.Members.Select(member => member.Value).Order(StringComparer.Ordinal)], stored.Revision);
 
-    internal static object Map<T>(WorkspaceResult<T> result, Func<T, object> success) => result switch
-    {
-        WorkspaceSucceeded<T> succeeded => success(succeeded.Value),
-        WorkspaceRefused refused => refused.Reason switch
-        {
-            WorkspaceRefusal.Forbidden => TicketFlowToolError.Forbidden(),
-            WorkspaceRefusal.Invalid => TicketFlowToolError.Invalid(refused.Errors),
-            WorkspaceRefusal.NotFound => TicketFlowToolError.NotFound(),
-            WorkspaceRefusal.Conflict => TicketFlowToolError.Conflict(refused.CurrentRevision),
-            _ => TicketFlowToolError.Rejected(refused.Errors),
-        },
-    };
+    internal static object Map<T>(TicketResult<T> result, Func<T, object> success) => TicketFlowToolError.Map(result, success);
 }

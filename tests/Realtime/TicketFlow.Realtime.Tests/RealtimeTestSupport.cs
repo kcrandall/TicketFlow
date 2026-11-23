@@ -47,7 +47,7 @@ internal static class RealtimeTestSupport
     public static async Task<StoredAccessRole> RoleAsync(this ChannelHost host, string id, params Permission[] permissions)
     {
         var written = await host.Services.GetRequiredService<IAccessRoleStore>().CreateAsync(host.Scope, new AccessRole(new RoleId(id), id, permissions));
-        return ChannelHost.Is<AccessWriteApplied<StoredAccessRole>>(written.Value).Value;
+        return ChannelHost.Is<StoreApplied<StoredAccessRole>>(written.Value).Value;
     }
 
     public static UserPrincipal User(this ChannelHost host, string id, params string[] teams) => TestPrincipals.User(host.Scope, id, teams);

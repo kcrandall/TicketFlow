@@ -107,9 +107,9 @@ public sealed partial class WalFlowRealtimeTests
         await sink.FlushAsync();
 
         Assert.AreEqual(2, received.Count, "Publishes once to conversation topic and once to inbox queue topic.");
-        Assert.IsInstanceOfType<ConversationTopic>(received[0].Topic.Value);
-        Assert.IsInstanceOfType<InboxQueueTopic>(received[1].Topic.Value);
-        Assert.AreEqual(ConversationChangedEvent.From(change), received[0].Event.Value);
+        Assert.IsInstanceOfType<ConversationTopic>(received[0].Topic);
+        Assert.IsInstanceOfType<InboxQueueTopic>(received[1].Topic);
+        Assert.AreEqual(ConversationChangedEvent.From(change), received[0].Event);
     }
 
     [TestMethod]
@@ -213,7 +213,7 @@ public sealed partial class WalFlowRealtimeTests
             }
 
             Assert.AreEqual(2, received.Count);
-            var changed = (ConversationChangedEvent)received[0].Event.Value!;
+            var changed = (ConversationChangedEvent)received[0].Event;
             Assert.AreEqual(new ConversationId("wal-c1"), changed.Conversation);
             Assert.AreEqual(ConversationChangeKind.Started, changed.Kind);
         }

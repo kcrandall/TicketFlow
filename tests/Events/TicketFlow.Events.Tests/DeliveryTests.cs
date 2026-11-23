@@ -84,8 +84,8 @@ public sealed class DeliveryTests
     public async Task ContentRequiresEventsContentForTheManagerAndThePrincipal()
     {
         using var fixture = await WithConversationAsync();
-        var refused = (EventRefused)(await fixture.SubscribeAsync("c", principal: "content-hooks", privacy: EventPrivacy.Content, actor: fixture.Manager)).Value!;
-        Assert.AreEqual(EventRefusal.Forbidden, refused.Reason);
+        var refused = (TicketFailure)(await fixture.SubscribeAsync("c", principal: "content-hooks", privacy: EventPrivacy.Content, actor: fixture.Manager)).Value!;
+        Assert.AreEqual(TicketFailureKind.Forbidden, refused.Kind);
         EventsFixture.Value(await fixture.SubscribeAsync("c", principal: "hooks", privacy: EventPrivacy.Content));
         var run = await fixture.DeliverAsync();
         Assert.AreEqual(1, run.Retried);
@@ -182,7 +182,7 @@ public sealed class DeliveryTests
 
         fixture.Subscriber.Fail = false;
         var refused = await fixture.InScopeAsync(provider => provider.GetRequiredService<IEventSubscriptionService>().ReplayAsync(fixture.Agent, id, 0));
-        Assert.AreEqual(EventRefusal.Forbidden, ((EventRefused)refused.Value!).Reason);
+        Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)refused.Value!).Kind);
         EventsFixture.Value(await fixture.InScopeAsync(provider => provider.GetRequiredService<IEventSubscriptionService>().ReplayAsync(fixture.Manager, id, 2)));
         await fixture.DeliverAllAsync();
         CollectionAssert.AreEqual(new long[] { 3, 4 }, fixture.Subscriber.Events.Select(item => item.Event.Sequence).ToArray());
@@ -200,32 +200,32 @@ public sealed class DeliveryTests
     {
         using var fixture = await EventsFixture.CreateAsync();
         var service = (IServiceProvider provider) => provider.GetRequiredService<IEventSubscriptionService>();
-        Assert.AreEqual(EventRefusal.Forbidden, ((EventRefused)(await fixture.SubscribeAsync("s1", actor: fixture.Agent)).Value!).Reason);
+        Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)(await fixture.SubscribeAsync("s1", actor: fixture.Agent)).Value!).Kind);
         var view = EventsFixture.Value(await fixture.SubscribeAsync("s1", actor: fixture.Manager, start: EventStartAtLatest.Instance));
         Assert.AreEqual(1, view.Subscription.Revision);
         Assert.AreEqual(0, view.Delivery!.Cursor);
 
         var invalid = await fixture.InScopeAsync(provider => service(provider).CreateAsync(fixture.Owner,
             new EventSubscription(new EventSubscriptionId("bad"), "bad", new EventSinkRef("in-process", "nobody"), EventSubscriptionFilter.Everything, new ApiClientId("hooks"))));
-        Assert.AreEqual(EventRefusal.Invalid, ((EventRefused)invalid.Value!).Reason);
+        Assert.AreEqual(TicketFailureKind.Invalid, ((TicketFailure)invalid.Value!).Kind);
         var unknownSink = await fixture.InScopeAsync(provider => service(provider).CreateAsync(fixture.Owner,
             new EventSubscription(new EventSubscriptionId("bad"), "bad", new EventSinkRef("carrier-pigeon", "x"), EventSubscriptionFilter.Everything, new ApiClientId("hooks"))));
-        Assert.AreEqual(EventRefusal.Invalid, ((EventRefused)unknownSink.Value!).Reason);
-        Assert.AreEqual(EventRefusal.Rejected, ((EventRefused)(await fixture.SubscribeAsync("s1")).Value!).Reason);
+        Assert.AreEqual(TicketFailureKind.Invalid, ((TicketFailure)unknownSink.Value!).Kind);
+        Assert.AreEqual(TicketFailureKind.Rejected, ((TicketFailure)(await fixture.SubscribeAsync("s1")).Value!).Kind);
 
-        Assert.AreEqual(EventRefusal.Forbidden, ((EventRefused)(await fixture.InScopeAsync(provider => service(provider).ListAsync(fixture.Agent))).Value!).Reason);
+        Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)(await fixture.InScopeAsync(provider => service(provider).ListAsync(fixture.Agent))).Value!).Kind);
         Assert.AreEqual(1, EventsFixture.Value(await fixture.InScopeAsync(provider => service(provider).ListAsync(fixture.Manager))).Count);
-        Assert.IsInstanceOfType<EventNotFound>((await fixture.InScopeAsync(provider => service(provider).GetAsync(fixture.Manager, new EventSubscriptionId("zz")))).Value);
+        Assert.AreEqual(TicketFailureKind.NotFound, Assert.IsInstanceOfType<TicketFailure>((await fixture.InScopeAsync(provider => service(provider).GetAsync(fixture.Manager, new EventSubscriptionId("zz")))).Value).Kind);
 
         var disabled = new EventSubscription(new EventSubscriptionId("s1"), "s1", new EventSinkRef("in-process", "recorder"), EventSubscriptionFilter.Everything,
             new ApiClientId("hooks"), enabled: false);
-        Assert.IsInstanceOfType<EventConflict>((await fixture.InScopeAsync(provider => service(provider).UpdateAsync(fixture.Manager, disabled, 5))).Value);
+        Assert.AreEqual(TicketFailureKind.Conflict, Assert.IsInstanceOfType<TicketFailure>((await fixture.InScopeAsync(provider => service(provider).UpdateAsync(fixture.Manager, disabled, 5))).Value).Kind);
         Assert.AreEqual(2, EventsFixture.Value(await fixture.InScopeAsync(provider => service(provider).UpdateAsync(fixture.Manager, disabled, 1))).Subscription.Revision);
         await fixture.StartAsync("c1");
         await fixture.DispatchAsync();
         Assert.AreEqual(0, (await fixture.DeliverAsync()).Delivered, "Disabled subscriptions are not delivered.");
-        Assert.AreEqual(EventRefusal.Forbidden, ((EventRefused)(await fixture.InScopeAsync(provider => service(provider).DeleteAsync(fixture.Agent, disabled.Id, 2))).Value!).Reason);
-        Assert.IsInstanceOfType<EventSucceeded<EventSubscriptionId>>((await fixture.InScopeAsync(provider => service(provider).DeleteAsync(fixture.Manager, disabled.Id, 2))).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)(await fixture.InScopeAsync(provider => service(provider).DeleteAsync(fixture.Agent, disabled.Id, 2))).Value!).Kind);
+        Assert.IsInstanceOfType<TicketValue<EventSubscriptionId>>((await fixture.InScopeAsync(provider => service(provider).DeleteAsync(fixture.Manager, disabled.Id, 2))).Value);
     }
 
     [TestMethod]

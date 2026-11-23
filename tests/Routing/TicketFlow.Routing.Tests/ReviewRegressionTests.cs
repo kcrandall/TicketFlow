@@ -90,7 +90,7 @@ public sealed class ReviewRegressionTests
         // Remove bob's profile: never chosen again; cat takes over.
         await fixture.OnlineAsync("cat");
         var bob = (await fixture.Agents.GetAsync(fixture.Scope, new UserId("bob")))!;
-        Assert.IsInstanceOfType<RoutingWriteApplied<StoredAgentProfile>>((await fixture.Agents.DeleteAsync(fixture.Scope, bob.Agent, bob.Revision)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAgentProfile>>((await fixture.Agents.DeleteAsync(fixture.Scope, bob.Agent, bob.Revision)).Value);
         for (var index = 5; index <= 7; index++)
         {
             await fixture.StartAsync($"c{index}");
@@ -107,8 +107,8 @@ public sealed class ReviewRegressionTests
         {
             var agent = new UserId($"a-{index:D4}");
             await fixture.GrantAsync(agent, role);
-            Assert.IsInstanceOfType<RoutingWriteApplied<StoredAgentProfile>>((await fixture.Agents.SaveSettingsAsync(fixture.Scope, new AgentRoutingSettings(agent, 5), null)).Value);
-            Assert.IsInstanceOfType<RoutingWriteApplied<StoredAgentProfile>>((await fixture.Agents.SetStatusAsync(fixture.Scope, agent, AgentStatus.Online, TimeSpan.FromHours(1))).Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredAgentProfile>>((await fixture.Agents.SaveSettingsAsync(fixture.Scope, new AgentRoutingSettings(agent, 5), null)).Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredAgentProfile>>((await fixture.Agents.SetStatusAsync(fixture.Scope, agent, AgentStatus.Online, TimeSpan.FromHours(1))).Value);
         }
         // Team members whose identifiers sort after the first 1000 available agents are still candidates.
         await fixture.Provider.GetRequiredService<ITeamStore>().CreateAsync(fixture.Scope,

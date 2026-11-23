@@ -125,7 +125,7 @@ public sealed class RoutingTools(TicketFlowToolContext context)
         new(stored.Policy.Id.Value, stored.Revision, TicketFlowToolJson.Parse(RoutingPolicyCodec.Serialize(stored.Policy)));
 
     private static UserId Agent(PrincipalRef principal, string agentId) => agentId == "me"
-        ? principal.Value is UserPrincipal user ? user.UserId : throw new ArgumentException("'me' requires a user principal.", nameof(agentId))
+        ? principal is UserPrincipal user ? user.UserId : throw new ArgumentException("'me' requires a user principal.", nameof(agentId))
         : new UserId(agentId);
 
     private DateTimeOffset Now() => (context.Services.GetService<TimeProvider>() ?? TimeProvider.System).GetUtcNow();
@@ -138,16 +138,5 @@ public sealed class RoutingTools(TicketFlowToolContext context)
             profile.Settings.Capacities.ToDictionary(pair => pair.Key.Value, pair => pair.Value, StringComparer.Ordinal),
             [.. profile.Settings.Skills.Select(skill => new AgentSkillOutput(skill.Name, skill.Level))], profile.ReassignmentPending, profile.Revision);
 
-    internal static object Map<T>(RoutingResult<T> result, Func<T, object> success) => result switch
-    {
-        RoutingValue<T> value => success(value.Value),
-        RoutingNotFound => TicketFlowToolError.NotFound(),
-        RoutingConflict conflict => TicketFlowToolError.Conflict(conflict.CurrentRevision),
-        RoutingRefused refused => refused.Reason switch
-        {
-            RoutingRefusal.Forbidden => TicketFlowToolError.Forbidden(),
-            RoutingRefusal.Invalid => TicketFlowToolError.Invalid(refused.Errors),
-            _ => TicketFlowToolError.Rejected(refused.Errors),
-        },
-    };
+    internal static object Map<T>(TicketResult<T> result, Func<T, object> success) => TicketFlowToolError.Map(result, success);
 }

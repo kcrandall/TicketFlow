@@ -184,11 +184,11 @@ public static class TicketFlowBlazorUIEndpointExtensions
         await using var writer = new LazyCsvResponseWriter(http, fileName);
         switch (await reporting.ExportAsync(session.Principal, new ReportExportQuery(new ReportQuery(start, end), 100_000), writer, http.RequestAborted))
         {
-            case ReportSucceeded<ReportExportSummary>:
+            case TicketValue<ReportExportSummary>:
                 writer.EnsureStarted();
                 await writer.FlushAsync(http.RequestAborted);
                 return TypedResults.Empty;
-            case ReportRefused:
+            case TicketFailure:
                 return TypedResults.Forbid();
         }
         return TypedResults.Forbid();

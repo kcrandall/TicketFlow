@@ -253,16 +253,5 @@ public sealed class AutomationTools(TicketFlowToolContext context)
 
     private static JsonElement Json(string json) => TicketFlowToolJson.Parse(json);
 
-    private static object Map<T>(AutomationResult<T> result, Func<T, object> success) => result switch
-    {
-        AutomationValue<T> value => success(value.Value),
-        AutomationNotFound => TicketFlowToolError.NotFound(),
-        AutomationConflict conflict => TicketFlowToolError.Conflict(conflict.CurrentRevision),
-        AutomationRefused refused => refused.Reason switch
-        {
-            AutomationRefusal.Forbidden => TicketFlowToolError.Forbidden(),
-            AutomationRefusal.Invalid => TicketFlowToolError.Invalid(refused.Errors),
-            _ => TicketFlowToolError.Rejected(refused.Errors),
-        },
-    };
+    private static object Map<T>(TicketResult<T> result, Func<T, object> success) => TicketFlowToolError.Map(result, success);
 }

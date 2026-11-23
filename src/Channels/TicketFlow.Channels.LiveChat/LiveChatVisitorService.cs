@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -83,7 +84,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
 
     // ---- Widgets and sessions ----
 
-    public async Task<LiveChatResult<LiveChatWidgetState>> GetWidgetAsync(AccessPartition partition, string widgetKey, string? origin, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<LiveChatWidgetState, LiveChatRefused>> GetWidgetAsync(AccessPartition partition, string widgetKey, string? origin, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(partition);
         if (await FindWidgetAsync(partition, widgetKey, cancellationToken).ConfigureAwait(false) is not { } found)
@@ -93,7 +94,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         return Value(await StateAsync(found.Widget, found.Inbox, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<LiveChatResult<VisitorSessionGrant>> StartSessionAsync(AccessPartition partition, string widgetKey, string? origin, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<VisitorSessionGrant, LiveChatRefused>> StartSessionAsync(AccessPartition partition, string widgetKey, string? origin, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(partition);
         if (await FindWidgetAsync(partition, widgetKey, cancellationToken).ConfigureAwait(false) is not { } found)
@@ -112,21 +113,21 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
                 now + options.SessionLifetime);
             switch (await sessions.CreateAsync(scope, session, cancellationToken).ConfigureAwait(false))
             {
-                case LiveChatWriteApplied<StoredVisitorSession> created:
+                case StoreApplied<StoredVisitorSession> created:
                     var state = await StateAsync(found.Widget, found.Inbox, cancellationToken).ConfigureAwait(false);
                     return Value(new VisitorSessionGrant(new VisitorSessionContext(created.Value, false), token.Token, state));
-                case LiveChatWriteConflict:
+                case StoreConflict:
                     continue;
-                case LiveChatWriteRejected:
+                case StoreRejected<LiveChatWriteRejection>:
                     return Refused<VisitorSessionGrant>(LiveChatRefusal.Rejected, "The session store is at capacity.");
-                case LiveChatWriteNotFound:
+                case StoreNotFound:
                     return Refused<VisitorSessionGrant>(LiveChatRefusal.Rejected);
             }
         }
         return Refused<VisitorSessionGrant>(LiveChatRefusal.Rejected);
     }
 
-    public async Task<LiveChatResult<VisitorSessionContext>> AuthenticateAsync(AccessPartition partition, string token, string? origin, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<VisitorSessionContext, LiveChatRefused>> AuthenticateAsync(AccessPartition partition, string token, string? origin, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(partition);
         if (VisitorSessionTokens.Parse(token) is not { } parsed)
@@ -145,7 +146,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         return Value(new VisitorSessionContext(stored, now - stored.Session.TokenIssuedAt >= options.TokenRotationInterval));
     }
 
-    public async Task<LiveChatResult<LiveChatWidgetState>> GetSessionWidgetAsync(VisitorSessionContext context, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<LiveChatWidgetState, LiveChatRefused>> GetSessionWidgetAsync(VisitorSessionContext context, CancellationToken cancellationToken = default)
     {
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
             return Refused<LiveChatWidgetState>(LiveChatRefusal.Unauthenticated);
@@ -154,7 +155,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         return Value(await StateAsync(found.Widget, found.Inbox, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<LiveChatResult<VisitorTokenRotated>> RotateTokenAsync(VisitorSessionContext context, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<VisitorTokenRotated, LiveChatRefused>> RotateTokenAsync(VisitorSessionContext context, CancellationToken cancellationToken = default)
     {
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
             return Refused<VisitorTokenRotated>(LiveChatRefusal.Unauthenticated);
@@ -166,12 +167,12 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
             previous: (session.Session.TokenHash, now + options.TokenRotationGrace));
         return await UpdateAsync(session, rotated, cancellationToken).ConfigureAwait(false) switch
         {
-            LiveChatValue<StoredVisitorSession> updated => Value(new VisitorTokenRotated(new VisitorSessionContext(updated.Value, false), token.Token)),
+            TicketValue<StoredVisitorSession> updated => Value(new VisitorTokenRotated(new VisitorSessionContext(updated.Value, false), token.Token)),
             LiveChatRefused refused => refused,
         };
     }
 
-    public async Task<LiveChatResult<VisitorSessionContext>> IdentifyAsync(VisitorSessionContext context, VisitorIdentification identification, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<VisitorSessionContext, LiveChatRefused>> IdentifyAsync(VisitorSessionContext context, VisitorIdentification identification, CancellationToken cancellationToken = default)
     {
         if (identification.Value is null)
             throw new ArgumentException("An identification is required.", nameof(identification));
@@ -207,11 +208,11 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
                     case VisitorTokenRejected:
                         return Refused<VisitorSessionContext>(LiveChatRefusal.IdentityRejected);
                     default:
-                        throw new InvalidOperationException("Unknown token validation outcome.");
+                        throw new UnreachableException();
                 }
                 break;
             default:
-                throw new InvalidOperationException("Unknown identification.");
+                throw new UnreachableException();
         }
         if (session.Session.Identity is { } existing)
         {
@@ -219,15 +220,18 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
                 return Refused<VisitorSessionContext>(LiveChatRefusal.Invalid, "The session is already verified as another identity; start a new session.");
             return Value(new VisitorSessionContext(session, context.RotationRecommended));
         }
-        switch (await UpdateAsync(session, session.Session.With(identity: identity, displayName: session.Session.DisplayName ?? displayName), cancellationToken).ConfigureAwait(false))
+        return await UpdateAsync(session, session.Session.With(identity: identity, displayName: session.Session.DisplayName ?? displayName), cancellationToken).ConfigureAwait(false) switch
         {
-            case LiveChatValue<StoredVisitorSession> updated:
-                await LinkVisitorContactAsync(updated.Value, identity, cancellationToken).ConfigureAwait(false);
-                return Value(new VisitorSessionContext(updated.Value, context.RotationRecommended));
-            case LiveChatRefused refused:
-                return refused;
-        }
-        throw new InvalidOperationException("Unknown session update outcome.");
+            TicketValue<StoredVisitorSession> updated => await FinishIdentifyAsync(updated.Value, identity, context.RotationRecommended, cancellationToken).ConfigureAwait(false),
+            LiveChatRefused refused => refused,
+        };
+    }
+
+    private async Task<TicketResult<VisitorSessionContext, LiveChatRefused>> FinishIdentifyAsync(StoredVisitorSession updated, VerifiedVisitorIdentity identity, bool rotationRecommended,
+        CancellationToken cancellationToken)
+    {
+        await LinkVisitorContactAsync(updated, identity, cancellationToken).ConfigureAwait(false);
+        return Value(new VisitorSessionContext(updated, rotationRecommended));
     }
 
     /// <summary>
@@ -266,7 +270,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         }
     }
 
-    public async Task<LiveChatResult<VisitorSessionContext>> SubmitPrechatAsync(VisitorSessionContext context, IReadOnlyDictionary<string, string> answers, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<VisitorSessionContext, LiveChatRefused>> SubmitPrechatAsync(VisitorSessionContext context, IReadOnlyDictionary<string, string> answers, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(answers);
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
@@ -299,19 +303,17 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         }
         if (fields.Values.FirstOrDefault(field => field.Required && !normalized.ContainsKey(field.Key)) is { } missing)
             return Refused<VisitorSessionContext>(LiveChatRefusal.PrechatRequired, $"'{missing.Key}' is required.");
-        switch (await UpdateAsync(session, session.Session.With(prechat: normalized, displayName: displayName), cancellationToken).ConfigureAwait(false))
+        return await UpdateAsync(session, session.Session.With(prechat: normalized, displayName: displayName), cancellationToken).ConfigureAwait(false) switch
         {
-            case LiveChatValue<StoredVisitorSession> updated:
-                return Value(new VisitorSessionContext(updated.Value, context.RotationRecommended));
-            case LiveChatRefused refused:
-                return refused;
-        }
-        throw new InvalidOperationException("Unknown session update outcome.");
+            TicketValue<StoredVisitorSession> updated => Value(new VisitorSessionContext(updated.Value, context.RotationRecommended)),
+            LiveChatRefused refused => refused,
+            _ => throw new UnreachableException(),
+        };
     }
 
     // ---- Messages ----
 
-    public async Task<LiveChatResult<VisitorMessageAccepted>> SendMessageAsync(VisitorSessionContext context, VisitorMessageDraft message, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<VisitorMessageAccepted, LiveChatRefused>> SendMessageAsync(VisitorSessionContext context, VisitorMessageDraft message, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(message);
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
@@ -382,42 +384,44 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         }
 
         var worker = channelOptions.ResolveWorker(scope);
-        switch (await pipeline.ReceiveAsync(worker, inbound, cancellationToken).ConfigureAwait(false))
+        return await pipeline.ReceiveAsync(worker, inbound, cancellationToken).ConfigureAwait(false) switch
         {
-            case InboundRecorded recorded:
-                switch (await sessions.LinkAsync(scope, visitor.Id, recorded.Conversation, time.GetUtcNow(), cancellationToken).ConfigureAwait(false))
-                {
-                    case LiveChatWriteApplied<VisitorConversationLink>:
-                        break;
-                    case LiveChatWriteRejected:
-                    case LiveChatWriteConflict:
-                        return Refused<VisitorMessageAccepted>(LiveChatRefusal.Rejected, "The session has too many conversations; start a new session.");
-                    case LiveChatWriteNotFound:
-                        return Refused<VisitorMessageAccepted>(LiveChatRefusal.Unauthenticated);
-                }
-                var row = await conversations.GetMessageAsync(scope, recorded.Conversation, recorded.Message, cancellationToken).ConfigureAwait(false);
-                var sequence = row?.Sequence ?? 0;
-                if (!recorded.Replayed && sequence > 0)
-                    await PublishAsync(new RealtimePublication(new VisitorSessionTopic(scope, visitor.Id), new VisitorMessageEvent(scope, visitor.Id, recorded.Conversation,
-                        recorded.Message, sequence, MessageDirection.Incoming, inbound.BodyText ?? string.Empty, MessageContentType.PlainText, resolved, time.GetUtcNow())),
-                        cancellationToken).ConfigureAwait(false);
-                return Value(new VisitorMessageAccepted(recorded.Conversation, recorded.Message, sequence, recorded.StartedConversation, recorded.Replayed));
-            case InboundRejected rejected:
-                return rejected.Reason switch
-                {
-                    InboundRejection.InboxNotFound or InboundRejection.InboxDisabled or InboundRejection.ChannelMismatch => Refused<VisitorMessageAccepted>(LiveChatRefusal.Unavailable),
-                    InboundRejection.InvalidSender or InboundRejection.Invalid => Refused<VisitorMessageAccepted>(LiveChatRefusal.Invalid, "The message is invalid."),
-                    InboundRejection.ContactBlocked => Refused<VisitorMessageAccepted>(LiveChatRefusal.Forbidden),
-                    InboundRejection.Forbidden => WorkerRefused(),
-                    InboundRejection.ContactAmbiguous or InboundRejection.Rejected => Refused<VisitorMessageAccepted>(LiveChatRefusal.Rejected),
-                    _ => Refused<VisitorMessageAccepted>(LiveChatRefusal.Rejected),
-                };
-            default:
-                throw new InvalidOperationException("Unknown inbound outcome.");
-        }
+            InboundRecorded recorded => await FinishSendMessageAsync(scope, visitor, inbound, resolved, recorded, cancellationToken).ConfigureAwait(false),
+            InboundRejected rejected => rejected.Reason switch
+            {
+                InboundRejection.InboxNotFound or InboundRejection.InboxDisabled or InboundRejection.ChannelMismatch => Refused<VisitorMessageAccepted>(LiveChatRefusal.Unavailable),
+                InboundRejection.InvalidSender or InboundRejection.Invalid => Refused<VisitorMessageAccepted>(LiveChatRefusal.Invalid, "The message is invalid."),
+                InboundRejection.ContactBlocked => Refused<VisitorMessageAccepted>(LiveChatRefusal.Forbidden),
+                InboundRejection.Forbidden => WorkerRefused(),
+                InboundRejection.ContactAmbiguous or InboundRejection.Rejected => Refused<VisitorMessageAccepted>(LiveChatRefusal.Rejected),
+                _ => Refused<VisitorMessageAccepted>(LiveChatRefusal.Rejected),
+            },
+        };
     }
 
-    public async Task<LiveChatResult<IReadOnlyList<VisitorConversationView>>> ListConversationsAsync(VisitorSessionContext context, CancellationToken cancellationToken = default)
+    private async Task<TicketResult<VisitorMessageAccepted, LiveChatRefused>> FinishSendMessageAsync(TicketScope scope, VisitorSession visitor, InboundChannelMessage inbound,
+        List<AttachmentRef> resolved, InboundRecorded recorded, CancellationToken cancellationToken)
+    {
+        switch (await sessions.LinkAsync(scope, visitor.Id, recorded.Conversation, time.GetUtcNow(), cancellationToken).ConfigureAwait(false))
+        {
+            case StoreApplied<VisitorConversationLink>:
+                break;
+            case StoreRejected<LiveChatWriteRejection>:
+            case StoreConflict:
+                return Refused<VisitorMessageAccepted>(LiveChatRefusal.Rejected, "The session has too many conversations; start a new session.");
+            case StoreNotFound:
+                return Refused<VisitorMessageAccepted>(LiveChatRefusal.Unauthenticated);
+        }
+        var row = await conversations.GetMessageAsync(scope, recorded.Conversation, recorded.Message, cancellationToken).ConfigureAwait(false);
+        var sequence = row?.Sequence ?? 0;
+        if (!recorded.Replayed && sequence > 0)
+            await PublishAsync(new RealtimePublication(new VisitorSessionTopic(scope, visitor.Id), new VisitorMessageEvent(scope, visitor.Id, recorded.Conversation,
+                recorded.Message, sequence, MessageDirection.Incoming, inbound.BodyText ?? string.Empty, MessageContentType.PlainText, resolved, time.GetUtcNow())),
+                cancellationToken).ConfigureAwait(false);
+        return Value(new VisitorMessageAccepted(recorded.Conversation, recorded.Message, sequence, recorded.StartedConversation, recorded.Replayed));
+    }
+
+    public async Task<TicketResult<IReadOnlyList<VisitorConversationView>, LiveChatRefused>> ListConversationsAsync(VisitorSessionContext context, CancellationToken cancellationToken = default)
     {
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
             return Refused<IReadOnlyList<VisitorConversationView>>(LiveChatRefusal.Unauthenticated);
@@ -439,7 +443,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         return Value<IReadOnlyList<VisitorConversationView>>(views);
     }
 
-    public async Task<LiveChatResult<VisitorMessagePage>> ReadMessagesAsync(VisitorSessionContext context, ConversationId conversation, long afterSequence = 0, int limit = 50, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<VisitorMessagePage, LiveChatRefused>> ReadMessagesAsync(VisitorSessionContext context, ConversationId conversation, long afterSequence = 0, int limit = 50, CancellationToken cancellationToken = default)
     {
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
             return Refused<VisitorMessagePage>(LiveChatRefusal.Unauthenticated);
@@ -457,7 +461,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         return Value(new VisitorMessagePage(conversation, messages, events.Count == take ? events[^1].Sequence : null, link.ReadSequence));
     }
 
-    public async Task<LiveChatResult<bool>> SetTypingAsync(VisitorSessionContext context, ConversationId conversation, bool typing, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<bool, LiveChatRefused>> SetTypingAsync(VisitorSessionContext context, ConversationId conversation, bool typing, CancellationToken cancellationToken = default)
     {
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
             return Refused<bool>(LiveChatRefusal.Unauthenticated);
@@ -468,7 +472,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         return Value(true);
     }
 
-    public async Task<LiveChatResult<long>> MarkReadAsync(VisitorSessionContext context, ConversationId conversation, long upToSequence, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<long, LiveChatRefused>> MarkReadAsync(VisitorSessionContext context, ConversationId conversation, long upToSequence, CancellationToken cancellationToken = default)
     {
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
             return Refused<long>(LiveChatRefusal.Unauthenticated);
@@ -481,22 +485,23 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
             return Refused<long>(LiveChatRefusal.NotFound);
         if (upToSequence < 1 || upToSequence > stored.Conversation.LastSequence)
             return Refused<long>(LiveChatRefusal.Invalid);
-        switch (await sessions.AdvanceCursorAsync(session.Scope, session.Session.Id, conversation, upToSequence, cancellationToken).ConfigureAwait(false))
+        return await sessions.AdvanceCursorAsync(session.Scope, session.Session.Id, conversation, upToSequence, cancellationToken).ConfigureAwait(false) switch
         {
-            case LiveChatWriteApplied<VisitorConversationLink> advanced:
-                await PublishAsync(new RealtimePublication(new ConversationTopic(session.Scope, conversation),
-                    new ReadReceiptEvent(session.Scope, conversation, VisitorActor.Instance, advanced.Value.ReadSequence, time.GetUtcNow())), cancellationToken).ConfigureAwait(false);
-                return Value(advanced.Value.ReadSequence);
-            case LiveChatWriteNotFound:
-                return Refused<long>(LiveChatRefusal.NotFound);
-            case LiveChatWriteConflict:
-            case LiveChatWriteRejected:
-                return Refused<long>(LiveChatRefusal.Rejected);
-        }
-        throw new InvalidOperationException("Unknown cursor outcome.");
+            StoreApplied<VisitorConversationLink> advanced => await FinishMarkReadAsync(session.Scope, conversation, advanced.Value.ReadSequence, cancellationToken).ConfigureAwait(false),
+            StoreNotFound => Refused<long>(LiveChatRefusal.NotFound),
+            StoreConflict => Refused<long>(LiveChatRefusal.Rejected),
+            StoreRejected<LiveChatWriteRejection> => Refused<long>(LiveChatRefusal.Rejected),
+        };
     }
 
-    public async Task<LiveChatResult<AttachmentRef>> UploadAttachmentAsync(VisitorSessionContext context, string fileName, string mediaType, Stream content, CancellationToken cancellationToken = default)
+    private async Task<TicketResult<long, LiveChatRefused>> FinishMarkReadAsync(TicketScope scope, ConversationId conversation, long readSequence, CancellationToken cancellationToken)
+    {
+        await PublishAsync(new RealtimePublication(new ConversationTopic(scope, conversation),
+            new ReadReceiptEvent(scope, conversation, VisitorActor.Instance, readSequence, time.GetUtcNow())), cancellationToken).ConfigureAwait(false);
+        return Value(readSequence);
+    }
+
+    public async Task<TicketResult<AttachmentRef, LiveChatRefused>> UploadAttachmentAsync(VisitorSessionContext context, string fileName, string mediaType, Stream content, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(content);
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
@@ -532,7 +537,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         }
     }
 
-    public async Task<LiveChatResult<IReadOnlyList<ArticleSnippet>>> SearchArticlesAsync(VisitorSessionContext context, string text, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<IReadOnlyList<ArticleSnippet>, LiveChatRefused>> SearchArticlesAsync(VisitorSessionContext context, string text, CancellationToken cancellationToken = default)
     {
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
             return Refused<IReadOnlyList<ArticleSnippet>>(LiveChatRefusal.Unauthenticated);
@@ -551,20 +556,22 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         return Value(await helpCenter.SearchPublicAsync(session.Scope, query, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<LiveChatResult<bool>> EndSessionAsync(VisitorSessionContext context, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<bool, LiveChatRefused>> EndSessionAsync(VisitorSessionContext context, CancellationToken cancellationToken = default)
     {
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
             return Refused<bool>(LiveChatRefusal.Unauthenticated);
-        switch (await UpdateAsync(session, session.Session.With(revoked: true), cancellationToken).ConfigureAwait(false))
+        return await UpdateAsync(session, session.Session.With(revoked: true), cancellationToken).ConfigureAwait(false) switch
         {
-            case LiveChatValue<StoredVisitorSession>:
-                await PublishAsync(new RealtimePublication(new VisitorSessionTopic(session.Scope, session.Session.Id),
-                    new VisitorSessionEndedEvent(session.Scope, session.Session.Id, VisitorSessionEnd.Revoked, time.GetUtcNow())), cancellationToken).ConfigureAwait(false);
-                return Value(true);
-            case LiveChatRefused refused:
-                return refused;
-        }
-        throw new InvalidOperationException("Unknown session update outcome.");
+            TicketValue<StoredVisitorSession> => await FinishEndSessionAsync(session, cancellationToken).ConfigureAwait(false),
+            LiveChatRefused refused => refused,
+        };
+    }
+
+    private async Task<TicketResult<bool, LiveChatRefused>> FinishEndSessionAsync(StoredVisitorSession session, CancellationToken cancellationToken)
+    {
+        await PublishAsync(new RealtimePublication(new VisitorSessionTopic(session.Scope, session.Session.Id),
+            new VisitorSessionEndedEvent(session.Scope, session.Session.Id, VisitorSessionEnd.Revoked, time.GetUtcNow())), cancellationToken).ConfigureAwait(false);
+        return Value(true);
     }
 
     // ---- Helpers ----
@@ -628,13 +635,13 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
     private Task<VisitorConversationLink?> LinkAsync(StoredVisitorSession session, ConversationId conversation, CancellationToken cancellationToken) =>
         conversation == default ? Task.FromResult<VisitorConversationLink?>(null) : sessions.GetLinkAsync(session.Scope, session.Session.Id, conversation, cancellationToken);
 
-    private async Task<LiveChatResult<StoredVisitorSession>> UpdateAsync(StoredVisitorSession current, VisitorSession next, CancellationToken cancellationToken) =>
+    private async Task<TicketResult<StoredVisitorSession, LiveChatRefused>> UpdateAsync(StoredVisitorSession current, VisitorSession next, CancellationToken cancellationToken) =>
         await sessions.UpdateAsync(current.Scope, next, current.Revision, cancellationToken).ConfigureAwait(false) switch
         {
-            LiveChatWriteApplied<StoredVisitorSession> applied => Value(applied.Value),
-            LiveChatWriteNotFound => Refused<StoredVisitorSession>(LiveChatRefusal.Unauthenticated),
-            LiveChatWriteConflict => Refused<StoredVisitorSession>(LiveChatRefusal.Conflict, "The session changed concurrently; retry."),
-            LiveChatWriteRejected => Refused<StoredVisitorSession>(LiveChatRefusal.Rejected),
+            StoreApplied<StoredVisitorSession> applied => Value(applied.Value),
+            StoreNotFound => Refused<StoredVisitorSession>(LiveChatRefusal.Unauthenticated),
+            StoreConflict => Refused<StoredVisitorSession>(LiveChatRefusal.Conflict, "The session changed concurrently; retry."),
+            StoreRejected<LiveChatWriteRejection> => Refused<StoredVisitorSession>(LiveChatRefusal.Rejected),
         };
 
     private async Task PublishAsync(RealtimePublication publication, CancellationToken cancellationToken)
@@ -650,7 +657,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         }
     }
 
-    private LiveChatResult<VisitorMessageAccepted> WorkerRefused()
+    private TicketResult<VisitorMessageAccepted, LiveChatRefused> WorkerRefused()
     {
         logger.LogWarning("The channel worker principal was refused while recording a live-chat message; check its grants.");
         return Refused<VisitorMessageAccepted>(LiveChatRefusal.Unavailable);
@@ -675,7 +682,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         return name.Length is 0 or > AttachmentRef.MaximumFileNameLength || name is "." or ".." || !LiveChatText.IsClean(name, allowNewLines: false) ? null : name;
     }
 
-    private static LiveChatResult<T> Value<T>(T value) => new LiveChatValue<T>(value);
+    private static TicketResult<T, LiveChatRefused> Value<T>(T value) => new TicketValue<T>(value);
 
-    private static LiveChatResult<T> Refused<T>(LiveChatRefusal reason, string? error = null) => LiveChatRefused.Of(reason, error);
+    private static TicketResult<T, LiveChatRefused> Refused<T>(LiveChatRefusal reason, string? error = null) => LiveChatRefused.Of(reason, error);
 }

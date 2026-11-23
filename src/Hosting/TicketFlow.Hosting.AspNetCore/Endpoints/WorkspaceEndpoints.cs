@@ -122,18 +122,7 @@ internal static class WorkspaceEndpoints
         return group;
     }
 
-    internal static IResult Map<T>(HttpContext http, WorkspaceResult<T> result, Func<T, IResult> success) => result switch
-    {
-        WorkspaceSucceeded<T> succeeded => success(succeeded.Value),
-        WorkspaceRefused refused => TicketFlowHttp.Refused(http, refused.Reason switch
-        {
-            WorkspaceRefusal.Forbidden => RefusalKind.Forbidden,
-            WorkspaceRefusal.Invalid => RefusalKind.Invalid,
-            WorkspaceRefusal.NotFound => RefusalKind.NotFound,
-            WorkspaceRefusal.Conflict => RefusalKind.Conflict,
-            _ => RefusalKind.Rejected,
-        }, refused.Errors, refused.CurrentRevision),
-    };
+    internal static IResult Map<T>(HttpContext http, TicketResult<T> result, Func<T, IResult> success) => TicketFlowHttp.Map(http, result, success);
 
     private static WorkspaceSettings Settings(WorkspaceSettingsRequest request) =>
         new(request.Name, request.DefaultLocale, request.TimeZoneId, request.FeatureToggles);

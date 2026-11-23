@@ -43,21 +43,21 @@ public abstract class UiPageBase : ComponentBase
         var teamTask = teamService?.ListAsync(Actor, new WorkspacePageRequest(100), Aborted);
         if (inboxTask is not null && teamTask is not null)
             await Task.WhenAll(inboxTask, teamTask);
-        if (inboxTask is not null && await inboxTask is WorkspaceSucceeded<WorkspacePage<StoredInbox>> inboxPage)
+        if (inboxTask is not null && await inboxTask is TicketValue<WorkspacePage<StoredInbox>> inboxPage)
             SetInboxes(inboxPage.Value.Items);
-        if (teamTask is not null && await teamTask is WorkspaceSucceeded<WorkspacePage<TeamSummary>> teamPage)
+        if (teamTask is not null && await teamTask is TicketValue<WorkspacePage<TeamSummary>> teamPage)
             SetTeams(teamPage.Value.Items);
     }
 
     protected async Task LoadInboxesAsync()
     {
-        if (Service<IInboxService>() is { } inboxes && await inboxes.ListAsync(Actor, new WorkspacePageRequest(100), Aborted) is WorkspaceSucceeded<WorkspacePage<StoredInbox>> inboxPage)
+        if (Service<IInboxService>() is { } inboxes && await inboxes.ListAsync(Actor, new WorkspacePageRequest(100), Aborted) is TicketValue<WorkspacePage<StoredInbox>> inboxPage)
             SetInboxes(inboxPage.Value.Items);
     }
 
     protected async Task LoadTeamsAsync()
     {
-        if (Service<ITeamService>() is { } teams && await teams.ListAsync(Actor, new WorkspacePageRequest(100), Aborted) is WorkspaceSucceeded<WorkspacePage<TeamSummary>> teamPage)
+        if (Service<ITeamService>() is { } teams && await teams.ListAsync(Actor, new WorkspacePageRequest(100), Aborted) is TicketValue<WorkspacePage<TeamSummary>> teamPage)
             SetTeams(teamPage.Value.Items);
     }
 
@@ -97,7 +97,7 @@ public abstract class UiPageBase : ComponentBase
             return null;
         var (_, to) = UiFormat.Range(null, null, Now);
         return await reporting.GetOverviewAsync(Actor, new TicketFlow.Reporting.ReportQuery(to.AddDays(-1), to, filter), Aborted)
-            is TicketFlow.Reporting.ReportSucceeded<TicketFlow.Reporting.ReportOverview> overview ? overview.Value.OpenBacklog : null;
+            is TicketValue<TicketFlow.Reporting.ReportOverview> overview ? overview.Value.OpenBacklog : null;
     }
 
     protected string ContactName(ContactId contact) => contactNames.TryGetValue(contact, out var name) ? name : "Contact " + Short(contact.Value);
@@ -120,7 +120,7 @@ public abstract class UiPageBase : ComponentBase
     /// Runs an authorized Access listing through <see cref="IAccessAdministrator"/> (a fresh <c>access:manage</c> decision per request, never
     /// the cached navigation snapshot). A refusal sets <see cref="Denied"/> and returns <see langword="null"/>.
     /// </summary>
-    protected async Task<T?> AccessListAsync<T>(Func<IAccessAdministrator, Task<AccessListResult<T>>> list) where T : class
+    protected async Task<T?> AccessListAsync<T>(Func<IAccessAdministrator, Task<TicketResult<T>>> list) where T : class
     {
         if (Service<IAccessAdministrator>() is not { } administrator)
         {
@@ -129,9 +129,9 @@ public abstract class UiPageBase : ComponentBase
         }
         switch (await list(administrator))
         {
-            case AccessListed<T> listed:
+            case TicketValue<T> listed:
                 return listed.Value;
-            case AccessChangeRefused:
+            case TicketFailure:
                 Denied = true;
                 return null;
         }

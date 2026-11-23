@@ -135,7 +135,7 @@ public sealed partial class PostgresWorkspaceStore
         return result;
     }
 
-    public async Task<WorkspaceWriteResult<StoredTeam>> CreateAsync(TicketScope scope, Team team, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredTeam, WorkspaceWriteRejection>> CreateAsync(TicketScope scope, Team team, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(team);
@@ -152,12 +152,12 @@ public sealed partial class PostgresWorkspaceStore
             await using var reader = await check.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
             if (!reader.IsDBNull(0))
-                return new WorkspaceWriteConflict(reader.GetInt64(0));
+                return new StoreConflict(reader.GetInt64(0));
             if (reader.GetInt64(1) >= WorkspaceLimits.MaximumTeamsPerWorkspace)
-                return new WorkspaceWriteRejected(WorkspaceWriteRejection.CapacityExceeded);
+                return new StoreRejected<WorkspaceWriteRejection>(WorkspaceWriteRejection.CapacityExceeded);
         }
         if (users.Length > 0 && await ExceedsMembershipLimitAsync(connection, transaction, scope, team.Id, users, onlyAdded: false, cancellationToken).ConfigureAwait(false))
-            return new WorkspaceWriteRejected(WorkspaceWriteRejection.TeamMembershipLimitExceeded);
+            return new StoreRejected<WorkspaceWriteRejection>(WorkspaceWriteRejection.TeamMembershipLimitExceeded);
         await using (var batch = new NpgsqlBatch(connection, transaction))
         {
             var insert = new NpgsqlBatchCommand("""
@@ -179,10 +179,10 @@ public sealed partial class PostgresWorkspaceStore
             await batch.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new WorkspaceWriteApplied<StoredTeam>(new(scope, team, 1));
+        return new StoreApplied<StoredTeam>(new(scope, team, 1));
     }
 
-    public async Task<WorkspaceWriteResult<StoredTeam>> UpdateAsync(TicketScope scope, Team team, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredTeam, WorkspaceWriteRejection>> UpdateAsync(TicketScope scope, Team team, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(team);
@@ -193,11 +193,11 @@ public sealed partial class PostgresWorkspaceStore
         await LockAsync(connection, transaction, "teams", scope, cancellationToken).ConfigureAwait(false);
         var current = await RevisionAsync(connection, transaction, TeamRevision + " FOR UPDATE", command => BindTeamKey(command, scope, team.Id), cancellationToken).ConfigureAwait(false);
         if (current is null)
-            return WorkspaceWriteNotFound.Instance;
+            return StoreNotFound.Instance;
         if (current != expectedRevision)
-            return new WorkspaceWriteConflict(current.Value);
+            return new StoreConflict(current.Value);
         if (users.Length > 0 && await ExceedsMembershipLimitAsync(connection, transaction, scope, team.Id, users, onlyAdded: true, cancellationToken).ConfigureAwait(false))
-            return new WorkspaceWriteRejected(WorkspaceWriteRejection.TeamMembershipLimitExceeded);
+            return new StoreRejected<WorkspaceWriteRejection>(WorkspaceWriteRejection.TeamMembershipLimitExceeded);
 
         long revision;
         await using (var batch = new NpgsqlBatch(connection, transaction))
@@ -236,10 +236,10 @@ public sealed partial class PostgresWorkspaceStore
             revision = (long)(await batch.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new WorkspaceWriteApplied<StoredTeam>(new(scope, team, revision));
+        return new StoreApplied<StoredTeam>(new(scope, team, revision));
     }
 
-    public async Task<WorkspaceWriteResult<StoredTeam>> DeleteAsync(TicketScope scope, TeamId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredTeam, WorkspaceWriteRejection>> DeleteAsync(TicketScope scope, TeamId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireTeam(id);
@@ -255,9 +255,9 @@ public sealed partial class PostgresWorkspaceStore
                 existing = ReadTeam(reader, scope);
         }
         if (existing is null)
-            return WorkspaceWriteNotFound.Instance;
+            return StoreNotFound.Instance;
         if (existing.Revision != expectedRevision)
-            return new WorkspaceWriteConflict(existing.Revision);
+            return new StoreConflict(existing.Revision);
         await using (var delete = new NpgsqlCommand($"DELETE FROM tf_workspace_teams WHERE {TeamKey} AND revision=@expected", connection, transaction))
         {
             BindTeamKey(delete, scope, id);
@@ -265,7 +265,7 @@ public sealed partial class PostgresWorkspaceStore
             await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new WorkspaceWriteApplied<StoredTeam>(existing);
+        return new StoreApplied<StoredTeam>(existing);
     }
 
     /// <summary>True when any member (or newly added member) already belongs to the per-user limit of other teams in the scope. Runs under the team lock.</summary>

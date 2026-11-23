@@ -54,7 +54,7 @@ public sealed class StaffIdentityServiceTests
             await fixture.GrantAsync(new UserId("viewer"), BuiltInRoles.Viewer);
             var manager = new AccessRole(new RoleId("identity-manager"), "Identity manager",
                 [StaffIdentityPermissions.Manage, AccessPermissions.WorkspaceRead, AccessPermissions.TeamRead, AccessPermissions.InboxRead]);
-            Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await fixture.Provider.GetRequiredService<IAccessRoleStore>().CreateAsync(fixture.Scope, manager)).Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await fixture.Provider.GetRequiredService<IAccessRoleStore>().CreateAsync(fixture.Scope, manager)).Value);
             await fixture.GrantAsync(new UserId("manager"), manager);
             await fixture.GrantAsync(new TeamId("escalation"), BuiltInRoles.Supervisor);
             return fixture;
@@ -63,7 +63,7 @@ public sealed class StaffIdentityServiceTests
         public async Task GrantAsync(GrantSubject subject, AccessRole role, GrantScope? scope = null)
         {
             var grant = new AccessGrant(new GrantId($"seed-{nextGrant++:D3}"), AccessPartition.From(Scope), subject, role.Id, scope ?? new WorkspaceGrantScope(Scope.WorkspaceId));
-            Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await Provider.GetRequiredService<IAccessGrantStore>().CreateAsync(grant)).Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await Provider.GetRequiredService<IAccessGrantStore>().CreateAsync(grant)).Value);
         }
 
         public void Dispose()
@@ -79,16 +79,18 @@ public sealed class StaffIdentityServiceTests
             Task.FromResult<IReadOnlyList<TeamId>>(user.Value == "teamed" ? [new TeamId("escalation")] : []);
     }
 
-    private static string Describe<T>(StaffIdentityResult<T> result) => result switch
+    private static string Describe<T>(TicketResult<T> result) => result switch
     {
-        StaffIdentityApplied<T> => "applied",
-        StaffIdentityRefused refused => $"refused:{refused.Reason}" + (refused.CurrentRevision is { } revision ? $":{revision}" : ""),
+        TicketValue<T> => "applied",
+        TicketFailure refused => refused.Code == "taken"
+            ? "refused:Taken"
+            : $"refused:{refused.Kind}" + (refused.CurrentRevision is { } revision ? $":{revision}" : ""),
     };
 
-    private static T Applied<T>(StaffIdentityResult<T> result) => result switch
+    private static T Applied<T>(TicketResult<T> result) => result switch
     {
-        StaffIdentityApplied<T> applied => applied.Value,
-        StaffIdentityRefused refused => throw new AssertFailedException($"refused {refused.Reason} {string.Join(";", refused.Errors)}"),
+        TicketValue<T> applied => applied.Value,
+        TicketFailure refused => throw new AssertFailedException($"refused {refused.Kind} {string.Join(";", refused.Errors)}"),
     };
 
     [TestMethod]
@@ -184,7 +186,7 @@ public sealed class StaffIdentityServiceTests
 
         Assert.AreEqual("ada@example.com", Applied(await fixture.Service.GetProfileAsync(fixture.User("viewer"), new UserId("agent"))).NotificationEmail);
         var policy = new AccessFieldPolicy(StaffFieldPaths.NotificationEmail, [AccessPermissions.TeamRead], [BuiltInRoles.Supervisor.Id]);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessFieldPolicy>>((await fixture.Provider.GetRequiredService<IAccessFieldPolicyStore>().CreateAsync(fixture.Scope, policy)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessFieldPolicy>>((await fixture.Provider.GetRequiredService<IAccessFieldPolicyStore>().CreateAsync(fixture.Scope, policy)).Value);
         var masked = Applied(await fixture.Service.GetProfileAsync(fixture.User("viewer"), new UserId("agent")));
         Assert.IsTrue(masked.EmailMasked);
         Assert.IsNull(masked.NotificationEmail);

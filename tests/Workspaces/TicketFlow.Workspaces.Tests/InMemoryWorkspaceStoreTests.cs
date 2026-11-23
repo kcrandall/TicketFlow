@@ -1,3 +1,4 @@
+using TicketFlow.Core;
 using TicketFlow.Workspaces.StoreContracts;
 
 namespace TicketFlow.Workspaces.Tests;
@@ -54,10 +55,10 @@ public sealed class InMemoryWorkspaceStoreTests
     {
         var store = new InMemoryInboxStore(maximumEntries: 1);
         var scope = Testing.TestScopes.Create();
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await store.CreateAsync(scope, WorkspaceStoreContract.SampleInbox("a"))).Value);
-        Assert.IsInstanceOfType<WorkspaceWriteRejected>((await store.CreateAsync(scope, WorkspaceStoreContract.SampleInbox("b"))).Value);
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await store.DeleteAsync(scope, new Core.InboxId("a"), 1)).Value);
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await store.CreateAsync(scope, WorkspaceStoreContract.SampleInbox("b"))).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await store.CreateAsync(scope, WorkspaceStoreContract.SampleInbox("a"))).Value);
+        Assert.IsInstanceOfType<StoreRejected<WorkspaceWriteRejection>>((await store.CreateAsync(scope, WorkspaceStoreContract.SampleInbox("b"))).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await store.DeleteAsync(scope, new Core.InboxId("a"), 1)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await store.CreateAsync(scope, WorkspaceStoreContract.SampleInbox("b"))).Value);
     }
 }
 

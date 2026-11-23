@@ -25,7 +25,7 @@ public sealed class HostPrincipalResolverTests
 
         var principal = await resolver.ResolveAsync(new TicketFlowMcpCaller(caller, new ServiceCollection().BuildServiceProvider()), scope.WorkspaceId);
 
-        Assert.IsInstanceOfType<ApiClientPrincipal>(principal!.Value.Value);
+        Assert.IsInstanceOfType<ApiClientPrincipal>(principal);
         Assert.AreSame(requestUser, http.User, "The shared HttpContext.User is never replaced.");
         Assert.IsTrue(seenUsers.All(user => ReferenceEquals(user, caller)), "Resolvers see exactly the MCP caller's user.");
         Assert.IsNull(await resolver.ResolveAsync(new TicketFlowMcpCaller(null, new ServiceCollection().BuildServiceProvider()), scope.WorkspaceId),

@@ -41,7 +41,7 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
             return Task.FromResult(policies.GetValueOrDefault(scope));
     }
 
-    public Task<ContactLinkingWriteResult<StoredContactLinkingPolicy>> PutPolicyAsync(TicketScope scope, ContactLinkingPolicy policy, long? expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredContactLinkingPolicy, ContactWriteRejection>> PutPolicyAsync(TicketScope scope, ContactLinkingPolicy policy, long? expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         if (policy.Value is null)
@@ -51,18 +51,18 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
         lock (gate)
         {
             var existing = policies.GetValueOrDefault(scope);
-            ContactLinkingWriteResult<StoredContactLinkingPolicy> result;
+            StoreWriteResult<StoredContactLinkingPolicy, ContactWriteRejection> result;
             if (expectedRevision is null && existing is not null)
-                result = new LinkingWriteConflict(existing.Revision);
+                result = new StoreConflict(existing.Revision);
             else if (expectedRevision is { } expected && existing is null)
-                result = LinkingWriteNotFound.Instance;
+                result = StoreNotFound.Instance;
             else if (expectedRevision is { } fenced && existing!.Revision != fenced)
-                result = new LinkingWriteConflict(existing.Revision);
+                result = new StoreConflict(existing.Revision);
             else
             {
                 var stored = new StoredContactLinkingPolicy(scope, policy, existing is null ? 1 : checked(existing.Revision + 1));
                 policies[scope] = stored;
-                result = new LinkingWriteApplied<StoredContactLinkingPolicy>(stored, existing is null);
+                result = new StoreApplied<StoredContactLinkingPolicy>(stored);
             }
             return Task.FromResult(result);
         }
@@ -75,7 +75,7 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
             return Task.FromResult(scopes.TryGetValue(scope, out var bucket) ? bucket.ById.GetValueOrDefault(id) : null);
     }
 
-    public Task<ContactLinkingWriteResult<StoredContactLinkSuggestion>> CreateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredLinkSuggestionWrite, ContactWriteRejection>> CreateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(suggestion);
@@ -85,13 +85,13 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
         {
             scopes.TryGetValue(scope, out var bucket);
             var pair = (suggestion.Candidate, suggestion.Account);
-            ContactLinkingWriteResult<StoredContactLinkSuggestion> result;
+            StoreWriteResult<StoredLinkSuggestionWrite, ContactWriteRejection> result;
             if (bucket is not null && bucket.PendingByPair.TryGetValue(pair, out var pendingId))
-                result = new LinkingWriteApplied<StoredContactLinkSuggestion>(bucket.ById[pendingId], false);
+                result = new StoreApplied<StoredLinkSuggestionWrite>(new(bucket.ById[pendingId], false));
             else if (bucket is not null && bucket.ById.TryGetValue(suggestion.Id, out var duplicate))
-                result = new LinkingWriteConflict(duplicate.Revision);
+                result = new StoreConflict(duplicate.Revision);
             else if (totalSuggestions >= MaximumSuggestions || (bucket?.PendingByPair.Count ?? 0) >= IContactLinkingStore.MaximumPendingSuggestions)
-                result = new ContactWriteRejected(ContactWriteRejection.CapacityExceeded);
+                result = new StoreRejected<ContactWriteRejection>(ContactWriteRejection.CapacityExceeded);
             else
             {
                 bucket ??= scopes[scope] = new ScopeBucket();
@@ -99,24 +99,24 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
                 bucket.ById[suggestion.Id] = stored;
                 bucket.PendingByPair[pair] = suggestion.Id;
                 totalSuggestions++;
-                result = new LinkingWriteApplied<StoredContactLinkSuggestion>(stored);
+                result = new StoreApplied<StoredLinkSuggestionWrite>(new(stored, true));
             }
             return Task.FromResult(result);
         }
     }
 
-    public Task<ContactLinkingWriteResult<StoredContactLinkSuggestion>> UpdateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredContactLinkSuggestion, ContactWriteRejection>> UpdateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(suggestion);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         lock (gate)
         {
-            ContactLinkingWriteResult<StoredContactLinkSuggestion> result;
+            StoreWriteResult<StoredContactLinkSuggestion, ContactWriteRejection> result;
             if (!scopes.TryGetValue(scope, out var bucket) || !bucket.ById.TryGetValue(suggestion.Id, out var existing))
-                result = LinkingWriteNotFound.Instance;
+                result = StoreNotFound.Instance;
             else if (existing.Revision != expectedRevision)
-                result = new LinkingWriteConflict(existing.Revision);
+                result = new StoreConflict(existing.Revision);
             else if (!SameIdentity(existing.Suggestion, suggestion))
                 throw new ArgumentException("A suggestion's pair, evidence and creation fields are immutable.", nameof(suggestion));
             else if (suggestion.Status == ContactLinkSuggestionStatus.Pending && existing.Suggestion.Status != ContactLinkSuggestionStatus.Pending)
@@ -127,7 +127,7 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
                 bucket.ById[suggestion.Id] = stored;
                 if (existing.Suggestion.Status == ContactLinkSuggestionStatus.Pending && suggestion.Status != ContactLinkSuggestionStatus.Pending)
                     bucket.PendingByPair.Remove((suggestion.Candidate, suggestion.Account));
-                result = new LinkingWriteApplied<StoredContactLinkSuggestion>(stored, false);
+                result = new StoreApplied<StoredContactLinkSuggestion>(stored);
             }
             return Task.FromResult(result);
         }

@@ -60,7 +60,7 @@ public sealed partial class PostgresSurveyStore : ISurveyStore
         return await ReadListAsync(command, reader => ReadSurvey(reader, scope), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<SurveyWriteResult<StoredSurvey>> CreateSurveyAsync(TicketScope scope, SurveyDefinition survey, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredSurvey, SurveyWriteRejection>> CreateSurveyAsync(TicketScope scope, SurveyDefinition survey, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(survey);
@@ -68,12 +68,12 @@ public sealed partial class PostgresSurveyStore : ISurveyStore
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await LockAsync(connection, transaction, cancellationToken, "definitions", scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value).ConfigureAwait(false);
         if (await SurveyRevisionAsync(connection, transaction, scope, survey.Id, cancellationToken).ConfigureAwait(false) is { } existing)
-            return new SurveyWriteConflict(existing);
+            return new StoreConflict(existing);
         await using (var count = new NpgsqlCommand($"SELECT count(*) FROM tf_survey_definitions WHERE {ScopeKeyWhere}", connection, transaction))
         {
             AddScope(count, scope);
             if ((long)(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))! >= SurveyLimits.MaximumSurveysPerWorkspace)
-                return new SurveyWriteRejected(SurveyWriteRejection.CapacityExceeded);
+                return new StoreRejected<SurveyWriteRejection>(SurveyWriteRejection.CapacityExceeded);
         }
         await using (var insert = new NpgsqlCommand($"""
             INSERT INTO tf_survey_definitions({ScopeColumns}, survey_id, format_version, name, kind, default_locale, questions, trigger, delay_seconds, cooldown_seconds,
@@ -85,10 +85,10 @@ public sealed partial class PostgresSurveyStore : ISurveyStore
             await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new SurveyWriteApplied<StoredSurvey>(new(scope, survey, 1));
+        return new StoreApplied<StoredSurvey>(new(scope, survey, 1));
     }
 
-    public async Task<SurveyWriteResult<StoredSurvey>> UpdateSurveyAsync(TicketScope scope, SurveyDefinition survey, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredSurvey, SurveyWriteRejection>> UpdateSurveyAsync(TicketScope scope, SurveyDefinition survey, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(survey);
@@ -106,13 +106,13 @@ public sealed partial class PostgresSurveyStore : ISurveyStore
             if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
             {
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new SurveyWriteApplied<StoredSurvey>(new(scope, survey, revision));
+                return new StoreApplied<StoredSurvey>(new(scope, survey, revision));
             }
         }
         return Miss<StoredSurvey>(await SurveyRevisionAsync(connection, transaction, scope, survey.Id, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<SurveyWriteResult<StoredSurvey>> DeleteSurveyAsync(TicketScope scope, SurveyId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredSurvey, SurveyWriteRejection>> DeleteSurveyAsync(TicketScope scope, SurveyId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         Require(id.IsInitialized, nameof(id));
@@ -127,7 +127,7 @@ public sealed partial class PostgresSurveyStore : ISurveyStore
         {
             BindSurveyKey(used, scope, id);
             if ((bool)(await used.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!)
-                return new SurveyWriteRejected(SurveyWriteRejection.InUse);
+                return new StoreRejected<SurveyWriteRejection>(SurveyWriteRejection.InUse);
         }
         StoredSurvey? removed;
         await using (var delete = new NpgsqlCommand($"DELETE FROM tf_survey_definitions WHERE {SurveyKeyWhere} RETURNING {SurveyColumns}", connection, transaction))
@@ -136,7 +136,7 @@ public sealed partial class PostgresSurveyStore : ISurveyStore
             removed = await ReadSingleAsync(delete, reader => ReadSurvey(reader, scope), cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new SurveyWriteApplied<StoredSurvey>(removed!);
+        return new StoreApplied<StoredSurvey>(removed!);
     }
 
     private static async Task<long?> SurveyRevisionAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, TicketScope scope, SurveyId id, CancellationToken cancellationToken)
@@ -187,8 +187,8 @@ public sealed partial class PostgresSurveyStore : ISurveyStore
         return System.Enum.IsDefined(result) ? result : throw new FormatException($"Unknown {typeof(T).Name} value.");
     }
 
-    private static SurveyWriteResult<T> Miss<T>(long? current) =>
-        current is { } revision ? new SurveyWriteConflict(revision) : SurveyWriteNotFound.Instance;
+    private static StoreWriteResult<T, SurveyWriteRejection> Miss<T>(long? current) =>
+        current is { } revision ? new StoreConflict(revision) : StoreNotFound.Instance;
 
     private static void Require(bool initialized, string parameterName)
     {

@@ -22,31 +22,31 @@ public sealed class InMemoryAccessRoleStore(int maximumEntries = 10_000) : IAcce
         return Task.FromResult<IReadOnlyList<StoredAccessRole>>([.. table.List(scope).OrderBy(role => role.Role.Id)]);
     }
 
-    public Task<AccessWriteResult<StoredAccessRole>> CreateAsync(TicketScope scope, AccessRole role, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAccessRole, AccessWriteRejection>> CreateAsync(TicketScope scope, AccessRole role, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(role);
         if (role.IsBuiltIn || BuiltInRoles.IsBuiltIn(role.Id))
-            return Task.FromResult<AccessWriteResult<StoredAccessRole>>(new AccessWriteRejected(AccessWriteRejection.BuiltInRoleImmutable));
+            return Task.FromResult<StoreWriteResult<StoredAccessRole, AccessWriteRejection>>(new StoreRejected<AccessWriteRejection>(AccessWriteRejection.BuiltInRoleImmutable));
         return Task.FromResult(table.Create(scope, role.Id, revision => new StoredAccessRole(scope, role, revision), static entry => entry.Revision));
     }
 
-    public Task<AccessWriteResult<StoredAccessRole>> UpdateAsync(TicketScope scope, AccessRole role, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAccessRole, AccessWriteRejection>> UpdateAsync(TicketScope scope, AccessRole role, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(role);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         if (role.IsBuiltIn || BuiltInRoles.IsBuiltIn(role.Id))
-            return Task.FromResult<AccessWriteResult<StoredAccessRole>>(new AccessWriteRejected(AccessWriteRejection.BuiltInRoleImmutable));
+            return Task.FromResult<StoreWriteResult<StoredAccessRole, AccessWriteRejection>>(new StoreRejected<AccessWriteRejection>(AccessWriteRejection.BuiltInRoleImmutable));
         return Task.FromResult(table.Update(scope, role.Id, expectedRevision, revision => new StoredAccessRole(scope, role, revision), static entry => entry.Revision));
     }
 
-    public Task<AccessWriteResult<StoredAccessRole>> DeleteAsync(TicketScope scope, RoleId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAccessRole, AccessWriteRejection>> DeleteAsync(TicketScope scope, RoleId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         if (BuiltInRoles.IsBuiltIn(id))
-            return Task.FromResult<AccessWriteResult<StoredAccessRole>>(new AccessWriteRejected(AccessWriteRejection.BuiltInRoleImmutable));
+            return Task.FromResult<StoreWriteResult<StoredAccessRole, AccessWriteRejection>>(new StoreRejected<AccessWriteRejection>(AccessWriteRejection.BuiltInRoleImmutable));
         return Task.FromResult(table.Delete(scope, id, expectedRevision, static entry => entry.Revision));
     }
 }
@@ -68,14 +68,14 @@ public sealed class InMemoryAccessFieldPolicyStore(int maximumEntries = 10_000) 
         return Task.FromResult<IReadOnlyList<StoredAccessFieldPolicy>>([.. table.List(scope).OrderBy(policy => policy.Policy.Field)]);
     }
 
-    public Task<AccessWriteResult<StoredAccessFieldPolicy>> CreateAsync(TicketScope scope, AccessFieldPolicy policy, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> CreateAsync(TicketScope scope, AccessFieldPolicy policy, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(policy);
         return Task.FromResult(table.Create(scope, policy.Field, revision => new StoredAccessFieldPolicy(scope, policy, revision), static entry => entry.Revision));
     }
 
-    public Task<AccessWriteResult<StoredAccessFieldPolicy>> UpdateAsync(TicketScope scope, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> UpdateAsync(TicketScope scope, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(policy);
@@ -83,7 +83,7 @@ public sealed class InMemoryAccessFieldPolicyStore(int maximumEntries = 10_000) 
         return Task.FromResult(table.Update(scope, policy.Field, expectedRevision, revision => new StoredAccessFieldPolicy(scope, policy, revision), static entry => entry.Revision));
     }
 
-    public Task<AccessWriteResult<StoredAccessFieldPolicy>> DeleteAsync(TicketScope scope, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> DeleteAsync(TicketScope scope, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
@@ -166,55 +166,55 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
         }
     }
 
-    public Task<AccessWriteResult<StoredAccessGrant>> CreateAsync(AccessGrant grant, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> CreateAsync(AccessGrant grant, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(grant);
         lock (gate)
         {
             if (grants.TryGetValue((grant.Partition, grant.Id), out var existing))
-                return Result(new AccessWriteConflict(existing.Revision));
+                return Result(new StoreConflict(existing.Revision));
             if (grants.Count >= MaximumEntries || CountForSubject(grant.Partition, grant.Subject, except: null) >= AccessLimits.MaximumGrantsPerSubject)
-                return Result(new AccessWriteRejected(AccessWriteRejection.CapacityExceeded));
+                return Result(new StoreRejected<AccessWriteRejection>(AccessWriteRejection.CapacityExceeded));
             var stored = new StoredAccessGrant(grant, 1);
             grants.Add((grant.Partition, grant.Id), stored);
             IndexGrant(grant);
-            return Result(new AccessWriteApplied<StoredAccessGrant>(stored));
+            return Result(new StoreApplied<StoredAccessGrant>(stored));
         }
     }
 
-    public Task<AccessWriteResult<StoredAccessGrant>> UpdateAsync(AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> UpdateAsync(AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(grant);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         lock (gate)
         {
             if (!grants.TryGetValue((grant.Partition, grant.Id), out var existing))
-                return Result(AccessWriteNotFound.Instance);
+                return Result(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result(new AccessWriteConflict(existing.Revision));
+                return Result(new StoreConflict(existing.Revision));
             if (!existing.Grant.Subject.Equals(grant.Subject) && CountForSubject(grant.Partition, grant.Subject, grant.Id) >= AccessLimits.MaximumGrantsPerSubject)
-                return Result(new AccessWriteRejected(AccessWriteRejection.CapacityExceeded));
+                return Result(new StoreRejected<AccessWriteRejection>(AccessWriteRejection.CapacityExceeded));
             UnindexGrant(existing.Grant);
             var stored = new StoredAccessGrant(grant, checked(existing.Revision + 1));
             grants[(grant.Partition, grant.Id)] = stored;
             IndexGrant(grant);
-            return Result(new AccessWriteApplied<StoredAccessGrant>(stored));
+            return Result(new StoreApplied<StoredAccessGrant>(stored));
         }
     }
 
-    public Task<AccessWriteResult<StoredAccessGrant>> DeleteAsync(AccessPartition partition, GrantId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> DeleteAsync(AccessPartition partition, GrantId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(partition);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         lock (gate)
         {
             if (!grants.TryGetValue((partition, id), out var existing))
-                return Result(AccessWriteNotFound.Instance);
+                return Result(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result(new AccessWriteConflict(existing.Revision));
+                return Result(new StoreConflict(existing.Revision));
             grants.Remove((partition, id));
             UnindexGrant(existing.Grant);
-            return Result(new AccessWriteApplied<StoredAccessGrant>(existing));
+            return Result(new StoreApplied<StoredAccessGrant>(existing));
         }
     }
 
@@ -284,7 +284,7 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
         return except is { } excluded && ids.Contains(excluded) ? ids.Count - 1 : ids.Count;
     }
 
-    private static Task<AccessWriteResult<StoredAccessGrant>> Result(AccessWriteResult<StoredAccessGrant> result) => Task.FromResult(result);
+    private static Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> Result(StoreWriteResult<StoredAccessGrant, AccessWriteRejection> result) => Task.FromResult(result);
 }
 
 /// <summary>
@@ -354,57 +354,57 @@ internal sealed class InMemoryScopedTable<TKey, TValue>
             return scopes.TryGetValue(scope, out var entries) ? [.. entries.Values] : [];
     }
 
-    public AccessWriteResult<TValue> Create(TicketScope scope, TKey key, Func<long, TValue> create, Func<TValue, long> revision)
+    public StoreWriteResult<TValue, AccessWriteRejection> Create(TicketScope scope, TKey key, Func<long, TValue> create, Func<TValue, long> revision)
     {
         lock (gate)
         {
             if (scopes.TryGetValue(scope, out var entries))
             {
                 if (entries.TryGetValue(key, out var existing))
-                    return new AccessWriteConflict(revision(existing));
+                    return new StoreConflict(revision(existing));
                 if (count >= maximumEntries || entries.Count >= maximumPerScope)
-                    return new AccessWriteRejected(AccessWriteRejection.CapacityExceeded);
+                    return new StoreRejected<AccessWriteRejection>(AccessWriteRejection.CapacityExceeded);
             }
             else
             {
                 if (count >= maximumEntries)
-                    return new AccessWriteRejected(AccessWriteRejection.CapacityExceeded);
+                    return new StoreRejected<AccessWriteRejection>(AccessWriteRejection.CapacityExceeded);
                 scopes[scope] = entries = [];
             }
             var created = create(1);
             entries.Add(key, created);
             count++;
-            return new AccessWriteApplied<TValue>(created);
+            return new StoreApplied<TValue>(created);
         }
     }
 
-    public AccessWriteResult<TValue> Update(TicketScope scope, TKey key, long expectedRevision, Func<long, TValue> create, Func<TValue, long> revision)
+    public StoreWriteResult<TValue, AccessWriteRejection> Update(TicketScope scope, TKey key, long expectedRevision, Func<long, TValue> create, Func<TValue, long> revision)
     {
         lock (gate)
         {
             if (!scopes.TryGetValue(scope, out var entries) || !entries.TryGetValue(key, out var existing))
-                return AccessWriteNotFound.Instance;
+                return StoreNotFound.Instance;
             if (revision(existing) != expectedRevision)
-                return new AccessWriteConflict(revision(existing));
+                return new StoreConflict(revision(existing));
             var updated = create(checked(expectedRevision + 1));
             entries[key] = updated;
-            return new AccessWriteApplied<TValue>(updated);
+            return new StoreApplied<TValue>(updated);
         }
     }
 
-    public AccessWriteResult<TValue> Delete(TicketScope scope, TKey key, long expectedRevision, Func<TValue, long> revision)
+    public StoreWriteResult<TValue, AccessWriteRejection> Delete(TicketScope scope, TKey key, long expectedRevision, Func<TValue, long> revision)
     {
         lock (gate)
         {
             if (!scopes.TryGetValue(scope, out var entries) || !entries.TryGetValue(key, out var existing))
-                return AccessWriteNotFound.Instance;
+                return StoreNotFound.Instance;
             if (revision(existing) != expectedRevision)
-                return new AccessWriteConflict(revision(existing));
+                return new StoreConflict(revision(existing));
             entries.Remove(key);
             count--;
             if (entries.Count == 0)
                 scopes.Remove(scope);
-            return new AccessWriteApplied<TValue>(existing);
+            return new StoreApplied<TValue>(existing);
         }
     }
 }

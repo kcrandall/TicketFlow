@@ -105,41 +105,6 @@ public interface IChannelReplyService
     Task<ReplyWindowResult> GetReplyWindowAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default);
 }
 
-public sealed record ChannelValue<T>(T Value);
-
-public sealed record ChannelNotFound
-{
-    private ChannelNotFound()
-    {
-    }
-
-    public static ChannelNotFound Instance { get; } = new();
-}
-
-public sealed record ChannelConflict(long CurrentRevision);
-
-public enum ChannelRefusal
-{
-    Forbidden = 1,
-    Invalid = 2,
-
-    /// <summary>The endpoint address is bound elsewhere in the partition, or a capacity limit was reached.</summary>
-    Rejected = 3,
-
-    /// <summary>The address ownership validator refused the address (for example it nests under an account bound by another scope).</summary>
-    AddressNotOwned = 4,
-}
-
-public sealed record ChannelRefused(ChannelRefusal Reason, IReadOnlyList<string> Errors)
-{
-    public static ChannelRefused Forbidden { get; } = new(ChannelRefusal.Forbidden, []);
-
-    public static ChannelRefused Invalid(string error) => new(ChannelRefusal.Invalid, [error]);
-}
-
-/// <summary>Outcome of an endpoint operation. Switch over every case without a discard arm.</summary>
-public union ChannelResult<T>(ChannelValue<T>, ChannelNotFound, ChannelConflict, ChannelRefused);
-
 /// <summary>
 /// Endpoint administration: <c>channel:manage</c> on the bound inbox to create, update (both inboxes when moving) and delete;
 /// <c>channel:read</c> to read. The inbox must exist and its <see cref="ChannelBinding"/> must equal the endpoint's kind and
@@ -147,14 +112,14 @@ public union ChannelResult<T>(ChannelValue<T>, ChannelNotFound, ChannelConflict,
 /// </summary>
 public interface IChannelEndpointService
 {
-    Task<ChannelResult<StoredChannelEndpoint>> GetAsync(PrincipalRef actor, ChannelKind kind, string configurationId, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredChannelEndpoint>> GetAsync(PrincipalRef actor, ChannelKind kind, string configurationId, CancellationToken cancellationToken = default);
 
-    Task<ChannelResult<StoredChannelEndpoint>> CreateAsync(PrincipalRef actor, ChannelEndpoint endpoint, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredChannelEndpoint>> CreateAsync(PrincipalRef actor, ChannelEndpoint endpoint, CancellationToken cancellationToken = default);
 
-    Task<ChannelResult<StoredChannelEndpoint>> UpdateAsync(PrincipalRef actor, ChannelEndpoint endpoint, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredChannelEndpoint>> UpdateAsync(PrincipalRef actor, ChannelEndpoint endpoint, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<ChannelResult<StoredChannelEndpoint>> DeleteAsync(PrincipalRef actor, ChannelKind kind, string configurationId, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredChannelEndpoint>> DeleteAsync(PrincipalRef actor, ChannelKind kind, string configurationId, long expectedRevision, CancellationToken cancellationToken = default);
 
     /// <summary>The dispatch record of an outgoing message (<c>channel:read</c> on the conversation's inbox).</summary>
-    Task<ChannelResult<StoredChannelDispatch>> GetDispatchAsync(PrincipalRef actor, ConversationId conversation, MessageId message, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredChannelDispatch>> GetDispatchAsync(PrincipalRef actor, ConversationId conversation, MessageId message, CancellationToken cancellationToken = default);
 }

@@ -87,14 +87,14 @@ internal sealed class AccessFixture : IDisposable
     public async Task<AccessGrant> SeedAsync(AccessGrant grant)
     {
         var result = await Grants.CreateAsync(grant);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>(result.Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>(result.Value);
         return grant;
     }
 
     public async Task<AccessRole> CustomRoleAsync(string id, params Permission[] permissions)
     {
         var role = new AccessRole(new RoleId(id), id, permissions);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
         return role;
     }
 
@@ -111,10 +111,10 @@ internal sealed class AccessFixture : IDisposable
         AccessMasked masked => "masked:" + string.Join(",", masked.Fields.Select(field => field.Field + (field.Revealable ? "+" : ""))),
     };
 
-    public static string Describe<T>(AccessChangeResult<T> result) => result switch
+    public static string Describe<T>(TicketResult<AccessChangeApplied<T>> result) => result switch
     {
-        AccessChangeApplied<T> => "applied",
-        AccessChangeRefused refused => $"refused:{refused.Reason}" + (refused.CurrentRevision is { } revision ? $":{revision}" : ""),
+        TicketValue<AccessChangeApplied<T>> => "applied",
+        TicketFailure refused => $"refused:{refused.Kind}" + (refused.CurrentRevision is { } revision ? $":{revision}" : ""),
     };
 
     public void Dispose()

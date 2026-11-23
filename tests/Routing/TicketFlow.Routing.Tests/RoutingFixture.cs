@@ -110,7 +110,7 @@ internal sealed class RoutingFixture : IDisposable
         {
             var contacts = scope.ServiceProvider.GetRequiredService<IContactService>();
             foreach (var contact in new[] { "ada", "grace" })
-                Assert.IsInstanceOfType<ContactApplied<ContactView>>((await contacts.CreateAsync(fixture.Owner,
+                Assert.IsInstanceOfType<TicketValue<ContactView>>((await contacts.CreateAsync(fixture.Owner,
                     new ContactDraft(new ContactProfile(contact), Id: new ContactId(contact)))).Value);
         }
         await fixture.SetPolicyAsync(new RoutingPolicy(new RoutingPolicyId("main"), "Main", RoutingStrategy.RoundRobin));
@@ -123,19 +123,19 @@ internal sealed class RoutingFixture : IDisposable
     {
         var existing = await PolicyStore.GetAsync(Scope, policy.Id);
         var result = existing is null ? await PolicyStore.CreateAsync(Scope, policy) : await PolicyStore.UpdateAsync(Scope, policy, existing.Revision);
-        Assert.IsInstanceOfType<RoutingWriteApplied<StoredRoutingPolicy>>(result.Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredRoutingPolicy>>(result.Value);
     }
 
     public async Task GrantAsync(GrantSubject subject, AccessRole role, GrantEffect effect = GrantEffect.Allow, AccessCondition? condition = null, GrantScope? scope = null)
     {
         var grant = new AccessGrant(new GrantId($"seed-{nextGrant++:D4}"), AccessPartition.From(Scope), subject, role.Id, scope ?? new WorkspaceGrantScope(Scope.WorkspaceId), effect, condition);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await Grants.CreateAsync(grant)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await Grants.CreateAsync(grant)).Value);
     }
 
     public async Task<AccessRole> CustomRoleAsync(string id, params Permission[] permissions)
     {
         var role = new AccessRole(new RoleId(id), id, permissions);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
         return role;
     }
 
@@ -168,20 +168,23 @@ internal sealed class RoutingFixture : IDisposable
     public async Task<IReadOnlyList<AssignmentChanged>> AssignmentsAsync(string conversation) =>
         [.. (await ConversationStore.ReadTimelineAsync(Scope, new ConversationId(conversation), 0, 200, true)).Select(item => item.Event.Value).OfType<AssignmentChanged>()];
 
-    public static T Value<T>(RoutingResult<T> result) => result switch
+    public static T Value<T>(TicketResult<T> result) => result switch
     {
-        RoutingValue<T> value => value.Value,
-        RoutingNotFound => throw new AssertFailedException("Expected a value but was not found."),
-        RoutingConflict conflict => throw new AssertFailedException($"Expected a value but was conflict:{conflict.CurrentRevision}."),
-        RoutingRefused refused => throw new AssertFailedException($"Expected a value but was refused:{refused.Reason} {string.Join("; ", refused.Errors)}."),
+        TicketValue<T> value => value.Value,
+        TicketFailure failure => throw new AssertFailedException($"Expected a value but was {DescribeFailure(failure)} {string.Join("; ", failure.Errors)}."),
     };
 
-    public static string Describe<T>(RoutingResult<T> result) => result switch
+    public static string Describe<T>(TicketResult<T> result) => result switch
     {
-        RoutingValue<T> => "value",
-        RoutingNotFound => "not-found",
-        RoutingConflict conflict => $"conflict:{conflict.CurrentRevision}",
-        RoutingRefused refused => $"refused:{refused.Reason}",
+        TicketValue<T> => "value",
+        TicketFailure failure => DescribeFailure(failure),
+    };
+
+    private static string DescribeFailure(TicketFailure failure) => failure.Kind switch
+    {
+        TicketFailureKind.NotFound => "not-found",
+        TicketFailureKind.Conflict => $"conflict:{failure.CurrentRevision}",
+        _ => $"refused:{failure.Kind}",
     };
 
     public static string Describe(RoutingOutcome outcome) => outcome switch

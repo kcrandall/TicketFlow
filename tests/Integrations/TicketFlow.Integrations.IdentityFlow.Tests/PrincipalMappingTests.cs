@@ -91,11 +91,11 @@ public sealed class PrincipalMappingTests
         var scope = TestScopes.Create();
         var resolver = new IdentityFlowPrincipalResolver(new FakeTeams(), Options.Create(new IdentityFlowPrincipalOptions()));
         var http = new DefaultHttpContext { User = Authenticated(("sub", Subject)) };
-        var resolved = Assert.IsInstanceOfType<UserPrincipal>((await resolver.ResolveAsync(http, scope))?.Value);
+        var resolved = Assert.IsInstanceOfType<UserPrincipal>(await resolver.ResolveAsync(http, scope));
         Assert.AreEqual(Subject, resolved.UserId.Value);
         Assert.IsTrue(resolved.Teams.Contains(new TeamId("tier1")));
         http.User = Authenticated((ClaimTypes.NameIdentifier, Subject), ("identityflow_auth_method", "ApiKey"));
-        Assert.IsInstanceOfType<ApiClientPrincipal>((await resolver.ResolveAsync(http, scope))?.Value);
+        Assert.IsInstanceOfType<ApiClientPrincipal>(await resolver.ResolveAsync(http, scope));
         http.User = new ClaimsPrincipal(new ClaimsIdentity());
         Assert.IsNull(await resolver.ResolveAsync(http, scope));
     }
@@ -108,12 +108,12 @@ public sealed class PrincipalMappingTests
         var options = new IdentityFlowPrincipalOptions();
         var resolver = new IdentityFlowPrincipalResolver(new FakeTeams(), Options.Create(options), staff);
         var http = new DefaultHttpContext { User = Authenticated(("sub", Subject)) };
-        var linked = Assert.IsInstanceOfType<UserPrincipal>((await resolver.ResolveAsync(http, scope))?.Value);
+        var linked = Assert.IsInstanceOfType<UserPrincipal>(await resolver.ResolveAsync(http, scope));
         Assert.AreEqual("agent-ada", linked.UserId.Value);
         Assert.AreEqual(new StaffIdentityRef("identityflow", Subject), staff.Last);
 
         http.User = Authenticated(("sub", "unlinked"));
-        Assert.AreEqual("unlinked", Assert.IsInstanceOfType<UserPrincipal>((await resolver.ResolveAsync(http, scope))?.Value).UserId.Value);
+        Assert.AreEqual("unlinked", Assert.IsInstanceOfType<UserPrincipal>(await resolver.ResolveAsync(http, scope)).UserId.Value);
         options.UnmappedStaff = IdentityFlowUnmappedStaff.Refuse;
         Assert.IsNull(await resolver.ResolveAsync(http, scope), "Unlinked identities can be refused.");
     }

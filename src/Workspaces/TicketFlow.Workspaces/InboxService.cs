@@ -28,27 +28,27 @@ public sealed class InboxService : IInboxService
         this.grants = grants ?? throw new ArgumentNullException(nameof(grants));
     }
 
-    public async Task<WorkspaceResult<StoredInbox>> GetAsync(PrincipalRef actor, InboxId id, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredInbox>> GetAsync(PrincipalRef actor, InboxId id, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         RequireId(id);
         if (await AuthorizeAsync(evaluator, actor, WorkspacePermissions.InboxRead, WorkspaceResources.Inbox(actor.Scope, id), cancellationToken).ConfigureAwait(false) is { } refused)
             return refused;
         return await inboxes.GetAsync(actor.Scope, id, cancellationToken).ConfigureAwait(false) is { } inbox
-            ? new WorkspaceSucceeded<StoredInbox>(inbox)
+            ? new TicketValue<StoredInbox>(inbox)
             : NotFound;
     }
 
-    public async Task<WorkspaceResult<WorkspacePage<StoredInbox>>> ListAsync(PrincipalRef actor, WorkspacePageRequest? page = null, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<WorkspacePage<StoredInbox>>> ListAsync(PrincipalRef actor, WorkspacePageRequest? page = null, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         var filter = await planner.PlanAsync(new AccessQuery(actor, WorkspacePermissions.InboxRead, actor.Scope), cancellationToken).ConfigureAwait(false);
         if (filter is DenyAllFilter)
-            return new WorkspaceSucceeded<WorkspacePage<StoredInbox>>(new([], false));
-        return new WorkspaceSucceeded<WorkspacePage<StoredInbox>>(await inboxes.ListAsync(actor.Scope, filter, page ?? new(), cancellationToken).ConfigureAwait(false));
+            return new TicketValue<WorkspacePage<StoredInbox>>(new([], false));
+        return new TicketValue<WorkspacePage<StoredInbox>>(await inboxes.ListAsync(actor.Scope, filter, page ?? new(), cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<WorkspaceResult<StoredInbox>> CreateAsync(PrincipalRef actor, Inbox inbox, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredInbox>> CreateAsync(PrincipalRef actor, Inbox inbox, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(inbox);
@@ -59,7 +59,7 @@ public sealed class InboxService : IInboxService
         return Map(await inboxes.CreateAsync(actor.Scope, inbox, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<WorkspaceResult<StoredInbox>> UpdateAsync(PrincipalRef actor, Inbox inbox, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredInbox>> UpdateAsync(PrincipalRef actor, Inbox inbox, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(inbox);
@@ -76,7 +76,7 @@ public sealed class InboxService : IInboxService
     /// <see cref="IAccessAdministrator"/>. The actor needs the authority to revoke them (checked before anything is written); other
     /// grants that name the inbox are left in place.
     /// </summary>
-    public async Task<WorkspaceResult<StoredInbox>> DeleteAsync(PrincipalRef actor, InboxId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredInbox>> DeleteAsync(PrincipalRef actor, InboxId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         RequireId(id);
@@ -92,7 +92,7 @@ public sealed class InboxService : IInboxService
             && TeamGrantPolicy.Refuse(await administrator.CheckCanRevokeAsync(actor, [.. agentGrants.Select(entry => entry.Grant)], cancellationToken).ConfigureAwait(false)) is { } forbidden)
             return forbidden;
         var result = await inboxes.DeleteAsync(actor.Scope, id, expectedRevision, cancellationToken).ConfigureAwait(false);
-        if (result.Value is WorkspaceWriteApplied<StoredInbox> && agentGrants.Count > 0)
+        if (result.Value is StoreApplied<StoredInbox> && agentGrants.Count > 0)
         {
             var targets = new (GrantId Id, long ExpectedRevision)[agentGrants.Count];
             for (var i = 0; i < agentGrants.Count; i++)
@@ -122,7 +122,7 @@ public sealed class InboxService : IInboxService
         }
     }
 
-    public async Task<WorkspaceResult<StoredAccessGrant>> AddAgentAsync(PrincipalRef actor, InboxId inbox, UserId agent, RoleId? role = null, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredAccessGrant>> AddAgentAsync(PrincipalRef actor, InboxId inbox, UserId agent, RoleId? role = null, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         RequireId(inbox);
@@ -135,7 +135,7 @@ public sealed class InboxService : IInboxService
         return Map(await administrator.CreateGrantAsync(actor, grant, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<WorkspaceResult<StoredAccessGrant>> RemoveAgentAsync(PrincipalRef actor, InboxId inbox, UserId agent, RoleId? role = null, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredAccessGrant>> RemoveAgentAsync(PrincipalRef actor, InboxId inbox, UserId agent, RoleId? role = null, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         RequireId(inbox);
@@ -150,7 +150,7 @@ public sealed class InboxService : IInboxService
         return Map(await administrator.RevokeGrantAsync(actor, id, existing.Revision, cancellationToken).ConfigureAwait(false));
     }
 
-    private async Task<WorkspaceRefused?> ValidateCalendarAsync(TicketScope scope, Inbox inbox, CancellationToken cancellationToken) =>
+    private async Task<TicketFailure?> ValidateCalendarAsync(TicketScope scope, Inbox inbox, CancellationToken cancellationToken) =>
         inbox.Calendar is { } calendar && await calendars.GetAsync(scope, calendar, cancellationToken).ConfigureAwait(false) is null
             ? Invalid("The referenced business calendar does not exist in this workspace.")
             : null;

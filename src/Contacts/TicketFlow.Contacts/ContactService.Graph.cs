@@ -217,7 +217,7 @@ public sealed partial class ContactService
         }
     }
 
-    public async Task<ContactResult<ContactMergeOutcome>> MergeAsync(PrincipalRef actor, ContactMergeRequest request, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ContactMergeOutcome, ContactRefused>> MergeAsync(PrincipalRef actor, ContactMergeRequest request, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(request);
@@ -266,7 +266,7 @@ public sealed partial class ContactService
             .ConfigureAwait(false);
     }
 
-    public async Task<ContactResult<ContactUnmergeOutcome>> UnmergeAsync(PrincipalRef actor, Guid mergeId, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ContactUnmergeOutcome, ContactRefused>> UnmergeAsync(PrincipalRef actor, Guid mergeId, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         if (mergeId == Guid.Empty)

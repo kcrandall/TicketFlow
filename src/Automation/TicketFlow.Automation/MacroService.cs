@@ -23,67 +23,67 @@ public sealed class MacroService(IMacroStore macros, IAccessEvaluator evaluator,
     private readonly AutomationActionExecutor executor = executor ?? throw new ArgumentNullException(nameof(executor));
     private readonly AutomationOptions options = (options ?? throw new ArgumentNullException(nameof(options))).Value;
 
-    public async Task<AutomationResult<StoredMacro>> GetAsync(PrincipalRef actor, MacroId id, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredMacro>> GetAsync(PrincipalRef actor, MacroId id, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         RequireId(id);
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.MacroRun, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return await macros.GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is { } stored && Visible(actor, stored.Macro)
-            ? new AutomationValue<StoredMacro>(stored)
-            : AutomationNotFound.Instance;
+            ? new TicketValue<StoredMacro>(stored)
+            : TicketFailure.NotFound;
     }
 
-    public async Task<AutomationResult<IReadOnlyList<StoredMacro>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<IReadOnlyList<StoredMacro>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.MacroRun, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
-        UserId? owner = actor.Value is UserPrincipal user ? user.UserId : null;
+            return TicketFailure.Forbidden;
+        UserId? owner = actor is UserPrincipal user ? user.UserId : null;
         var visible = await macros.ListVisibleAsync(scope, owner, cancellationToken).ConfigureAwait(false);
-        return new AutomationValue<IReadOnlyList<StoredMacro>>(visible);
+        return new TicketValue<IReadOnlyList<StoredMacro>>(visible);
     }
 
-    public async Task<AutomationResult<StoredMacro>> CreateAsync(PrincipalRef actor, Macro macro, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredMacro>> CreateAsync(PrincipalRef actor, Macro macro, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(macro);
         if (!await CanManageAsync(actor, macro, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return AutomationGuards.Map(await macros.CreateAsync(scope, macro, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<AutomationResult<StoredMacro>> UpdateAsync(PrincipalRef actor, Macro macro, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredMacro>> UpdateAsync(PrincipalRef actor, Macro macro, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(macro);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         var current = await macros.GetAsync(scope, macro.Id, cancellationToken).ConfigureAwait(false);
         if (current is null || !Visible(actor, current.Macro))
-            return AutomationNotFound.Instance;
+            return TicketFailure.NotFound;
         if (current.Revision != expectedRevision)
-            return new AutomationConflict(current.Revision);
+            return TicketFailure.Conflict(current.Revision);
         if (!await CanManageAsync(actor, current.Macro, cancellationToken).ConfigureAwait(false) || !await CanManageAsync(actor, macro, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return AutomationGuards.Map(await macros.UpdateAsync(scope, macro, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<AutomationResult<StoredMacro>> DeleteAsync(PrincipalRef actor, MacroId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredMacro>> DeleteAsync(PrincipalRef actor, MacroId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         RequireId(id);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         var current = await macros.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
         if (current is null || !Visible(actor, current.Macro))
-            return AutomationNotFound.Instance;
+            return TicketFailure.NotFound;
         if (current.Revision != expectedRevision)
-            return new AutomationConflict(current.Revision);
+            return TicketFailure.Conflict(current.Revision);
         if (!await CanManageAsync(actor, current.Macro, cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return AutomationGuards.Map(await macros.DeleteAsync(scope, id, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<AutomationResult<MacroRunResult>> RunAsync(PrincipalRef actor, MacroId id, ConversationId conversation, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<MacroRunResult>> RunAsync(PrincipalRef actor, MacroId id, ConversationId conversation, CancellationToken cancellationToken = default)
     {
         var scope = AutomationGuards.RequireActor(actor);
         RequireId(id);
@@ -91,18 +91,18 @@ public sealed class MacroService(IMacroStore macros, IAccessEvaluator evaluator,
             throw new ArgumentException("A conversation is required.", nameof(conversation));
         var stored = await conversations.GetAsync(scope, conversation, cancellationToken).ConfigureAwait(false);
         if (stored is null)
-            return AutomationNotFound.Instance;
+            return TicketFailure.NotFound;
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.MacroRun, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
-            return AutomationRefused.Forbidden;
+            return TicketFailure.Forbidden;
         var macro = await macros.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
         if (macro is null || !Visible(actor, macro.Macro))
-            return AutomationNotFound.Instance;
+            return TicketFailure.NotFound;
         var needs = AutomationContextNeedsHelper.ForActions(macro.Macro.Actions);
         var (context, failure) = await contexts.BuildInternalAsync(actor, conversation, AutomationEvent.ConversationUpdated(ConversationUpdateField.Status), null, needs, cache: null, cancellationToken)
             .ConfigureAwait(false);
         if (context is null)
-            return failure == AutomationContextFailure.Forbidden ? AutomationRefused.Forbidden : AutomationNotFound.Instance;
-        var agentName = (needs & AutomationContextNeeds.AgentName) != 0 && actor.Value is UserPrincipal user && agents is not null
+            return failure == AutomationContextFailure.Forbidden ? TicketFailure.Forbidden : TicketFailure.NotFound;
+        var agentName = (needs & AutomationContextNeeds.AgentName) != 0 && actor is UserPrincipal user && agents is not null
             ? await agents.GetDisplayNameAsync(scope, user.UserId, cancellationToken).ConfigureAwait(false)
             : null;
         var run = Guid.NewGuid();
@@ -131,16 +131,16 @@ public sealed class MacroService(IMacroStore macros, IAccessEvaluator evaluator,
         }
         if (options.AppendMacroMarkers)
             _ = await conversationService.AppendExtensionAsync(actor, conversation, AutomationEventCodec.MacroApplied(id, run, outcomes), cancellationToken: cancellationToken).ConfigureAwait(false);
-        return new AutomationValue<MacroRunResult>(new MacroRunResult(id, conversation, run, outcomes, completed));
+        return new TicketValue<MacroRunResult>(new MacroRunResult(id, conversation, run, outcomes, completed));
     }
 
     private static bool Visible(PrincipalRef actor, Macro macro) =>
-        macro.Visibility == MacroVisibility.Shared || (actor.Value is UserPrincipal user && macro.Owner == user.UserId);
+        macro.Visibility == MacroVisibility.Shared || (actor is UserPrincipal user && macro.Owner == user.UserId);
 
     private async Task<bool> CanManageAsync(PrincipalRef actor, Macro macro, CancellationToken cancellationToken) => macro.Visibility switch
     {
         MacroVisibility.Shared => await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.MacroManage, cancellationToken).ConfigureAwait(false),
-        MacroVisibility.Personal => actor.Value is UserPrincipal user && macro.Owner == user.UserId
+        MacroVisibility.Personal => actor is UserPrincipal user && macro.Owner == user.UserId
             && await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.MacroRun, cancellationToken).ConfigureAwait(false),
         _ => false,
     };

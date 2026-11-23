@@ -11,18 +11,18 @@ namespace TicketFlow.Workspaces.StoreContracts;
 /// </summary>
 public static class WorkspaceStoreContract
 {
-    public static string Describe<T>(WorkspaceWriteResult<T> result, Func<T, long> revision) => result switch
+    public static string Describe<T>(StoreWriteResult<T, WorkspaceWriteRejection> result, Func<T, long> revision) => result switch
     {
-        WorkspaceWriteApplied<T> applied => $"applied:{revision(applied.Value)}",
-        WorkspaceWriteNotFound => "not-found",
-        WorkspaceWriteConflict conflict => $"conflict:{conflict.CurrentRevision}",
-        WorkspaceWriteRejected rejected => $"rejected:{rejected.Reason}",
+        StoreApplied<T> applied => $"applied:{revision(applied.Value)}",
+        StoreNotFound => "not-found",
+        StoreConflict conflict => $"conflict:{conflict.CurrentRevision}",
+        StoreRejected<WorkspaceWriteRejection> rejected => $"rejected:{rejected.Reason}",
     };
 
-    private static string S(WorkspaceWriteResult<StoredWorkspaceSettings> result) => Describe(result, stored => stored.Revision);
-    private static string I(WorkspaceWriteResult<StoredInbox> result) => Describe(result, stored => stored.Revision);
-    private static string T(WorkspaceWriteResult<StoredTeam> result) => Describe(result, stored => stored.Revision);
-    private static string C(WorkspaceWriteResult<StoredBusinessCalendar> result) => Describe(result, stored => stored.Revision);
+    private static string S(StoreWriteResult<StoredWorkspaceSettings, WorkspaceWriteRejection> result) => Describe(result, stored => stored.Revision);
+    private static string I(StoreWriteResult<StoredInbox, WorkspaceWriteRejection> result) => Describe(result, stored => stored.Revision);
+    private static string T(StoreWriteResult<StoredTeam, WorkspaceWriteRejection> result) => Describe(result, stored => stored.Revision);
+    private static string C(StoreWriteResult<StoredBusinessCalendar, WorkspaceWriteRejection> result) => Describe(result, stored => stored.Revision);
 
     public static Inbox SampleInbox(string id, string name = "Support", BusinessCalendarId? calendar = null) => new(
         new InboxId(id), name, new ChannelBinding(new ChannelKind("email"), id), calendar, new SlaPolicyId("sla-gold"),
@@ -160,8 +160,8 @@ public static class WorkspaceStoreContract
         Assert.AreEqual("applied:2", I(await primary.UpdateAsync(scope, Bound("b", mailbox), 1)));
         var racers = await Task.WhenAll(Enumerable.Range(0, 6).Select(index =>
             (index % 2 == 0 ? primary : competing).CreateAsync(scope, Bound($"race-{index}", new ChannelBinding(new ChannelKind("chat"), "widget")))));
-        Assert.AreEqual(1, racers.Count(result => result.Value is WorkspaceWriteApplied<StoredInbox>));
-        Assert.AreEqual(5, racers.Count(result => result.Value is WorkspaceWriteRejected { Reason: WorkspaceWriteRejection.ChannelBindingInUse }));
+        Assert.AreEqual(1, racers.Count(result => result.Value is StoreApplied<StoredInbox>));
+        Assert.AreEqual(5, racers.Count(result => result.Value is StoreRejected<WorkspaceWriteRejection> { Reason: WorkspaceWriteRejection.ChannelBindingInUse }));
     }
 
     public static void AssertInbox(Inbox expected, Inbox actual)
@@ -362,8 +362,8 @@ public static class WorkspaceStoreContract
             Assert.AreEqual("applied:1", T(await primary.CreateAsync(scope, new Team(new TeamId($"team-{index:D3}"), "Team", null, [busy]))));
         var outcomes = await Task.WhenAll(Enumerable.Range(0, 8).Select(index =>
             (index % 2 == 0 ? primary : competing).CreateAsync(scope, new Team(new TeamId($"race-{index}"), "Team", null, [busy]))));
-        Assert.AreEqual(1, outcomes.Count(outcome => outcome.Value is WorkspaceWriteApplied<StoredTeam>));
-        Assert.AreEqual(7, outcomes.Count(outcome => outcome.Value is WorkspaceWriteRejected { Reason: WorkspaceWriteRejection.TeamMembershipLimitExceeded }));
+        Assert.AreEqual(1, outcomes.Count(outcome => outcome.Value is StoreApplied<StoredTeam>));
+        Assert.AreEqual(7, outcomes.Count(outcome => outcome.Value is StoreRejected<WorkspaceWriteRejection> { Reason: WorkspaceWriteRejection.TeamMembershipLimitExceeded }));
         Assert.HasCount(WorkspaceLimits.MaximumTeamsPerUser, await competing.ListTeamsForUserAsync(scope, busy));
     }
 

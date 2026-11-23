@@ -70,7 +70,7 @@ public sealed class PostgresLiveChatStoreTests
         var token = VisitorSessionTokens.Issue(new VisitorSessionId("vs_hash"));
         var session = new VisitorSession(new VisitorSessionId("vs_hash"), "cfg-chat", new InboxId("chat-inbox"), "v_hash", token.Hash,
             TestClock.DefaultStart, TestClock.DefaultStart, TestClock.DefaultStart.AddDays(1));
-        Assert.IsInstanceOfType<LiveChatWriteApplied<StoredVisitorSession>>((await database.Store.CreateAsync(scope, session)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredVisitorSession>>((await database.Store.CreateAsync(scope, session)).Value);
         await using var command = database.Storage.First.CreateCommand("SELECT count(*) FROM tf_livechat_sessions t WHERE position(convert_to(@secret, 'UTF8') in t.token_hash) > 0 OR t::text LIKE '%' || @secret || '%'");
         command.Parameters.AddWithValue("secret", token.Token.Split('.')[^1]);
         Assert.AreEqual(0L, await command.ExecuteScalarAsync());

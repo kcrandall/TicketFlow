@@ -18,14 +18,14 @@ public sealed class InMemoryWorkspaceSettingsStore(int maximumEntries = 10_000) 
         return Task.FromResult(table.Get(scope, Key) is { } entry ? Project(scope, entry) : null);
     }
 
-    public Task<WorkspaceWriteResult<StoredWorkspaceSettings>> CreateAsync(TicketScope scope, WorkspaceSettings settings, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredWorkspaceSettings, WorkspaceWriteRejection>> CreateAsync(TicketScope scope, WorkspaceSettings settings, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(settings);
         return Task.FromResult(table.Create(scope, Key, settings, entry => Project(scope, entry)));
     }
 
-    public Task<WorkspaceWriteResult<StoredWorkspaceSettings>> UpdateAsync(TicketScope scope, WorkspaceSettings settings, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredWorkspaceSettings, WorkspaceWriteRejection>> UpdateAsync(TicketScope scope, WorkspaceSettings settings, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(settings);
@@ -67,14 +67,14 @@ public sealed class InMemoryInboxStore(int maximumEntries = 10_000) : IInboxStor
         return Task.FromResult(new WorkspacePage<StoredInbox>([.. items.Select(entry => Project(scope, entry))], more));
     }
 
-    public Task<WorkspaceWriteResult<StoredInbox>> CreateAsync(TicketScope scope, Inbox inbox, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredInbox, WorkspaceWriteRejection>> CreateAsync(TicketScope scope, Inbox inbox, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(inbox);
         return Task.FromResult(table.Create(scope, Key(inbox.Id), inbox, entry => Project(scope, entry), others => CheckBinding(inbox, others)));
     }
 
-    public Task<WorkspaceWriteResult<StoredInbox>> UpdateAsync(TicketScope scope, Inbox inbox, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredInbox, WorkspaceWriteRejection>> UpdateAsync(TicketScope scope, Inbox inbox, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(inbox);
@@ -82,7 +82,7 @@ public sealed class InMemoryInboxStore(int maximumEntries = 10_000) : IInboxStor
         return Task.FromResult(table.Update(scope, Key(inbox.Id), expectedRevision, inbox, entry => Project(scope, entry), others => CheckBinding(inbox, others)));
     }
 
-    public Task<WorkspaceWriteResult<StoredInbox>> DeleteAsync(TicketScope scope, InboxId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredInbox, WorkspaceWriteRejection>> DeleteAsync(TicketScope scope, InboxId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
@@ -165,14 +165,14 @@ public sealed class InMemoryTeamStore(int maximumEntries = 10_000) : ITeamStore
         return Task.FromResult<IReadOnlyDictionary<UserId, IReadOnlyList<TeamId>>>(result);
     }
 
-    public Task<WorkspaceWriteResult<StoredTeam>> CreateAsync(TicketScope scope, Team team, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredTeam, WorkspaceWriteRejection>> CreateAsync(TicketScope scope, Team team, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(team);
         return Task.FromResult(table.Create(scope, Key(team.Id), team, entry => Project(scope, entry), others => CheckMemberships(team, others)));
     }
 
-    public Task<WorkspaceWriteResult<StoredTeam>> UpdateAsync(TicketScope scope, Team team, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredTeam, WorkspaceWriteRejection>> UpdateAsync(TicketScope scope, Team team, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(team);
@@ -180,7 +180,7 @@ public sealed class InMemoryTeamStore(int maximumEntries = 10_000) : ITeamStore
         return Task.FromResult(table.Update(scope, Key(team.Id), expectedRevision, team, entry => Project(scope, entry), others => CheckMemberships(team, others)));
     }
 
-    public Task<WorkspaceWriteResult<StoredTeam>> DeleteAsync(TicketScope scope, TeamId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredTeam, WorkspaceWriteRejection>> DeleteAsync(TicketScope scope, TeamId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
@@ -236,14 +236,14 @@ public sealed class InMemoryBusinessCalendarStore(int maximumEntries = 10_000) :
         return Task.FromResult<IReadOnlyList<StoredBusinessCalendar>>([.. table.All(scope).Select(entry => Project(scope, entry))]);
     }
 
-    public Task<WorkspaceWriteResult<StoredBusinessCalendar>> CreateAsync(TicketScope scope, BusinessCalendar calendar, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredBusinessCalendar, WorkspaceWriteRejection>> CreateAsync(TicketScope scope, BusinessCalendar calendar, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(calendar);
         return Task.FromResult(table.Create(scope, Key(calendar.Id), calendar, entry => Project(scope, entry)));
     }
 
-    public Task<WorkspaceWriteResult<StoredBusinessCalendar>> UpdateAsync(TicketScope scope, BusinessCalendar calendar, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredBusinessCalendar, WorkspaceWriteRejection>> UpdateAsync(TicketScope scope, BusinessCalendar calendar, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(calendar);
@@ -251,7 +251,7 @@ public sealed class InMemoryBusinessCalendarStore(int maximumEntries = 10_000) :
         return Task.FromResult(table.Update(scope, Key(calendar.Id), expectedRevision, calendar, entry => Project(scope, entry)));
     }
 
-    public Task<WorkspaceWriteResult<StoredBusinessCalendar>> DeleteAsync(TicketScope scope, BusinessCalendarId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredBusinessCalendar, WorkspaceWriteRejection>> DeleteAsync(TicketScope scope, BusinessCalendarId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
@@ -317,53 +317,53 @@ internal sealed class InMemoryWorkspaceTable<TValue>
         return (items, false);
     }
 
-    public WorkspaceWriteResult<T> Create<T>(TicketScope scope, string key, TValue value, Func<Entry, T> project, Func<IEnumerable<Entry>, WorkspaceWriteRejection?>? validate = null)
+    public StoreWriteResult<T, WorkspaceWriteRejection> Create<T>(TicketScope scope, string key, TValue value, Func<Entry, T> project, Func<IEnumerable<Entry>, WorkspaceWriteRejection?>? validate = null)
     {
         lock (gate)
         {
             var entries = Entries(scope);
             if (entries.TryGetValue(key, out var existing))
-                return new WorkspaceWriteConflict(existing.Revision);
+                return new StoreConflict(existing.Revision);
             if (count >= maximumEntries || entries.Count >= maximumPerScope)
-                return new WorkspaceWriteRejected(WorkspaceWriteRejection.CapacityExceeded);
+                return new StoreRejected<WorkspaceWriteRejection>(WorkspaceWriteRejection.CapacityExceeded);
             if (validate?.Invoke(entries.Values) is { } rejection)
-                return new WorkspaceWriteRejected(rejection);
+                return new StoreRejected<WorkspaceWriteRejection>(rejection);
             var created = new Entry(value, 1);
             entries.Add(key, created);
             count++;
-            return new WorkspaceWriteApplied<T>(project(created));
+            return new StoreApplied<T>(project(created));
         }
     }
 
-    public WorkspaceWriteResult<T> Update<T>(TicketScope scope, string key, long expectedRevision, TValue value, Func<Entry, T> project, Func<IEnumerable<Entry>, WorkspaceWriteRejection?>? validate = null)
+    public StoreWriteResult<T, WorkspaceWriteRejection> Update<T>(TicketScope scope, string key, long expectedRevision, TValue value, Func<Entry, T> project, Func<IEnumerable<Entry>, WorkspaceWriteRejection?>? validate = null)
     {
         lock (gate)
         {
             if (!scopes.TryGetValue(scope, out var entries) || !entries.TryGetValue(key, out var existing))
-                return WorkspaceWriteNotFound.Instance;
+                return StoreNotFound.Instance;
             if (existing.Revision != expectedRevision)
-                return new WorkspaceWriteConflict(existing.Revision);
+                return new StoreConflict(existing.Revision);
             if (validate?.Invoke(entries.Where(pair => pair.Key != key).Select(pair => pair.Value)) is { } rejection)
-                return new WorkspaceWriteRejected(rejection);
+                return new StoreRejected<WorkspaceWriteRejection>(rejection);
             var updated = new Entry(value, checked(existing.Revision + 1));
             entries[key] = updated;
-            return new WorkspaceWriteApplied<T>(project(updated));
+            return new StoreApplied<T>(project(updated));
         }
     }
 
-    public WorkspaceWriteResult<T> Delete<T>(TicketScope scope, string key, long expectedRevision, Func<Entry, T> project)
+    public StoreWriteResult<T, WorkspaceWriteRejection> Delete<T>(TicketScope scope, string key, long expectedRevision, Func<Entry, T> project)
     {
         lock (gate)
         {
             if (!scopes.TryGetValue(scope, out var entries) || !entries.TryGetValue(key, out var existing))
-                return WorkspaceWriteNotFound.Instance;
+                return StoreNotFound.Instance;
             if (existing.Revision != expectedRevision)
-                return new WorkspaceWriteConflict(existing.Revision);
+                return new StoreConflict(existing.Revision);
             entries.Remove(key);
             count--;
             if (entries.Count == 0)
                 scopes.Remove(scope);
-            return new WorkspaceWriteApplied<T>(project(existing));
+            return new StoreApplied<T>(project(existing));
         }
     }
 

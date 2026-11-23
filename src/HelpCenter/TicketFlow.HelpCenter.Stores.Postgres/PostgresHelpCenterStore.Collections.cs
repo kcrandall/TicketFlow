@@ -30,7 +30,7 @@ public sealed partial class PostgresHelpCenterStore
         return await ReadListAsync(command, reader => ReadCollection(reader, scope), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<HelpCenterWriteResult<StoredCollection>> CreateCollectionAsync(TicketScope scope, HelpCollection collection, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredCollection, HelpCenterWriteRejection>> CreateCollectionAsync(TicketScope scope, HelpCollection collection, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(collection);
@@ -39,17 +39,17 @@ public sealed partial class PostgresHelpCenterStore
         await LockAsync(connection, transaction, scope, cancellationToken).ConfigureAwait(false);
         var existing = await CollectionStateAsync(connection, transaction, scope, collection.Id, cancellationToken).ConfigureAwait(false);
         if (existing is { } found)
-            return new HelpCenterWriteConflict(found.Revision);
+            return new StoreConflict(found.Revision);
         if (await PortalRevisionAsync(connection, transaction, scope, collection.Portal, cancellationToken).ConfigureAwait(false) is null)
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidReference);
+            return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidReference);
         var depth = 1;
         if (collection.Parent is { } parentId)
         {
             if (await CollectionStateAsync(connection, transaction, scope, parentId, cancellationToken).ConfigureAwait(false) is not { } parent || parent.Portal != collection.Portal.Value)
-                return new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidReference);
+                return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidReference);
             depth = parent.Depth + 1;
             if (depth > HelpCenterLimits.MaximumCollectionDepth)
-                return new HelpCenterWriteRejected(HelpCenterWriteRejection.DepthExceeded);
+                return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.DepthExceeded);
         }
         var count = await ScalarAsync<long>(connection, transaction, $"SELECT count(*) FROM tf_helpcenter_collections WHERE {PortalKeyWhere}", command =>
         {
@@ -57,7 +57,7 @@ public sealed partial class PostgresHelpCenterStore
             AddText(command, "portal", collection.Portal.Value);
         }, cancellationToken).ConfigureAwait(false);
         if (count >= HelpCenterLimits.MaximumCollectionsPerPortal)
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.CapacityExceeded);
+            return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.CapacityExceeded);
         await using (var insert = new NpgsqlCommand($"""
             INSERT INTO tf_helpcenter_collections({ScopeColumns}, collection_id, portal_id, parent_id, format_version, depth, position, translations, revision)
             VALUES({ScopeParameters}, @collection, @portal, @parent, 1, @depth, @position, @translations, 1)
@@ -68,10 +68,10 @@ public sealed partial class PostgresHelpCenterStore
             await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new HelpCenterWriteApplied<StoredCollection>(new(scope, collection, depth, 1));
+        return new StoreApplied<StoredCollection>(new(scope, collection, depth, 1));
     }
 
-    public async Task<HelpCenterWriteResult<StoredCollection>> UpdateCollectionAsync(TicketScope scope, HelpCollection collection, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredCollection, HelpCenterWriteRejection>> UpdateCollectionAsync(TicketScope scope, HelpCollection collection, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(collection);
@@ -83,17 +83,17 @@ public sealed partial class PostgresHelpCenterStore
         if (Miss<StoredCollection>(existing?.Revision, expectedRevision) is { } miss)
             return miss;
         if (existing!.Value.Portal != collection.Portal.Value || existing.Value.Parent != collection.Parent?.Value)
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidReference);
+            return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidReference);
         await using (var update = new NpgsqlCommand($"UPDATE tf_helpcenter_collections SET position=@position, translations=@translations, revision=revision+1 WHERE {CollectionKeyWhere}", connection, transaction))
         {
             BindCollection(update, scope, collection);
             await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new HelpCenterWriteApplied<StoredCollection>(new(scope, collection, existing.Value.Depth, expectedRevision + 1));
+        return new StoreApplied<StoredCollection>(new(scope, collection, existing.Value.Depth, expectedRevision + 1));
     }
 
-    public async Task<HelpCenterWriteResult<StoredCollection>> DeleteCollectionAsync(TicketScope scope, CollectionId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredCollection, HelpCenterWriteRejection>> DeleteCollectionAsync(TicketScope scope, CollectionId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         Require(id.IsInitialized, nameof(id));
@@ -109,7 +109,7 @@ public sealed partial class PostgresHelpCenterStore
                 OR EXISTS (SELECT 1 FROM tf_helpcenter_articles WHERE collection_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@collection))
             """, command => BindCollectionKey(command, scope, id), cancellationToken).ConfigureAwait(false);
         if (used)
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.NotEmpty);
+            return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.NotEmpty);
         StoredCollection? removed;
         await using (var delete = new NpgsqlCommand($"DELETE FROM tf_helpcenter_collections WHERE {CollectionKeyWhere} RETURNING {CollectionColumns}", connection, transaction))
         {
@@ -117,7 +117,7 @@ public sealed partial class PostgresHelpCenterStore
             removed = await ReadSingleAsync(delete, reader => ReadCollection(reader, scope), cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new HelpCenterWriteApplied<StoredCollection>(removed!);
+        return new StoreApplied<StoredCollection>(removed!);
     }
 
     private readonly record struct CollectionState(long Revision, string Portal, string? Parent, int Depth);

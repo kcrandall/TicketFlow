@@ -9,15 +9,15 @@ namespace TicketFlow.Routing;
 /// </summary>
 public sealed class RoutingQueueService(IAccessQueryPlanner planner, IRoutingQueueStore queue) : IRoutingQueueService
 {
-    public async Task<RoutingResult<RoutingQueueListPage>> ListAsync(PrincipalRef actor, RoutingQueueQuery query, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<RoutingQueueListPage>> ListAsync(PrincipalRef actor, RoutingQueueQuery query, CancellationToken cancellationToken = default)
     {
         RoutingGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
         var filter = await planner.PlanAsync(new AccessQuery(actor, RoutingPermissions.QueueRead, actor.Scope), cancellationToken).ConfigureAwait(false);
         if (filter is DenyAllFilter)
-            return RoutingRefused.Forbidden;
+            return TicketFailure.Forbidden;
         var page = await queue.ListAsync(actor.Scope, query, filter, cancellationToken).ConfigureAwait(false);
-        return new RoutingValue<RoutingQueueListPage>(new RoutingQueueListPage(
+        return new TicketValue<RoutingQueueListPage>(new RoutingQueueListPage(
             [.. page.Entries.Select(stored => stored.Entry).Select(entry => new RoutingQueueItem(entry.Conversation, entry.Snapshot.Inbox, entry.TargetInbox,
                 entry.Snapshot.Team, entry.Snapshot.WaitingSince, entry.QueuedAt, entry.OverflowStage, entry.WaitExceeded))],
             page.Next));

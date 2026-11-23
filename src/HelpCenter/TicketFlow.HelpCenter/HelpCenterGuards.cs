@@ -8,19 +8,19 @@ internal static class HelpCenterGuards
 {
     public static void RequireActor(PrincipalRef actor)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("An actor is required.", nameof(actor));
     }
 
     /// <summary>Point check through Access. Masked decisions permit the action: help center records define no maskable fields.</summary>
-    public static async Task<HelpCenterRefused?> AuthorizeAsync(IAccessEvaluator evaluator, PrincipalRef actor, Permission permission, AccessResource resource, CancellationToken cancellationToken)
+    public static async Task<TicketFailure?> AuthorizeAsync(IAccessEvaluator evaluator, PrincipalRef actor, Permission permission, AccessResource resource, CancellationToken cancellationToken)
     {
         var decision = await evaluator.AuthorizeAsync(new AccessRequest(actor, permission, resource), cancellationToken).ConfigureAwait(false);
         return decision switch
         {
             AccessAllowed => null,
             AccessMasked => null,
-            AccessDenied => new HelpCenterRefused(HelpCenterRefusal.Forbidden, [$"Permission '{permission}' is required."]),
+            AccessDenied => new TicketFailure(TicketFailureKind.Forbidden, [$"Permission '{permission}' is required."]),
         };
     }
 
@@ -35,30 +35,30 @@ internal static class HelpCenterGuards
         return filter is not DenyAllFilter && AccessFilterEvaluator.Matches(filter, HelpCenterResources.Workspace(actor.Scope));
     }
 
-    public static HelpCenterRefused? ValidateRevision(long expectedRevision) =>
+    public static TicketFailure? ValidateRevision(long expectedRevision) =>
         expectedRevision < 1 ? Invalid("Expected revisions start at 1.") : null;
 
-    public static HelpCenterRefused Invalid(string error) => new(HelpCenterRefusal.Invalid, [error]);
+    public static TicketFailure Invalid(string error) => new(TicketFailureKind.Invalid, [error]);
 
-    public static HelpCenterRefused NotFound { get; } = new(HelpCenterRefusal.NotFound, ["The record does not exist."]);
+    public static TicketFailure NotFound { get; } = new(TicketFailureKind.NotFound, ["The record does not exist."]);
 
-    public static HelpCenterRefused Conflict(long currentRevision) =>
-        new(HelpCenterRefusal.Conflict, ["The record changed or already exists."], currentRevision);
+    public static TicketFailure Conflict(long? currentRevision) =>
+        new(TicketFailureKind.Conflict, ["The record changed or already exists."], currentRevision);
 
     /// <summary>Compare-and-set precheck on a loaded record.</summary>
-    public static HelpCenterRefused? Fence(long? currentRevision, long expectedRevision) => currentRevision switch
+    public static TicketFailure? Fence(long? currentRevision, long expectedRevision) => currentRevision switch
     {
         null => NotFound,
         { } current when current != expectedRevision => Conflict(current),
         _ => null,
     };
 
-    public static HelpCenterResult<T> Map<T>(HelpCenterWriteResult<T> result) => result switch
+    public static TicketResult<T> Map<T>(StoreWriteResult<T, HelpCenterWriteRejection> result) => result switch
     {
-        HelpCenterWriteApplied<T> applied => new HelpCenterSucceeded<T>(applied.Value),
-        HelpCenterWriteNotFound => NotFound,
-        HelpCenterWriteConflict conflict => Conflict(conflict.CurrentRevision),
-        HelpCenterWriteRejected rejected => new HelpCenterRefused(HelpCenterRefusal.Rejected, [rejected.Reason switch
+        StoreApplied<T> applied => new TicketValue<T>(applied.Value),
+        StoreNotFound => NotFound,
+        StoreConflict conflict => Conflict(conflict.CurrentRevision),
+        StoreRejected<HelpCenterWriteRejection> rejected => new TicketFailure(TicketFailureKind.Rejected, [rejected.Reason switch
         {
             HelpCenterWriteRejection.CapacityExceeded => "A help center capacity limit would be exceeded.",
             HelpCenterWriteRejection.SlugConflict => "The slug is already in use.",
@@ -70,6 +70,6 @@ internal static class HelpCenterGuards
         }]),
     };
 
-    public static HelpCenterRefused? ValidateLocales(Portal portal, IEnumerable<HelpCenterLocale> locales) =>
+    public static TicketFailure? ValidateLocales(Portal portal, IEnumerable<HelpCenterLocale> locales) =>
         locales.All(portal.Supports) ? null : Invalid("Every translation must use a locale the portal supports.");
 }

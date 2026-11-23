@@ -31,7 +31,7 @@ public static class AccessFilteredResponseParity
         await roles.CreateAsync(scope, RandomAccessFixture.DeletedRole);
         await roles.DeleteAsync(scope, RandomAccessFixture.DeletedRole.Id, 1);
         foreach (var grant in RandomAccessFixture.Grants(random, scope, clock.GetUtcNow(), 40))
-            Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await grants.CreateAsync(grant)).Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await grants.CreateAsync(grant)).Value);
         var planner = request.ServiceProvider.GetRequiredService<IAccessQueryPlanner>();
         var evaluator = request.ServiceProvider.GetRequiredService<IAccessEvaluator>();
         var (_, responses) = await SurveyStoreContract.SeedResponsesAsync(store, 40, seed, scope);
@@ -49,7 +49,7 @@ public static class AccessFilteredResponseParity
                     expected.Add(response);
             var listed = await store.ListResponsesAsync(scope, new SurveyResponseQuery(from, to, limit: 200), filter);
             CollectionAssert.AreEquivalent(expected.Select(item => item.Invitation).ToArray(), listed.Items.Select(item => item.Response.Invitation).ToArray(),
-                $"seed {seed} for {principal.Value!.GetType().Name}");
+                $"seed {seed} for {principal.GetType().Name}");
             var aggregate = await store.AggregateAsync(scope, new SurveyAggregateQuery(SurveyKind.Csat, from, to), filter);
             Assert.AreEqual(expected.Count(item => item.Kind == SurveyKind.Csat), aggregate.Rows.Sum(row => row.Responses), $"seed {seed} aggregate");
             permitted += expected.Count;

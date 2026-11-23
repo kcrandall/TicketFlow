@@ -35,7 +35,7 @@ public sealed partial class PostgresAccessStore
         return policies;
     }
 
-    public async Task<AccessWriteResult<StoredAccessFieldPolicy>> CreateAsync(TicketScope scope, AccessFieldPolicy policy, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> CreateAsync(TicketScope scope, AccessFieldPolicy policy, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(policy);
@@ -50,8 +50,8 @@ public sealed partial class PostgresAccessStore
                 await using var existing = new NpgsqlCommand($"SELECT revision FROM tf_access_field_policies WHERE {PolicyKey}", connection, transaction);
                 BindPolicyKey(existing, scope, policy.Field);
                 return await existing.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision
-                    ? new AccessWriteConflict(revision)
-                    : new AccessWriteRejected(AccessWriteRejection.CapacityExceeded);
+                    ? new StoreConflict(revision)
+                    : new StoreRejected<AccessWriteRejection>(AccessWriteRejection.CapacityExceeded);
             }
         }
         await using (var insert = new NpgsqlCommand("""
@@ -65,10 +65,10 @@ public sealed partial class PostgresAccessStore
                 return await MissAsync<StoredAccessFieldPolicy>(connection, transaction, $"SELECT revision FROM tf_access_field_policies WHERE {PolicyKey}", command => BindPolicyKey(command, scope, policy.Field), cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new AccessWriteApplied<StoredAccessFieldPolicy>(new(scope, policy, 1));
+        return new StoreApplied<StoredAccessFieldPolicy>(new(scope, policy, 1));
     }
 
-    public async Task<AccessWriteResult<StoredAccessFieldPolicy>> UpdateAsync(TicketScope scope, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> UpdateAsync(TicketScope scope, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(policy);
@@ -82,16 +82,16 @@ public sealed partial class PostgresAccessStore
             BindPolicy(update, scope, policy);
             AddLong(update, "expected", expectedRevision);
             if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                return new AccessWriteApplied<StoredAccessFieldPolicy>(new(scope, policy, revision));
+                return new StoreApplied<StoredAccessFieldPolicy>(new(scope, policy, revision));
         }
         await using var current = new NpgsqlCommand($"SELECT revision FROM tf_access_field_policies WHERE {PolicyKey}", connection);
         BindPolicyKey(current, scope, policy.Field);
         return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
-            ? new AccessWriteConflict(existing)
-            : AccessWriteNotFound.Instance;
+            ? new StoreConflict(existing)
+            : StoreNotFound.Instance;
     }
 
-    public async Task<AccessWriteResult<StoredAccessFieldPolicy>> DeleteAsync(TicketScope scope, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> DeleteAsync(TicketScope scope, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireField(field);
@@ -103,13 +103,13 @@ public sealed partial class PostgresAccessStore
             AddLong(delete, "expected", expectedRevision);
             await using var reader = await delete.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new AccessWriteApplied<StoredAccessFieldPolicy>(ReadPolicy(reader, scope));
+                return new StoreApplied<StoredAccessFieldPolicy>(ReadPolicy(reader, scope));
         }
         await using var current = new NpgsqlCommand($"SELECT revision FROM tf_access_field_policies WHERE {PolicyKey}", connection);
         BindPolicyKey(current, scope, field);
         return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
-            ? new AccessWriteConflict(existing)
-            : AccessWriteNotFound.Instance;
+            ? new StoreConflict(existing)
+            : StoreNotFound.Instance;
     }
 
     private static void RequireField(FieldPath field)

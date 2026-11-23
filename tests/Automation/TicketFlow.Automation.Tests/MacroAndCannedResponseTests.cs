@@ -43,16 +43,16 @@ public sealed class MacroAndCannedResponseTests
         await SeedAsync(fixture);
         var macro = new Macro(new MacroId("close"), "Close politely", MacroVisibility.Shared, null,
             [new SendReplyAction(new CannedResponseId("thanks")), new AddLabelsAction(new LabelId("done")), new SetStatusAction(ConversationStatusKind.Resolved)]);
-        Assert.IsInstanceOfType<AutomationRefused>((await MacrosAsync(fixture, service => service.CreateAsync(fixture.Agent, macro))).Value, "Shared macros need macro:manage.");
-        Assert.IsInstanceOfType<AutomationValue<StoredMacro>>((await MacrosAsync(fixture, service => service.CreateAsync(fixture.Owner, macro))).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await MacrosAsync(fixture, service => service.CreateAsync(fixture.Agent, macro))).Value, "Shared macros need macro:manage.").Kind);
+        Assert.IsInstanceOfType<TicketValue<StoredMacro>>((await MacrosAsync(fixture, service => service.CreateAsync(fixture.Owner, macro))).Value);
 
         // A light agent may run macros but cannot reply: the run stops at the first refused action and changes nothing.
-        var light = Assert.IsInstanceOfType<AutomationValue<MacroRunResult>>((await MacrosAsync(fixture, service => service.RunAsync(fixture.Light, macro.Id, C1))).Value).Value;
+        var light = Assert.IsInstanceOfType<TicketValue<MacroRunResult>>((await MacrosAsync(fixture, service => service.RunAsync(fixture.Light, macro.Id, C1))).Value).Value;
         Assert.IsFalse(light.Completed);
         Assert.AreEqual(AutomationActionRefusal.Forbidden, ((AutomationActionRefused)light.Outcomes.Single().Value!).Reason);
         Assert.AreEqual(ConversationStatusKind.Open, (await fixture.ConversationAsync("c1")).Status.Kind);
 
-        var run = Assert.IsInstanceOfType<AutomationValue<MacroRunResult>>((await MacrosAsync(fixture, service => service.RunAsync(fixture.Agent, macro.Id, C1))).Value).Value;
+        var run = Assert.IsInstanceOfType<TicketValue<MacroRunResult>>((await MacrosAsync(fixture, service => service.RunAsync(fixture.Agent, macro.Id, C1))).Value).Value;
         Assert.IsTrue(run.Completed);
         Assert.AreEqual(3, run.Outcomes.Count);
         var conversation = await fixture.ConversationAsync("c1");
@@ -63,8 +63,8 @@ public sealed class MacroAndCannedResponseTests
         Assert.IsTrue(timeline.Where(item => item.Event.Value is MessageEvent { Direction: MessageDirection.Outgoing } or StatusChanged).All(item => item.Actor.Id == "agent"));
         Assert.IsTrue(timeline.Any(item => item.Event.Value is ExtensionEvent { Kind: AutomationEventCodec.MacroAppliedKind }));
 
-        Assert.IsInstanceOfType<AutomationRefused>((await MacrosAsync(fixture, service => service.RunAsync(fixture.Viewer, macro.Id, C1))).Value, "Viewers lack macro:run.");
-        Assert.IsInstanceOfType<AutomationNotFound>((await MacrosAsync(fixture, service => service.RunAsync(fixture.Agent, macro.Id, new ConversationId("missing")))).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await MacrosAsync(fixture, service => service.RunAsync(fixture.Viewer, macro.Id, C1))).Value, "Viewers lack macro:run.").Kind);
+        Assert.AreEqual(TicketFailureKind.NotFound, Assert.IsInstanceOfType<TicketFailure>((await MacrosAsync(fixture, service => service.RunAsync(fixture.Agent, macro.Id, new ConversationId("missing")))).Value).Kind);
     }
 
     [TestMethod]
@@ -73,20 +73,20 @@ public sealed class MacroAndCannedResponseTests
         using var fixture = await AutomationFixture.CreateAsync();
         await SeedAsync(fixture);
         var mine = new Macro(new MacroId("mine"), "Mine", MacroVisibility.Personal, new UserId("agent"), [new AddLabelsAction(new LabelId("mine"))]);
-        Assert.IsInstanceOfType<AutomationRefused>((await MacrosAsync(fixture, service => service.CreateAsync(fixture.Light,
-            new Macro(new MacroId("theirs"), "Theirs", MacroVisibility.Personal, new UserId("agent"), [new AddLabelsAction(new LabelId("x"))])))).Value, "Only the owner creates a personal macro.");
-        var created = Assert.IsInstanceOfType<AutomationValue<StoredMacro>>((await MacrosAsync(fixture, service => service.CreateAsync(fixture.Agent, mine))).Value).Value;
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await MacrosAsync(fixture, service => service.CreateAsync(fixture.Light,
+            new Macro(new MacroId("theirs"), "Theirs", MacroVisibility.Personal, new UserId("agent"), [new AddLabelsAction(new LabelId("x"))])))).Value, "Only the owner creates a personal macro.").Kind);
+        var created = Assert.IsInstanceOfType<TicketValue<StoredMacro>>((await MacrosAsync(fixture, service => service.CreateAsync(fixture.Agent, mine))).Value).Value;
         await MacrosAsync(fixture, service => service.CreateAsync(fixture.Owner, new Macro(new MacroId("shared"), "Shared", MacroVisibility.Shared, null, [new AddLabelsAction(new LabelId("s"))])));
 
-        var agentList = Assert.IsInstanceOfType<AutomationValue<IReadOnlyList<StoredMacro>>>((await MacrosAsync(fixture, service => service.ListAsync(fixture.Agent))).Value).Value;
+        var agentList = Assert.IsInstanceOfType<TicketValue<IReadOnlyList<StoredMacro>>>((await MacrosAsync(fixture, service => service.ListAsync(fixture.Agent))).Value).Value;
         CollectionAssert.AreEqual(new[] { "mine", "shared" }, agentList.Select(item => item.Id.Value).ToArray());
-        var lightList = Assert.IsInstanceOfType<AutomationValue<IReadOnlyList<StoredMacro>>>((await MacrosAsync(fixture, service => service.ListAsync(fixture.Light))).Value).Value;
+        var lightList = Assert.IsInstanceOfType<TicketValue<IReadOnlyList<StoredMacro>>>((await MacrosAsync(fixture, service => service.ListAsync(fixture.Light))).Value).Value;
         CollectionAssert.AreEqual(new[] { "shared" }, lightList.Select(item => item.Id.Value).ToArray());
-        Assert.IsInstanceOfType<AutomationNotFound>((await MacrosAsync(fixture, service => service.GetAsync(fixture.Light, mine.Id))).Value);
-        Assert.IsInstanceOfType<AutomationNotFound>((await MacrosAsync(fixture, service => service.RunAsync(fixture.Light, mine.Id, C1))).Value);
-        Assert.IsInstanceOfType<AutomationNotFound>((await MacrosAsync(fixture, service => service.DeleteAsync(fixture.Light, mine.Id, 1))).Value);
-        Assert.IsInstanceOfType<AutomationConflict>((await MacrosAsync(fixture, service => service.DeleteAsync(fixture.Agent, mine.Id, 5))).Value);
-        Assert.IsInstanceOfType<AutomationValue<StoredMacro>>((await MacrosAsync(fixture, service => service.DeleteAsync(fixture.Agent, mine.Id, created.Revision))).Value);
+        Assert.AreEqual(TicketFailureKind.NotFound, Assert.IsInstanceOfType<TicketFailure>((await MacrosAsync(fixture, service => service.GetAsync(fixture.Light, mine.Id))).Value).Kind);
+        Assert.AreEqual(TicketFailureKind.NotFound, Assert.IsInstanceOfType<TicketFailure>((await MacrosAsync(fixture, service => service.RunAsync(fixture.Light, mine.Id, C1))).Value).Kind);
+        Assert.AreEqual(TicketFailureKind.NotFound, Assert.IsInstanceOfType<TicketFailure>((await MacrosAsync(fixture, service => service.DeleteAsync(fixture.Light, mine.Id, 1))).Value).Kind);
+        Assert.AreEqual(TicketFailureKind.Conflict, Assert.IsInstanceOfType<TicketFailure>((await MacrosAsync(fixture, service => service.DeleteAsync(fixture.Agent, mine.Id, 5))).Value).Kind);
+        Assert.IsInstanceOfType<TicketValue<StoredMacro>>((await MacrosAsync(fixture, service => service.DeleteAsync(fixture.Agent, mine.Id, created.Revision))).Value);
     }
 
     [TestMethod]
@@ -94,23 +94,23 @@ public sealed class MacroAndCannedResponseTests
     {
         using var fixture = await AutomationFixture.CreateAsync();
         await SeedAsync(fixture);
-        var rendered = Assert.IsInstanceOfType<AutomationValue<RenderedCannedResponse>>((await CannedAsync(fixture, service =>
+        var rendered = Assert.IsInstanceOfType<TicketValue<RenderedCannedResponse>>((await CannedAsync(fixture, service =>
             service.RenderAsync(fixture.Agent, new CannedResponseId("thanks"), C1, "en-US"))).Value).Value;
         Assert.AreEqual("en", rendered.Locale);
         Assert.AreEqual("Thanks Ada (gold, hidden) — Support", rendered.Body);
         Assert.IsFalse(rendered.Body.Contains("123-45", StringComparison.Ordinal));
-        var defaultLocale = Assert.IsInstanceOfType<AutomationValue<RenderedCannedResponse>>((await CannedAsync(fixture, service =>
+        var defaultLocale = Assert.IsInstanceOfType<TicketValue<RenderedCannedResponse>>((await CannedAsync(fixture, service =>
             service.RenderAsync(fixture.Agent, new CannedResponseId("thanks"), C1))).Value).Value;
         Assert.AreEqual("de", defaultLocale.Locale, "The contact's locale is used when none is requested.");
 
-        Assert.IsInstanceOfType<AutomationRefused>((await CannedAsync(fixture, service => service.RenderAsync(fixture.Light, new CannedResponseId("thanks"), C1))).Value,
-            "Rendering needs conversation:reply.");
-        Assert.IsInstanceOfType<AutomationValue<CannedResponsePage>>((await CannedAsync(fixture, service => service.ListAsync(fixture.Agent, new CannedResponseQuery()))).Value);
-        Assert.IsInstanceOfType<AutomationValue<StoredCannedResponse>>((await CannedAsync(fixture, service => service.FindByShortcutAsync(fixture.Agent, "thanks"))).Value);
-        Assert.IsInstanceOfType<AutomationRefused>((await CannedAsync(fixture, service => service.ListAsync(fixture.Viewer, new CannedResponseQuery()))).Value);
-        Assert.IsInstanceOfType<AutomationRefused>((await CannedAsync(fixture, service => service.CreateAsync(fixture.Agent, AutomationStoreContractsShim.Response("x", "x")))).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await CannedAsync(fixture, service => service.RenderAsync(fixture.Light, new CannedResponseId("thanks"), C1))).Value,
+            "Rendering needs conversation:reply.").Kind);
+        Assert.IsInstanceOfType<TicketValue<CannedResponsePage>>((await CannedAsync(fixture, service => service.ListAsync(fixture.Agent, new CannedResponseQuery()))).Value);
+        Assert.IsInstanceOfType<TicketValue<StoredCannedResponse>>((await CannedAsync(fixture, service => service.FindByShortcutAsync(fixture.Agent, "thanks"))).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await CannedAsync(fixture, service => service.ListAsync(fixture.Viewer, new CannedResponseQuery()))).Value).Kind);
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await CannedAsync(fixture, service => service.CreateAsync(fixture.Agent, AutomationStoreContractsShim.Response("x", "x")))).Value).Kind);
         var duplicate = await CannedAsync(fixture, service => service.CreateAsync(fixture.Owner, AutomationStoreContractsShim.Response("other", "thanks")));
-        Assert.AreEqual(AutomationRefusal.Rejected, ((AutomationRefused)duplicate.Value!).Reason);
+        Assert.AreEqual(TicketFailureKind.Rejected, ((TicketFailure)duplicate.Value!).Kind);
     }
 
     [TestMethod]

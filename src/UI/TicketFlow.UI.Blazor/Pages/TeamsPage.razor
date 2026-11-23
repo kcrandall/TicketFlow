@@ -69,7 +69,7 @@
         await LoadTeamsAsync();
         if (Service<ITeamService>() is not { } service || Teams.Count == 0)
             return;
-        var detailTasks = new Task<WorkspaceResult<StoredTeam>>[Teams.Count];
+        var detailTasks = new Task<TicketResult<StoredTeam>>[Teams.Count];
         var backlogTasks = new Task<long?>[Teams.Count];
         for (var i = 0; i < Teams.Count; i++)
         {
@@ -80,7 +80,7 @@
         await Task.WhenAll(Task.WhenAll(detailTasks), Task.WhenAll(backlogTasks));
         for (var i = 0; i < Teams.Count; i++)
         {
-            if (await detailTasks[i] is WorkspaceSucceeded<StoredTeam> stored)
+            if (await detailTasks[i] is TicketValue<StoredTeam> stored)
                 details.Add(stored.Value);
             if (await backlogTasks[i] is { } count)
                 open[Teams[i].Id.Value] = count;

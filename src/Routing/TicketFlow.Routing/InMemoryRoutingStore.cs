@@ -52,50 +52,50 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
             return Task.FromResult<IReadOnlyList<StoredRoutingPolicy>>([.. policies.Values.Where(p => p.Scope == scope).OrderBy(p => p.Policy.Id.Value, StringComparer.Ordinal)]);
     }
 
-    public Task<RoutingWriteResult<StoredRoutingPolicy>> CreateAsync(TicketScope scope, RoutingPolicy policy, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredRoutingPolicy, RoutingWriteRejection>> CreateAsync(TicketScope scope, RoutingPolicy policy, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(policy);
         lock (gate)
         {
             if (policies.TryGetValue((scope, policy.Id.Value), out var existing))
-                return Result<StoredRoutingPolicy>(new RoutingWriteConflict(existing.Revision));
+                return Result<StoredRoutingPolicy>(new StoreConflict(existing.Revision));
             if (policies.Keys.Count(key => key.Scope == scope) >= IRoutingPolicyStore.MaximumPoliciesPerWorkspace)
-                return Result<StoredRoutingPolicy>(new RoutingWriteRejected(RoutingWriteRejection.CapacityExceeded));
+                return Result<StoredRoutingPolicy>(new StoreRejected<RoutingWriteRejection>(RoutingWriteRejection.CapacityExceeded));
             var stored = new StoredRoutingPolicy(scope, policy, 1);
             policies[(scope, policy.Id.Value)] = stored;
-            return Result<StoredRoutingPolicy>(new RoutingWriteApplied<StoredRoutingPolicy>(stored));
+            return Result<StoredRoutingPolicy>(new StoreApplied<StoredRoutingPolicy>(stored));
         }
     }
 
-    public Task<RoutingWriteResult<StoredRoutingPolicy>> UpdateAsync(TicketScope scope, RoutingPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredRoutingPolicy, RoutingWriteRejection>> UpdateAsync(TicketScope scope, RoutingPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(policy);
         lock (gate)
         {
             if (!policies.TryGetValue((scope, policy.Id.Value), out var existing))
-                return Result<StoredRoutingPolicy>(RoutingWriteNotFound.Instance);
+                return Result<StoredRoutingPolicy>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result<StoredRoutingPolicy>(new RoutingWriteConflict(existing.Revision));
+                return Result<StoredRoutingPolicy>(new StoreConflict(existing.Revision));
             var stored = new StoredRoutingPolicy(scope, policy, existing.Revision + 1);
             policies[(scope, policy.Id.Value)] = stored;
-            return Result<StoredRoutingPolicy>(new RoutingWriteApplied<StoredRoutingPolicy>(stored));
+            return Result<StoredRoutingPolicy>(new StoreApplied<StoredRoutingPolicy>(stored));
         }
     }
 
-    public Task<RoutingWriteResult<StoredRoutingPolicy>> DeleteAsync(TicketScope scope, RoutingPolicyId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredRoutingPolicy, RoutingWriteRejection>> DeleteAsync(TicketScope scope, RoutingPolicyId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequirePolicyId(id);
         lock (gate)
         {
             if (!policies.TryGetValue((scope, id.Value), out var existing))
-                return Result<StoredRoutingPolicy>(RoutingWriteNotFound.Instance);
+                return Result<StoredRoutingPolicy>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result<StoredRoutingPolicy>(new RoutingWriteConflict(existing.Revision));
+                return Result<StoredRoutingPolicy>(new StoreConflict(existing.Revision));
             policies.Remove((scope, id.Value));
-            return Result<StoredRoutingPolicy>(new RoutingWriteApplied<StoredRoutingPolicy>(existing));
+            return Result<StoredRoutingPolicy>(new StoreApplied<StoredRoutingPolicy>(existing));
         }
     }
 
@@ -134,7 +134,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
                 .Select(pair => pair.Value.Profile).OrderBy(profile => profile.Agent.Value, StringComparer.Ordinal).Take(query.Limit)]);
     }
 
-    public Task<RoutingWriteResult<StoredAgentProfile>> SaveSettingsAsync(TicketScope scope, AgentRoutingSettings settings, long? expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAgentProfile, RoutingWriteRejection>> SaveSettingsAsync(TicketScope scope, AgentRoutingSettings settings, long? expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(settings);
@@ -148,23 +148,23 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
             if (expectedRevision is null)
             {
                 if (exists)
-                    return Result<StoredAgentProfile>(new RoutingWriteConflict(row!.Profile.Revision));
+                    return Result<StoredAgentProfile>(new StoreConflict(row!.Profile.Revision));
                 if (agents.Keys.Count(item => item.Scope == scope) >= IAgentAvailabilityStore.MaximumAgentsPerWorkspace || agents.Count >= MaximumRows)
-                    return Result<StoredAgentProfile>(new RoutingWriteRejected(RoutingWriteRejection.CapacityExceeded));
+                    return Result<StoredAgentProfile>(new StoreRejected<RoutingWriteRejection>(RoutingWriteRejection.CapacityExceeded));
                 var created = new AgentRow(new StoredAgentProfile(scope, settings, AgentPresence.Offline(now), false, 1));
                 agents[key] = created;
-                return Result<StoredAgentProfile>(new RoutingWriteApplied<StoredAgentProfile>(created.Profile));
+                return Result<StoredAgentProfile>(new StoreApplied<StoredAgentProfile>(created.Profile));
             }
             if (!exists)
-                return Result<StoredAgentProfile>(RoutingWriteNotFound.Instance);
+                return Result<StoredAgentProfile>(StoreNotFound.Instance);
             if (row!.Profile.Revision != expectedRevision)
-                return Result<StoredAgentProfile>(new RoutingWriteConflict(row.Profile.Revision));
+                return Result<StoredAgentProfile>(new StoreConflict(row.Profile.Revision));
             row.Profile = row.Profile with { Settings = settings, Revision = row.Profile.Revision + 1 };
-            return Result<StoredAgentProfile>(new RoutingWriteApplied<StoredAgentProfile>(row.Profile));
+            return Result<StoredAgentProfile>(new StoreApplied<StoredAgentProfile>(row.Profile));
         }
     }
 
-    public Task<RoutingWriteResult<StoredAgentProfile>> SetStatusAsync(TicketScope scope, UserId agent, AgentStatus status, TimeSpan presenceTtl, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAgentProfile, RoutingWriteRejection>> SetStatusAsync(TicketScope scope, UserId agent, AgentStatus status, TimeSpan presenceTtl, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireAgent(agent);
@@ -175,7 +175,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         lock (gate)
         {
             if (!agents.TryGetValue((scope, agent), out var row))
-                return Result<StoredAgentProfile>(RoutingWriteNotFound.Instance);
+                return Result<StoredAgentProfile>(StoreNotFound.Instance);
             var profile = row.Profile;
             var wasOnline = profile.Presence.EffectiveStatus(now) != AgentStatus.Offline;
             var presence = status == AgentStatus.Offline ? AgentPresence.Offline(now) : new AgentPresence(status, now, now, now + presenceTtl);
@@ -185,11 +185,11 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
                 ReassignmentPending = profile.ReassignmentPending || (wasOnline && status == AgentStatus.Offline),
                 Revision = profile.Revision + 1,
             };
-            return Result<StoredAgentProfile>(new RoutingWriteApplied<StoredAgentProfile>(row.Profile));
+            return Result<StoredAgentProfile>(new StoreApplied<StoredAgentProfile>(row.Profile));
         }
     }
 
-    public Task<RoutingWriteResult<StoredAgentProfile>> HeartbeatAsync(TicketScope scope, UserId agent, TimeSpan presenceTtl, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAgentProfile, RoutingWriteRejection>> HeartbeatAsync(TicketScope scope, UserId agent, TimeSpan presenceTtl, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireAgent(agent);
@@ -198,26 +198,26 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         lock (gate)
         {
             if (!agents.TryGetValue((scope, agent), out var row))
-                return Result<StoredAgentProfile>(RoutingWriteNotFound.Instance);
+                return Result<StoredAgentProfile>(StoreNotFound.Instance);
             var presence = row.Profile.Presence;
             if (presence.EffectiveStatus(now) != AgentStatus.Offline)
                 row.Profile = row.Profile with { Presence = new AgentPresence(presence.Status, presence.ChangedAt, now, now + presenceTtl) };
-            return Result<StoredAgentProfile>(new RoutingWriteApplied<StoredAgentProfile>(row.Profile));
+            return Result<StoredAgentProfile>(new StoreApplied<StoredAgentProfile>(row.Profile));
         }
     }
 
-    public Task<RoutingWriteResult<StoredAgentProfile>> DeleteAsync(TicketScope scope, UserId agent, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredAgentProfile, RoutingWriteRejection>> DeleteAsync(TicketScope scope, UserId agent, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireAgent(agent);
         lock (gate)
         {
             if (!agents.TryGetValue((scope, agent), out var row))
-                return Result<StoredAgentProfile>(RoutingWriteNotFound.Instance);
+                return Result<StoredAgentProfile>(StoreNotFound.Instance);
             if (row.Profile.Revision != expectedRevision)
-                return Result<StoredAgentProfile>(new RoutingWriteConflict(row.Profile.Revision));
+                return Result<StoredAgentProfile>(new StoreConflict(row.Profile.Revision));
             agents.Remove((scope, agent));
-            return Result<StoredAgentProfile>(new RoutingWriteApplied<StoredAgentProfile>(row.Profile));
+            return Result<StoredAgentProfile>(new StoreApplied<StoredAgentProfile>(row.Profile));
         }
     }
 
@@ -714,7 +714,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         }
     }
 
-    private static Task<RoutingWriteResult<T>> Result<T>(RoutingWriteResult<T> result) => Task.FromResult(result);
+    private static Task<StoreWriteResult<T, RoutingWriteRejection>> Result<T>(StoreWriteResult<T, RoutingWriteRejection> result) => Task.FromResult(result);
 
     private static void RequirePolicyId(RoutingPolicyId id)
     {

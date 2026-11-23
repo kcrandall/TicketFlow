@@ -135,7 +135,7 @@ else
         else if (listTask is not null)
             await listTask;
 
-        if (ruleTask is not null && await ruleTask is AutomationValue<StoredAutomationRule> found)
+        if (ruleTask is not null && await ruleTask is TicketValue<StoredAutomationRule> found)
             stored = found.Value;
         json = stored is null ? NewRuleJson : DefinitionEditor.Pretty(AutomationCodec.SerializeRule(stored.Rule));
         result = Session.PageStateAs<AutomationDryRunResult>();

@@ -115,7 +115,7 @@ public sealed record AccessRequest
 {
     public AccessRequest(PrincipalRef principal, Permission permission, AccessResource resource)
     {
-        if (principal.Value is null)
+        if (principal is null)
             throw new ArgumentException("A principal is required.", nameof(principal));
         ArgumentNullException.ThrowIfNull(resource);
         Principal = principal;
@@ -136,7 +136,7 @@ public sealed record AccessQuery
 {
     public AccessQuery(PrincipalRef principal, Permission permission, TicketScope scope)
     {
-        if (principal.Value is null)
+        if (principal is null)
             throw new ArgumentException("A principal is required.", nameof(principal));
         ArgumentNullException.ThrowIfNull(scope);
         Principal = principal;

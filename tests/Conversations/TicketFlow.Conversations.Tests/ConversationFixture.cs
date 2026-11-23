@@ -83,7 +83,7 @@ internal sealed class ConversationFixture : IDisposable
         await inboxes.CreateAsync(fixture.Scope, new Inbox(new InboxId("closed-inbox"), "Old", new ChannelBinding(new ChannelKind("email"), "cfg-old"), enabled: false));
         await provider(fixture).GetRequiredService<ITeamStore>().CreateAsync(fixture.Scope, new Team(new TeamId("billing"), "Billing"));
         foreach (var contact in new[] { "ada", "grace" })
-            Assert.IsInstanceOfType<ContactApplied<ContactView>>((await fixture.ContactsService.CreateAsync(fixture.Owner,
+            Assert.IsInstanceOfType<TicketValue<ContactView>>((await fixture.ContactsService.CreateAsync(fixture.Owner,
                 new ContactDraft(new ContactProfile(contact), Id: new ContactId(contact)))).Value);
         return fixture;
 
@@ -93,21 +93,21 @@ internal sealed class ConversationFixture : IDisposable
     public async Task GrantAsync(GrantSubject subject, AccessRole role, GrantEffect effect = GrantEffect.Allow, AccessCondition? condition = null, GrantScope? scope = null)
     {
         var grant = new AccessGrant(new GrantId($"seed-{nextGrant++:D4}"), AccessPartition.From(Scope), subject, role.Id, scope ?? new WorkspaceGrantScope(Scope.WorkspaceId), effect, condition);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await Grants.CreateAsync(grant)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await Grants.CreateAsync(grant)).Value);
     }
 
     public async Task<AccessRole> CustomRoleAsync(string id, params Permission[] permissions)
     {
         var role = new AccessRole(new RoleId(id), id, permissions);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
         return role;
     }
 
     public async Task PolicyAsync(AccessFieldPolicy policy) =>
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessFieldPolicy>>((await Policies.CreateAsync(Scope, policy)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessFieldPolicy>>((await Policies.CreateAsync(Scope, policy)).Value);
 
     public async Task DefineAsync(ConversationAttributeDefinition definition) =>
-        Assert.IsInstanceOfType<ConversationValue<StoredConversationAttributeDefinition>>((await Definitions.CreateAsync(Owner, definition)).Value);
+        Assert.IsInstanceOfType<TicketValue<StoredConversationAttributeDefinition>>((await Definitions.CreateAsync(Owner, definition)).Value);
 
     public async Task<ConversationApplied> StartAsync(string id, string contact = "ada", string? externalId = null, string body = "Help please",
         ChannelThreadRef? thread = null, TeamId? team = null, UserId? assignee = null, IReadOnlyList<LabelId>? labels = null)

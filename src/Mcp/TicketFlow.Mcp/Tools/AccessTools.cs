@@ -237,24 +237,24 @@ public sealed class AccessTools(TicketFlowToolContext context)
             stored.Revision);
     }
 
-    private static TicketFlowToolError Refused(AccessChangeRefused refused) => refused.Reason switch
+    private static TicketFlowToolError Refused(TicketFailure refused) => refused.Kind switch
     {
-        AccessChangeRefusal.Forbidden => TicketFlowToolError.Forbidden() with { Errors = refused.Errors.Count > 0 ? refused.Errors : null },
-        AccessChangeRefusal.Invalid => TicketFlowToolError.Invalid(refused.Errors),
-        AccessChangeRefusal.NotFound => TicketFlowToolError.NotFound("The grant"),
-        AccessChangeRefusal.Conflict => TicketFlowToolError.Conflict(refused.CurrentRevision),
+        TicketFailureKind.Forbidden => TicketFlowToolError.Forbidden() with { Errors = refused.Errors.Count > 0 ? refused.Errors : null },
+        TicketFailureKind.Invalid => TicketFlowToolError.Invalid(refused.Errors),
+        TicketFailureKind.NotFound => TicketFlowToolError.NotFound("The grant"),
+        TicketFailureKind.Conflict => TicketFlowToolError.Conflict(refused.CurrentRevision),
         _ => TicketFlowToolError.Rejected(refused.Errors),
     };
 
-    private static object Map<T>(AccessChangeResult<T> result, Func<T, object> success) => result switch
+    private static object Map<T>(TicketResult<AccessChangeApplied<T>> result, Func<T, object> success) => result switch
     {
-        AccessChangeApplied<T> applied => success(applied.Value),
-        AccessChangeRefused refused => Refused(refused),
+        TicketValue<AccessChangeApplied<T>> applied => success(applied.Value.Value),
+        TicketFailure refused => Refused(refused),
     };
 
-    private static object Map<T>(AccessListResult<T> result, Func<T, object> success) => result switch
+    private static object Map<T>(TicketResult<T> result, Func<T, object> success) => result switch
     {
-        AccessListed<T> listed => success(listed.Value),
-        AccessChangeRefused refused => Refused(refused),
+        TicketValue<T> listed => success(listed.Value),
+        TicketFailure refused => Refused(refused),
     };
 }

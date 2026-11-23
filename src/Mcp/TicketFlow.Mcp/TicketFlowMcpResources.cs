@@ -74,11 +74,11 @@ public sealed class TicketFlowMcpResources(IServiceProvider services)
         var result = await context.Service<IHelpCenterService>().GetArticleAsync(principal, id, cancellationToken).ConfigureAwait(false);
         return result switch
         {
-            HelpCenterSucceeded<StoredArticle> succeeded => Serialize(HelpCenterTools.ToArticleOutput(succeeded.Value, context), context.Options.MaximumResultBytes),
-            HelpCenterRefused refused => throw new McpException(refused.Reason switch
+            TicketValue<StoredArticle> succeeded => Serialize(HelpCenterTools.ToArticleOutput(succeeded.Value, context), context.Options.MaximumResultBytes),
+            TicketFailure refused => throw new McpException(refused.Kind switch
             {
-                HelpCenterRefusal.Forbidden => "forbidden: Access denied helpcenter:read for the calling principal.",
-                HelpCenterRefusal.NotFound => "not-found: The article does not exist or is not visible to the calling principal.",
+                TicketFailureKind.Forbidden => "forbidden: Access denied helpcenter:read for the calling principal.",
+                TicketFailureKind.NotFound => "not-found: The article does not exist or is not visible to the calling principal.",
                 _ => "invalid: The article request is invalid.",
             }),
         };

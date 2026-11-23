@@ -136,7 +136,7 @@ public sealed class RoundTripTests
         var inbound = Recorded(await host.Pipeline.ReceiveAsync(host.Worker, host.Email("<root@x>")));
         var messageId = OutgoingId(Applied(await ReplyAsync(host, inbound.Conversation)));
         // Simulate a crash after the Sending record was written.
-        Assert.IsInstanceOfType<ChannelWriteApplied<StoredChannelDispatch>>((await host.Dispatches.WriteAsync(host.Scope, new ChannelDispatch(inbound.Conversation, messageId,
+        Assert.IsInstanceOfType<StoreApplied<StoredChannelDispatch>>((await host.Dispatches.WriteAsync(host.Scope, new ChannelDispatch(inbound.Conversation, messageId,
             new InboxId("email-inbox"), new ChannelKind("email"), ChannelDispatchState.Sending, 1, host.Clock.GetUtcNow()), null)).Value);
         await host.DispatchAsync();
         Assert.AreEqual(0, email.Requests.Count);
@@ -148,10 +148,10 @@ public sealed class RoundTripTests
     {
         var email = EmailChannel();
         await using var host = await HostAsync(email);
-        var created = (ContactApplied<ContactView>)(await host.Contacts.CreateAsync(host.Owner, new ContactDraft(new ContactProfile("Grace"),
+        var created = (TicketValue<ContactView>)(await host.Contacts.CreateAsync(host.Owner, new ContactDraft(new ContactProfile("Grace"),
             Identities: [new ContactIdentity(ContactIdentityAddress.Parse(ContactIdentityKind.Email, "grace@example.com"), new IdentityClaimed("agent", host.Clock.GetUtcNow()))]))).Value!;
         var started = (ConversationApplied)(await host.Conversations.StartAsync(host.Owner, new StartConversationRequest(new InboxId("email-inbox"), created.Value.Id))).Value!;
-        var noRecipient = (ContactApplied<ContactView>)(await host.Contacts.CreateAsync(host.Owner, new ContactDraft(new ContactProfile("Nobody")))).Value!;
+        var noRecipient = (TicketValue<ContactView>)(await host.Contacts.CreateAsync(host.Owner, new ContactDraft(new ContactProfile("Nobody")))).Value!;
         var orphan = (ConversationApplied)(await host.Conversations.StartAsync(host.Owner, new StartConversationRequest(new InboxId("email-inbox"), noRecipient.Value.Id))).Value!;
         var first = OutgoingId(Applied(await ReplyAsync(host, started.Conversation)));
         var second = OutgoingId(Applied(await ReplyAsync(host, orphan.Conversation)));
@@ -182,25 +182,25 @@ public sealed class RoundTripTests
     {
         await using var host = await HostAsync(EmailChannel());
         var kind = new ChannelKind("email");
-        Assert.IsInstanceOfType<ChannelRefused>((await host.Endpoints.GetAsync(host.Agent, kind, "cfg-email")).Value);
-        var stored = ChannelHost.Is<ChannelValue<StoredChannelEndpoint>>((await host.Endpoints.GetAsync(host.Owner, kind, "cfg-email")).Value).Value;
+        Assert.AreEqual(TicketFailureKind.Forbidden, ChannelHost.Is<TicketFailure>((await host.Endpoints.GetAsync(host.Agent, kind, "cfg-email")).Value).Kind);
+        var stored = ChannelHost.Is<TicketValue<StoredChannelEndpoint>>((await host.Endpoints.GetAsync(host.Owner, kind, "cfg-email")).Value).Value;
         Assert.AreEqual(new InboxId("email-inbox"), stored.Endpoint.Inbox);
-        Assert.AreEqual(ChannelRefusal.Forbidden, ChannelHost.Is<ChannelRefused>((await host.Endpoints.CreateAsync(host.Agent,
-            new ChannelEndpoint(kind, "cfg-x", new InboxId("email-inbox")))).Value).Reason);
-        Assert.AreEqual(ChannelRefusal.Invalid, ChannelHost.Is<ChannelRefused>((await host.Endpoints.CreateAsync(host.Owner,
-            new ChannelEndpoint(kind, "cfg-x", new InboxId("email-inbox")))).Value).Reason);
-        Assert.AreEqual(ChannelRefusal.Invalid, ChannelHost.Is<ChannelRefused>((await host.Endpoints.CreateAsync(host.Owner,
-            new ChannelEndpoint(kind, "cfg-email", new InboxId("missing")))).Value).Reason);
-        Assert.IsInstanceOfType<ChannelConflict>((await host.Endpoints.UpdateAsync(host.Owner, stored.Endpoint, 9)).Value);
-        Assert.IsInstanceOfType<ChannelValue<StoredChannelEndpoint>>((await host.Endpoints.UpdateAsync(host.Owner,
+        Assert.AreEqual(TicketFailureKind.Forbidden, ChannelHost.Is<TicketFailure>((await host.Endpoints.CreateAsync(host.Agent,
+            new ChannelEndpoint(kind, "cfg-x", new InboxId("email-inbox")))).Value).Kind);
+        Assert.AreEqual(TicketFailureKind.Invalid, ChannelHost.Is<TicketFailure>((await host.Endpoints.CreateAsync(host.Owner,
+            new ChannelEndpoint(kind, "cfg-x", new InboxId("email-inbox")))).Value).Kind);
+        Assert.AreEqual(TicketFailureKind.Invalid, ChannelHost.Is<TicketFailure>((await host.Endpoints.CreateAsync(host.Owner,
+            new ChannelEndpoint(kind, "cfg-email", new InboxId("missing")))).Value).Kind);
+        Assert.AreEqual(TicketFailureKind.Conflict, ChannelHost.Is<TicketFailure>((await host.Endpoints.UpdateAsync(host.Owner, stored.Endpoint, 9)).Value).Kind);
+        Assert.IsInstanceOfType<TicketValue<StoredChannelEndpoint>>((await host.Endpoints.UpdateAsync(host.Owner,
             new ChannelEndpoint(kind, "cfg-email", new InboxId("email-inbox"), "mailgun:new"), 1)).Value);
         var inboxes = (IInboxStore)host.Services.GetService(typeof(IInboxStore))!;
         await inboxes.CreateAsync(host.Scope, new Inbox(new InboxId("email-2"), "Email 2", new ChannelBinding(kind, "cfg-email-2")));
-        Assert.AreEqual(ChannelRefusal.Rejected, ChannelHost.Is<ChannelRefused>((await host.Endpoints.CreateAsync(host.Owner,
-            new ChannelEndpoint(kind, "cfg-email-2", new InboxId("email-2"), "mailgun:new"))).Value).Reason);
-        Assert.IsInstanceOfType<ChannelNotFound>((await host.Endpoints.DeleteAsync(host.Owner, kind, "cfg-none", 1)).Value);
-        Assert.IsInstanceOfType<ChannelRefused>((await host.Endpoints.DeleteAsync(host.Agent, kind, "cfg-email", 2)).Value);
-        Assert.IsInstanceOfType<ChannelValue<StoredChannelEndpoint>>((await host.Endpoints.DeleteAsync(host.Owner, kind, "cfg-email", 2)).Value);
+        Assert.AreEqual(TicketFailureKind.Rejected, ChannelHost.Is<TicketFailure>((await host.Endpoints.CreateAsync(host.Owner,
+            new ChannelEndpoint(kind, "cfg-email-2", new InboxId("email-2"), "mailgun:new"))).Value).Kind);
+        Assert.AreEqual(TicketFailureKind.NotFound, ChannelHost.Is<TicketFailure>((await host.Endpoints.DeleteAsync(host.Owner, kind, "cfg-none", 1)).Value).Kind);
+        Assert.AreEqual(TicketFailureKind.Forbidden, ChannelHost.Is<TicketFailure>((await host.Endpoints.DeleteAsync(host.Agent, kind, "cfg-email", 2)).Value).Kind);
+        Assert.IsInstanceOfType<TicketValue<StoredChannelEndpoint>>((await host.Endpoints.DeleteAsync(host.Owner, kind, "cfg-email", 2)).Value);
     }
 
     [TestMethod]
@@ -210,9 +210,9 @@ public sealed class RoundTripTests
         var inbound = Recorded(await host.Pipeline.ReceiveAsync(host.Worker, host.Email("<root@x>")));
         var messageId = OutgoingId(Applied(await ReplyAsync(host, inbound.Conversation)));
         await host.DispatchAsync();
-        Assert.AreEqual(ChannelDispatchState.Accepted, ChannelHost.Is<ChannelValue<StoredChannelDispatch>>(
+        Assert.AreEqual(ChannelDispatchState.Accepted, ChannelHost.Is<TicketValue<StoredChannelDispatch>>(
             (await host.Endpoints.GetDispatchAsync(host.Owner, inbound.Conversation, messageId)).Value).Value.Dispatch.State);
-        Assert.IsInstanceOfType<ChannelRefused>((await host.Endpoints.GetDispatchAsync(host.Agent, inbound.Conversation, messageId)).Value);
-        Assert.IsInstanceOfType<ChannelNotFound>((await host.Endpoints.GetDispatchAsync(host.Owner, new ConversationId("missing"), messageId)).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, ChannelHost.Is<TicketFailure>((await host.Endpoints.GetDispatchAsync(host.Agent, inbound.Conversation, messageId)).Value).Kind);
+        Assert.AreEqual(TicketFailureKind.NotFound, ChannelHost.Is<TicketFailure>((await host.Endpoints.GetDispatchAsync(host.Owner, new ConversationId("missing"), messageId)).Value).Kind);
     }
 }

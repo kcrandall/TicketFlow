@@ -104,7 +104,7 @@ public sealed class HelpCenterPublicReader : IHelpCenterPublicReader, IHelpCente
     public Task<ArticleFeedbackResult> RecordFeedbackAsync(TicketScope scope, HelpCenterSlug portal, ArticleId article, string visitorKey, bool helpful, CancellationToken cancellationToken = default) =>
         RecordAsync(scope, portal, article, visitorKey, (visitor, token) => feedback.RecordVoteAsync(scope, article, visitor, helpful, token), cancellationToken);
 
-    public async Task<HelpCenterResult<IReadOnlyList<ArticleSnippet>>> SearchAsync(PrincipalRef actor, HelpCenterSearchQuery query, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<IReadOnlyList<ArticleSnippet>>> SearchAsync(PrincipalRef actor, HelpCenterSearchQuery query, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
@@ -112,7 +112,7 @@ public sealed class HelpCenterPublicReader : IHelpCenterPublicReader, IHelpCente
             return refused;
         if (await store.GetPortalAsync(actor.Scope, query.Portal, cancellationToken).ConfigureAwait(false) is null)
             return NotFound;
-        return new HelpCenterSucceeded<IReadOnlyList<ArticleSnippet>>(await store.SearchAsync(actor.Scope, query, cancellationToken).ConfigureAwait(false));
+        return new TicketValue<IReadOnlyList<ArticleSnippet>>(await store.SearchAsync(actor.Scope, query, cancellationToken).ConfigureAwait(false));
     }
 
     public async Task<IReadOnlyList<ArticleSnippet>> SearchPublicAsync(TicketScope scope, HelpCenterSearchQuery query, CancellationToken cancellationToken = default)

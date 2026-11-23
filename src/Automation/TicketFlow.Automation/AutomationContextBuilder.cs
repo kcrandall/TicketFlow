@@ -209,7 +209,7 @@ public sealed class AutomationContextBuilder(IConversationService conversations,
             return cached;
         var result = await contacts.GetAsync(principal, id, cancellationToken).ConfigureAwait(false);
         AutomationContactFacts? facts = null;
-        if (result.Value is ContactApplied<ContactView> applied)
+        if (result.Value is TicketValue<ContactView> applied)
         {
             var view = applied.Value;
             Dictionary<string, AutomationAttributeFact> attributes;

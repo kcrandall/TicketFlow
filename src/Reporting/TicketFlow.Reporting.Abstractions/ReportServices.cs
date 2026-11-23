@@ -197,14 +197,14 @@ public sealed record ReportExportSummary(long Rows, bool Truncated);
 /// </summary>
 public interface IReportingService
 {
-    Task<ReportResult<ReportOverview>> GetOverviewAsync(PrincipalRef actor, ReportQuery query, CancellationToken cancellationToken = default);
+    Task<TicketResult<ReportOverview>> GetOverviewAsync(PrincipalRef actor, ReportQuery query, CancellationToken cancellationToken = default);
 
-    Task<ReportResult<ReportLeaderboard>> GetLeaderboardAsync(PrincipalRef actor, ReportLeaderboardQuery query, CancellationToken cancellationToken = default);
+    Task<TicketResult<ReportLeaderboard>> GetLeaderboardAsync(PrincipalRef actor, ReportLeaderboardQuery query, CancellationToken cancellationToken = default);
 
-    Task<ReportResult<ReportTrend>> GetTrendsAsync(PrincipalRef actor, ReportTrendQuery query, CancellationToken cancellationToken = default);
+    Task<TicketResult<ReportTrend>> GetTrendsAsync(PrincipalRef actor, ReportTrendQuery query, CancellationToken cancellationToken = default);
 
     /// <summary>Streams matching facts as RFC 4180 CSV to <paramref name="output"/> (flushed per page) and returns the row count.</summary>
-    Task<ReportResult<ReportExportSummary>> ExportAsync(PrincipalRef actor, ReportExportQuery query, TextWriter output, CancellationToken cancellationToken = default);
+    Task<TicketResult<ReportExportSummary>> ExportAsync(PrincipalRef actor, ReportExportQuery query, TextWriter output, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Satisfaction counts of one group (<see langword="null"/> group when ungrouped or absent).</summary>

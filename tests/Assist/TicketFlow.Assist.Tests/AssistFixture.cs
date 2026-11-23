@@ -116,17 +116,17 @@ internal sealed class AssistFixture : IDisposable
         using (var scope = Provider.CreateScope())
         {
             var contactDefinitions = scope.ServiceProvider.GetRequiredService<IContactAttributeDefinitionService>();
-            Assert.IsInstanceOfType<ContactApplied<StoredContactAttributeDefinition>>((await contactDefinitions.CreateAsync(Owner, new ContactAttributeDefinition("national-id", ContactAttributeType.Text, sensitive: true))).Value);
-            Assert.IsInstanceOfType<ContactApplied<StoredContactAttributeDefinition>>((await contactDefinitions.CreateAsync(Owner, new ContactAttributeDefinition("tier", ContactAttributeType.Text))).Value);
+            Assert.IsInstanceOfType<TicketValue<StoredContactAttributeDefinition>>((await contactDefinitions.CreateAsync(Owner, new ContactAttributeDefinition("national-id", ContactAttributeType.Text, sensitive: true))).Value);
+            Assert.IsInstanceOfType<TicketValue<StoredContactAttributeDefinition>>((await contactDefinitions.CreateAsync(Owner, new ContactAttributeDefinition("tier", ContactAttributeType.Text))).Value);
             var conversationDefinitions = scope.ServiceProvider.GetRequiredService<IConversationAttributeDefinitionService>();
-            Assert.IsInstanceOfType<ConversationValue<StoredConversationAttributeDefinition>>((await conversationDefinitions.CreateAsync(Owner, new ConversationAttributeDefinition("account-pin", ConversationAttributeType.Text, sensitive: true))).Value);
-            Assert.IsInstanceOfType<ConversationValue<StoredConversationAttributeDefinition>>((await conversationDefinitions.CreateAsync(Owner, new ConversationAttributeDefinition("plan", ConversationAttributeType.Text))).Value);
+            Assert.IsInstanceOfType<TicketValue<StoredConversationAttributeDefinition>>((await conversationDefinitions.CreateAsync(Owner, new ConversationAttributeDefinition("account-pin", ConversationAttributeType.Text, sensitive: true))).Value);
+            Assert.IsInstanceOfType<TicketValue<StoredConversationAttributeDefinition>>((await conversationDefinitions.CreateAsync(Owner, new ConversationAttributeDefinition("plan", ConversationAttributeType.Text))).Value);
         }
         await PolicyAsync(ContactFieldPaths.SensitivePolicy(ContactFieldPaths.Email));
         await PolicyAsync(ContactFieldPaths.SensitivePolicy(ContactFieldPaths.Attribute("national-id")));
         await PolicyAsync(ConversationFieldPaths.SensitivePolicy(ConversationFieldPaths.Attribute("account-pin")));
 
-        Assert.IsInstanceOfType<ContactApplied<ContactView>>((await Contacts.CreateAsync(Owner, new ContactDraft(new ContactProfile("Ada Lovelace"),
+        Assert.IsInstanceOfType<TicketValue<ContactView>>((await Contacts.CreateAsync(Owner, new ContactDraft(new ContactProfile("Ada Lovelace"),
             [new ContactIdentity(ContactIdentityAddress.Parse(ContactIdentityKind.Email, SecretEmail), new IdentityClaimed("widget", Clock.GetUtcNow()))],
             new Dictionary<string, ContactAttributeValue> { ["national-id"] = new TextAttributeValue(SecretNationalId), ["tier"] = new TextAttributeValue("platinum") },
             Id: new ContactId("ada")))).Value);
@@ -166,18 +166,18 @@ internal sealed class AssistFixture : IDisposable
     public async Task GrantAsync(GrantSubject subject, AccessRole role)
     {
         var grant = new AccessGrant(new GrantId($"seed-{nextGrant++:D4}"), AccessPartition.From(Scope), subject, role.Id, new WorkspaceGrantScope(Scope.WorkspaceId));
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await Grants.CreateAsync(grant)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await Grants.CreateAsync(grant)).Value);
     }
 
     public async Task<AccessRole> CustomRoleAsync(string id, params Permission[] permissions)
     {
         var role = new AccessRole(new RoleId(id), id, permissions);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
         return role;
     }
 
     public async Task PolicyAsync(AccessFieldPolicy policy) =>
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessFieldPolicy>>((await Policies.CreateAsync(Scope, policy)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessFieldPolicy>>((await Policies.CreateAsync(Scope, policy)).Value);
 
     public async Task<TimelinePage> TimelineAsync() => (TimelinePage)(await Conversations.ReadTimelineAsync(Owner, C1, 0, 200)).Value!;
 
@@ -189,10 +189,10 @@ internal sealed class AssistFixture : IDisposable
         ConversationRefused refused => throw new AssertFailedException($"refused {refused.Reason} {string.Join("; ", refused.Errors)}"),
     };
 
-    public static T Value<T>(HelpCenterResult<T> result) => result switch
+    public static T Value<T>(TicketResult<T> result) => result switch
     {
-        HelpCenterSucceeded<T> succeeded => succeeded.Value,
-        HelpCenterRefused refused => throw new AssertFailedException($"refused {refused.Reason} {string.Join("; ", refused.Errors)}"),
+        TicketValue<T> succeeded => succeeded.Value,
+        TicketFailure refused => throw new AssertFailedException($"refused {refused.Kind} {string.Join("; ", refused.Errors)}"),
     };
 
     public static AssistSucceeded<T> Succeeded<T>(AssistResult<T> result) => result switch
@@ -210,10 +210,10 @@ internal sealed class AssistFixture : IDisposable
         AssistProviderFailed failed => $"failed:{failed.Failure}:{(failed.Retryable ? "retryable" : "final")}",
     };
 
-    public static string Describe<T>(AssistAdminResult<T> result) => result switch
+    public static string Describe<T>(TicketResult<T> result) => result switch
     {
-        AssistValue<T> => "ok",
-        AssistRefused refused => $"refused:{refused.Reason}" + (refused.CurrentRevision is { } revision ? $":{revision}" : ""),
+        TicketValue<T> => "ok",
+        TicketFailure failure => $"refused:{failure.Kind}" + (failure.CurrentRevision is { } revision ? $":{revision}" : ""),
     };
 
     public void Dispose()

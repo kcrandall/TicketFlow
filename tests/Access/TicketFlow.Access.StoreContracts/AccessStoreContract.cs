@@ -10,17 +10,17 @@ namespace TicketFlow.Access.StoreContracts;
 /// </summary>
 public static class AccessStoreContract
 {
-    public static string Describe<T>(AccessWriteResult<T> result, Func<T, long> revision) => result switch
+    public static string Describe<T>(StoreWriteResult<T, AccessWriteRejection> result, Func<T, long> revision) => result switch
     {
-        AccessWriteApplied<T> applied => $"applied:{revision(applied.Value)}",
-        AccessWriteNotFound => "not-found",
-        AccessWriteConflict conflict => $"conflict:{conflict.CurrentRevision}",
-        AccessWriteRejected rejected => $"rejected:{rejected.Reason}",
+        StoreApplied<T> applied => $"applied:{revision(applied.Value)}",
+        StoreNotFound => "not-found",
+        StoreConflict conflict => $"conflict:{conflict.CurrentRevision}",
+        StoreRejected<AccessWriteRejection> rejected => $"rejected:{rejected.Reason}",
     };
 
-    private static string Role(AccessWriteResult<StoredAccessRole> result) => Describe(result, stored => stored.Revision);
-    private static string Grant(AccessWriteResult<StoredAccessGrant> result) => Describe(result, stored => stored.Revision);
-    private static string Policy(AccessWriteResult<StoredAccessFieldPolicy> result) => Describe(result, stored => stored.Revision);
+    private static string Role(StoreWriteResult<StoredAccessRole, AccessWriteRejection> result) => Describe(result, stored => stored.Revision);
+    private static string Grant(StoreWriteResult<StoredAccessGrant, AccessWriteRejection> result) => Describe(result, stored => stored.Revision);
+    private static string Policy(StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection> result) => Describe(result, stored => stored.Revision);
 
     public static async Task VerifyRolesAsync(IAccessRoleStore primary, IAccessRoleStore competing)
     {
@@ -178,7 +178,7 @@ public static class AccessStoreContract
         Assert.AreEqual("conflict:1", Grant(await primary.DeleteAsync(partition, inboxGrant.Id, 2)));
         var removed = await competing.DeleteAsync(partition, inboxGrant.Id, 1);
         Assert.AreEqual("applied:1", Grant(removed));
-        Assert.AreEqual(inboxGrant, ((AccessWriteApplied<StoredAccessGrant>)removed.Value!).Value.Grant);
+        Assert.AreEqual(inboxGrant, ((StoreApplied<StoredAccessGrant>)removed.Value!).Value.Grant);
         Assert.IsNull(await primary.GetAsync(partition, inboxGrant.Id));
         Assert.AreEqual("not-found", Grant(await primary.DeleteAsync(partition, inboxGrant.Id, 1)));
     }

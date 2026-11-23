@@ -27,7 +27,7 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
             return Task.FromResult(widgetsByScope.TryGetValue(scope, out var bucket) ? bucket.GetValueOrDefault(configurationId) : null);
     }
 
-    public Task<LiveChatWriteResult<StoredLiveChatWidget>> CreateAsync(TicketScope scope, LiveChatWidget widget, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredLiveChatWidget, LiveChatWriteRejection>> CreateAsync(TicketScope scope, LiveChatWidget widget, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(widget);
@@ -35,51 +35,51 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         {
             widgetsByScope.TryGetValue(scope, out var bucket);
             if (bucket is not null && bucket.TryGetValue(widget.ConfigurationId, out var existing))
-                return Result<StoredLiveChatWidget>(new LiveChatWriteConflict(existing.Revision));
+                return Result<StoredLiveChatWidget>(new StoreConflict(existing.Revision));
             if ((bucket?.Count ?? 0) >= ILiveChatWidgetStore.MaximumWidgetsPerScope)
-                return Result<StoredLiveChatWidget>(new LiveChatWriteRejected(LiveChatWriteRejection.CapacityExceeded));
+                return Result<StoredLiveChatWidget>(new StoreRejected<LiveChatWriteRejection>(LiveChatWriteRejection.CapacityExceeded));
             var stored = new StoredLiveChatWidget(scope, widget, 1);
             if (bucket is null)
                 widgetsByScope[scope] = bucket = new Dictionary<string, StoredLiveChatWidget>(StringComparer.Ordinal);
             bucket[widget.ConfigurationId] = stored;
-            return Result<StoredLiveChatWidget>(new LiveChatWriteApplied<StoredLiveChatWidget>(stored));
+            return Result<StoredLiveChatWidget>(new StoreApplied<StoredLiveChatWidget>(stored));
         }
     }
 
-    public Task<LiveChatWriteResult<StoredLiveChatWidget>> UpdateAsync(TicketScope scope, LiveChatWidget widget, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredLiveChatWidget, LiveChatWriteRejection>> UpdateAsync(TicketScope scope, LiveChatWidget widget, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(widget);
         lock (gate)
         {
             if (!widgetsByScope.TryGetValue(scope, out var bucket) || !bucket.TryGetValue(widget.ConfigurationId, out var existing))
-                return Result<StoredLiveChatWidget>(LiveChatWriteNotFound.Instance);
+                return Result<StoredLiveChatWidget>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result<StoredLiveChatWidget>(new LiveChatWriteConflict(existing.Revision));
+                return Result<StoredLiveChatWidget>(new StoreConflict(existing.Revision));
             var stored = new StoredLiveChatWidget(scope, widget, existing.Revision + 1);
             bucket[widget.ConfigurationId] = stored;
-            return Result<StoredLiveChatWidget>(new LiveChatWriteApplied<StoredLiveChatWidget>(stored));
+            return Result<StoredLiveChatWidget>(new StoreApplied<StoredLiveChatWidget>(stored));
         }
     }
 
-    public Task<LiveChatWriteResult<StoredLiveChatWidget>> DeleteAsync(TicketScope scope, string configurationId, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredLiveChatWidget, LiveChatWriteRejection>> DeleteAsync(TicketScope scope, string configurationId, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(configurationId);
         lock (gate)
         {
             if (!widgetsByScope.TryGetValue(scope, out var bucket) || !bucket.TryGetValue(configurationId, out var existing))
-                return Result<StoredLiveChatWidget>(LiveChatWriteNotFound.Instance);
+                return Result<StoredLiveChatWidget>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result<StoredLiveChatWidget>(new LiveChatWriteConflict(existing.Revision));
+                return Result<StoredLiveChatWidget>(new StoreConflict(existing.Revision));
             bucket.Remove(configurationId);
             if (bucket.Count == 0)
                 widgetsByScope.Remove(scope);
-            return Result<StoredLiveChatWidget>(new LiveChatWriteApplied<StoredLiveChatWidget>(existing));
+            return Result<StoredLiveChatWidget>(new StoreApplied<StoredLiveChatWidget>(existing));
         }
     }
 
-    public Task<LiveChatWriteResult<StoredVisitorSession>> CreateAsync(TicketScope scope, VisitorSession session, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredVisitorSession, LiveChatWriteRejection>> CreateAsync(TicketScope scope, VisitorSession session, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(session);
@@ -87,12 +87,12 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         {
             var key = (AccessPartition.From(scope), session.Id);
             if (sessions.TryGetValue(key, out var existing))
-                return Result<StoredVisitorSession>(new LiveChatWriteConflict(existing.Revision));
+                return Result<StoredVisitorSession>(new StoreConflict(existing.Revision));
             if (sessions.Count >= MaximumSessions)
-                return Result<StoredVisitorSession>(new LiveChatWriteRejected(LiveChatWriteRejection.CapacityExceeded));
+                return Result<StoredVisitorSession>(new StoreRejected<LiveChatWriteRejection>(LiveChatWriteRejection.CapacityExceeded));
             var stored = new StoredVisitorSession(scope, session, 1);
             sessions[key] = stored;
-            return Result<StoredVisitorSession>(new LiveChatWriteApplied<StoredVisitorSession>(stored));
+            return Result<StoredVisitorSession>(new StoreApplied<StoredVisitorSession>(stored));
         }
     }
 
@@ -103,7 +103,7 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
             return Task.FromResult(sessions.GetValueOrDefault((partition, id)));
     }
 
-    public Task<LiveChatWriteResult<StoredVisitorSession>> UpdateAsync(TicketScope scope, VisitorSession session, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredVisitorSession, LiveChatWriteRejection>> UpdateAsync(TicketScope scope, VisitorSession session, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(session);
@@ -111,39 +111,39 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         {
             var key = (AccessPartition.From(scope), session.Id);
             if (!sessions.TryGetValue(key, out var existing) || existing.Scope != scope)
-                return Result<StoredVisitorSession>(LiveChatWriteNotFound.Instance);
+                return Result<StoredVisitorSession>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
-                return Result<StoredVisitorSession>(new LiveChatWriteConflict(existing.Revision));
+                return Result<StoredVisitorSession>(new StoreConflict(existing.Revision));
             var current = existing.Session;
             if (current.ConfigurationId != session.ConfigurationId || current.Inbox != session.Inbox || current.VisitorId != session.VisitorId || current.CreatedAt != session.CreatedAt)
                 throw new ArgumentException("Session identity fields are immutable.", nameof(session));
             var stored = new StoredVisitorSession(scope, session, existing.Revision + 1);
             sessions[key] = stored;
-            return Result<StoredVisitorSession>(new LiveChatWriteApplied<StoredVisitorSession>(stored));
+            return Result<StoredVisitorSession>(new StoreApplied<StoredVisitorSession>(stored));
         }
     }
 
-    public Task<LiveChatWriteResult<VisitorConversationLink>> LinkAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, DateTimeOffset linkedAt, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<VisitorConversationLink, LiveChatWriteRejection>> LinkAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, DateTimeOffset linkedAt, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireIds(session, conversation);
         lock (gate)
         {
             if (!sessions.TryGetValue((AccessPartition.From(scope), session), out var stored) || stored.Scope != scope)
-                return Result<VisitorConversationLink>(LiveChatWriteNotFound.Instance);
+                return Result<VisitorConversationLink>(StoreNotFound.Instance);
             if (!links.TryGetValue((scope, session), out var list))
                 links[(scope, session)] = list = [];
             for (var i = 0; i < list.Count; i++)
                 if (list[i].Conversation == conversation)
-                    return Result<VisitorConversationLink>(new LiveChatWriteApplied<VisitorConversationLink>(list[i]));
+                    return Result<VisitorConversationLink>(new StoreApplied<VisitorConversationLink>(list[i]));
             if (list.Count >= ILiveChatSessionStore.MaximumLinksPerSession)
-                return Result<VisitorConversationLink>(new LiveChatWriteRejected(LiveChatWriteRejection.CapacityExceeded));
+                return Result<VisitorConversationLink>(new StoreRejected<LiveChatWriteRejection>(LiveChatWriteRejection.CapacityExceeded));
             var link = new VisitorConversationLink(session, conversation, LiveChatText.Instant(linkedAt), 0);
             list.Add(link);
             if (!linksByConversation.TryGetValue((scope, conversation), out var byConv))
                 linksByConversation[(scope, conversation)] = byConv = [];
             byConv.Add(link);
-            return Result<VisitorConversationLink>(new LiveChatWriteApplied<VisitorConversationLink>(link));
+            return Result<VisitorConversationLink>(new StoreApplied<VisitorConversationLink>(link));
         }
     }
 
@@ -235,7 +235,7 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         return cmp != 0 ? cmp : StringComparer.Ordinal.Compare(a.Session.Value, b.Session.Value);
     }
 
-    public Task<LiveChatWriteResult<VisitorConversationLink>> AdvanceCursorAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, long readSequence, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<VisitorConversationLink, LiveChatWriteRejection>> AdvanceCursorAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, long readSequence, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireIds(session, conversation);
@@ -244,7 +244,7 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         {
             var index = links.TryGetValue((scope, session), out var list) ? list.FindIndex(link => link.Conversation == conversation) : -1;
             if (list is null || index < 0)
-                return Result<VisitorConversationLink>(LiveChatWriteNotFound.Instance);
+                return Result<VisitorConversationLink>(StoreNotFound.Instance);
             var link = list[index];
             if (readSequence > link.ReadSequence)
             {
@@ -259,7 +259,7 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
                         }
                 }
             }
-            return Result<VisitorConversationLink>(new LiveChatWriteApplied<VisitorConversationLink>(link));
+            return Result<VisitorConversationLink>(new StoreApplied<VisitorConversationLink>(link));
         }
     }
 
@@ -307,7 +307,7 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
             throw new ArgumentException("Session and conversation identifiers are required.");
     }
 
-    private static Task<LiveChatWriteResult<T>> Result<T>(LiveChatWriteResult<T> result) => Task.FromResult(result);
+    private static Task<StoreWriteResult<T, LiveChatWriteRejection>> Result<T>(StoreWriteResult<T, LiveChatWriteRejection> result) => Task.FromResult(result);
 }
 
 /// <summary>

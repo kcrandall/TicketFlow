@@ -14,7 +14,7 @@ public sealed class DecisionContextTests
         await fixture.GrantAsync(user.UserId, BuiltInRoles.Agent, new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("billing")));
         await fixture.GrantAsync(user.UserId, BuiltInRoles.Viewer, condition: new HasLabelCondition(new LabelId("public")));
         await fixture.GrantAsync(user.UserId, BuiltInRoles.LightAgent, new InboxGrantScope(fixture.Scope.WorkspaceId, new InboxId("vip")), GrantEffect.Deny);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessFieldPolicy>>((await fixture.Policies.CreateAsync(fixture.Scope,
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessFieldPolicy>>((await fixture.Policies.CreateAsync(fixture.Scope,
             new AccessFieldPolicy(new FieldPath("conversation.channel"), [AccessPermissions.ConversationRead], [BuiltInRoles.Agent.Id], AccessPermissions.ContactReveal))).Value);
         Permission[] permissions = [AccessPermissions.ConversationRead, AccessPermissions.NoteRead, AccessPermissions.ConversationReply, new("macro:run")];
         var context = await fixture.Evaluator.LoadDecisionContextAsync(user, fixture.Scope, permissions);

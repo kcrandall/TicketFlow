@@ -122,7 +122,7 @@ public sealed partial class PostgresAutomationStore : IAutomationRuleStore, IAut
         return rules;
     }
 
-    public async Task<AutomationWriteResult<StoredAutomationRule>> CreateAsync(TicketScope scope, AutomationRule rule, DateTimeOffset? nextRunAt, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAutomationRule, AutomationWriteRejection>> CreateAsync(TicketScope scope, AutomationRule rule, DateTimeOffset? nextRunAt, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(rule);
@@ -148,14 +148,14 @@ public sealed partial class PostgresAutomationStore : IAutomationRuleStore, IAut
         if (insertedRevision is { } rev)
         {
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new AutomationWriteApplied<StoredAutomationRule>(new StoredAutomationRule(scope, rule, rev));
+            return new StoreApplied<StoredAutomationRule>(new StoredAutomationRule(scope, rule, rev));
         }
         return existingRevision is { } current
-            ? new AutomationWriteConflict(current)
-            : new AutomationWriteRejected(AutomationWriteRejection.CapacityExceeded);
+            ? new StoreConflict(current)
+            : new StoreRejected<AutomationWriteRejection>(AutomationWriteRejection.CapacityExceeded);
     }
 
-    public async Task<AutomationWriteResult<StoredAutomationRule>> UpdateAsync(TicketScope scope, AutomationRule rule, long expectedRevision, DateTimeOffset? nextRunAt,
+    public async Task<StoreWriteResult<StoredAutomationRule, AutomationWriteRejection>> UpdateAsync(TicketScope scope, AutomationRule rule, long expectedRevision, DateTimeOffset? nextRunAt,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -170,14 +170,14 @@ public sealed partial class PostgresAutomationStore : IAutomationRuleStore, IAut
             AddInstant(command, "next", nextRunAt);
             AddLong(command, "expected", expectedRevision);
             if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                return new AutomationWriteApplied<StoredAutomationRule>(new StoredAutomationRule(scope, rule, revision));
+                return new StoreApplied<StoredAutomationRule>(new StoredAutomationRule(scope, rule, revision));
         }
         return await RevisionAsync(connection, null, $"SELECT revision FROM tf_automation_rules WHERE {RuleWhere}", scope, "rule", rule.Id.Value, cancellationToken).ConfigureAwait(false) is { } current
-            ? new AutomationWriteConflict(current)
-            : AutomationWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
-    public async Task<AutomationWriteResult<StoredAutomationRule>> DeleteAsync(TicketScope scope, AutomationRuleId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAutomationRule, AutomationWriteRejection>> DeleteAsync(TicketScope scope, AutomationRuleId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireInitialized(id.IsInitialized, nameof(id));
@@ -189,11 +189,11 @@ public sealed partial class PostgresAutomationStore : IAutomationRuleStore, IAut
             AddLong(command, "expected", expectedRevision);
             await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new AutomationWriteApplied<StoredAutomationRule>(ReadRule(reader, scope));
+                return new StoreApplied<StoredAutomationRule>(ReadRule(reader, scope));
         }
         return await RevisionAsync(connection, null, $"SELECT revision FROM tf_automation_rules WHERE {RuleWhere}", scope, "rule", id.Value, cancellationToken).ConfigureAwait(false) is { } current
-            ? new AutomationWriteConflict(current)
-            : AutomationWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
     public async Task<IReadOnlyList<AutomationScheduleClaim>> ClaimDueSchedulesAsync(int limit, TimeSpan lease, CancellationToken cancellationToken = default)

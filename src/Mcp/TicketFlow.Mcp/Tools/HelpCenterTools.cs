@@ -4,6 +4,7 @@ using ModelContextProtocol.Server;
 using TicketFlow.HelpCenter;
 
 using P = TicketFlow.Mcp.TicketFlowMcpPermissions;
+using TicketFlow.Core;
 
 namespace TicketFlow.Mcp.Tools;
 
@@ -112,7 +113,7 @@ public sealed class HelpCenterTools(TicketFlowToolContext context)
         context.RunAsync(workspace, async principal =>
         {
             var read = await Service.GetArticleAsync(principal, new ArticleId(articleId), cancellationToken);
-            if (read is not HelpCenterSucceeded<StoredArticle> current)
+            if (read is not TicketValue<StoredArticle> current)
                 return Map(read, Article);
             var article = current.Value.Record.Article;
             var target = new HelpCenterLocale(locale);
@@ -163,16 +164,5 @@ public sealed class HelpCenterTools(TicketFlowToolContext context)
         stored.Record.UpdatedAt,
         stored.Revision);
 
-    private static object Map<T>(HelpCenterResult<T> result, Func<T, object> success) => result switch
-    {
-        HelpCenterSucceeded<T> succeeded => success(succeeded.Value),
-        HelpCenterRefused refused => refused.Reason switch
-        {
-            HelpCenterRefusal.Forbidden => TicketFlowToolError.Forbidden(),
-            HelpCenterRefusal.Invalid => TicketFlowToolError.Invalid(refused.Errors),
-            HelpCenterRefusal.NotFound => TicketFlowToolError.NotFound(),
-            HelpCenterRefusal.Conflict => TicketFlowToolError.Conflict(refused.CurrentRevision),
-            _ => TicketFlowToolError.Rejected(refused.Errors),
-        },
-    };
+    private static object Map<T>(TicketResult<T> result, Func<T, object> success) => TicketFlowToolError.Map(result, success);
 }

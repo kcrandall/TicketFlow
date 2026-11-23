@@ -54,12 +54,12 @@ internal sealed class LiveChatHost : IAsyncDisposable
         });
         var created = new LiveChatHost(host, search, validator, attachments);
         var inboxes = host.Services.GetRequiredService<IInboxStore>();
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await inboxes.CreateAsync(host.Scope,
+        Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await inboxes.CreateAsync(host.Scope,
             new Inbox(new InboxId("chat-inbox"), "Chat", new ChannelBinding(new ChannelKind("livechat"), "cfg-chat"), greetingMessage: "Inbox greeting", awayMessage: "Inbox away"))).Value);
-        Assert.IsInstanceOfType<ChannelValue<StoredChannelEndpoint>>((await host.Endpoints.CreateAsync(host.Owner,
+        Assert.IsInstanceOfType<TicketValue<StoredChannelEndpoint>>((await host.Endpoints.CreateAsync(host.Owner,
             new ChannelEndpoint(new ChannelKind("livechat"), "cfg-chat", new InboxId("chat-inbox"), WidgetKey))).Value);
         if (seedWidget)
-            Assert.IsInstanceOfType<LiveChatValue<StoredLiveChatWidget>>((await created.Widgets.CreateAsync(host.Owner, widget ?? LiveChatStoreContract.Widget())).Value);
+            Assert.IsInstanceOfType<TicketValue<StoredLiveChatWidget>>((await created.Widgets.CreateAsync(host.Owner, widget ?? LiveChatStoreContract.Widget())).Value);
         return created;
     }
 
@@ -90,14 +90,14 @@ internal sealed class LiveChatHost : IAsyncDisposable
 
     public Task Idle() => Host.Services.GetRequiredService<RealtimeSubscriptionRegistry>().IdleAsync();
 
-    public static T Value<T>(LiveChatResult<T> result)
+    public static T Value<T>(TicketResult<T, LiveChatRefused> result)
     {
         if (result.Value is LiveChatRefused refused)
             Assert.Fail($"Expected a value but got {refused.Reason}: {string.Join("; ", refused.Errors)}");
-        return ((LiveChatValue<T>)result.Value!).Value;
+        return ((TicketValue<T>)result.Value!).Value;
     }
 
-    public static LiveChatRefusal Refusal<T>(LiveChatResult<T> result) => ChannelHost.Is<LiveChatRefused>(result.Value).Reason;
+    public static LiveChatRefusal Refusal<T>(TicketResult<T, LiveChatRefused> result) => ChannelHost.Is<LiveChatRefused>(result.Value).Reason;
 
     public ValueTask DisposeAsync() => Host.DisposeAsync();
 
@@ -111,7 +111,7 @@ internal sealed class LiveChatHost : IAsyncDisposable
     {
         public List<HelpCenterSearchQuery> Queries { get; } = [];
 
-        public Task<HelpCenterResult<IReadOnlyList<ArticleSnippet>>> SearchAsync(PrincipalRef actor, HelpCenterSearchQuery query, CancellationToken cancellationToken = default) =>
+        public Task<TicketResult<IReadOnlyList<ArticleSnippet>>> SearchAsync(PrincipalRef actor, HelpCenterSearchQuery query, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
         public Task<IReadOnlyList<ArticleSnippet>> SearchPublicAsync(TicketScope scope, HelpCenterSearchQuery query, CancellationToken cancellationToken = default)

@@ -2,22 +2,6 @@ using TicketFlow.Core;
 
 namespace TicketFlow.Automation;
 
-/// <summary>The store write was applied; <see cref="Value"/> is the stored state (for deletes, the removed state).</summary>
-public sealed record AutomationWriteApplied<T>(T Value);
-
-/// <summary>No record exists for the key in the requested scope. Nothing was written.</summary>
-public sealed record AutomationWriteNotFound
-{
-    private AutomationWriteNotFound()
-    {
-    }
-
-    public static AutomationWriteNotFound Instance { get; } = new();
-}
-
-/// <summary>The expected revision did not match, or a create found an existing record. Nothing was written.</summary>
-public sealed record AutomationWriteConflict(long CurrentRevision);
-
 public enum AutomationWriteRejection
 {
     /// <summary>A per-workspace capacity would be exceeded.</summary>
@@ -26,12 +10,6 @@ public enum AutomationWriteRejection
     /// <summary>Another canned response in the workspace already uses the shortcut.</summary>
     DuplicateShortcut = 2,
 }
-
-/// <summary>The store refused the write for a contract reason. Nothing was written.</summary>
-public sealed record AutomationWriteRejected(AutomationWriteRejection Reason);
-
-/// <summary>Outcome of an automation store write. Switch over every case without a discard arm.</summary>
-public union AutomationWriteResult<T>(AutomationWriteApplied<T>, AutomationWriteNotFound, AutomationWriteConflict, AutomationWriteRejected);
 
 /// <summary>
 /// A leased claim of one due scheduled rule. <see cref="Fence"/> increases with every claim and every rule write;
@@ -79,12 +57,12 @@ public interface IAutomationRuleStore
 
     Task<long> GetRuleSetVersionAsync(TicketScope scope, CancellationToken cancellationToken = default);
 
-    Task<AutomationWriteResult<StoredAutomationRule>> CreateAsync(TicketScope scope, AutomationRule rule, DateTimeOffset? nextRunAt, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAutomationRule, AutomationWriteRejection>> CreateAsync(TicketScope scope, AutomationRule rule, DateTimeOffset? nextRunAt, CancellationToken cancellationToken = default);
 
-    Task<AutomationWriteResult<StoredAutomationRule>> UpdateAsync(TicketScope scope, AutomationRule rule, long expectedRevision, DateTimeOffset? nextRunAt,
+    Task<StoreWriteResult<StoredAutomationRule, AutomationWriteRejection>> UpdateAsync(TicketScope scope, AutomationRule rule, long expectedRevision, DateTimeOffset? nextRunAt,
         CancellationToken cancellationToken = default);
 
-    Task<AutomationWriteResult<StoredAutomationRule>> DeleteAsync(TicketScope scope, AutomationRuleId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAutomationRule, AutomationWriteRejection>> DeleteAsync(TicketScope scope, AutomationRuleId id, long expectedRevision, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<AutomationScheduleClaim>> ClaimDueSchedulesAsync(int limit, TimeSpan lease, CancellationToken cancellationToken = default);
 
@@ -183,7 +161,7 @@ public interface IAutomationExecutionStore
 
     Task<AutomationBeginResult> BeginAsync(TicketScope scope, AutomationExecution execution, CancellationToken cancellationToken = default);
 
-    Task<AutomationWriteResult<StoredAutomationExecution>> UpdateAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
+    Task<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>> UpdateAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
         CancellationToken cancellationToken = default);
 
     Task<StoredAutomationExecution?> GetAsync(TicketScope scope, Guid execution, CancellationToken cancellationToken = default);
@@ -204,7 +182,7 @@ public interface IAutomationExecutionStore
 /// <summary>Optional fast-path implemented by execution stores that can index only newly produced sequences during progress updates.</summary>
 public interface IIncrementalAutomationExecutionStore
 {
-    Task<AutomationWriteResult<StoredAutomationExecution>> UpdateProgressAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
+    Task<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>> UpdateProgressAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
         IReadOnlyList<long> newSequences, CancellationToken cancellationToken = default);
 }
 
@@ -234,11 +212,11 @@ public interface IMacroStore
         return visible;
     }
 
-    Task<AutomationWriteResult<StoredMacro>> CreateAsync(TicketScope scope, Macro macro, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredMacro, AutomationWriteRejection>> CreateAsync(TicketScope scope, Macro macro, CancellationToken cancellationToken = default);
 
-    Task<AutomationWriteResult<StoredMacro>> UpdateAsync(TicketScope scope, Macro macro, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredMacro, AutomationWriteRejection>> UpdateAsync(TicketScope scope, Macro macro, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AutomationWriteResult<StoredMacro>> DeleteAsync(TicketScope scope, MacroId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredMacro, AutomationWriteRejection>> DeleteAsync(TicketScope scope, MacroId id, long expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>A bounded canned response list ordered by shortcut (ordinal), optionally restricted to a shortcut prefix.</summary>
@@ -284,9 +262,9 @@ public interface ICannedResponseStore
 
     Task<CannedResponsePage> ListAsync(TicketScope scope, CannedResponseQuery query, CancellationToken cancellationToken = default);
 
-    Task<AutomationWriteResult<StoredCannedResponse>> CreateAsync(TicketScope scope, CannedResponse response, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredCannedResponse, AutomationWriteRejection>> CreateAsync(TicketScope scope, CannedResponse response, CancellationToken cancellationToken = default);
 
-    Task<AutomationWriteResult<StoredCannedResponse>> UpdateAsync(TicketScope scope, CannedResponse response, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredCannedResponse, AutomationWriteRejection>> UpdateAsync(TicketScope scope, CannedResponse response, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AutomationWriteResult<StoredCannedResponse>> DeleteAsync(TicketScope scope, CannedResponseId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredCannedResponse, AutomationWriteRejection>> DeleteAsync(TicketScope scope, CannedResponseId id, long expectedRevision, CancellationToken cancellationToken = default);
 }

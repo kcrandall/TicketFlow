@@ -181,18 +181,18 @@ public sealed class VisitorFlowTests
         Assert.AreEqual("Inbox greeting", open.GreetingMessage);
 
         var calendars = host.Host.Services.GetRequiredService<IBusinessCalendarStore>();
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredBusinessCalendar>>((await calendars.CreateAsync(host.Scope, new BusinessCalendar(new BusinessCalendarId("closed"), "Closed", "UTC"))).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredBusinessCalendar>>((await calendars.CreateAsync(host.Scope, new BusinessCalendar(new BusinessCalendarId("closed"), "Closed", "UTC"))).Value);
         var inboxes = host.Host.Services.GetRequiredService<IInboxStore>();
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await inboxes.UpdateAsync(host.Scope, new Inbox(new InboxId("chat-inbox"), "Chat",
+        Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await inboxes.UpdateAsync(host.Scope, new Inbox(new InboxId("chat-inbox"), "Chat",
             new ChannelBinding(new ChannelKind("livechat"), "cfg-chat"), new BusinessCalendarId("closed"), greetingMessage: "Inbox greeting", awayMessage: "Inbox away"), 1)).Value);
         var closed = Value(await host.Visitors.GetWidgetAsync(host.Partition, WidgetKey, Origin));
         Assert.IsFalse(closed.Online);
         Assert.AreEqual("Inbox away", closed.AwayMessage);
 
         await using var overridden = await CreateAsync();
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredBusinessCalendar>>((await overridden.Host.Services.GetRequiredService<IBusinessCalendarStore>()
+        Assert.IsInstanceOfType<StoreApplied<StoredBusinessCalendar>>((await overridden.Host.Services.GetRequiredService<IBusinessCalendarStore>()
             .CreateAsync(overridden.Scope, new BusinessCalendar(new BusinessCalendarId("closed"), "Closed", "UTC"))).Value);
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await overridden.Host.Services.GetRequiredService<IInboxStore>().UpdateAsync(overridden.Scope,
+        Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await overridden.Host.Services.GetRequiredService<IInboxStore>().UpdateAsync(overridden.Scope,
             new Inbox(new InboxId("chat-inbox"), "Chat", new ChannelBinding(new ChannelKind("livechat"), "cfg-chat"), new BusinessCalendarId("closed"), awayMessage: "Inbox away"), 1)).Value);
         Assert.AreEqual("We are away", Value(await overridden.Visitors.GetWidgetAsync(overridden.Partition, WidgetKey, Origin)).AwayMessage);
     }
@@ -202,7 +202,7 @@ public sealed class VisitorFlowTests
     {
         await using var host = await CreateAsync(new LiveChatWidget("cfg-chat", new InboxId("chat-inbox"), [Origin]));
         var grant = Value(await host.Visitors.StartSessionAsync(host.Partition, WidgetKey, Origin));
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await host.Host.Services.GetRequiredService<IInboxStore>().UpdateAsync(host.Scope,
+        Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await host.Host.Services.GetRequiredService<IInboxStore>().UpdateAsync(host.Scope,
             new Inbox(new InboxId("chat-inbox"), "Chat", new ChannelBinding(new ChannelKind("livechat"), "cfg-chat"), enabled: false), 1)).Value);
         Assert.AreEqual(LiveChatRefusal.Unavailable, Refusal(await host.Visitors.StartSessionAsync(host.Partition, WidgetKey, Origin)));
         Assert.AreEqual(LiveChatRefusal.Unavailable, Refusal(await host.Visitors.SendMessageAsync(grant.Context, new VisitorMessageDraft("c1", "Hi"))));
@@ -220,7 +220,7 @@ public sealed class VisitorFlowTests
 
         var sessions = host.Host.Services.GetRequiredService<ILiveChatSessionStore>();
         var current = (await sessions.GetAsync(host.Partition, grant.Context.Session.Session.Id))!;
-        Assert.IsInstanceOfType<LiveChatWriteApplied<StoredVisitorSession>>((await sessions.UpdateAsync(host.Scope, current.Session.With(revoked: true), current.Revision)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredVisitorSession>>((await sessions.UpdateAsync(host.Scope, current.Session.With(revoked: true), current.Revision)).Value);
         Assert.IsEmpty(await host.Host.Services.GetServices<IVisitorSessionDirectory>().Single().ListSessionsAsync(host.Scope, accepted.Conversation));
 
         Assert.IsInstanceOfType<RealtimeActionApplied>((await host.Host.Services.GetRequiredService<IRealtimeAgentActions>().SetTypingAsync(host.Host.Agent, accepted.Conversation, true)).Value);

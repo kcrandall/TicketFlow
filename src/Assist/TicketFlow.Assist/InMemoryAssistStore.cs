@@ -32,10 +32,10 @@ public sealed class InMemoryAssistStore : IAssistStore
         {
             var current = settings.GetValueOrDefault(scope)?.Revision ?? 0;
             if (current != expectedRevision)
-                return Task.FromResult<AssistWriteResult<StoredAssistSettings>>(new AssistWriteConflict(current));
+                return Task.FromResult<AssistWriteResult<StoredAssistSettings>>(new StoreConflict(current));
             var stored = new StoredAssistSettings(scope, value, current + 1);
             settings[scope] = stored;
-            return Task.FromResult<AssistWriteResult<StoredAssistSettings>>(new AssistWriteApplied<StoredAssistSettings>(stored));
+            return Task.FromResult<AssistWriteResult<StoredAssistSettings>>(new StoreApplied<StoredAssistSettings>(stored));
         }
     }
 

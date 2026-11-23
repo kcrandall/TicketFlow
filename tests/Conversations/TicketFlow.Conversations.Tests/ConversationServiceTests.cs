@@ -346,13 +346,13 @@ public sealed class ConversationServiceTests
         Assert.IsInstanceOfType<ConversationNotFound>((await fixture.Conversations.GetAsync(fixture.Owner, C1)).Value);
 
         var definition = new ConversationAttributeDefinition("plan", ConversationAttributeType.Text);
-        Assert.IsInstanceOfType<ConversationRefused>((await fixture.Definitions.CreateAsync(fixture.Agent, definition)).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await fixture.Definitions.CreateAsync(fixture.Agent, definition)).Value).Kind);
         await fixture.DefineAsync(definition);
-        Assert.IsInstanceOfType<ConversationConflict>((await fixture.Definitions.CreateAsync(fixture.Owner, definition)).Value);
-        Assert.AreEqual(1, ((ConversationValue<IReadOnlyList<StoredConversationAttributeDefinition>>)(await fixture.Definitions.ListAsync(fixture.Agent)).Value!).Value.Count);
-        Assert.IsInstanceOfType<ConversationRefused>((await fixture.Definitions.UpdateAsync(fixture.Owner,
-            new ConversationAttributeDefinition("plan", ConversationAttributeType.Number), 1)).Value);
-        Assert.IsInstanceOfType<ConversationValue<StoredConversationAttributeDefinition>>((await fixture.Definitions.DeleteAsync(fixture.Owner, "plan", 1)).Value);
+        Assert.AreEqual(TicketFailureKind.Conflict, Assert.IsInstanceOfType<TicketFailure>((await fixture.Definitions.CreateAsync(fixture.Owner, definition)).Value).Kind);
+        Assert.AreEqual(1, ((TicketValue<IReadOnlyList<StoredConversationAttributeDefinition>>)(await fixture.Definitions.ListAsync(fixture.Agent)).Value!).Value.Count);
+        Assert.AreEqual(TicketFailureKind.Rejected, Assert.IsInstanceOfType<TicketFailure>((await fixture.Definitions.UpdateAsync(fixture.Owner,
+            new ConversationAttributeDefinition("plan", ConversationAttributeType.Number), 1)).Value).Kind);
+        Assert.IsInstanceOfType<TicketValue<StoredConversationAttributeDefinition>>((await fixture.Definitions.DeleteAsync(fixture.Owner, "plan", 1)).Value);
     }
 
     [TestMethod]
@@ -360,7 +360,7 @@ public sealed class ConversationServiceTests
     {
         using var fixture = await ConversationFixture.CreateAsync();
         var merge = await fixture.ContactsService.MergeAsync(fixture.Owner, new ContactMergeRequest(new ContactId("ada"), 1, new ContactId("grace"), 1));
-        Assert.IsInstanceOfType<ContactApplied<ContactMergeOutcome>>(merge.Value);
+        Assert.IsInstanceOfType<TicketValue<ContactMergeOutcome>>(merge.Value);
         Assert.AreEqual("refused:Invalid", ConversationFixture.Describe(await fixture.Conversations.StartAsync(fixture.Channel,
             new StartConversationRequest(new InboxId("email"), new ContactId("grace")))));
     }

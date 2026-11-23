@@ -3,58 +3,18 @@ using TicketFlow.Workspaces;
 
 namespace TicketFlow.Routing;
 
-public sealed record RoutingValue<T>(T Value);
-
-/// <summary>The record does not exist in the actor's scope.</summary>
-public sealed record RoutingNotFound
-{
-    private RoutingNotFound()
-    {
-    }
-
-    public static RoutingNotFound Instance { get; } = new();
-}
-
-/// <summary>The expected revision did not match.</summary>
-public sealed record RoutingConflict(long CurrentRevision);
-
-public enum RoutingRefusal
-{
-    /// <summary>Access denied the operation.</summary>
-    Forbidden = 1,
-
-    /// <summary>The input is invalid; see <see cref="RoutingRefused.Errors"/>.</summary>
-    Invalid = 2,
-
-    /// <summary>A store limit refused the write, or the principal kind is not supported for the operation.</summary>
-    Rejected = 3,
-}
-
-/// <summary>The operation was refused. <see cref="Errors"/> are non-sensitive messages.</summary>
-public sealed record RoutingRefused(RoutingRefusal Reason, IReadOnlyList<string> Errors)
-{
-    public static RoutingRefused Forbidden { get; } = new(RoutingRefusal.Forbidden, []);
-
-    public static RoutingRefused Invalid(string error) => new(RoutingRefusal.Invalid, [error]);
-
-    public static RoutingRefused Rejected(string error) => new(RoutingRefusal.Rejected, [error]);
-}
-
-/// <summary>Outcome of a routing service operation. Switch over every case without a discard arm.</summary>
-public union RoutingResult<T>(RoutingValue<T>, RoutingNotFound, RoutingConflict, RoutingRefused);
-
 /// <summary>Access-checked routing policy management: reads need <c>inbox:read</c>, writes <c>routing:manage</c> (workspace level).</summary>
 public interface IRoutingPolicyService
 {
-    Task<RoutingResult<StoredRoutingPolicy>> GetAsync(PrincipalRef actor, RoutingPolicyId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredRoutingPolicy>> GetAsync(PrincipalRef actor, RoutingPolicyId id, CancellationToken cancellationToken = default);
 
-    Task<RoutingResult<IReadOnlyList<StoredRoutingPolicy>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredRoutingPolicy>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
-    Task<RoutingResult<StoredRoutingPolicy>> CreateAsync(PrincipalRef actor, RoutingPolicy policy, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredRoutingPolicy>> CreateAsync(PrincipalRef actor, RoutingPolicy policy, CancellationToken cancellationToken = default);
 
-    Task<RoutingResult<StoredRoutingPolicy>> UpdateAsync(PrincipalRef actor, RoutingPolicy policy, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredRoutingPolicy>> UpdateAsync(PrincipalRef actor, RoutingPolicy policy, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<RoutingResult<StoredRoutingPolicy>> DeleteAsync(PrincipalRef actor, RoutingPolicyId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredRoutingPolicy>> DeleteAsync(PrincipalRef actor, RoutingPolicyId id, long expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -65,17 +25,17 @@ public interface IRoutingPolicyService
 /// </summary>
 public interface IAgentAvailabilityService
 {
-    Task<RoutingResult<StoredAgentProfile>> GetAsync(PrincipalRef actor, UserId agent, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredAgentProfile>> GetAsync(PrincipalRef actor, UserId agent, CancellationToken cancellationToken = default);
 
-    Task<RoutingResult<IReadOnlyList<StoredAgentProfile>>> ListAsync(PrincipalRef actor, UserId? after = null, int limit = 50, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredAgentProfile>>> ListAsync(PrincipalRef actor, UserId? after = null, int limit = 50, CancellationToken cancellationToken = default);
 
     /// <summary>Creates (expected revision <see langword="null"/>; the agent starts Offline) or replaces an agent's capacity and skills.</summary>
-    Task<RoutingResult<StoredAgentProfile>> ConfigureAsync(PrincipalRef actor, AgentRoutingSettings settings, long? expectedRevision = null, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredAgentProfile>> ConfigureAsync(PrincipalRef actor, AgentRoutingSettings settings, long? expectedRevision = null, CancellationToken cancellationToken = default);
 
-    Task<RoutingResult<StoredAgentProfile>> SetStatusAsync(PrincipalRef actor, UserId agent, AgentStatus status, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredAgentProfile>> SetStatusAsync(PrincipalRef actor, UserId agent, AgentStatus status, CancellationToken cancellationToken = default);
 
     /// <summary>Extends the calling user's presence; lapsed agents must set a status again.</summary>
-    Task<RoutingResult<StoredAgentProfile>> HeartbeatAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredAgentProfile>> HeartbeatAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -84,18 +44,18 @@ public interface IAgentAvailabilityService
 /// </summary>
 public interface IConversationCollisionService
 {
-    Task<RoutingResult<ConversationPresence>> ReportActivityAsync(PrincipalRef actor, ConversationId conversation, ConversationActivity activity, CancellationToken cancellationToken = default);
+    Task<TicketResult<ConversationPresence>> ReportActivityAsync(PrincipalRef actor, ConversationId conversation, ConversationActivity activity, CancellationToken cancellationToken = default);
 
-    Task<RoutingResult<bool>> LeaveAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default);
+    Task<TicketResult<bool>> LeaveAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default);
 
-    Task<RoutingResult<IReadOnlyList<ConversationPresence>>> ListActivityAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<ConversationPresence>>> ListActivityAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default);
 
     /// <summary>Acquires or renews the caller's lock for <paramref name="duration"/> (default from options).</summary>
-    Task<RoutingResult<ReplyLockResult>> AcquireReplyLockAsync(PrincipalRef actor, ConversationId conversation, TimeSpan? duration = null, CancellationToken cancellationToken = default);
+    Task<TicketResult<ReplyLockResult>> AcquireReplyLockAsync(PrincipalRef actor, ConversationId conversation, TimeSpan? duration = null, CancellationToken cancellationToken = default);
 
-    Task<RoutingResult<ReplyLock?>> GetReplyLockAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default);
+    Task<TicketResult<ReplyLock?>> GetReplyLockAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default);
 
-    Task<RoutingResult<bool>> ReleaseReplyLockAsync(PrincipalRef actor, ConversationId conversation, long fence, CancellationToken cancellationToken = default);
+    Task<TicketResult<bool>> ReleaseReplyLockAsync(PrincipalRef actor, ConversationId conversation, long fence, CancellationToken cancellationToken = default);
 }
 
 /// <summary>A queued conversation as listed: waiting position, target queue and overflow progress (no PII).</summary>
@@ -107,7 +67,7 @@ public sealed record RoutingQueueListPage(IReadOnlyList<RoutingQueueItem> Items,
 /// <summary>Unassigned queues: <c>conversation:read</c>, filtered per conversation by the planned Access filter inside the store query.</summary>
 public interface IRoutingQueueService
 {
-    Task<RoutingResult<RoutingQueueListPage>> ListAsync(PrincipalRef actor, RoutingQueueQuery query, CancellationToken cancellationToken = default);
+    Task<TicketResult<RoutingQueueListPage>> ListAsync(PrincipalRef actor, RoutingQueueQuery query, CancellationToken cancellationToken = default);
 }
 
 /// <summary>The conversation was assigned to <see cref="Agent"/> at conversation revision <see cref="Revision"/>.</summary>

@@ -24,23 +24,23 @@ public sealed class ChannelEndpointService(
     private readonly IAccessEvaluator evaluator = evaluator ?? throw new ArgumentNullException(nameof(evaluator));
     private readonly IChannelAddressOwnershipValidator ownership = ownership ?? throw new ArgumentNullException(nameof(ownership));
 
-    public async Task<ChannelResult<StoredChannelEndpoint>> GetAsync(PrincipalRef actor, ChannelKind kind, string configurationId, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredChannelEndpoint>> GetAsync(PrincipalRef actor, ChannelKind kind, string configurationId, CancellationToken cancellationToken = default)
     {
         var scope = Scope(actor);
         var stored = await endpoints.GetAsync(scope, kind, configurationId, cancellationToken).ConfigureAwait(false);
         if (stored is null)
-            return ChannelNotFound.Instance;
+            return TicketFailure.NotFound;
         if (!await PermittedAsync(actor, ChannelPermissions.Read, stored.Endpoint.Inbox, cancellationToken).ConfigureAwait(false))
-            return ChannelRefused.Forbidden;
-        return new ChannelValue<StoredChannelEndpoint>(stored);
+            return TicketFailure.Forbidden;
+        return new TicketValue<StoredChannelEndpoint>(stored);
     }
 
-    public async Task<ChannelResult<StoredChannelEndpoint>> CreateAsync(PrincipalRef actor, ChannelEndpoint endpoint, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredChannelEndpoint>> CreateAsync(PrincipalRef actor, ChannelEndpoint endpoint, CancellationToken cancellationToken = default)
     {
         var scope = Scope(actor);
         ArgumentNullException.ThrowIfNull(endpoint);
         if (!await PermittedAsync(actor, ChannelPermissions.Manage, endpoint.Inbox, cancellationToken).ConfigureAwait(false))
-            return ChannelRefused.Forbidden;
+            return TicketFailure.Forbidden;
         if (await ValidateInboxAsync(scope, endpoint, cancellationToken).ConfigureAwait(false) is { } invalid)
             return invalid;
         if (!await ownership.MayBindAsync(actor, scope, endpoint, cancellationToken).ConfigureAwait(false))
@@ -48,18 +48,18 @@ public sealed class ChannelEndpointService(
         return Map(await endpoints.CreateAsync(scope, endpoint, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<ChannelResult<StoredChannelEndpoint>> UpdateAsync(PrincipalRef actor, ChannelEndpoint endpoint, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredChannelEndpoint>> UpdateAsync(PrincipalRef actor, ChannelEndpoint endpoint, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = Scope(actor);
         ArgumentNullException.ThrowIfNull(endpoint);
         var stored = await endpoints.GetAsync(scope, endpoint.Kind, endpoint.ConfigurationId, cancellationToken).ConfigureAwait(false);
         if (stored is null)
-            return ChannelNotFound.Instance;
+            return TicketFailure.NotFound;
         if (stored.Revision != expectedRevision)
-            return new ChannelConflict(stored.Revision);
+            return TicketFailure.Conflict(stored.Revision);
         if (!await PermittedAsync(actor, ChannelPermissions.Manage, stored.Endpoint.Inbox, cancellationToken).ConfigureAwait(false)
             || (endpoint.Inbox != stored.Endpoint.Inbox && !await PermittedAsync(actor, ChannelPermissions.Manage, endpoint.Inbox, cancellationToken).ConfigureAwait(false)))
-            return ChannelRefused.Forbidden;
+            return TicketFailure.Forbidden;
         if (await ValidateInboxAsync(scope, endpoint, cancellationToken).ConfigureAwait(false) is { } invalid)
             return invalid;
         if (endpoint.Address != stored.Endpoint.Address && !await ownership.MayBindAsync(actor, scope, endpoint, cancellationToken).ConfigureAwait(false))
@@ -67,55 +67,55 @@ public sealed class ChannelEndpointService(
         return Map(await endpoints.UpdateAsync(scope, endpoint, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<ChannelResult<StoredChannelEndpoint>> DeleteAsync(PrincipalRef actor, ChannelKind kind, string configurationId, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredChannelEndpoint>> DeleteAsync(PrincipalRef actor, ChannelKind kind, string configurationId, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = Scope(actor);
         var stored = await endpoints.GetAsync(scope, kind, configurationId, cancellationToken).ConfigureAwait(false);
         if (stored is null)
-            return ChannelNotFound.Instance;
+            return TicketFailure.NotFound;
         if (stored.Revision != expectedRevision)
-            return new ChannelConflict(stored.Revision);
+            return TicketFailure.Conflict(stored.Revision);
         if (!await PermittedAsync(actor, ChannelPermissions.Manage, stored.Endpoint.Inbox, cancellationToken).ConfigureAwait(false))
-            return ChannelRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return Map(await endpoints.DeleteAsync(scope, kind, configurationId, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<ChannelResult<StoredChannelDispatch>> GetDispatchAsync(PrincipalRef actor, ConversationId conversation, MessageId message, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredChannelDispatch>> GetDispatchAsync(PrincipalRef actor, ConversationId conversation, MessageId message, CancellationToken cancellationToken = default)
     {
         var scope = Scope(actor);
         var stored = await conversations.GetAsync(scope, conversation, cancellationToken).ConfigureAwait(false);
         if (stored is null)
-            return ChannelNotFound.Instance;
+            return TicketFailure.NotFound;
         if (!await PermittedAsync(actor, ChannelPermissions.Read, stored.Conversation.Inbox, cancellationToken).ConfigureAwait(false))
-            return ChannelRefused.Forbidden;
+            return TicketFailure.Forbidden;
         var dispatch = await dispatches.GetAsync(scope, conversation, message, cancellationToken).ConfigureAwait(false);
-        return dispatch is null ? ChannelNotFound.Instance : new ChannelValue<StoredChannelDispatch>(dispatch);
+        return dispatch is null ? TicketFailure.NotFound : new TicketValue<StoredChannelDispatch>(dispatch);
     }
 
-    private static ChannelRefused NotOwned { get; } = new(ChannelRefusal.AddressNotOwned, ["The endpoint address overlaps a provider address bound by another scope."]);
+    private static TicketFailure NotOwned { get; } = TicketFailure.Rejected("The endpoint address overlaps a provider address bound by another scope.", code: "address-not-owned");
 
     private static TicketScope Scope(PrincipalRef actor) =>
-        actor.Value is null ? throw new ArgumentException("A principal is required.", nameof(actor)) : actor.Scope;
+        actor is null ? throw new ArgumentException("A principal is required.", nameof(actor)) : actor.Scope;
 
     private Task<bool> PermittedAsync(PrincipalRef actor, Permission permission, InboxId inbox, CancellationToken cancellationToken) =>
         evaluator.PermittedAsync(actor, permission, WorkspaceResources.Inbox(actor.Scope, inbox), cancellationToken);
 
-    private async Task<ChannelRefused?> ValidateInboxAsync(TicketScope scope, ChannelEndpoint endpoint, CancellationToken cancellationToken)
+    private async Task<TicketFailure?> ValidateInboxAsync(TicketScope scope, ChannelEndpoint endpoint, CancellationToken cancellationToken)
     {
         var inbox = await inboxes.GetAsync(scope, endpoint.Inbox, cancellationToken).ConfigureAwait(false);
         if (inbox is null)
-            return ChannelRefused.Invalid("The inbox does not exist.");
+            return TicketFailure.Invalid("The inbox does not exist.");
         if (inbox.Inbox.Channel.Kind != endpoint.Kind || !string.Equals(inbox.Inbox.Channel.ConfigurationId, endpoint.ConfigurationId, StringComparison.Ordinal))
-            return ChannelRefused.Invalid("The inbox's channel binding does not match the endpoint.");
+            return TicketFailure.Invalid("The inbox's channel binding does not match the endpoint.");
         return null;
     }
 
-    private static ChannelResult<StoredChannelEndpoint> Map(ChannelWriteResult<StoredChannelEndpoint> result) => result switch
+    private static TicketResult<StoredChannelEndpoint> Map(StoreWriteResult<StoredChannelEndpoint, ChannelWriteRejection> result) => result switch
     {
-        ChannelWriteApplied<StoredChannelEndpoint> applied => new ChannelValue<StoredChannelEndpoint>(applied.Value),
-        ChannelWriteNotFound => ChannelNotFound.Instance,
-        ChannelWriteConflict conflict => new ChannelConflict(conflict.CurrentRevision),
-        ChannelWriteRejected rejected => new ChannelRefused(ChannelRefusal.Rejected, [rejected.Reason == ChannelWriteRejection.AddressTaken
+        StoreApplied<StoredChannelEndpoint> applied => new TicketValue<StoredChannelEndpoint>(applied.Value),
+        StoreNotFound => TicketFailure.NotFound,
+        StoreConflict conflict => TicketFailure.Conflict(conflict.CurrentRevision),
+        StoreRejected<ChannelWriteRejection> rejected => new TicketFailure(TicketFailureKind.Rejected, [rejected.Reason == ChannelWriteRejection.AddressTaken
             ? "The endpoint address is already bound." : "The endpoint capacity is exhausted."]),
     };
 }

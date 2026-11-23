@@ -56,7 +56,7 @@ public sealed class RoleTests
         Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(agent, triage)));
         var created = await fixture.Admin.CreateRoleAsync(admin, triage);
         Assert.AreEqual("applied", AccessFixture.Describe(created));
-        Assert.AreEqual(1L, ((AccessChangeApplied<StoredAccessRole>)created.Value!).Value.Revision);
+        Assert.AreEqual(1L, ((TicketValue<AccessChangeApplied<StoredAccessRole>>)created.Value!).Value.Value.Revision);
         Assert.AreEqual("refused:Conflict:1", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(admin, triage)));
 
         var wider = new AccessRole(triage.Id, "Triage", [AccessPermissions.ConversationRead, AccessPermissions.ConversationAssign]);
@@ -68,8 +68,8 @@ public sealed class RoleTests
         Assert.AreEqual("refused:Rejected", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(admin, BuiltInRoles.Agent.Id, 1)));
 
         var unknown = new AccessRole(new RoleId("ghost"), "Ghost", [new Permission("ghost:haunt"), new Permission("alpha:zap")]);
-        var invalid = (AccessChangeRefused)(await fixture.Admin.CreateRoleAsync(admin, unknown)).Value!;
-        Assert.AreEqual(AccessChangeRefusal.Invalid, invalid.Reason);
+        var invalid = (TicketFailure)(await fixture.Admin.CreateRoleAsync(admin, unknown)).Value!;
+        Assert.AreEqual(TicketFailureKind.Invalid, invalid.Kind);
         CollectionAssert.AreEqual(new[] { "Unknown permission 'alpha:zap'.", "Unknown permission 'ghost:haunt'." }, invalid.Errors.ToArray());
 
         Assert.AreEqual("refused:Conflict:2", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(admin, triage.Id, 1)));

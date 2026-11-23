@@ -7,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using TicketFlow.Channels.LiveChat;
 using TicketFlow.Conversations;
+using TicketFlow.Core;
 
 namespace TicketFlow.Realtime.SignalR;
 
@@ -62,13 +63,13 @@ public static class TicketFlowSignalRExtensions
                 return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
             var origin = http.Request.Headers.Origin.ToString() is { Length: > 0 } header ? header : null;
             var session = await visitors.AuthenticateAsync(partition, authorization["Bearer ".Length..].Trim(), origin, http.RequestAborted).ConfigureAwait(false);
-            if (session.Value is not LiveChatValue<VisitorSessionContext> authenticated)
+            if (session.Value is not TicketValue<VisitorSessionContext> authenticated)
                 return session.Value is LiveChatRefused { Reason: LiveChatRefusal.OriginNotAllowed } ? Results.StatusCode(StatusCodes.Status403Forbidden) : Results.Unauthorized();
             var fileName = Uri.UnescapeDataString(http.Request.Headers[FileNameHeader].ToString());
             var result = await visitors.UploadAttachmentAsync(authenticated.Value, fileName, http.Request.ContentType ?? string.Empty, http.Request.Body, http.RequestAborted).ConfigureAwait(false);
             return result.Value switch
             {
-                LiveChatValue<AttachmentRef> stored => Results.Json(RealtimeWireFormat.Attachment(stored.Value), JsonSerializerOptions.Web),
+                TicketValue<AttachmentRef> stored => Results.Json(RealtimeWireFormat.Attachment(stored.Value), JsonSerializerOptions.Web),
                 LiveChatRefused { Reason: LiveChatRefusal.TooLarge } => Results.StatusCode(StatusCodes.Status413PayloadTooLarge),
                 LiveChatRefused { Reason: LiveChatRefusal.UnsupportedMediaType } => Results.StatusCode(StatusCodes.Status415UnsupportedMediaType),
                 LiveChatRefused { Reason: LiveChatRefusal.Unauthenticated } => Results.Unauthorized(),

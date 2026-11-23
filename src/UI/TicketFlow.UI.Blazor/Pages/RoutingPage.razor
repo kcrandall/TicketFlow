@@ -137,12 +137,12 @@
         if (policyTask is not null) pending.Add(policyTask);
         await Task.WhenAll(pending);
 
-        if (availabilityTask is not null && await availabilityTask is RoutingValue<IReadOnlyList<StoredAgentProfile>> profiles)
+        if (availabilityTask is not null && await availabilityTask is TicketValue<IReadOnlyList<StoredAgentProfile>> profiles)
             agents = [.. profiles.Value];
         myStatus = agents.FirstOrDefault(agent => agent.Agent == Session.UserId)?.Presence.EffectiveStatus(Now);
-        if (queueTask is not null && await queueTask is RoutingValue<RoutingQueueListPage> page)
+        if (queueTask is not null && await queueTask is TicketValue<RoutingQueueListPage> page)
             queue = [.. page.Value.Items];
-        if (policyTask is not null && await policyTask is RoutingValue<IReadOnlyList<StoredRoutingPolicy>> list)
+        if (policyTask is not null && await policyTask is TicketValue<IReadOnlyList<StoredRoutingPolicy>> list)
             policies = [.. list.Value];
         if (queue.Count > 0 && Service<TicketFlow.Conversations.IConversationService>() is { } conversations)
         {

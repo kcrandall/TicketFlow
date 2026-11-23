@@ -58,7 +58,7 @@ internal sealed class HostMcpPrincipalResolver(IHttpContextAccessor accessor, IT
             return null;
         var scope = partition.InWorkspace(workspace);
         var principal = await principals.ResolveAsync(http, scope, cancellationToken).ConfigureAwait(false);
-        return principal is { } value && value.Value is not null && value.Scope == scope ? value : (PrincipalRef?)null;
+        return principal is { } value && value.Scope == scope ? value : null;
     }
 
     internal static HttpContext For(HttpContext? current, System.Security.Claims.ClaimsPrincipal user, IServiceProvider services)

@@ -1,15 +1,7 @@
-using TicketFlow.Access;
-using TicketFlow.Automation;
-using TicketFlow.Channels;
 using TicketFlow.Channels.LiveChat;
 using TicketFlow.Contacts;
 using TicketFlow.Conversations;
-using TicketFlow.HelpCenter;
-using TicketFlow.Reporting;
-using TicketFlow.Routing;
-using TicketFlow.Sla;
-using TicketFlow.Surveys;
-using TicketFlow.Workspaces;
+using TicketFlow.Core;
 
 namespace TicketFlow.UI.Blazor.Infrastructure;
 
@@ -43,7 +35,18 @@ public sealed record UiOutcome(UiOutcomeKind Kind, string Title, IReadOnlyList<s
     public static UiOutcome Conflict(long? current) => new(UiOutcomeKind.Conflict, "Someone else changed this record",
         [current is { } revision ? $"It is now at revision {revision}. Review the latest values and try again." : "Review the latest values and try again."], current);
 
-    /// <summary>Maps a refusal reason by name (every feature uses the same vocabulary: Forbidden, Invalid, NotFound, Conflict, ...).</summary>
+    /// <summary>Maps a standard <see cref="TicketFailure"/> to a user-facing <see cref="UiOutcome"/>.</summary>
+    public static UiOutcome FromFailure(TicketFailure failure) => failure.Kind switch
+    {
+        TicketFailureKind.Forbidden => Forbidden() with { Messages = failure.Errors.Count > 0 ? failure.Errors : Forbidden().Messages },
+        TicketFailureKind.NotFound => NotFound(),
+        TicketFailureKind.Conflict => Conflict(failure.CurrentRevision),
+        TicketFailureKind.Invalid => new(UiOutcomeKind.Invalid, "Check the values and try again", failure.Errors.Count > 0 ? failure.Errors : ["The request was not valid."]),
+        TicketFailureKind.Rejected => new(UiOutcomeKind.Rejected, "The change was rejected", failure.Errors.Count > 0 ? failure.Errors : ["Rejected"]),
+        _ => throw new ArgumentOutOfRangeException(nameof(failure)),
+    };
+
+    /// <summary>Maps a domain-specific refusal reason (contacts, live chat, conversations, assist) to a <see cref="UiOutcome"/>.</summary>
     public static UiOutcome Refused(Enum reason, IReadOnlyList<string> errors, long? currentRevision = null) => reason.ToString() switch
     {
         "Forbidden" => Forbidden() with { Messages = errors.Count > 0 ? errors : Forbidden().Messages },
@@ -64,10 +67,10 @@ public sealed record UiOutcome(UiOutcomeKind Kind, string Title, IReadOnlyList<s
 /// <summary>Maps every feature's union result to a <see cref="UiOutcome"/> (exhaustive switches, no discard arms).</summary>
 public static class UiOutcomes
 {
-    public static UiOutcome From<T>(WorkspaceResult<T> result, Func<T, UiOutcome> success) => result switch
+    public static UiOutcome From<T>(TicketResult<T> result, Func<T, UiOutcome> success) => result switch
     {
-        WorkspaceSucceeded<T> value => success(value.Value),
-        WorkspaceRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors, refused.CurrentRevision),
+        TicketValue<T> value => success(value.Value),
+        TicketFailure failure => UiOutcome.FromFailure(failure),
     };
 
     public static UiOutcome From(ConversationCommandResult result, string success) => result switch
@@ -78,71 +81,15 @@ public static class UiOutcomes
         ConversationRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors),
     };
 
-    public static UiOutcome From<T>(ContactResult<T> result, Func<T, UiOutcome> success) => result switch
+    public static UiOutcome From<T>(TicketResult<T, ContactRefused> result, Func<T, UiOutcome> success) => result switch
     {
-        ContactApplied<T> value => success(value.Value),
+        TicketValue<T> value => success(value.Value),
         ContactRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors, refused.CurrentRevision),
     };
 
-    public static UiOutcome From<T>(AccessChangeResult<T> result, Func<T, UiOutcome> success) => result switch
+    public static UiOutcome From<T>(TicketResult<T, LiveChatRefused> result, Func<T, UiOutcome> success) => result switch
     {
-        AccessChangeApplied<T> value => success(value.Value),
-        AccessChangeRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors, refused.CurrentRevision),
-    };
-
-    public static UiOutcome From<T>(SlaResult<T> result, Func<T, UiOutcome> success) => result switch
-    {
-        SlaValue<T> value => success(value.Value),
-        SlaNotFound => UiOutcome.NotFound(),
-        SlaConflict conflict => UiOutcome.Conflict(conflict.CurrentRevision),
-        SlaRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors),
-    };
-
-    public static UiOutcome From<T>(RoutingResult<T> result, Func<T, UiOutcome> success) => result switch
-    {
-        RoutingValue<T> value => success(value.Value),
-        RoutingNotFound => UiOutcome.NotFound(),
-        RoutingConflict conflict => UiOutcome.Conflict(conflict.CurrentRevision),
-        RoutingRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors),
-    };
-
-    public static UiOutcome From<T>(AutomationResult<T> result, Func<T, UiOutcome> success) => result switch
-    {
-        AutomationValue<T> value => success(value.Value),
-        AutomationNotFound => UiOutcome.NotFound(),
-        AutomationConflict conflict => UiOutcome.Conflict(conflict.CurrentRevision),
-        AutomationRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors),
-    };
-
-    public static UiOutcome From<T>(HelpCenterResult<T> result, Func<T, UiOutcome> success) => result switch
-    {
-        HelpCenterSucceeded<T> value => success(value.Value),
-        HelpCenterRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors, refused.CurrentRevision),
-    };
-
-    public static UiOutcome From<T>(SurveyResult<T> result, Func<T, UiOutcome> success) => result switch
-    {
-        SurveySucceeded<T> value => success(value.Value),
-        SurveyRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors, refused.CurrentRevision),
-    };
-
-    public static UiOutcome From<T>(LiveChatResult<T> result, Func<T, UiOutcome> success) => result switch
-    {
-        LiveChatValue<T> value => success(value.Value),
+        TicketValue<T> value => success(value.Value),
         LiveChatRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors),
-    };
-
-    public static UiOutcome From<T>(ChannelResult<T> result, Func<T, UiOutcome> success) => result switch
-    {
-        ChannelValue<T> value => success(value.Value),
-        ChannelNotFound => UiOutcome.NotFound(),
-        ChannelConflict conflict => UiOutcome.Conflict(conflict.CurrentRevision),
-        ChannelRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors),
-    };
-
-    public static UiOutcome From<T>(ReportResult<T> result, Func<T, UiOutcome> success) => result switch
-    {
-        ReportSucceeded<T> value => success(value.Value),
-        ReportRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors),
     };
 }

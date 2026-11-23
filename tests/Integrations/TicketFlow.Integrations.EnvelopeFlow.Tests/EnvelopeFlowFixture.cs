@@ -76,15 +76,15 @@ internal sealed class EnvelopeFlowFixture : IAsyncDisposable
         await fixture.AddressAsync("whatsapp", "cfg-wa", "whatsapp-meta:waba-1");
         var inboxes = host.Services.GetRequiredService<IInboxStore>();
         await inboxes.CreateAsync(host.Scope, new Inbox(new InboxId("slack-inbox"), "Slack", new ChannelBinding(new ChannelKind("slack"), "cfg-slack")));
-        Assert.IsInstanceOfType<ChannelValue<StoredChannelEndpoint>>((await host.Endpoints.CreateAsync(host.Owner,
+        Assert.IsInstanceOfType<TicketValue<StoredChannelEndpoint>>((await host.Endpoints.CreateAsync(host.Owner,
             new ChannelEndpoint(new ChannelKind("slack"), "cfg-slack", new InboxId("slack-inbox"), "slack:T1"))).Value);
         return fixture;
     }
 
     private async Task AddressAsync(string kind, string configuration, string address)
     {
-        var current = ChannelHost.Is<ChannelValue<StoredChannelEndpoint>>((await Host.Endpoints.GetAsync(Host.Owner, new ChannelKind(kind), configuration)).Value).Value;
-        Assert.IsInstanceOfType<ChannelValue<StoredChannelEndpoint>>((await Host.Endpoints.UpdateAsync(Host.Owner,
+        var current = ChannelHost.Is<TicketValue<StoredChannelEndpoint>>((await Host.Endpoints.GetAsync(Host.Owner, new ChannelKind(kind), configuration)).Value).Value;
+        Assert.IsInstanceOfType<TicketValue<StoredChannelEndpoint>>((await Host.Endpoints.UpdateAsync(Host.Owner,
             new ChannelEndpoint(current.Endpoint.Kind, configuration, current.Endpoint.Inbox, address), current.Revision)).Value);
     }
 

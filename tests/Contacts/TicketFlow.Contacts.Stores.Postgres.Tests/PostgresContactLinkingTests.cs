@@ -54,10 +54,10 @@ public sealed class PostgresContactLinkingTests
             Assert.IsTrue(ContactStoreContract.Describe(await ContactStoreContract.CreateAsync(database.Store, scope, ContactStoreContract.NewContact($"c{index:D3}"))).StartsWith("applied", StringComparison.Ordinal));
         for (var index = 1; index < 120; index++)
         {
-            var created = (LinkingWriteApplied<StoredContactLinkSuggestion>)(await database.Store.CreateSuggestionAsync(scope,
+            var created = (StoreApplied<StoredLinkSuggestionWrite>)(await database.Store.CreateSuggestionAsync(scope,
                 ContactLinkingStoreContract.Suggestion($"c{index:D3}", index % 2 == 0 ? "c000" : $"c{index - 1:D3}"))).Value!;
             if (index % 3 == 0)
-                _ = await database.Store.UpdateSuggestionAsync(scope, created.Value.Suggestion.Decide(ContactLinkSuggestionStatus.Rejected, null, ContactStoreContract.At), 1);
+                _ = await database.Store.UpdateSuggestionAsync(scope, created.Value.Suggestion.Suggestion.Decide(ContactLinkSuggestionStatus.Rejected, null, ContactStoreContract.At), 1);
         }
         await database.ScalarAsync("ANALYZE");
         await using var connection = await database.Primary.OpenConnectionAsync();
@@ -103,7 +103,7 @@ public sealed class PostgresContactLinkingTests
         var access = new PostgresAccessStore(database.Primary);
         await access.InitializeAsync();
         var scope = TestScopes.Create();
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await access.CreateAsync(new AccessGrant(new GrantId("owner"), AccessPartition.From(scope),
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await access.CreateAsync(new AccessGrant(new GrantId("owner"), AccessPartition.From(scope),
             new UserId("owner"), BuiltInRoles.Owner.Id, new WorkspaceGrantScope(scope.WorkspaceId)))).Value);
         var owner = TestPrincipals.User(scope, "owner");
         var providers = new List<ServiceProvider>();

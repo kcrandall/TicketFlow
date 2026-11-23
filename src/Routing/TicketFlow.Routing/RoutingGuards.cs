@@ -11,17 +11,17 @@ internal static class RoutingGuards
         return decision.IsPermitted;
     }
 
-    public static RoutingResult<T> FromWrite<T>(RoutingWriteResult<T> result) => result switch
+    public static TicketResult<T> FromWrite<T>(StoreWriteResult<T, RoutingWriteRejection> result) => result switch
     {
-        RoutingWriteApplied<T> applied => new RoutingValue<T>(applied.Value),
-        RoutingWriteNotFound => RoutingNotFound.Instance,
-        RoutingWriteConflict conflict => new RoutingConflict(conflict.CurrentRevision),
-        RoutingWriteRejected rejected => RoutingRefused.Rejected($"The store refused the write ({rejected.Reason})."),
+        StoreApplied<T> applied => new TicketValue<T>(applied.Value),
+        StoreNotFound => TicketFailure.NotFound,
+        StoreConflict conflict => TicketFailure.Conflict(conflict.CurrentRevision),
+        StoreRejected<RoutingWriteRejection> rejected => TicketFailure.Rejected($"The store refused the write ({rejected.Reason})."),
     };
 
     public static void RequireActor(PrincipalRef actor)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("An actor is required.", nameof(actor));
     }
 }

@@ -64,7 +64,7 @@ public sealed class RealtimeFanoutTests
         // A deny grant takes effect on the live subscription: the next change is not delivered.
         var deny = new AccessGrant(new GrantId("deny-reader"), AccessPartition.From(host.Scope), new UserId("reader"), reader.Role.Id,
             new WorkspaceGrantScope(host.Scope.WorkspaceId), GrantEffect.Deny);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await host.Services.GetRequiredService<IAccessGrantStore>().CreateAsync(deny)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await host.Services.GetRequiredService<IAccessGrantStore>().CreateAsync(deny)).Value);
         host.Clock.Advance(TimeSpan.FromSeconds(31));   // past DecisionContextLifetime: the cached decision context is reloaded
         Applied(await host.Conversations.ReplyAsync(host.Agent, conversation, new OutgoingMessageDraft("hello")));
         await host.DispatchAsync();

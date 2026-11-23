@@ -77,7 +77,7 @@ public sealed partial class TicketFlowToolContext
         if (resolver is null)
             return null;
         if (await resolver.ResolveAsync(new TicketFlowMcpCaller(User, Services), workspace, cancellationToken).ConfigureAwait(false) is not { } principal
-            || principal.Value is null || principal.Scope.WorkspaceId != workspace)
+            || principal.Scope.WorkspaceId != workspace)
             return null;
         return principal;
     }

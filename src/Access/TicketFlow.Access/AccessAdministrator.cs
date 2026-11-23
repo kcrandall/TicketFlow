@@ -39,7 +39,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         engine = new(catalog, grants, roles, time);
     }
 
-    public async Task<AccessChangeResult<StoredAccessRole>> CreateRoleAsync(PrincipalRef actor, AccessRole role, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<AccessChangeApplied<StoredAccessRole>>> CreateRoleAsync(PrincipalRef actor, AccessRole role, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(role);
@@ -56,7 +56,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
     /// The actor must hold every permission of both the current and the new definition, so it could have created every grant that
     /// references the role (custom roles are workspace-scoped and never resolve at tenant scope).
     /// </summary>
-    public async Task<AccessChangeResult<StoredAccessRole>> UpdateRoleAsync(PrincipalRef actor, AccessRole role, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<AccessChangeApplied<StoredAccessRole>>> UpdateRoleAsync(PrincipalRef actor, AccessRole role, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(role);
@@ -75,7 +75,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         return await CompleteAsync(change, await roles.UpdateAsync(actor.Scope, role, expectedRevision, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<AccessChangeResult<StoredAccessRole>> DeleteRoleAsync(PrincipalRef actor, RoleId role, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<AccessChangeApplied<StoredAccessRole>>> DeleteRoleAsync(PrincipalRef actor, RoleId role, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         if (!role.IsInitialized)
@@ -83,7 +83,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         var change = new Change(AccessAuditKind.RoleDeleted, actor, Role: role);
         var workspace = new AccessResource(actor.Scope);
         var (refusal, context) = await AuthorizeWithContextAsync(actor, AccessPermissions.AccessManage, workspace, cancellationToken).ConfigureAwait(false);
-        refusal ??= (BuiltInRoles.IsBuiltIn(role) ? new Refusal(AccessChangeRefusal.Rejected, ["Built-in roles are immutable."]) : null)
+        refusal ??= (BuiltInRoles.IsBuiltIn(role) ? new Refusal(TicketFailureKind.Rejected, ["Built-in roles are immutable."]) : null)
             ?? ValidateRevision(expectedRevision);
         if (refusal is null)
         {
@@ -96,7 +96,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         return await CompleteAsync(change, await roles.DeleteAsync(actor.Scope, role, expectedRevision, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<AccessChangeResult<StoredAccessGrant>> CreateGrantAsync(PrincipalRef actor, AccessGrant grant, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<AccessChangeApplied<StoredAccessGrant>>> CreateGrantAsync(PrincipalRef actor, AccessGrant grant, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(grant);
@@ -107,7 +107,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         return await CompleteAsync(change, await grants.CreateAsync(grant, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<AccessChangeResult<StoredAccessGrant>> UpdateGrantAsync(PrincipalRef actor, AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<AccessChangeApplied<StoredAccessGrant>>> UpdateGrantAsync(PrincipalRef actor, AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(grant);
@@ -120,7 +120,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
             if (Fence(existing?.Revision, expectedRevision) is { } fenced)
                 refusal = fenced;
             else if (existing!.Grant.Kind == GrantKind.BreakGlass)
-                refusal = new(AccessChangeRefusal.Invalid, ["Break-glass grants cannot be modified; revoke them instead."]);
+                refusal = new(TicketFailureKind.Invalid, ["Break-glass grants cannot be modified; revoke them instead."]);
             else
                 (refusal, context) = await AuthorizeTargetWithContextAsync(actor, existing.Grant, context, cancellationToken).ConfigureAwait(false);
         }
@@ -130,7 +130,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         return await CompleteAsync(change, await grants.UpdateAsync(grant, expectedRevision, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<AccessChangeResult<StoredAccessGrant>> RevokeGrantAsync(PrincipalRef actor, GrantId grant, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<AccessChangeApplied<StoredAccessGrant>>> RevokeGrantAsync(PrincipalRef actor, GrantId grant, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         if (!grant.IsInitialized)
@@ -151,7 +151,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         return await CompleteAsync(change, await grants.DeleteAsync(partition, grant, expectedRevision, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<AccessChangeResult<StoredAccessGrant>>> RevokeGrantsAsync(PrincipalRef actor, IReadOnlyList<(GrantId Id, long ExpectedRevision)> targets, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<TicketResult<AccessChangeApplied<StoredAccessGrant>>>> RevokeGrantsAsync(PrincipalRef actor, IReadOnlyList<(GrantId Id, long ExpectedRevision)> targets, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(targets);
@@ -161,7 +161,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
             return [await RevokeGrantAsync(actor, targets[0].Id, targets[0].ExpectedRevision, cancellationToken).ConfigureAwait(false)];
 
         var partition = AccessPartition.From(actor.Scope);
-        var results = new AccessChangeResult<StoredAccessGrant>[targets.Count];
+        var results = new TicketResult<AccessChangeApplied<StoredAccessGrant>>[targets.Count];
         var toDelete = new List<(int Index, StoredAccessGrant Existing, Change Change)>(targets.Count);
         AccessContext? context = null;
 
@@ -209,8 +209,8 @@ public sealed class AccessAdministrator : IAccessAdministrator
                 {
                     var current = await grants.GetAsync(partition, existing.Grant.Id, cancellationToken).ConfigureAwait(false);
                     var miss = current is null
-                        ? new Refusal(AccessChangeRefusal.NotFound, ["The record does not exist."])
-                        : new Refusal(AccessChangeRefusal.Conflict, ["The record changed concurrently."], CurrentRevision: current.Revision);
+                        ? new Refusal(TicketFailureKind.NotFound, ["The record does not exist."])
+                        : new Refusal(TicketFailureKind.Conflict, ["The record changed concurrently."], CurrentRevision: current.Revision);
                     results[index] = await RefuseAsync<StoredAccessGrant>(change, miss, cancellationToken).ConfigureAwait(false);
                 }
             }
@@ -218,7 +218,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         return results;
     }
 
-    public async Task<AccessChangeResult<StoredAccessFieldPolicy>> CreateFieldPolicyAsync(PrincipalRef actor, AccessFieldPolicy policy, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<AccessChangeApplied<StoredAccessFieldPolicy>>> CreateFieldPolicyAsync(PrincipalRef actor, AccessFieldPolicy policy, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(policy);
@@ -230,7 +230,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         return await CompleteAsync(change, await policies.CreateAsync(actor.Scope, policy, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<AccessChangeResult<StoredAccessFieldPolicy>> UpdateFieldPolicyAsync(PrincipalRef actor, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<AccessChangeApplied<StoredAccessFieldPolicy>>> UpdateFieldPolicyAsync(PrincipalRef actor, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(policy);
@@ -242,7 +242,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         return await CompleteAsync(change, await policies.UpdateAsync(actor.Scope, policy, expectedRevision, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<AccessChangeResult<StoredAccessFieldPolicy>> DeleteFieldPolicyAsync(PrincipalRef actor, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<AccessChangeApplied<StoredAccessFieldPolicy>>> DeleteFieldPolicyAsync(PrincipalRef actor, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         if (!field.IsInitialized)
@@ -255,7 +255,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         return await CompleteAsync(change, await policies.DeleteAsync(actor.Scope, field, expectedRevision, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<AccessChangeResult<StoredAccessGrant>> ActivateBreakGlassAsync(BreakGlassRequest request, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<AccessChangeApplied<StoredAccessGrant>>> ActivateBreakGlassAsync(BreakGlassRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         var actor = request.Requester;
@@ -286,7 +286,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         else if (role.IncludesAllPermissions || role.Permissions.Overlaps(ManagementPermissions))
             errors.Add("Break-glass roles cannot include access-management or break-glass permissions.");
 
-        var refusal = errors.Count > 0 ? new Refusal(AccessChangeRefusal.Invalid, errors) : null;
+        var refusal = errors.Count > 0 ? new Refusal(TicketFailureKind.Invalid, errors) : null;
         refusal ??= await AuthorizeAsync(actor, AccessPermissions.AccessBreakGlass, target!, cancellationToken).ConfigureAwait(false);
         if (refusal is not null)
             return await RefuseAsync<StoredAccessGrant>(change, refusal, cancellationToken).ConfigureAwait(false);
@@ -409,55 +409,55 @@ public sealed class AccessAdministrator : IAccessAdministrator
     private static bool InActorScope(PrincipalRef actor, AccessGrant grant) =>
         grant.Partition == AccessPartition.From(actor.Scope) && (grant.Workspace is not { } workspace || workspace == actor.Scope.WorkspaceId);
 
-    public async Task<AccessListResult<IReadOnlyList<AccessRoleListing>>> ListRolesAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<IReadOnlyList<AccessRoleListing>>> ListRolesAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         if (await AuthorizeAsync(actor, AccessPermissions.AccessManage, new AccessResource(actor.Scope), cancellationToken).ConfigureAwait(false) is { } refusal)
-            return new AccessChangeRefused(refusal.Reason, refusal.Errors);
+            return new TicketFailure(refusal.Reason, refusal.Errors);
         var custom = await roles.ListAsync(actor.Scope, cancellationToken).ConfigureAwait(false);
-        return new AccessListed<IReadOnlyList<AccessRoleListing>>([.. BuiltInRoles.All.Select(role => new AccessRoleListing(role, null)),
+        return new TicketValue<IReadOnlyList<AccessRoleListing>>([.. BuiltInRoles.All.Select(role => new AccessRoleListing(role, null)),
             .. custom.Select(stored => new AccessRoleListing(stored.Role, stored.Revision))]);
     }
 
-    public async Task<AccessListResult<IReadOnlyList<StoredAccessGrant>>> ListGrantsAsync(PrincipalRef actor, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<IReadOnlyList<StoredAccessGrant>>> ListGrantsAsync(PrincipalRef actor, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(target);
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, AccessLimits.MaximumTargetPage);
         if (target is TenantGrantScope)
-            return new AccessChangeRefused(AccessChangeRefusal.Invalid, ["Tenant grants are not listed by target."]);
+            return new TicketFailure(TicketFailureKind.Invalid, ["Tenant grants are not listed by target."]);
         AccessGrantTargets.Validate(target, limit, after);
         if (target is WorkspaceGrantScope workspace && workspace.Workspace != actor.Scope.WorkspaceId
             || target is TeamGrantScope team && team.Workspace != actor.Scope.WorkspaceId
             || target is InboxGrantScope inbox && inbox.Workspace != actor.Scope.WorkspaceId)
-            return new AccessChangeRefused(AccessChangeRefusal.Forbidden, ["The actor is not authorized."]);
+            return new TicketFailure(TicketFailureKind.Forbidden, ["The actor is not authorized."]);
         if (await AuthorizeAsync(actor, AccessPermissions.AccessManage, AccessEngine.Target(actor.Scope, target), cancellationToken).ConfigureAwait(false) is { } refusal)
-            return new AccessChangeRefused(refusal.Reason, refusal.Errors);
-        return new AccessListed<IReadOnlyList<StoredAccessGrant>>(await grants.ListForTargetAsync(AccessPartition.From(actor.Scope), target, limit, after, cancellationToken).ConfigureAwait(false));
+            return new TicketFailure(refusal.Reason, refusal.Errors);
+        return new TicketValue<IReadOnlyList<StoredAccessGrant>>(await grants.ListForTargetAsync(AccessPartition.From(actor.Scope), target, limit, after, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<AccessListResult<IReadOnlyList<StoredAccessFieldPolicy>>> ListFieldPoliciesAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<IReadOnlyList<StoredAccessFieldPolicy>>> ListFieldPoliciesAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         if (await AuthorizeAsync(actor, AccessPermissions.AccessManage, new AccessResource(actor.Scope), cancellationToken).ConfigureAwait(false) is { } refusal)
-            return new AccessChangeRefused(refusal.Reason, refusal.Errors);
-        return new AccessListed<IReadOnlyList<StoredAccessFieldPolicy>>(await policies.ListAsync(actor.Scope, cancellationToken).ConfigureAwait(false));
+            return new TicketFailure(refusal.Reason, refusal.Errors);
+        return new TicketValue<IReadOnlyList<StoredAccessFieldPolicy>>(await policies.ListAsync(actor.Scope, cancellationToken).ConfigureAwait(false));
     }
 
-    private static AccessChangeRefused Refused(IReadOnlyList<string> errors, AccessDenialReason reason) =>
-        new(AccessChangeRefusal.Forbidden, errors);
+    private static TicketFailure Refused(IReadOnlyList<string> errors, AccessDenialReason reason) =>
+        new(TicketFailureKind.Forbidden, errors);
 
     private static readonly Permission[] ManagementPermissions =
         [AccessPermissions.AccessManage, AccessPermissions.AccessManageTenant, AccessPermissions.AccessBreakGlass];
 
-    private sealed record Refusal(AccessChangeRefusal Reason, IReadOnlyList<string> Errors, AccessDenialReason? Denial = null, long? CurrentRevision = null);
+    private sealed record Refusal(TicketFailureKind Reason, IReadOnlyList<string> Errors, AccessDenialReason? Denial = null, long? CurrentRevision = null);
 
     /// <summary>Refuses before any authorization decision is based on a record that is missing or at another revision.</summary>
     private static Refusal? Fence(long? currentRevision, long expectedRevision) => currentRevision switch
     {
-        null => new(AccessChangeRefusal.NotFound, ["The record does not exist."]),
-        { } current when current != expectedRevision => new(AccessChangeRefusal.Conflict, ["The record changed concurrently."], CurrentRevision: current),
+        null => new(TicketFailureKind.NotFound, ["The record does not exist."]),
+        { } current when current != expectedRevision => new(TicketFailureKind.Conflict, ["The record changed concurrently."], CurrentRevision: current),
         _ => null,
     };
 
@@ -472,7 +472,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
 
     private static void RequireActor(PrincipalRef actor)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("An actor is required.", nameof(actor));
     }
 
@@ -485,21 +485,21 @@ public sealed class AccessAdministrator : IAccessAdministrator
             Justification: grant.Justification);
 
     private static Refusal? ValidateRevision(long expectedRevision) =>
-        expectedRevision < 1 ? new(AccessChangeRefusal.Invalid, ["The expected revision must be at least 1."]) : null;
+        expectedRevision < 1 ? new(TicketFailureKind.Invalid, ["The expected revision must be at least 1."]) : null;
 
     private Refusal? ValidateRole(AccessRole role)
     {
         if (role.IsBuiltIn)
-            return new(AccessChangeRefusal.Rejected, ["Built-in roles are immutable."]);
+            return new(TicketFailureKind.Rejected, ["Built-in roles are immutable."]);
         var unknown = role.Permissions.Where(permission => !engine.Catalog.Contains(permission)).Order().ToList();
-        return unknown.Count == 0 ? null : new(AccessChangeRefusal.Invalid, [.. unknown.Select(permission => $"Unknown permission '{permission}'.")]);
+        return unknown.Count == 0 ? null : new(TicketFailureKind.Invalid, [.. unknown.Select(permission => $"Unknown permission '{permission}'.")]);
     }
 
     private Refusal? ValidatePolicy(AccessFieldPolicy policy)
     {
         var referenced = policy.RevealPermission is { } reveal ? policy.AppliesTo.Append(reveal) : policy.AppliesTo;
         var unknown = referenced.Where(permission => !engine.Catalog.Contains(permission)).Distinct().Order().ToList();
-        return unknown.Count == 0 ? null : new(AccessChangeRefusal.Invalid, [.. unknown.Select(permission => $"Unknown permission '{permission}'.")]);
+        return unknown.Count == 0 ? null : new(TicketFailureKind.Invalid, [.. unknown.Select(permission => $"Unknown permission '{permission}'.")]);
     }
 
     /// <remarks>With <c>tenantAllowsOnly</c>, only tenant-scoped allow grants count (tenant administration authority).</remarks>
@@ -509,10 +509,10 @@ public sealed class AccessAdministrator : IAccessAdministrator
     private async Task<(Refusal? Refusal, AccessContext? Context)> AuthorizeWithContextAsync(PrincipalRef actor, Permission permission, AccessResource resource, CancellationToken cancellationToken, bool tenantAllowsOnly = false, AccessContext? context = null)
     {
         if (engine.Precheck(actor, permission, resource.Scope) is { } reason)
-            return (new(AccessChangeRefusal.Forbidden, ["The actor is not authorized."], reason), context);
+            return (new(TicketFailureKind.Forbidden, ["The actor is not authorized."], reason), context);
         context ??= await engine.LoadAsync(actor, resource.Scope, cancellationToken).ConfigureAwait(false);
         var result = AccessEngine.EvaluateSimple(context, permission, resource, includeBreakGlass: false, tenantAllowsOnly);
-        return (result.Denial is { } denial ? new(AccessChangeRefusal.Forbidden, ["The actor is not authorized."], denial) : null, context);
+        return (result.Denial is { } denial ? new(TicketFailureKind.Forbidden, ["The actor is not authorized."], denial) : null, context);
     }
 
     /// <summary>No escalation: the actor must already hold every listed permission on the target from standard (never break-glass) grants.</summary>
@@ -534,7 +534,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         var errors = new string[missing.Count];
         for (var i = 0; i < missing.Count; i++)
             errors[i] = $"The actor does not hold '{missing[i]}' on the target.";
-        return new(AccessChangeRefusal.Forbidden, errors, AccessDenialReason.NoMatchingGrant);
+        return new(TicketFailureKind.Forbidden, errors, AccessDenialReason.NoMatchingGrant);
     }
 
     /// <summary>
@@ -544,7 +544,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
     private Task<(Refusal? Refusal, AccessContext? Context)> AuthorizeTargetWithContextAsync(PrincipalRef actor, AccessGrant grant, AccessContext? context, CancellationToken cancellationToken)
     {
         if (grant.Partition != AccessPartition.From(actor.Scope) || (grant.Workspace is { } workspace && workspace != actor.Scope.WorkspaceId))
-            return Task.FromResult<(Refusal?, AccessContext?)>((new(AccessChangeRefusal.Forbidden, ["The grant is outside the actor's scope."], AccessDenialReason.ScopeMismatch), context));
+            return Task.FromResult<(Refusal?, AccessContext?)>((new(TicketFailureKind.Forbidden, ["The grant is outside the actor's scope."], AccessDenialReason.ScopeMismatch), context));
         var tenant = grant.Scope is TenantGrantScope;
         var permission = tenant ? AccessPermissions.AccessManageTenant : AccessPermissions.AccessManage;
         return AuthorizeWithContextAsync(actor, permission, AccessEngine.Target(actor.Scope, grant.Scope), cancellationToken, tenantAllowsOnly: tenant, context: context);
@@ -556,35 +556,35 @@ public sealed class AccessAdministrator : IAccessAdministrator
         if (refusal is not null)
             return refusal;
         if (grant.Kind == GrantKind.BreakGlass)
-            return new(AccessChangeRefusal.Invalid, ["Break-glass grants are created only through break-glass activation."]);
+            return new(TicketFailureKind.Invalid, ["Break-glass grants are created only through break-glass activation."]);
 
         var role = BuiltInRoles.Find(grant.Role) ?? (await roles.GetAsync(actor.Scope, grant.Role, cancellationToken).ConfigureAwait(false))?.Role;
         if (AccessGrantValidator.Validate(grant, role, engine.Now) is GrantInvalid invalid)
-            return new(AccessChangeRefusal.Invalid, invalid.Errors);
+            return new(TicketFailureKind.Invalid, invalid.Errors);
         if (grant.Effect == GrantEffect.Deny)
             return null;
         var granted = role!.IncludesAllPermissions ? engine.Catalog.Definitions.Select(definition => definition.Permission) : role.Permissions;
         return RequireHeld(loadedContext!, granted, AccessEngine.Target(actor.Scope, grant.Scope), grant.Scope is TenantGrantScope);
     }
 
-    private async Task<AccessChangeResult<T>> RefuseAsync<T>(Change change, Refusal refusal, CancellationToken cancellationToken, long? currentRevision = null)
+    private async Task<TicketResult<AccessChangeApplied<T>>> RefuseAsync<T>(Change change, Refusal refusal, CancellationToken cancellationToken, long? currentRevision = null)
     {
         await RecordAsync(change, AccessAuditOutcome.Denied, refusal.Denial, cancellationToken).ConfigureAwait(false);
-        return new AccessChangeRefused(refusal.Reason, refusal.Errors, refusal.CurrentRevision ?? currentRevision);
+        return new TicketFailure(refusal.Reason, refusal.Errors, refusal.CurrentRevision ?? currentRevision);
     }
 
-    private Task<AccessChangeResult<T>> CompleteAsync<T>(Change change, AccessWriteResult<T> result, CancellationToken cancellationToken) => result switch
+    private Task<TicketResult<AccessChangeApplied<T>>> CompleteAsync<T>(Change change, StoreWriteResult<T, AccessWriteRejection> result, CancellationToken cancellationToken) => result switch
     {
-        AccessWriteApplied<T> applied => AppliedAsync(change, applied.Value, cancellationToken),
-        AccessWriteNotFound => RefuseAsync<T>(change, new(AccessChangeRefusal.NotFound, ["The record does not exist."]), cancellationToken),
-        AccessWriteConflict conflict => RefuseAsync<T>(change, new(AccessChangeRefusal.Conflict, ["The record changed concurrently."]), cancellationToken, conflict.CurrentRevision),
-        AccessWriteRejected rejected => RefuseAsync<T>(change, new(AccessChangeRefusal.Rejected, [$"The store rejected the write: {rejected.Reason}."]), cancellationToken),
+        StoreApplied<T> applied => AppliedAsync(change, applied.Value, cancellationToken),
+        StoreNotFound => RefuseAsync<T>(change, new(TicketFailureKind.NotFound, ["The record does not exist."]), cancellationToken),
+        StoreConflict conflict => RefuseAsync<T>(change, new(TicketFailureKind.Conflict, ["The record changed concurrently."]), cancellationToken, conflict.CurrentRevision),
+        StoreRejected<AccessWriteRejection> rejected => RefuseAsync<T>(change, new(TicketFailureKind.Rejected, [$"The store rejected the write: {rejected.Reason}."]), cancellationToken),
     };
 
-    private async Task<AccessChangeResult<T>> AppliedAsync<T>(Change change, T value, CancellationToken cancellationToken)
+    private async Task<TicketResult<AccessChangeApplied<T>>> AppliedAsync<T>(Change change, T value, CancellationToken cancellationToken)
     {
         var auditEvent = await RecordAsync(change, AccessAuditOutcome.Allowed, null, cancellationToken).ConfigureAwait(false);
-        return new AccessChangeApplied<T>(value, auditEvent.Id);
+        return new TicketValue<AccessChangeApplied<T>>(new AccessChangeApplied<T>(value, auditEvent.Id));
     }
 
     private async Task<AccessAuditEvent> RecordAsync(Change change, AccessAuditOutcome outcome, AccessDenialReason? denial, CancellationToken cancellationToken)

@@ -43,7 +43,7 @@ public sealed partial class PostgresHelpCenterStore
         return rows.Count > query.Limit ? new(rows[..query.Limit], true) : new(rows, false);
     }
 
-    public async Task<HelpCenterWriteResult<StoredArticle>> CreateArticleAsync(TicketScope scope, ArticleRecord record, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredArticle, HelpCenterWriteRejection>> CreateArticleAsync(TicketScope scope, ArticleRecord record, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(record);
@@ -52,18 +52,18 @@ public sealed partial class PostgresHelpCenterStore
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await LockAsync(connection, transaction, scope, cancellationToken).ConfigureAwait(false);
         if (await ArticleStateAsync(connection, transaction, scope, article.Id, cancellationToken).ConfigureAwait(false) is { } existing)
-            return new HelpCenterWriteConflict(existing.Revision);
+            return new StoreConflict(existing.Revision);
         if (record.State == ArticleState.Published || record.PublishedRevision is not null)
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidRevision);
+            return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidRevision);
         if (await InvalidReferencesAsync(connection, transaction, scope, article, cancellationToken).ConfigureAwait(false))
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidReference);
+            return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidReference);
         var count = await ScalarAsync<long>(connection, transaction, $"SELECT count(*) FROM tf_helpcenter_articles WHERE {PortalKeyWhere}", command =>
         {
             AddScope(command, scope);
             AddText(command, "portal", article.Portal.Value);
         }, cancellationToken).ConfigureAwait(false);
         if (count >= HelpCenterLimits.MaximumArticlesPerPortal)
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.CapacityExceeded);
+            return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.CapacityExceeded);
         await using (var insert = new NpgsqlCommand($"""
             INSERT INTO tf_helpcenter_articles({ScopeColumns}, article_id, portal_id, collection_id, format_version, position, state, published_revision, translations,
                 created_by_kind, created_by_id, created_at, updated_by_kind, updated_by_id, updated_at, revision)
@@ -75,10 +75,10 @@ public sealed partial class PostgresHelpCenterStore
             await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new HelpCenterWriteApplied<StoredArticle>(new(scope, record, 1));
+        return new StoreApplied<StoredArticle>(new(scope, record, 1));
     }
 
-    public async Task<HelpCenterWriteResult<StoredArticle>> UpdateArticleAsync(TicketScope scope, ArticleRecord record, long expectedRevision, ArticleRevision? appendRevision = null, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredArticle, HelpCenterWriteRejection>> UpdateArticleAsync(TicketScope scope, ArticleRecord record, long expectedRevision, ArticleRevision? appendRevision = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(record);
@@ -92,16 +92,16 @@ public sealed partial class PostgresHelpCenterStore
             return miss;
         var current = existing!.Value;
         if (current.Portal != article.Portal.Value || await InvalidReferencesAsync(connection, transaction, scope, article, cancellationToken).ConfigureAwait(false))
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidReference);
+            return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidReference);
         if (appendRevision is not null || record.PublishedRevision != current.PublishedRevision)
         {
             var latest = await ScalarAsync<int>(connection, transaction, $"SELECT coalesce(max(number), 0) FROM tf_helpcenter_revisions WHERE {ArticleKeyWhere}",
                 command => BindArticleKey(command, scope, article.Id), cancellationToken).ConfigureAwait(false);
             if (appendRevision is not null && (appendRevision.Article != article.Id || appendRevision.Number != latest + 1))
-                return new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidRevision);
+                return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidRevision);
             var available = latest + (appendRevision is null ? 0 : 1);
             if (record.PublishedRevision is { } live && live > available)
-                return new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidRevision);
+                return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidRevision);
         }
 
         if (appendRevision is not null)
@@ -168,15 +168,15 @@ public sealed partial class PostgresHelpCenterStore
                 catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == "tf_helpcenter_published_slug")
                 {
                     // The transaction is aborted; disposing it rolls back the revision insert and article update.
-                    return new HelpCenterWriteRejected(HelpCenterWriteRejection.SlugConflict);
+                    return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.SlugConflict);
                 }
             }
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new HelpCenterWriteApplied<StoredArticle>(new(scope, record, expectedRevision + 1));
+        return new StoreApplied<StoredArticle>(new(scope, record, expectedRevision + 1));
     }
 
-    public async Task<HelpCenterWriteResult<StoredArticle>> DeleteArticleAsync(TicketScope scope, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredArticle, HelpCenterWriteRejection>> DeleteArticleAsync(TicketScope scope, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         Require(id.IsInitialized, nameof(id));
@@ -195,7 +195,7 @@ public sealed partial class PostgresHelpCenterStore
             return Miss<StoredArticle>((await ArticleStateAsync(connection, transaction, scope, id, cancellationToken).ConfigureAwait(false))?.Revision, expectedRevision)
                 ?? throw new InvalidOperationException("The article changed during deletion.");
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new HelpCenterWriteApplied<StoredArticle>(removed);
+        return new StoreApplied<StoredArticle>(removed);
     }
 
     public async Task<ArticleRevision?> GetRevisionAsync(TicketScope scope, ArticleId article, int number, CancellationToken cancellationToken = default)

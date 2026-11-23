@@ -17,20 +17,20 @@ public static class RoutingStoreContract
     public static readonly ChannelKind Email = new("email");
     public static readonly ChannelKind Chat = new("live-chat");
 
-    public static string Describe<T>(RoutingWriteResult<T> result) => result switch
+    public static string Describe<T>(StoreWriteResult<T, RoutingWriteRejection> result) => result switch
     {
-        RoutingWriteApplied<T> => "applied",
-        RoutingWriteNotFound => "not-found",
-        RoutingWriteConflict conflict => $"conflict:{conflict.CurrentRevision}",
-        RoutingWriteRejected rejected => $"rejected:{rejected.Reason}",
+        StoreApplied<T> => "applied",
+        StoreNotFound => "not-found",
+        StoreConflict conflict => $"conflict:{conflict.CurrentRevision}",
+        StoreRejected<RoutingWriteRejection> rejected => $"rejected:{rejected.Reason}",
     };
 
-    public static T Applied<T>(RoutingWriteResult<T> result) => result switch
+    public static T Applied<T>(StoreWriteResult<T, RoutingWriteRejection> result) => result switch
     {
-        RoutingWriteApplied<T> applied => applied.Value,
-        RoutingWriteNotFound => throw new AssertFailedException("Expected applied but was not found."),
-        RoutingWriteConflict conflict => throw new AssertFailedException($"Expected applied but was conflict:{conflict.CurrentRevision}."),
-        RoutingWriteRejected rejected => throw new AssertFailedException($"Expected applied but was rejected:{rejected.Reason}."),
+        StoreApplied<T> applied => applied.Value,
+        StoreNotFound => throw new AssertFailedException("Expected applied but was not found."),
+        StoreConflict conflict => throw new AssertFailedException($"Expected applied but was conflict:{conflict.CurrentRevision}."),
+        StoreRejected<RoutingWriteRejection> rejected => throw new AssertFailedException($"Expected applied but was rejected:{rejected.Reason}."),
     };
 
     public static string Describe(RoutingReservationResult result) => result switch

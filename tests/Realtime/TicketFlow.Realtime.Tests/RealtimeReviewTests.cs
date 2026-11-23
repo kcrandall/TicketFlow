@@ -93,7 +93,7 @@ public sealed class RealtimeReviewTests
 
         var deny = new AccessGrant(new GrantId("deny-inbox"), AccessPartition.From(host.Scope), new UserId("reader"), inboxReader.Role.Id,
             new WorkspaceGrantScope(host.Scope.WorkspaceId), GrantEffect.Deny);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await host.Services.GetRequiredService<IAccessGrantStore>().CreateAsync(deny)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await host.Services.GetRequiredService<IAccessGrantStore>().CreateAsync(deny)).Value);
         // A deny overrides every allow of inbox:read (including the Agent role's), while conversation:read stays allowed.
         host.Clock.Advance(TimeSpan.FromSeconds(31));
         Applied(await host.Conversations.ReplyAsync(host.Owner, conversation, new OutgoingMessageDraft("after revoke")));
@@ -113,7 +113,7 @@ public sealed class RealtimeReviewTests
         foreach (var topic in new RealtimeTopic[] { new ConversationTopic(host.Scope, conversation), new InboxQueueTopic(host.Scope, new InboxId("email-inbox")),
             new AgentTopic(host.Scope, new UserId("agent")) })
         {
-            var connection = host.Connect($"agent-{topic.Value!.GetType().Name}", host.Agent);
+            var connection = host.Connect($"agent-{topic.GetType().Name}", host.Agent);
             Assert.IsNull(await host.SubscribeAsync(connection, topic));
         }
         await host.DispatchAsync();

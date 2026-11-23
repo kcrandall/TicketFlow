@@ -2,25 +2,6 @@ using TicketFlow.Core;
 
 namespace TicketFlow.Access;
 
-/// <summary>The write was applied; <see cref="Value"/> is the stored state (for deletes, the removed state).</summary>
-public sealed record AccessWriteApplied<T>(T Value);
-
-/// <summary>No record exists for the key in the requested scope or partition.</summary>
-public sealed record AccessWriteNotFound
-{
-    private AccessWriteNotFound()
-    {
-    }
-
-    public static AccessWriteNotFound Instance { get; } = new();
-}
-
-/// <summary>The expected revision did not match, or a create found an existing record. Nothing was written.</summary>
-public sealed record AccessWriteConflict(long CurrentRevision);
-
-/// <summary>The store refused the write for a contract reason. Nothing was written.</summary>
-public sealed record AccessWriteRejected(AccessWriteRejection Reason);
-
 public enum AccessWriteRejection
 {
     /// <summary>Built-in roles cannot be created, replaced or deleted.</summary>
@@ -32,9 +13,6 @@ public enum AccessWriteRejection
     /// <summary>An update tried to change a record's identity, scope or partition.</summary>
     IdentityChanged = 3,
 }
-
-/// <summary>Outcome of a revision-fenced store write. Switch over every case without a discard arm.</summary>
-public union AccessWriteResult<T>(AccessWriteApplied<T>, AccessWriteNotFound, AccessWriteConflict, AccessWriteRejected);
 
 /// <summary>Capacity limits every access store enforces atomically with the write.</summary>
 public static class AccessLimits
@@ -63,11 +41,11 @@ public interface IAccessRoleStore
     /// <summary>Roles in <paramref name="scope"/> ordered by identifier (ordinal).</summary>
     Task<IReadOnlyList<StoredAccessRole>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default);
 
-    Task<AccessWriteResult<StoredAccessRole>> CreateAsync(TicketScope scope, AccessRole role, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAccessRole, AccessWriteRejection>> CreateAsync(TicketScope scope, AccessRole role, CancellationToken cancellationToken = default);
 
-    Task<AccessWriteResult<StoredAccessRole>> UpdateAsync(TicketScope scope, AccessRole role, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAccessRole, AccessWriteRejection>> UpdateAsync(TicketScope scope, AccessRole role, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AccessWriteResult<StoredAccessRole>> DeleteAsync(TicketScope scope, RoleId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAccessRole, AccessWriteRejection>> DeleteAsync(TicketScope scope, RoleId id, long expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -95,11 +73,11 @@ public interface IAccessGrantStore
     /// </summary>
     Task<IReadOnlyList<StoredAccessGrant>> ListForTargetAsync(AccessPartition partition, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default);
 
-    Task<AccessWriteResult<StoredAccessGrant>> CreateAsync(AccessGrant grant, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> CreateAsync(AccessGrant grant, CancellationToken cancellationToken = default);
 
-    Task<AccessWriteResult<StoredAccessGrant>> UpdateAsync(AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> UpdateAsync(AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AccessWriteResult<StoredAccessGrant>> DeleteAsync(AccessPartition partition, GrantId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> DeleteAsync(AccessPartition partition, GrantId id, long expectedRevision, CancellationToken cancellationToken = default);
 
     /// <summary>Deletes multiple revision-fenced grants in one batch, returning those that were removed.</summary>
     async Task<IReadOnlyList<StoredAccessGrant>> DeleteManyAsync(AccessPartition partition, IReadOnlyList<(GrantId Id, long ExpectedRevision)> targets, CancellationToken cancellationToken = default)
@@ -108,7 +86,7 @@ public interface IAccessGrantStore
         ArgumentNullException.ThrowIfNull(targets);
         var removed = new List<StoredAccessGrant>(targets.Count);
         for (var i = 0; i < targets.Count; i++)
-            if (await DeleteAsync(partition, targets[i].Id, targets[i].ExpectedRevision, cancellationToken).ConfigureAwait(false) is { Value: AccessWriteApplied<StoredAccessGrant> applied })
+            if (await DeleteAsync(partition, targets[i].Id, targets[i].ExpectedRevision, cancellationToken).ConfigureAwait(false) is StoreApplied<StoredAccessGrant> applied)
                 removed.Add(applied.Value);
         return removed;
     }
@@ -125,9 +103,9 @@ public interface IAccessFieldPolicyStore
     /// <summary>Policies in <paramref name="scope"/> ordered by field path (ordinal).</summary>
     Task<IReadOnlyList<StoredAccessFieldPolicy>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default);
 
-    Task<AccessWriteResult<StoredAccessFieldPolicy>> CreateAsync(TicketScope scope, AccessFieldPolicy policy, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> CreateAsync(TicketScope scope, AccessFieldPolicy policy, CancellationToken cancellationToken = default);
 
-    Task<AccessWriteResult<StoredAccessFieldPolicy>> UpdateAsync(TicketScope scope, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> UpdateAsync(TicketScope scope, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AccessWriteResult<StoredAccessFieldPolicy>> DeleteAsync(TicketScope scope, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAccessFieldPolicy, AccessWriteRejection>> DeleteAsync(TicketScope scope, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default);
 }

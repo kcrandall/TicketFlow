@@ -87,7 +87,7 @@ public sealed record RevealRequest
 {
     public RevealRequest(PrincipalRef principal, AccessResource resource, Permission readPermission, FieldPath field, string? justification = null)
     {
-        if (principal.Value is null)
+        if (principal is null)
             throw new ArgumentException("A principal is required.", nameof(principal));
         ArgumentNullException.ThrowIfNull(resource);
         if (!field.IsInitialized)

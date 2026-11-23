@@ -146,7 +146,7 @@ public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
         return policies;
     }
 
-    public async Task<SlaWriteResult<StoredSlaPolicy>> CreateAsync(TicketScope scope, SlaPolicy policy, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>> CreateAsync(TicketScope scope, SlaPolicy policy, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(policy);
@@ -177,14 +177,14 @@ public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
         if (insertedRevision is { } rev)
         {
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new SlaWriteApplied<StoredSlaPolicy>(new StoredSlaPolicy(scope, policy, rev));
+            return new StoreApplied<StoredSlaPolicy>(new StoredSlaPolicy(scope, policy, rev));
         }
         return existingRevision is { } existing
-            ? new SlaWriteConflict(existing)
-            : new SlaWriteRejected(SlaWriteRejection.CapacityExceeded);
+            ? new StoreConflict(existing)
+            : new StoreRejected<SlaWriteRejection>(SlaWriteRejection.CapacityExceeded);
     }
 
-    public async Task<SlaWriteResult<StoredSlaPolicy>> UpdateAsync(TicketScope scope, SlaPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>> UpdateAsync(TicketScope scope, SlaPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(policy);
@@ -195,13 +195,13 @@ public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
         AddText(command, "definition", SlaPolicyCodec.Serialize(policy));
         AddLong(command, "expected", expectedRevision);
         if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-            return new SlaWriteApplied<StoredSlaPolicy>(new StoredSlaPolicy(scope, policy, revision));
+            return new StoreApplied<StoredSlaPolicy>(new StoredSlaPolicy(scope, policy, revision));
         return await PolicyRevisionAsync(connection, null, scope, policy.Id, cancellationToken).ConfigureAwait(false) is { } current
-            ? new SlaWriteConflict(current)
-            : SlaWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
-    public async Task<SlaWriteResult<StoredSlaPolicy>> DeleteAsync(TicketScope scope, SlaPolicyId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredSlaPolicy, SlaWriteRejection>> DeleteAsync(TicketScope scope, SlaPolicyId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireId(id);
@@ -213,11 +213,11 @@ public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
             AddLong(command, "expected", expectedRevision);
             await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new SlaWriteApplied<StoredSlaPolicy>(ReadPolicy(reader, scope));
+                return new StoreApplied<StoredSlaPolicy>(ReadPolicy(reader, scope));
         }
         return await PolicyRevisionAsync(connection, null, scope, id, cancellationToken).ConfigureAwait(false) is { } current
-            ? new SlaWriteConflict(current)
-            : SlaWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
     public async Task<StoredSlaTracker?> GetAsync(TicketScope scope, ConversationId conversation, CancellationToken cancellationToken = default)
@@ -231,7 +231,7 @@ public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadTracker(reader, scope) : null;
     }
 
-    public async Task<SlaWriteResult<StoredSlaTracker>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, SlaTimerClaim? release = null,
+    public async Task<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>> WriteAsync(TicketScope scope, SlaTracker tracker, long? expectedRevision, SlaTimerClaim? release = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -263,13 +263,13 @@ public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
             if (expectedRevision is { } expected)
                 AddLong(command, "expected", expected);
             if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                return new SlaWriteApplied<StoredSlaTracker>(new StoredSlaTracker(scope, tracker, revision));
+                return new StoreApplied<StoredSlaTracker>(new StoredSlaTracker(scope, tracker, revision));
         }
         var current = await TrackerRevisionAsync(connection, null, scope, tracker.Conversation, cancellationToken).ConfigureAwait(false);
-        return current is { } value ? new SlaWriteConflict(value) : expectedRevision is null ? new SlaWriteConflict(0) : SlaWriteNotFound.Instance;
+        return current is { } value ? new StoreConflict(value) : expectedRevision is null ? new StoreConflict(0) : StoreNotFound.Instance;
     }
 
-    public async Task<SlaWriteResult<StoredSlaTracker>> DeleteAsync(TicketScope scope, ConversationId conversation, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredSlaTracker, SlaWriteRejection>> DeleteAsync(TicketScope scope, ConversationId conversation, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireId(conversation);
@@ -281,11 +281,11 @@ public sealed class PostgresSlaStore : ISlaPolicyStore, ISlaTrackerStore
             AddLong(command, "expected", expectedRevision);
             await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new SlaWriteApplied<StoredSlaTracker>(ReadTracker(reader, scope));
+                return new StoreApplied<StoredSlaTracker>(ReadTracker(reader, scope));
         }
         return await TrackerRevisionAsync(connection, null, scope, conversation, cancellationToken).ConfigureAwait(false) is { } current
-            ? new SlaWriteConflict(current)
-            : SlaWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
     public async Task<IReadOnlyList<SlaTimerClaim>> ClaimDueAsync(int limit, TimeSpan lease, CancellationToken cancellationToken = default)

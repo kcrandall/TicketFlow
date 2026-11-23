@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.SignalR.Client;
 using TicketFlow.Access;
 using TicketFlow.Channels.LiveChat;
+using TicketFlow.Core;
 using TicketFlow.Realtime;
 using static TicketFlow.Realtime.SignalR.Tests.SignalRHost;
 
@@ -82,9 +83,9 @@ public sealed class SignalRReviewTests
         await tabC.StartAsync();
         Ok(await tabC.InvokeAsync<JsonElement>("Connect", WidgetKey, null));
         var sessions = host.Service<ILiveChatSessionStore>();
-        var topic = (VisitorSessionTopic)host.Service<IRealtimeSubscriptions>().Topics(tabC.ConnectionId!).Single().Value!;
+        var topic = (VisitorSessionTopic)host.Service<IRealtimeSubscriptions>().Topics(tabC.ConnectionId!).Single();
         var session = (await sessions.GetAsync(AccessPartition.From(host.Scope), topic.Session))!;
-        Assert.IsInstanceOfType<LiveChatWriteApplied<StoredVisitorSession>>((await sessions.UpdateAsync(host.Scope, session.Session.With(revoked: true), session.Revision)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredVisitorSession>>((await sessions.UpdateAsync(host.Scope, session.Session.With(revoked: true), session.Revision)).Value);
         Assert.AreEqual("unauthenticated", Error(await tabC.InvokeAsync<JsonElement>("SendMessage", "c1", "after revoke", null)));
     }
 

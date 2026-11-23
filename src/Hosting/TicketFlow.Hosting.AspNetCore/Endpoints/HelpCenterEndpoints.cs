@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using TicketFlow.HelpCenter;
 using TicketFlow.Hosting.AspNetCore.Contracts;
+using TicketFlow.Core;
 
 namespace TicketFlow.Hosting.AspNetCore.Endpoints;
 
@@ -117,7 +118,7 @@ internal static class HelpCenterEndpoints
         return group;
     }
 
-    private delegate Task<HelpCenterResult<StoredArticle>> TransitionHandler(IHelpCenterService service, TicketFlowActor actor, ArticleId article, long expectedRevision, CancellationToken cancellationToken);
+    private delegate Task<TicketResult<StoredArticle>> TransitionHandler(IHelpCenterService service, TicketFlowActor actor, ArticleId article, long expectedRevision, CancellationToken cancellationToken);
 
     private static void Transition(RouteGroupBuilder group, string action, string name, TransitionHandler handler) =>
         group.MapPost($"/help-center/articles/{{articleId}}/{action}", async (TicketFlowActor actor, string articleId, [FromServices] IHelpCenterService service, HttpContext http) =>
@@ -127,18 +128,7 @@ internal static class HelpCenterEndpoints
             return Map(http, await handler(service, actor, new ArticleId(articleId), revision, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision));
         }).WithName(name).Produces<ArticleResponse>();
 
-    internal static IResult Map<T>(HttpContext http, HelpCenterResult<T> result, Func<T, IResult> success) => result switch
-    {
-        HelpCenterSucceeded<T> succeeded => success(succeeded.Value),
-        HelpCenterRefused refused => TicketFlowHttp.Refused(http, refused.Reason switch
-        {
-            HelpCenterRefusal.Forbidden => RefusalKind.Forbidden,
-            HelpCenterRefusal.Invalid => RefusalKind.Invalid,
-            HelpCenterRefusal.NotFound => RefusalKind.NotFound,
-            HelpCenterRefusal.Conflict => RefusalKind.Conflict,
-            _ => RefusalKind.Rejected,
-        }, refused.Errors, refused.CurrentRevision),
-    };
+    internal static IResult Map<T>(HttpContext http, TicketResult<T> result, Func<T, IResult> success) => TicketFlowHttp.Map(http, result, success);
 
     private static Portal Portal(string id, PortalRequest request) => new(new PortalId(id), new HelpCenterSlug(request.Slug), request.Name, new HelpCenterLocale(request.DefaultLocale),
         request.SupportedLocales?.Select(locale => new HelpCenterLocale(locale)),

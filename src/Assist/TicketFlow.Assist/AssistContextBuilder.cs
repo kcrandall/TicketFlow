@@ -70,7 +70,7 @@ public sealed class AssistContextBuilder
 
     public async Task<AssistContextResult> BuildAsync(PrincipalRef actor, ConversationId conversation, AssistContextRequest request, CancellationToken cancellationToken = default)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("An actor is required.", nameof(actor));
         if (conversation == default)
             throw new ArgumentException("A conversation identifier is required.", nameof(conversation));
@@ -118,7 +118,7 @@ public sealed class AssistContextBuilder
         if (contactTask is not null)
             contact = await contactTask.ConfigureAwait(false) switch
             {
-                ContactApplied<ContactView> applied => applied.Value,
+                TicketValue<ContactView> applied => applied.Value,
                 ContactRefused => null,
             };
 
@@ -222,9 +222,9 @@ public sealed class AssistContextBuilder
         var query = new HelpCenterSearchQuery(grounding.Portal, grounding.Locale, text, options.MaximumSnippets);
         IReadOnlyList<ArticleSnippet> hits = await helpCenter.SearchAsync(actor, query, cancellationToken).ConfigureAwait(false) switch
         {
-            HelpCenterSucceeded<IReadOnlyList<ArticleSnippet>> succeeded => succeeded.Value,
-            HelpCenterRefused { Reason: HelpCenterRefusal.Forbidden } => await helpCenter.SearchPublicAsync(actor.Scope, query, cancellationToken).ConfigureAwait(false),
-            HelpCenterRefused => [],
+            TicketValue<IReadOnlyList<ArticleSnippet>> succeeded => succeeded.Value,
+            TicketFailure { Kind: TicketFailureKind.Forbidden } => await helpCenter.SearchPublicAsync(actor.Scope, query, cancellationToken).ConfigureAwait(false),
+            TicketFailure => [],
         };
         return [.. hits.Take(options.MaximumSnippets).Select((hit, index) => new AssistSnippet("A" + (index + 1).ToString(CultureInfo.InvariantCulture), hit))];
     }

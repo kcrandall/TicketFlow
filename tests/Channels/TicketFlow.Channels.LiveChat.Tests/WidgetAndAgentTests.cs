@@ -75,9 +75,9 @@ public sealed class WidgetAndAgentTests
         Assert.IsNull(order.Value);
 
         var policies = host.Host.Services.GetRequiredService<IAccessFieldPolicyStore>();
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessFieldPolicy>>((await policies.CreateAsync(host.Scope,
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessFieldPolicy>>((await policies.CreateAsync(host.Scope,
             new AccessFieldPolicy(ContactFieldPaths.Email, [ContactPermissions.Read], [BuiltInRoles.Owner.Id]))).Value);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessFieldPolicy>>((await policies.CreateAsync(host.Scope,
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessFieldPolicy>>((await policies.CreateAsync(host.Scope,
             new AccessFieldPolicy(ContactFieldPaths.Attribute("order"), [ContactPermissions.Read], [BuiltInRoles.Agent.Id]))).Value);
         var masked = Value(await agents.GetVisitorAsync(host.Host.Agent, accepted.Conversation));
         Assert.IsNull(masked.Prechat.Single(answer => answer.Key == "email").Value);

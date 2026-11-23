@@ -37,7 +37,7 @@ public sealed class ConversationTools(TicketFlowToolContext context)
             UserId? assigneeId = assignee switch
             {
                 null => null,
-                "me" => principal.Value is UserPrincipal user ? user.UserId : throw new ArgumentException("'me' requires a user principal.", nameof(assignee)),
+                "me" => principal is UserPrincipal user ? user.UserId : throw new ArgumentException("'me' requires a user principal.", nameof(assignee)),
                 _ => new UserId(assignee),
             };
             var query = new ConversationListQuery(inboxId is null ? null : new InboxId(inboxId), TicketFlowToolJson.ParseOptional<ConversationStatusKind>(status, nameof(status)),
@@ -140,7 +140,7 @@ public sealed class ConversationTools(TicketFlowToolContext context)
             UserId? assignee = assigneeId switch
             {
                 null => null,
-                "me" => principal.Value is UserPrincipal user ? user.UserId : throw new ArgumentException("'me' requires a user principal.", nameof(assigneeId)),
+                "me" => principal is UserPrincipal user ? user.UserId : throw new ArgumentException("'me' requires a user principal.", nameof(assigneeId)),
                 _ => new UserId(assigneeId),
             };
             return ToolViews.Map(await Service.AssignAsync(principal, new ConversationId(conversationId), assignee, expectedRevision, cancellationToken));

@@ -190,7 +190,7 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
         var sending = new ChannelDispatch(conversationId, messageId, stored.Conversation.Inbox, binding.Kind, ChannelDispatchState.Sending, attempts, now,
             code: existing?.Dispatch.Code);
         var claimed = await dispatches.WriteAsync(scope, sending, existing?.Revision, cancellationToken).ConfigureAwait(false);
-        if (claimed.Value is not ChannelWriteApplied<StoredChannelDispatch> { Value: var current })
+        if (claimed.Value is not StoreApplied<StoredChannelDispatch> { Value: var current })
             throw new InvalidOperationException("The dispatch record changed concurrently; the entry will be retried.");
 
         ChannelSendResult result;
@@ -216,7 +216,7 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
             case ChannelSendRejected { Retryable: true } rejected when attempts < options.MaximumSendAttempts:
                 var retry = new ChannelDispatch(conversationId, messageId, stored.Conversation.Inbox, binding.Kind, ChannelDispatchState.RetryScheduled, attempts,
                     time.GetUtcNow(), time.GetUtcNow() + (rejected.RetryAfter ?? TimeSpan.Zero), code: rejected.Code);
-                if (await dispatches.WriteAsync(scope, retry, current.Revision, cancellationToken).ConfigureAwait(false) is { Value: not ChannelWriteApplied<StoredChannelDispatch> })
+                if (await dispatches.WriteAsync(scope, retry, current.Revision, cancellationToken).ConfigureAwait(false) is { Value: not StoreApplied<StoredChannelDispatch> })
                     throw new InvalidOperationException("The dispatch record changed concurrently; the entry will be retried.");
                 throw new ChannelDispatchRetryException(rejected.Code, rejected.RetryAfter);
             case ChannelSendRejected rejected:
@@ -239,7 +239,7 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
 
     private async Task WriteAndApplyAsync(TicketScope scope, ChannelDispatch dispatch, long? expectedRevision, CancellationToken cancellationToken)
     {
-        if (await dispatches.WriteAsync(scope, dispatch, expectedRevision, cancellationToken).ConfigureAwait(false) is { Value: not ChannelWriteApplied<StoredChannelDispatch> })
+        if (await dispatches.WriteAsync(scope, dispatch, expectedRevision, cancellationToken).ConfigureAwait(false) is { Value: not StoreApplied<StoredChannelDispatch> })
             throw new InvalidOperationException("The dispatch record changed concurrently; the entry will be retried.");
         await ApplyAsync(scope, dispatch, cancellationToken).ConfigureAwait(false);
     }

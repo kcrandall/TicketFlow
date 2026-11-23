@@ -4,8 +4,6 @@ using TicketFlow.Core;
 
 namespace TicketFlow.Channels.LiveChat;
 
-public sealed record LiveChatValue<T>(T Value);
-
 public enum LiveChatRefusal
 {
     /// <summary>The session token is malformed, unknown, expired, revoked or rotated out.</summary>
@@ -50,9 +48,6 @@ public sealed record LiveChatRefused(LiveChatRefusal Reason, IReadOnlyList<strin
 {
     public static LiveChatRefused Of(LiveChatRefusal reason, string? error = null) => new(reason, error is null ? [] : [error]);
 }
-
-/// <summary>Outcome of a live-chat operation. Switch over every case without a discard arm.</summary>
-public union LiveChatResult<T>(LiveChatValue<T>, LiveChatRefused);
 
 /// <summary>What the widget needs to render: theme, pre-chat form, greeting, business-hours state and away message, features.</summary>
 public sealed record LiveChatWidgetState(

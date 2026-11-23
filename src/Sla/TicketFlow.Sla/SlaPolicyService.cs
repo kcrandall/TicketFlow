@@ -10,58 +10,58 @@ public sealed class SlaPolicyService(ISlaPolicyStore store, IAccessEvaluator eva
     private readonly ISlaPolicyStore store = store ?? throw new ArgumentNullException(nameof(store));
     private readonly IAccessEvaluator evaluator = evaluator ?? throw new ArgumentNullException(nameof(evaluator));
 
-    public async Task<SlaResult<StoredSlaPolicy>> GetAsync(PrincipalRef actor, SlaPolicyId id, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredSlaPolicy>> GetAsync(PrincipalRef actor, SlaPolicyId id, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         RequireId(id);
         if (!await PermittedAsync(actor, SlaPermissions.Read, scope, cancellationToken).ConfigureAwait(false))
-            return SlaRefused.Forbidden;
-        return await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is { } stored ? new SlaValue<StoredSlaPolicy>(stored) : SlaNotFound.Instance;
+            return TicketFailure.Forbidden;
+        return await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is { } stored ? new TicketValue<StoredSlaPolicy>(stored) : TicketFailure.NotFound;
     }
 
-    public async Task<SlaResult<IReadOnlyList<StoredSlaPolicy>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<IReadOnlyList<StoredSlaPolicy>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         if (!await PermittedAsync(actor, SlaPermissions.Read, scope, cancellationToken).ConfigureAwait(false))
-            return SlaRefused.Forbidden;
-        return new SlaValue<IReadOnlyList<StoredSlaPolicy>>(await store.ListAsync(scope, cancellationToken).ConfigureAwait(false));
+            return TicketFailure.Forbidden;
+        return new TicketValue<IReadOnlyList<StoredSlaPolicy>>(await store.ListAsync(scope, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<SlaResult<StoredSlaPolicy>> CreateAsync(PrincipalRef actor, SlaPolicy policy, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredSlaPolicy>> CreateAsync(PrincipalRef actor, SlaPolicy policy, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(policy);
         if (!await PermittedAsync(actor, SlaPermissions.Manage, scope, cancellationToken).ConfigureAwait(false))
-            return SlaRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return Map(await store.CreateAsync(scope, policy, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<SlaResult<StoredSlaPolicy>> UpdateAsync(PrincipalRef actor, SlaPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredSlaPolicy>> UpdateAsync(PrincipalRef actor, SlaPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(policy);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         if (!await PermittedAsync(actor, SlaPermissions.Manage, scope, cancellationToken).ConfigureAwait(false))
-            return SlaRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return Map(await store.UpdateAsync(scope, policy, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<SlaResult<StoredSlaPolicy>> DeleteAsync(PrincipalRef actor, SlaPolicyId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredSlaPolicy>> DeleteAsync(PrincipalRef actor, SlaPolicyId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         RequireId(id);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         if (!await PermittedAsync(actor, SlaPermissions.Manage, scope, cancellationToken).ConfigureAwait(false))
-            return SlaRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return Map(await store.DeleteAsync(scope, id, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    private static SlaResult<StoredSlaPolicy> Map(SlaWriteResult<StoredSlaPolicy> result) => result switch
+    private static TicketResult<StoredSlaPolicy> Map(StoreWriteResult<StoredSlaPolicy, SlaWriteRejection> result) => result switch
     {
-        SlaWriteApplied<StoredSlaPolicy> applied => new SlaValue<StoredSlaPolicy>(applied.Value),
-        SlaWriteNotFound => SlaNotFound.Instance,
-        SlaWriteConflict conflict => new SlaConflict(conflict.CurrentRevision),
-        SlaWriteRejected rejected => new SlaRefused(SlaRefusal.Rejected, [$"The store rejected the write: {rejected.Reason}."]),
+        StoreApplied<StoredSlaPolicy> applied => new TicketValue<StoredSlaPolicy>(applied.Value),
+        StoreNotFound => TicketFailure.NotFound,
+        StoreConflict conflict => TicketFailure.Conflict(conflict.CurrentRevision),
+        StoreRejected<SlaWriteRejection> rejected => new TicketFailure(TicketFailureKind.Rejected, [$"The store rejected the write: {rejected.Reason}."]),
     };
 
     private async Task<bool> PermittedAsync(PrincipalRef actor, Permission permission, TicketScope scope, CancellationToken cancellationToken) =>
@@ -69,7 +69,7 @@ public sealed class SlaPolicyService(ISlaPolicyStore store, IAccessEvaluator eva
 
     private static TicketScope RequireActor(PrincipalRef actor)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("An actor is required.", nameof(actor));
         return actor.Scope;
     }

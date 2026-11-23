@@ -88,7 +88,7 @@ public static class EventStoreContract
         var created = Applied(await primary.CreateAsync(scope, Subscription(), 4, Now));
         Assert.AreEqual(1, created.Revision);
         Assert.AreEqual(Now, created.CreatedAt);
-        Assert.IsInstanceOfType<EventWriteRejected>((await competing.CreateAsync(scope, Subscription(), 0, Now)).Value);
+        Assert.IsInstanceOfType<StoreRejected<EventWriteRejection>>((await competing.CreateAsync(scope, Subscription(), 0, Now)).Value);
         var loaded = (await competing.GetAsync(scope, new EventSubscriptionId("s1")))!;
         Assert.AreEqual(Subscription(), loaded.Subscription);
         Assert.AreEqual(new EventDeliveryState(4, 0, Now, null, null), await competing.GetStateAsync(scope, new EventSubscriptionId("s1")));
@@ -97,21 +97,21 @@ public static class EventStoreContract
         var changed = new EventSubscription(new EventSubscriptionId("s1"), "Renamed", new EventSinkRef("webhook", "https://hooks.example.com/x"),
             new EventSubscriptionFilter([new EventTypePattern("ticketflow.conversation.*")], [new InboxId("i1")], [new TeamId("t1")]), new ApiClientId("hooks"),
             EventPrivacy.Content, enabled: false, batchSize: 7);
-        Assert.IsInstanceOfType<EventWriteConflict>((await competing.UpdateAsync(scope, changed, 2)).Value);
+        Assert.IsInstanceOfType<StoreConflict>((await competing.UpdateAsync(scope, changed, 2)).Value);
         Assert.AreEqual(2, Applied(await competing.UpdateAsync(scope, changed, 1)).Revision);
         Assert.AreEqual(changed, (await primary.GetAsync(scope, changed.Id))!.Subscription);
-        Assert.IsInstanceOfType<EventWriteNotFound>((await primary.UpdateAsync(scope, Subscription("missing"), 1)).Value);
+        Assert.IsInstanceOfType<StoreNotFound>((await primary.UpdateAsync(scope, Subscription("missing"), 1)).Value);
 
         await primary.CreateAsync(scope, Subscription("s0"), 0, Now);
         CollectionAssert.AreEqual(new[] { "s0", "s1" }, (await competing.ListAsync(scope)).Select(item => item.Subscription.Id.Value).ToArray());
-        Assert.IsInstanceOfType<EventWriteConflict>((await competing.DeleteAsync(scope, changed.Id, 1)).Value);
-        Assert.IsInstanceOfType<EventWriteApplied<StoredEventSubscription>>((await competing.DeleteAsync(scope, changed.Id, 2)).Value);
+        Assert.IsInstanceOfType<StoreConflict>((await competing.DeleteAsync(scope, changed.Id, 1)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredEventSubscription>>((await competing.DeleteAsync(scope, changed.Id, 2)).Value);
         Assert.IsNull(await primary.GetStateAsync(scope, changed.Id));
 
         var limited = NewScope();
         for (var index = 0; index < IEventSubscriptionStore.MaximumSubscriptionsPerWorkspace; index++)
             Applied(await primary.CreateAsync(limited, Subscription("l" + index), 0, Now));
-        Assert.AreEqual(EventWriteRejection.LimitReached, ((EventWriteRejected)(await competing.CreateAsync(limited, Subscription("over"), 0, Now)).Value!).Reason);
+        Assert.AreEqual(EventWriteRejection.LimitReached, ((StoreRejected<EventWriteRejection>)(await competing.CreateAsync(limited, Subscription("over"), 0, Now)).Value!).Reason);
     }
 
     /// <summary>Claims, completion, failure, dead letters and replay. Stores must use a clock at <see cref="Now"/>.</summary>
@@ -216,11 +216,11 @@ public static class EventStoreContract
         CollectionAssert.AreEquivalent(Enumerable.Range(0, 6).Select(index => "f" + index).ToArray(), seen.ToArray(), "Every busy subscription is served before any repeats.");
     }
 
-    public static StoredEventSubscription Applied(EventWriteResult<StoredEventSubscription> result) => result switch
+    public static StoredEventSubscription Applied(StoreWriteResult<StoredEventSubscription, EventWriteRejection> result) => result switch
     {
-        EventWriteApplied<StoredEventSubscription> applied => applied.Value,
-        EventWriteNotFound => throw new AssertFailedException("Not found."),
-        EventWriteConflict conflict => throw new AssertFailedException($"Conflict at {conflict.CurrentRevision}."),
-        EventWriteRejected rejected => throw new AssertFailedException($"Rejected: {rejected.Reason}."),
+        StoreApplied<StoredEventSubscription> applied => applied.Value,
+        StoreNotFound => throw new AssertFailedException("Not found."),
+        StoreConflict conflict => throw new AssertFailedException($"Conflict at {conflict.CurrentRevision}."),
+        StoreRejected<EventWriteRejection> rejected => throw new AssertFailedException($"Rejected: {rejected.Reason}."),
     };
 }

@@ -202,8 +202,8 @@ public sealed class GrantTests
 
         Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(agent, Grant("a1", BuiltInRoles.Viewer))));
         Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(admin, Grant("a2", BuiltInRoles.Supervisor))));
-        var escalation = (AccessChangeRefused)(await fixture.Admin.CreateGrantAsync(admin, Grant("a3", BuiltInRoles.Owner))).Value!;
-        Assert.AreEqual(AccessChangeRefusal.Forbidden, escalation.Reason);
+        var escalation = (TicketFailure)(await fixture.Admin.CreateGrantAsync(admin, Grant("a3", BuiltInRoles.Owner))).Value!;
+        Assert.AreEqual(TicketFailureKind.Forbidden, escalation.Kind);
         CollectionAssert.Contains(escalation.Errors.ToArray(), "The actor does not hold 'access:manage-tenant' on the target.");
         Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(admin, Grant("a4", BuiltInRoles.Viewer, TenantGrantScope.Instance))));
         Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(owner, Grant("a5", BuiltInRoles.Owner, TenantGrantScope.Instance))));

@@ -93,10 +93,10 @@ internal sealed class SurveyFixture : IDisposable
     public async Task<UserPrincipal> UserWithAsync(string id, GrantScope? scope, params Permission[] permissions)
     {
         var role = new AccessRole(new RoleId("role-" + id), id, permissions);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
         var user = TestPrincipals.User(Scope, id);
         var grant = new AccessGrant(new GrantId($"seed-{nextGrant++:D4}"), AccessPartition.From(Scope), user.UserId, role.Id, scope ?? new WorkspaceGrantScope(Scope.WorkspaceId));
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await Grants.CreateAsync(grant)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await Grants.CreateAsync(grant)).Value);
         return user;
     }
 
@@ -107,16 +107,16 @@ internal sealed class SurveyFixture : IDisposable
         new(Scope, new ConversationId(conversation), new ContactId(contact), Clock.GetUtcNow(), inbox is null ? null : new InboxId(inbox), team is null ? null : new TeamId(team),
             agent is null ? null : new UserId(agent), locale is null ? null : new SurveyLocale(locale));
 
-    public static T Value<T>(SurveyResult<T> result) => result switch
+    public static T Value<T>(TicketResult<T> result) => result switch
     {
-        SurveySucceeded<T> succeeded => succeeded.Value,
-        SurveyRefused refused => throw new AssertFailedException($"Expected success but was refused: {refused.Reason} {string.Join("; ", refused.Errors)}"),
+        TicketValue<T> succeeded => succeeded.Value,
+        TicketFailure refused => throw new AssertFailedException($"Expected success but was refused: {refused.Kind} {string.Join("; ", refused.Errors)}"),
     };
 
-    public static string Describe<T>(SurveyResult<T> result) => result switch
+    public static string Describe<T>(TicketResult<T> result) => result switch
     {
-        SurveySucceeded<T> => "ok",
-        SurveyRefused refused => $"refused:{refused.Reason}" + (refused.CurrentRevision is { } revision ? $":{revision}" : ""),
+        TicketValue<T> => "ok",
+        TicketFailure refused => $"refused:{refused.Kind}" + (refused.CurrentRevision is { } revision ? $":{revision}" : ""),
     };
 
     public static string Describe(SurveyResponseResult result) => result switch

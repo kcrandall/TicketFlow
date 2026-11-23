@@ -262,21 +262,16 @@ public interface IConversationService
     Task<ConversationReadResult> FindByThreadAsync(PrincipalRef actor, InboxId inbox, ChannelThreadRef thread, CancellationToken cancellationToken = default);
 }
 
-public sealed record ConversationValue<T>(T Value);
-
-/// <summary>Outcome of an attribute definition operation. Switch over every case without a discard arm.</summary>
-public union ConversationResult<T>(ConversationValue<T>, ConversationNotFound, ConversationConflict, ConversationRefused);
-
 /// <summary>Access-checked attribute definition management. Reads require <c>conversation:read</c>; writes <c>conversation-attribute:manage</c>.</summary>
 public interface IConversationAttributeDefinitionService
 {
-    Task<ConversationResult<IReadOnlyList<StoredConversationAttributeDefinition>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredConversationAttributeDefinition>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
-    Task<ConversationResult<StoredConversationAttributeDefinition>> CreateAsync(PrincipalRef actor, ConversationAttributeDefinition definition, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredConversationAttributeDefinition>> CreateAsync(PrincipalRef actor, ConversationAttributeDefinition definition, CancellationToken cancellationToken = default);
 
     /// <summary>Changes the display name or sensitivity; the type is immutable.</summary>
-    Task<ConversationResult<StoredConversationAttributeDefinition>> UpdateAsync(PrincipalRef actor, ConversationAttributeDefinition definition, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredConversationAttributeDefinition>> UpdateAsync(PrincipalRef actor, ConversationAttributeDefinition definition, long expectedRevision, CancellationToken cancellationToken = default);
 
     /// <summary>Values stored under a deleted definition stay stored but are omitted from views.</summary>
-    Task<ConversationResult<StoredConversationAttributeDefinition>> DeleteAsync(PrincipalRef actor, string key, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredConversationAttributeDefinition>> DeleteAsync(PrincipalRef actor, string key, long expectedRevision, CancellationToken cancellationToken = default);
 }

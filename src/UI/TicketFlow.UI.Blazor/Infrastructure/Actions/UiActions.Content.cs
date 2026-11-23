@@ -1,5 +1,6 @@
 using TicketFlow.HelpCenter;
 using TicketFlow.Surveys;
+using TicketFlow.Core;
 
 namespace TicketFlow.UI.Blazor.Infrastructure;
 
@@ -21,7 +22,7 @@ public static partial class UiActions
         });
         handlers["survey.toggle"] = context => WithAsync<ISurveyService>(context, async service =>
         {
-            if (await service.GetSurveyAsync(context.Actor, new SurveyId(context.Require("id", "Survey")), context.Aborted) is not SurveySucceeded<StoredSurvey> current)
+            if (await service.GetSurveyAsync(context.Actor, new SurveyId(context.Require("id", "Survey")), context.Aborted) is not TicketValue<StoredSurvey> current)
                 return UiOutcome.NotFound();
             var survey = current.Value.Survey;
             var toggled = new SurveyDefinition(survey.Id, survey.Name, survey.Kind, survey.DefaultLocale, survey.Questions, survey.Policy, survey.Inbox, !survey.Enabled);
@@ -56,7 +57,7 @@ public static partial class UiActions
     }
 
     private static async Task<UiActionResult> TransitionAsync(UiActionContext context, string success,
-        Func<IHelpCenterService, ArticleId, long, Task<HelpCenterResult<StoredArticle>>> transition)
+        Func<IHelpCenterService, ArticleId, long, Task<TicketResult<StoredArticle>>> transition)
     {
         if (context.Session.Service<IHelpCenterService>() is not { } service)
             return UiOutcome.NotFound();

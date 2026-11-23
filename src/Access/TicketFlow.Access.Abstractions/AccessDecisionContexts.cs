@@ -57,7 +57,7 @@ public static class AccessDecisionContexts
     /// <summary>Validates and snapshots a context's principal, scope and 1-<see cref="MaximumPermissions"/> permissions.</summary>
     public static IReadOnlySet<Permission> Validate(PrincipalRef principal, TicketScope scope, IEnumerable<Permission> permissions)
     {
-        if (principal.Value is null)
+        if (principal is null)
             throw new ArgumentException("A principal is required.", nameof(principal));
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(permissions);

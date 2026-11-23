@@ -95,7 +95,7 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadWidget(reader, scope) : null;
     }
 
-    public async Task<LiveChatWriteResult<StoredLiveChatWidget>> CreateAsync(TicketScope scope, LiveChatWidget widget, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredLiveChatWidget, LiveChatWriteRejection>> CreateAsync(TicketScope scope, LiveChatWidget widget, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(widget);
@@ -117,14 +117,14 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         if (insertedRevision is { } rev)
         {
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new LiveChatWriteApplied<StoredLiveChatWidget>(new StoredLiveChatWidget(scope, widget, rev));
+            return new StoreApplied<StoredLiveChatWidget>(new StoredLiveChatWidget(scope, widget, rev));
         }
         return existingRevision is { } existing
-            ? new LiveChatWriteConflict(existing)
-            : new LiveChatWriteRejected(LiveChatWriteRejection.CapacityExceeded);
+            ? new StoreConflict(existing)
+            : new StoreRejected<LiveChatWriteRejection>(LiveChatWriteRejection.CapacityExceeded);
     }
 
-    public async Task<LiveChatWriteResult<StoredLiveChatWidget>> UpdateAsync(TicketScope scope, LiveChatWidget widget, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredLiveChatWidget, LiveChatWriteRejection>> UpdateAsync(TicketScope scope, LiveChatWidget widget, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(widget);
@@ -138,12 +138,12 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         AddWidget(command, widget);
         AddInt64(command, "revision", expectedRevision);
         if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-            return new LiveChatWriteApplied<StoredLiveChatWidget>(new StoredLiveChatWidget(scope, widget, revision));
+            return new StoreApplied<StoredLiveChatWidget>(new StoredLiveChatWidget(scope, widget, revision));
         var current = await LoadWidgetAsync(connection, null, scope, widget.ConfigurationId, cancellationToken).ConfigureAwait(false);
-        return current is null ? LiveChatWriteNotFound.Instance : new LiveChatWriteConflict(current.Revision);
+        return current is null ? StoreNotFound.Instance : new StoreConflict(current.Revision);
     }
 
-    public async Task<LiveChatWriteResult<StoredLiveChatWidget>> DeleteAsync(TicketScope scope, string configurationId, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredLiveChatWidget, LiveChatWriteRejection>> DeleteAsync(TicketScope scope, string configurationId, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(configurationId);
@@ -159,10 +159,10 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
             AddInt64(command, "revision", expectedRevision);
             await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new LiveChatWriteApplied<StoredLiveChatWidget>(ReadWidget(reader, scope));
+                return new StoreApplied<StoredLiveChatWidget>(ReadWidget(reader, scope));
         }
         var now = await LoadWidgetAsync(connection, null, scope, configurationId, cancellationToken).ConfigureAwait(false);
-        return now is null ? LiveChatWriteNotFound.Instance : new LiveChatWriteConflict(now.Revision);
+        return now is null ? StoreNotFound.Instance : new StoreConflict(now.Revision);
     }
 
     private static async Task<StoredLiveChatWidget?> LoadWidgetAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, TicketScope scope, string configurationId, CancellationToken cancellationToken)
@@ -193,7 +193,7 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
 
     // ---- Sessions ----
 
-    public async Task<LiveChatWriteResult<StoredVisitorSession>> CreateAsync(TicketScope scope, VisitorSession session, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredVisitorSession, LiveChatWriteRejection>> CreateAsync(TicketScope scope, VisitorSession session, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(session);
@@ -213,9 +213,9 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         AddText(command, "inbox", session.Inbox.Value);
         AddText(command, "visitor", session.VisitorId);
         if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1)
-            return new LiveChatWriteApplied<StoredVisitorSession>(new StoredVisitorSession(scope, session, 1));
+            return new StoreApplied<StoredVisitorSession>(new StoredVisitorSession(scope, session, 1));
         var existing = await LoadSessionAsync(connection, AccessPartition.From(scope), session.Id, cancellationToken).ConfigureAwait(false);
-        return new LiveChatWriteConflict(existing?.Revision);
+        return new StoreConflict(existing?.Revision);
     }
 
     public async Task<StoredVisitorSession?> GetAsync(AccessPartition partition, VisitorSessionId id, CancellationToken cancellationToken = default)
@@ -236,7 +236,7 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadSession(reader) : null;
     }
 
-    public async Task<LiveChatWriteResult<StoredVisitorSession>> UpdateAsync(TicketScope scope, VisitorSession session, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredVisitorSession, LiveChatWriteRejection>> UpdateAsync(TicketScope scope, VisitorSession session, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(session);
@@ -258,18 +258,18 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
             AddInstant(command, "created", session.CreatedAt);
             AddInt64(command, "revision", expectedRevision);
             if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                return new LiveChatWriteApplied<StoredVisitorSession>(new StoredVisitorSession(scope, session, revision));
+                return new StoreApplied<StoredVisitorSession>(new StoredVisitorSession(scope, session, revision));
         }
         var current = await LoadSessionAsync(connection, AccessPartition.From(scope), session.Id, cancellationToken).ConfigureAwait(false);
         if (current is null || current.Scope != scope)
-            return LiveChatWriteNotFound.Instance;
+            return StoreNotFound.Instance;
         var existing = current.Session;
         if (existing.ConfigurationId != session.ConfigurationId || existing.Inbox != session.Inbox || existing.VisitorId != session.VisitorId || existing.CreatedAt != session.CreatedAt)
             throw new ArgumentException("Session identity fields are immutable.", nameof(session));
-        return new LiveChatWriteConflict(current.Revision);
+        return new StoreConflict(current.Revision);
     }
 
-    public async Task<LiveChatWriteResult<VisitorConversationLink>> LinkAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, DateTimeOffset linkedAt, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<VisitorConversationLink, LiveChatWriteRejection>> LinkAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, DateTimeOffset linkedAt, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireIds(session, conversation);
@@ -300,12 +300,12 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
             }
         }
         if (!hasSession)
-            return LiveChatWriteNotFound.Instance;
+            return StoreNotFound.Instance;
         if (resultLink is null)
-            return new LiveChatWriteRejected(LiveChatWriteRejection.CapacityExceeded);
+            return new StoreRejected<LiveChatWriteRejection>(LiveChatWriteRejection.CapacityExceeded);
         if (wasInserted)
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new LiveChatWriteApplied<VisitorConversationLink>(resultLink);
+        return new StoreApplied<VisitorConversationLink>(resultLink);
     }
 
     public async Task<VisitorConversationLink?> GetLinkAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, CancellationToken cancellationToken = default)
@@ -391,7 +391,7 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         return sessions;
     }
 
-    public async Task<LiveChatWriteResult<VisitorConversationLink>> AdvanceCursorAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, long readSequence, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<VisitorConversationLink, LiveChatWriteRejection>> AdvanceCursorAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, long readSequence, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireIds(session, conversation);
@@ -407,8 +407,8 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         AddInt64(command, "sequence", readSequence);
         await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
-            ? new LiveChatWriteApplied<VisitorConversationLink>(ReadLink(reader))
-            : LiveChatWriteNotFound.Instance;
+            ? new StoreApplied<VisitorConversationLink>(ReadLink(reader))
+            : StoreNotFound.Instance;
     }
 
     public async Task<int> PruneExpiredAsync(DateTimeOffset expiredBefore, int limit, CancellationToken cancellationToken = default)

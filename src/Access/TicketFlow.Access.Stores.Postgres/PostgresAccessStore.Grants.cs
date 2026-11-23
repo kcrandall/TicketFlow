@@ -112,7 +112,7 @@ public sealed partial class PostgresAccessStore
         return result;
     }
 
-    public async Task<AccessWriteResult<StoredAccessGrant>> CreateAsync(AccessGrant grant, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> CreateAsync(AccessGrant grant, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(grant);
         var (kind, subject) = EncodeSubject(grant.Subject);
@@ -124,8 +124,8 @@ public sealed partial class PostgresAccessStore
             await using var existing = new NpgsqlCommand($"SELECT revision FROM tf_access_grants WHERE {GrantKey}", connection, transaction);
             BindGrantKey(existing, grant.Partition, grant.Id);
             return await existing.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision
-                ? new AccessWriteConflict(revision)
-                : new AccessWriteRejected(AccessWriteRejection.CapacityExceeded);
+                ? new StoreConflict(revision)
+                : new StoreRejected<AccessWriteRejection>(AccessWriteRejection.CapacityExceeded);
         }
         await using (var insert = new NpgsqlCommand("""
             INSERT INTO tf_access_grants(tenant_id, project_id, environment_id, app_id, grant_id, format_version, subject_kind, subject_id, role_id,
@@ -140,10 +140,10 @@ public sealed partial class PostgresAccessStore
                 return await MissAsync<StoredAccessGrant>(connection, transaction, $"SELECT revision FROM tf_access_grants WHERE {GrantKey}", command => BindGrantKey(command, grant.Partition, grant.Id), cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new AccessWriteApplied<StoredAccessGrant>(new(grant, 1));
+        return new StoreApplied<StoredAccessGrant>(new(grant, 1));
     }
 
-    public async Task<AccessWriteResult<StoredAccessGrant>> UpdateAsync(AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> UpdateAsync(AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(grant);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
@@ -160,7 +160,7 @@ public sealed partial class PostgresAccessStore
             BindGrant(fast, grant);
             AddLong(fast, "expected", expectedRevision);
             if (await fast.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long fastRevision)
-                return new AccessWriteApplied<StoredAccessGrant>(new(grant, fastRevision));
+                return new StoreApplied<StoredAccessGrant>(new(grant, fastRevision));
         }
 
         // Fresh snapshot check: distinguish not-found / revision conflict / subject change.
@@ -172,12 +172,12 @@ public sealed partial class PostgresAccessStore
             AddText(probe, "subject_id", subject);
             await using var reader = await probe.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return AccessWriteNotFound.Instance;
+                return StoreNotFound.Instance;
             var probedRevision = reader.GetInt64(0);
             if (probedRevision != expectedRevision)
-                return new AccessWriteConflict(probedRevision);
+                return new StoreConflict(probedRevision);
             if (reader.GetBoolean(1))
-                return new AccessWriteConflict(probedRevision);
+                return new StoreConflict(probedRevision);
         }
 
         // Subject changed at matching revision: run subject-locked capacity-checked update.
@@ -192,14 +192,14 @@ public sealed partial class PostgresAccessStore
             AddText(read, "subject_id", subject);
             await using var reader = await read.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return AccessWriteNotFound.Instance;
+                return StoreNotFound.Instance;
             current = reader.GetInt64(0);
             sameSubject = reader.GetBoolean(1);
         }
         if (current != expectedRevision)
-            return new AccessWriteConflict(current);
+            return new StoreConflict(current);
         if (!sameSubject && await CountSubjectAsync(connection, transaction, grant.Partition, kind, subject, grant.Id, cancellationToken).ConfigureAwait(false) >= AccessLimits.MaximumGrantsPerSubject)
-            return new AccessWriteRejected(AccessWriteRejection.CapacityExceeded);
+            return new StoreRejected<AccessWriteRejection>(AccessWriteRejection.CapacityExceeded);
         await using (var update = new NpgsqlCommand($"""
             UPDATE tf_access_grants SET subject_kind=@subject_kind, subject_id=@subject_id, role_id=@role, scope_level=@scope_level,
                 workspace_id=@workspace, team_id=@team, inbox_id=@inbox, effect=@effect, grant_kind=@kind, condition=@condition,
@@ -212,11 +212,11 @@ public sealed partial class PostgresAccessStore
             AddLong(update, "expected", expectedRevision);
             var revision = (long)(await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new AccessWriteApplied<StoredAccessGrant>(new(grant, revision));
+            return new StoreApplied<StoredAccessGrant>(new(grant, revision));
         }
     }
 
-    public async Task<AccessWriteResult<StoredAccessGrant>> DeleteAsync(AccessPartition partition, GrantId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> DeleteAsync(AccessPartition partition, GrantId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(partition);
         RequireGrantId(id);
@@ -228,13 +228,13 @@ public sealed partial class PostgresAccessStore
             AddLong(delete, "expected", expectedRevision);
             await using var reader = await delete.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new AccessWriteApplied<StoredAccessGrant>(ReadGrant(reader, partition));
+                return new StoreApplied<StoredAccessGrant>(ReadGrant(reader, partition));
         }
         await using var current = new NpgsqlCommand($"SELECT revision FROM tf_access_grants WHERE {GrantKey}", connection);
         BindGrantKey(current, partition, id);
         return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
-            ? new AccessWriteConflict(existing)
-            : AccessWriteNotFound.Instance;
+            ? new StoreConflict(existing)
+            : StoreNotFound.Instance;
     }
 
     public async Task<IReadOnlyList<StoredAccessGrant>> DeleteManyAsync(AccessPartition partition, IReadOnlyList<(GrantId Id, long ExpectedRevision)> targets, CancellationToken cancellationToken = default)

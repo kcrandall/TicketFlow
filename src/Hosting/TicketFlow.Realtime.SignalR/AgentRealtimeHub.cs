@@ -23,7 +23,7 @@ public sealed class AgentRealtimeHub(IRealtimeSubscriptions subscriptions, IReal
             return;
         }
         var principal = await principals.ResolveAsync(Context.User ?? new System.Security.Claims.ClaimsPrincipal(), Context.GetHttpContext(), Context.ConnectionAborted).ConfigureAwait(false);
-        if (principal is not { } resolved || resolved.Value is null)
+        if (principal is not { } resolved)
         {
             Context.Abort();
             return;
@@ -145,7 +145,7 @@ public sealed class AgentRealtimeHub(IRealtimeSubscriptions subscriptions, IReal
             {
                 "conversation" when id is not null => new ConversationTopic(principal.Scope, new ConversationId(id)),
                 "queue" when id is not null => new InboxQueueTopic(principal.Scope, new InboxId(id)),
-                "agent" when principal.Value is UserPrincipal user => new AgentTopic(principal.Scope, user.UserId),
+                "agent" when principal is UserPrincipal user => new AgentTopic(principal.Scope, user.UserId),
                 _ => null,
             };
         }

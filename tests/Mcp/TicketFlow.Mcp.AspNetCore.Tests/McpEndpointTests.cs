@@ -144,7 +144,7 @@ public sealed class McpEndpointTests
             new WorkspaceGrantScope(scope.WorkspaceId)));
         await services.GetRequiredService<IInboxStore>().CreateAsync(scope, new Inbox(new InboxId("support"), "Support", new ChannelBinding(new ChannelKind("email"), "cfg")));
         var owner = new UserPrincipal(scope, new UserId("owner"));
-        var contact = (ContactApplied<ContactView>)(await services.GetRequiredService<IContactService>().CreateAsync(owner, new ContactDraft(new ContactProfile("Ada")))).Value!;
+        var contact = (TicketValue<ContactView>)(await services.GetRequiredService<IContactService>().CreateAsync(owner, new ContactDraft(new ContactProfile("Ada")))).Value!;
         await services.GetRequiredService<IConversationService>().StartAsync(owner, new StartConversationRequest(new InboxId("support"), contact.Value.Id));
     }
 }

@@ -213,7 +213,7 @@ public sealed class ApiChannelTests
         });
         var inboxes = host.Services.GetRequiredService<IInboxStore>();
         await inboxes.CreateAsync(host.Scope, new Inbox(new InboxId("api-inbox"), "API", new ChannelBinding(new ChannelKind("api"), "cfg-api")));
-        Assert.IsInstanceOfType<ChannelValue<StoredChannelEndpoint>>((await host.Endpoints.CreateAsync(host.Owner,
+        Assert.IsInstanceOfType<TicketValue<StoredChannelEndpoint>>((await host.Endpoints.CreateAsync(host.Owner,
             new ChannelEndpoint(new ChannelKind("api"), "cfg-api", new InboxId("api-inbox")))).Value);
         var inbound = host.Services.GetRequiredService<ApiChannelInbound>();
 

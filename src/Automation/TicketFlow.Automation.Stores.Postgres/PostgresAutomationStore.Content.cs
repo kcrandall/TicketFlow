@@ -92,7 +92,7 @@ public sealed partial class PostgresAutomationStore
         return macros;
     }
 
-    public async Task<AutomationWriteResult<StoredMacro>> CreateAsync(TicketScope scope, Macro macro, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredMacro, AutomationWriteRejection>> CreateAsync(TicketScope scope, Macro macro, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(macro);
@@ -118,14 +118,14 @@ public sealed partial class PostgresAutomationStore
         if (insertedRevision is { } rev)
         {
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new AutomationWriteApplied<StoredMacro>(new StoredMacro(scope, macro, rev));
+            return new StoreApplied<StoredMacro>(new StoredMacro(scope, macro, rev));
         }
         return existingRevision is { } current
-            ? new AutomationWriteConflict(current)
-            : new AutomationWriteRejected(AutomationWriteRejection.CapacityExceeded);
+            ? new StoreConflict(current)
+            : new StoreRejected<AutomationWriteRejection>(AutomationWriteRejection.CapacityExceeded);
     }
 
-    public async Task<AutomationWriteResult<StoredMacro>> UpdateAsync(TicketScope scope, Macro macro, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredMacro, AutomationWriteRejection>> UpdateAsync(TicketScope scope, Macro macro, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(macro);
@@ -139,13 +139,13 @@ public sealed partial class PostgresAutomationStore
         AddText(command, "definition", AutomationCodec.SerializeMacro(macro));
         AddLong(command, "expected", expectedRevision);
         if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-            return new AutomationWriteApplied<StoredMacro>(new StoredMacro(scope, macro, revision));
+            return new StoreApplied<StoredMacro>(new StoredMacro(scope, macro, revision));
         return await RevisionAsync(connection, null, $"SELECT revision FROM tf_automation_macros WHERE {MacroWhere}", scope, "macro", macro.Id.Value, cancellationToken).ConfigureAwait(false) is { } current
-            ? new AutomationWriteConflict(current)
-            : AutomationWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
-    public async Task<AutomationWriteResult<StoredMacro>> DeleteAsync(TicketScope scope, MacroId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredMacro, AutomationWriteRejection>> DeleteAsync(TicketScope scope, MacroId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireInitialized(id.IsInitialized, nameof(id));
@@ -157,11 +157,11 @@ public sealed partial class PostgresAutomationStore
             AddLong(command, "expected", expectedRevision);
             await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new AutomationWriteApplied<StoredMacro>(ReadMacro(reader, scope));
+                return new StoreApplied<StoredMacro>(ReadMacro(reader, scope));
         }
         return await RevisionAsync(connection, null, $"SELECT revision FROM tf_automation_macros WHERE {MacroWhere}", scope, "macro", id.Value, cancellationToken).ConfigureAwait(false) is { } current
-            ? new AutomationWriteConflict(current)
-            : AutomationWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
     public async Task<StoredCannedResponse?> GetAsync(TicketScope scope, CannedResponseId id, CancellationToken cancellationToken = default)
@@ -226,7 +226,7 @@ public sealed partial class PostgresAutomationStore
         return new CannedResponsePage(rows, rows[^1].Response.Shortcut);
     }
 
-    public async Task<AutomationWriteResult<StoredCannedResponse>> CreateAsync(TicketScope scope, CannedResponse response, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredCannedResponse, AutomationWriteRejection>> CreateAsync(TicketScope scope, CannedResponse response, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(response);
@@ -253,14 +253,14 @@ public sealed partial class PostgresAutomationStore
         if (insertedRevision is { } rev)
         {
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new AutomationWriteApplied<StoredCannedResponse>(new StoredCannedResponse(scope, response, rev));
+            return new StoreApplied<StoredCannedResponse>(new StoredCannedResponse(scope, response, rev));
         }
         if (existingRevision is { } current)
-            return new AutomationWriteConflict(current);
-        return new AutomationWriteRejected(atCapacity ? AutomationWriteRejection.CapacityExceeded : AutomationWriteRejection.DuplicateShortcut);
+            return new StoreConflict(current);
+        return new StoreRejected<AutomationWriteRejection>(atCapacity ? AutomationWriteRejection.CapacityExceeded : AutomationWriteRejection.DuplicateShortcut);
     }
 
-    public async Task<AutomationWriteResult<StoredCannedResponse>> UpdateAsync(TicketScope scope, CannedResponse response, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredCannedResponse, AutomationWriteRejection>> UpdateAsync(TicketScope scope, CannedResponse response, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(response);
@@ -278,20 +278,20 @@ public sealed partial class PostgresAutomationStore
             try
             {
                 if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                    return new AutomationWriteApplied<StoredCannedResponse>(new StoredCannedResponse(scope, response, revision));
+                    return new StoreApplied<StoredCannedResponse>(new StoredCannedResponse(scope, response, revision));
             }
             catch (PostgresException error) when (error.SqlState == UniqueViolation && error.ConstraintName == ShortcutConstraint)
             {
-                return new AutomationWriteRejected(AutomationWriteRejection.DuplicateShortcut);
+                return new StoreRejected<AutomationWriteRejection>(AutomationWriteRejection.DuplicateShortcut);
             }
         }
         return await RevisionAsync(connection, null, $"SELECT revision FROM tf_automation_canned_responses WHERE {ResponseWhere}", scope, "response", response.Id.Value, cancellationToken)
             .ConfigureAwait(false) is { } current
-            ? new AutomationWriteConflict(current)
-            : AutomationWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
-    public async Task<AutomationWriteResult<StoredCannedResponse>> DeleteAsync(TicketScope scope, CannedResponseId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredCannedResponse, AutomationWriteRejection>> DeleteAsync(TicketScope scope, CannedResponseId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireInitialized(id.IsInitialized, nameof(id));
@@ -304,12 +304,12 @@ public sealed partial class PostgresAutomationStore
             AddLong(command, "expected", expectedRevision);
             await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new AutomationWriteApplied<StoredCannedResponse>(ReadResponse(reader, scope));
+                return new StoreApplied<StoredCannedResponse>(ReadResponse(reader, scope));
         }
         return await RevisionAsync(connection, null, $"SELECT revision FROM tf_automation_canned_responses WHERE {ResponseWhere}", scope, "response", id.Value, cancellationToken)
             .ConfigureAwait(false) is { } current
-            ? new AutomationWriteConflict(current)
-            : AutomationWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
     private static StoredMacro ReadMacro(NpgsqlDataReader reader, TicketScope scope)

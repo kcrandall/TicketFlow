@@ -154,7 +154,7 @@ public sealed partial class PostgresSurveyStore
         return rows;
     }
 
-    public async Task<SurveyWriteResult<StoredInvitation>> UpdateInvitationAsync(TicketScope scope, SurveyInvitation invitation, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredInvitation, SurveyWriteRejection>> UpdateInvitationAsync(TicketScope scope, SurveyInvitation invitation, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(invitation);
@@ -171,11 +171,11 @@ public sealed partial class PostgresSurveyStore
             BindInvitation(update, scope, invitation);
             update.Parameters.AddWithValue("expected", expectedRevision);
             if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                return new SurveyWriteApplied<StoredInvitation>(new(scope, invitation, revision));
+                return new StoreApplied<StoredInvitation>(new(scope, invitation, revision));
         }
         catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == "tf_survey_invitations_token")
         {
-            return new SurveyWriteRejected(SurveyWriteRejection.InUse);
+            return new StoreRejected<SurveyWriteRejection>(SurveyWriteRejection.InUse);
         }
 
         // 0-row miss: fresh-snapshot SELECT to distinguish NotFound vs Conflict vs immutable-column mismatch.
@@ -183,11 +183,11 @@ public sealed partial class PostgresSurveyStore
         BindInvitationKey(check, scope, invitation.Id);
         await using var reader = await check.ExecuteReaderAsync(System.Data.CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            return SurveyWriteNotFound.Instance;
+            return StoreNotFound.Instance;
         var currentRevision = reader.GetInt64(0);
         if (currentRevision != expectedRevision)
-            return new SurveyWriteConflict(currentRevision);
-        return new SurveyWriteRejected(SurveyWriteRejection.InUse);
+            return new StoreConflict(currentRevision);
+        return new StoreRejected<SurveyWriteRejection>(SurveyWriteRejection.InUse);
     }
 
     public async Task<ResponseRecordResult> RecordResponseAsync(TicketScope scope, SurveyResponse response, CancellationToken cancellationToken = default)

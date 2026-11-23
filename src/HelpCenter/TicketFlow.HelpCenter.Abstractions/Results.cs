@@ -2,25 +2,6 @@ using TicketFlow.Core;
 
 namespace TicketFlow.HelpCenter;
 
-/// <summary>The store write was applied; <see cref="Value"/> is the stored state (for deletes, the removed state).</summary>
-public sealed record HelpCenterWriteApplied<T>(T Value);
-
-/// <summary>No record exists for the key in the requested scope.</summary>
-public sealed record HelpCenterWriteNotFound
-{
-    private HelpCenterWriteNotFound()
-    {
-    }
-
-    public static HelpCenterWriteNotFound Instance { get; } = new();
-}
-
-/// <summary>The expected revision did not match, or a create found an existing record. Nothing was written.</summary>
-public sealed record HelpCenterWriteConflict(long CurrentRevision);
-
-/// <summary>The store refused the write for a contract reason. Nothing was written.</summary>
-public sealed record HelpCenterWriteRejected(HelpCenterWriteRejection Reason);
-
 public enum HelpCenterWriteRejection
 {
     /// <summary>A capacity in <see cref="HelpCenterLimits"/> would be exceeded.</summary>
@@ -41,35 +22,6 @@ public enum HelpCenterWriteRejection
     /// <summary>An appended revision is not the next number, or a published record references a missing revision.</summary>
     InvalidRevision = 6,
 }
-
-/// <summary>Outcome of a revision-fenced store write. Switch over every case without a discard arm.</summary>
-public union HelpCenterWriteResult<T>(HelpCenterWriteApplied<T>, HelpCenterWriteNotFound, HelpCenterWriteConflict, HelpCenterWriteRejected);
-
-/// <summary>The authorized read or change succeeded.</summary>
-public sealed record HelpCenterSucceeded<T>(T Value);
-
-/// <summary>The request was refused. <see cref="Errors"/> are non-sensitive messages; <see cref="CurrentRevision"/> accompanies conflicts.</summary>
-public sealed record HelpCenterRefused(HelpCenterRefusal Reason, IReadOnlyList<string> Errors, long? CurrentRevision = null);
-
-public enum HelpCenterRefusal
-{
-    /// <summary>Access control denied the request. Checked before the store is consulted.</summary>
-    Forbidden = 1,
-
-    /// <summary>The input failed contextual validation (unsupported locale, missing default translation, ...).</summary>
-    Invalid = 2,
-
-    NotFound = 3,
-
-    /// <summary>The expected revision did not match, or the record already exists.</summary>
-    Conflict = 4,
-
-    /// <summary>A store rule refused the write (see the error text).</summary>
-    Rejected = 5,
-}
-
-/// <summary>Outcome of a help center service call. Switch over every case without a discard arm.</summary>
-public union HelpCenterResult<T>(HelpCenterSucceeded<T>, HelpCenterRefused);
 
 /// <summary>One keyset page. <see cref="HasMore"/> means a further page exists.</summary>
 public sealed record HelpCenterPage<T>(IReadOnlyList<T> Items, bool HasMore);

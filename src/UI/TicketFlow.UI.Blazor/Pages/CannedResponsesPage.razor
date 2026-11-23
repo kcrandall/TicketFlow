@@ -48,7 +48,7 @@
 
     protected override async Task OnInitializedAsync()
     {
-        if (Service<ICannedResponseService>() is { } service && await service.ListAsync(Actor, new CannedResponseQuery(null, null, 100), Aborted) is AutomationValue<CannedResponsePage> page)
+        if (Service<ICannedResponseService>() is { } service && await service.ListAsync(Actor, new CannedResponseQuery(null, null, 100), Aborted) is TicketValue<CannedResponsePage> page)
             responses = [.. page.Value.Responses];
     }
 }

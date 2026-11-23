@@ -77,13 +77,13 @@
         if (routingTask is not null) pending.Add(routingTask);
         if (pending.Count > 1)
             await Task.WhenAll(pending);
-        if (calendarTask is not null && await calendarTask is WorkspaceSucceeded<IReadOnlyList<StoredBusinessCalendar>> list)
+        if (calendarTask is not null && await calendarTask is TicketValue<IReadOnlyList<StoredBusinessCalendar>> list)
             foreach (var calendar in list.Value)
                 calendars[calendar.Calendar.Id.Value] = calendar.Calendar.Name;
-        if (slaTask is not null && await slaTask is SlaValue<IReadOnlyList<StoredSlaPolicy>> policies)
+        if (slaTask is not null && await slaTask is TicketValue<IReadOnlyList<StoredSlaPolicy>> policies)
             foreach (var policy in policies.Value)
                 sla[policy.Policy.Id.Value] = policy.Policy.Name;
-        if (routingTask is not null && await routingTask is RoutingValue<IReadOnlyList<StoredRoutingPolicy>> routes)
+        if (routingTask is not null && await routingTask is TicketValue<IReadOnlyList<StoredRoutingPolicy>> routes)
             foreach (var policy in routes.Value)
                 routing[policy.Policy.Id.Value] = policy.Policy.Name;
         return (calendars, sla, routing);

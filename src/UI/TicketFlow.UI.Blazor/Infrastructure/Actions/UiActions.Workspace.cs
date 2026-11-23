@@ -27,7 +27,7 @@ public static partial class UiActions
         handlers["team.update"] = context => WithAsync<ITeamService>(context, async teams =>
         {
             var id = new TeamId(PathId(context, "teams"));
-            if (await teams.GetAsync(context.Actor, id, context.Aborted) is not WorkspaceSucceeded<StoredTeam> current)
+            if (await teams.GetAsync(context.Actor, id, context.Aborted) is not TicketValue<StoredTeam> current)
                 return UiOutcome.NotFound();
             return UiOutcomes.From(await teams.UpdateAsync(context.Actor, new Team(id, context.Require("name", "Name"), context.Text("description"), current.Value.Team.Members),
                 context.RequireRevision(), context.Aborted), _ => UiOutcome.Success("Team saved"));

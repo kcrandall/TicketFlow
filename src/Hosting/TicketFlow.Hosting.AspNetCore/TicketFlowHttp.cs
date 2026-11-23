@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using TicketFlow.Core;
 using TicketFlow.Hosting.AspNetCore.Contracts;
 
 namespace TicketFlow.Hosting.AspNetCore;
@@ -144,6 +145,24 @@ public static class TicketFlowHttp
             ? Problem(StatusCodes.Status412PreconditionFailed, "revision-mismatch", errors, currentRevision)
             : Problem(StatusCodes.Status409Conflict, "conflict", errors, currentRevision);
     }
+
+    internal static IResult Map<T>(HttpContext httpContext, TicketResult<T> result, Func<T, IResult> success) => result switch
+    {
+        TicketValue<T> ok => success(ok.Value),
+        TicketFailure failure => Failure(httpContext, failure),
+    };
+
+    internal static IResult Failure(HttpContext httpContext, TicketFailure failure) => failure.Kind switch
+    {
+        TicketFailureKind.Forbidden => Problem(StatusCodes.Status403Forbidden, "forbidden", failure.Errors),
+        TicketFailureKind.Invalid => Problem(StatusCodes.Status422UnprocessableEntity, "invalid", failure.Errors),
+        TicketFailureKind.NotFound => Problem(StatusCodes.Status404NotFound, "not-found", failure.Errors),
+        TicketFailureKind.Conflict => failure.CurrentRevision is { } revision
+            ? Conflict(httpContext, revision, failure.Errors)
+            : Problem(StatusCodes.Status409Conflict, "conflict", failure.Errors),
+        TicketFailureKind.Rejected => Problem(StatusCodes.Status409Conflict, "rejected", failure.Errors),
+        _ => throw new ArgumentOutOfRangeException(nameof(failure)),
+    };
 
     internal static IResult Refused(HttpContext httpContext, RefusalKind kind, IReadOnlyList<string>? errors = null, long? currentRevision = null) => kind switch
     {

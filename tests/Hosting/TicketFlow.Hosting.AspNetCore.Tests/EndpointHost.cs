@@ -85,11 +85,11 @@ internal sealed class EndpointHost : IAsyncDisposable
         var services = serviceScope.ServiceProvider;
         var grants = services.GetRequiredService<IAccessGrantStore>();
         var index = 0;
-        async Task GrantAsync(GrantSubject subject, RoleId role) => Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await grants.CreateAsync(
+        async Task GrantAsync(GrantSubject subject, RoleId role) => Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await grants.CreateAsync(
             new AccessGrant(new GrantId($"seed-{index++}"), AccessPartition.From(Scope), subject, role, new WorkspaceGrantScope(Scope.WorkspaceId)))).Value);
         await GrantAsync(new UserId("owner"), BuiltInRoles.Owner.Id);
         await GrantAsync(new UserId("agent"), BuiltInRoles.Agent.Id);
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await services.GetRequiredService<IInboxStore>().CreateAsync(Scope,
+        Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await services.GetRequiredService<IInboxStore>().CreateAsync(Scope,
             new Inbox(new InboxId("support"), "Support", new ChannelBinding(new ChannelKind("email"), "cfg-support")))).Value);
     }
 

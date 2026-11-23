@@ -164,18 +164,18 @@ internal sealed class EventsFixture : IDisposable
     {
         var grant = new AccessGrant(new GrantId($"seed-{nextGrant++:D4}"), AccessPartition.From(Scope), subject, role.Id, scope ?? new WorkspaceGrantScope(Scope.WorkspaceId),
             GrantEffect.Allow, null);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await Get<IAccessGrantStore>().CreateAsync(grant)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await Get<IAccessGrantStore>().CreateAsync(grant)).Value);
     }
 
     public async Task<AccessRole> CustomRoleAsync(string id, params Permission[] permissions)
     {
         var role = new AccessRole(new RoleId(id), id, permissions);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await Get<IAccessRoleStore>().CreateAsync(Scope, role)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await Get<IAccessRoleStore>().CreateAsync(Scope, role)).Value);
         return role;
     }
 
     public async Task MaskAsync(AccessFieldPolicy policy) =>
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessFieldPolicy>>((await Get<IAccessFieldPolicyStore>().CreateAsync(Scope, policy)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessFieldPolicy>>((await Get<IAccessFieldPolicyStore>().CreateAsync(Scope, policy)).Value);
 
     public async Task<T> InScopeAsync<T>(Func<IServiceProvider, Task<T>> action)
     {
@@ -187,7 +187,7 @@ internal sealed class EventsFixture : IDisposable
     {
         var identity = new ContactIdentity(ContactIdentityAddress.Parse(ContactIdentityKind.Email, email), new IdentityVerified("test", Start));
         var result = await provider.GetRequiredService<IContactService>().CreateAsync(Owner, new ContactDraft(new ContactProfile(id), [identity], Id: new ContactId(id)));
-        return ((ContactApplied<ContactView>)result.Value!).Value;
+        return ((TicketValue<ContactView>)result.Value!).Value;
     });
 
     /// <summary>Runs the outbox dispatcher until a run handles nothing.</summary>
@@ -244,18 +244,16 @@ internal sealed class EventsFixture : IDisposable
     public Task SlaEventAsync(string id, PrincipalRef actor, SlaTimelineEvent slaEvent) =>
         CommandAsync(service => service.AppendExtensionAsync(actor, new ConversationId(id), SlaEventCodec.Encode(slaEvent)));
 
-    public Task<EventResult<EventSubscriptionView>> SubscribeAsync(string id, string principal = "hooks", EventPrivacy privacy = EventPrivacy.IdsOnly,
+    public Task<TicketResult<EventSubscriptionView>> SubscribeAsync(string id, string principal = "hooks", EventPrivacy privacy = EventPrivacy.IdsOnly,
         EventSubscriptionFilter? filter = null, int batchSize = 50, EventSubscriptionStart? start = null, PrincipalRef? actor = null, string sink = "in-process") =>
         InScopeAsync(provider => provider.GetRequiredService<IEventSubscriptionService>().CreateAsync(actor ?? Owner,
             new EventSubscription(new EventSubscriptionId(id), id, new EventSinkRef(sink, "recorder"), filter ?? EventSubscriptionFilter.Everything,
                 new ApiClientId(principal), privacy, batchSize: batchSize), start ?? EventStartAtEarliest.Instance));
 
-    public static T Value<T>(EventResult<T> result) => result switch
+    public static T Value<T>(TicketResult<T> result) => result switch
     {
-        EventSucceeded<T> succeeded => succeeded.Value,
-        EventNotFound => throw new AssertFailedException("Not found."),
-        EventConflict conflict => throw new AssertFailedException($"Conflict at {conflict.CurrentRevision}."),
-        EventRefused refused => throw new AssertFailedException($"Refused: {refused.Reason} {string.Join("; ", refused.Errors)}"),
+        TicketValue<T> succeeded => succeeded.Value,
+        TicketFailure failure => throw new AssertFailedException($"Failed: {failure.Kind} {string.Join("; ", failure.Errors)}"),
     };
 
     public void Dispose()

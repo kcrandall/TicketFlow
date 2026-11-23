@@ -30,7 +30,7 @@ public sealed class AutomationReviewRegressionTests
         Assert.AreEqual(ConversationPriority.None, (await fixture.ConversationAsync("c1")).Priority);
         Assert.AreEqual(0, (await fixture.ExecutionsAsync("c1")).Count);
         var start = fixture.Clock.GetUtcNow().AddMinutes(-1);
-        var replay = Assert.IsInstanceOfType<AutomationValue<AutomationReplayResult>>((await fixture.RulesAsync(service => service.ReplayAsync(fixture.Owner,
+        var replay = Assert.IsInstanceOfType<TicketValue<AutomationReplayResult>>((await fixture.RulesAsync(service => service.ReplayAsync(fixture.Owner,
             new AutomationReplayRequest(C1, start, start.AddHours(1))))).Value).Value;
         Assert.IsFalse(replay.Items.Any(item => item.Event.Kind == AutomationEventKind.SlaEvent), "Replay ignores forged SLA events too.");
 
@@ -120,7 +120,7 @@ public sealed class AutomationReviewRegressionTests
             lost = true;
             var execution = (AutomationExecution)args[1]!;
             var bumped = inner.UpdateAsync((TicketScope)args[0]!, execution.WithProgress([]), (long)args[2]!).GetAwaiter().GetResult();
-            Assert.IsInstanceOfType<AutomationWriteApplied<StoredAutomationExecution>>(bumped.Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredAutomationExecution>>(bumped.Value);
             return inner.UpdateAsync((TicketScope)args[0]!, execution, (long)args[2]!);
         };
         var occurrence = new AutomationOccurrence(fixture.Scope, C1, AutomationEvent.MessageReceived(1), AutomationTriggerKeys.TimelineEvent(1), false, null, null);

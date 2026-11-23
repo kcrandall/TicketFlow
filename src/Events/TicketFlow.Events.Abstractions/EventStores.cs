@@ -67,24 +67,6 @@ public enum EventWriteRejection
     Duplicate = 2,
 }
 
-public sealed record EventWriteApplied<T>(T Value);
-
-public sealed record EventWriteNotFound
-{
-    private EventWriteNotFound()
-    {
-    }
-
-    public static EventWriteNotFound Instance { get; } = new();
-}
-
-public sealed record EventWriteConflict(long CurrentRevision);
-
-public sealed record EventWriteRejected(EventWriteRejection Reason);
-
-/// <summary>Outcome of a subscription store write. Switch over every case without a discard arm.</summary>
-public union EventWriteResult<T>(EventWriteApplied<T>, EventWriteNotFound, EventWriteConflict, EventWriteRejected);
-
 /// <summary>
 /// Durable subscriptions and their delivery state. Contract:
 /// <list type="bullet">
@@ -117,11 +99,11 @@ public interface IEventSubscriptionStore
     /// <summary>The scope's subscriptions ordered by identifier (ordinal).</summary>
     Task<IReadOnlyList<StoredEventSubscription>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default);
 
-    Task<EventWriteResult<StoredEventSubscription>> CreateAsync(TicketScope scope, EventSubscription subscription, long cursor, DateTimeOffset createdAt, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredEventSubscription, EventWriteRejection>> CreateAsync(TicketScope scope, EventSubscription subscription, long cursor, DateTimeOffset createdAt, CancellationToken cancellationToken = default);
 
-    Task<EventWriteResult<StoredEventSubscription>> UpdateAsync(TicketScope scope, EventSubscription subscription, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredEventSubscription, EventWriteRejection>> UpdateAsync(TicketScope scope, EventSubscription subscription, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<EventWriteResult<StoredEventSubscription>> DeleteAsync(TicketScope scope, EventSubscriptionId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredEventSubscription, EventWriteRejection>> DeleteAsync(TicketScope scope, EventSubscriptionId id, long expectedRevision, CancellationToken cancellationToken = default);
 
     Task<EventDeliveryState?> GetStateAsync(TicketScope scope, EventSubscriptionId id, CancellationToken cancellationToken = default);
 

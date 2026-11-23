@@ -50,29 +50,14 @@ public interface IAccessQueryPlanner
 }
 
 /// <summary>The change was authorized, validated, stored and audited.</summary>
-public sealed record AccessChangeApplied<T>(T Value, Guid AuditEventId);
-
-/// <summary>The change was refused. <see cref="Errors"/> are non-sensitive validation messages.</summary>
-public sealed record AccessChangeRefused(AccessChangeRefusal Reason, IReadOnlyList<string> Errors, long? CurrentRevision = null);
-
-public enum AccessChangeRefusal
-{
-    Forbidden = 1,
-    Invalid = 2,
-    NotFound = 3,
-    Conflict = 4,
-    Rejected = 5,
-}
-
-/// <summary>Outcome of an administrative change. Switch over every case without a discard arm.</summary>
-public union AccessChangeResult<T>(AccessChangeApplied<T>, AccessChangeRefused);
+public readonly record struct AccessChangeApplied<T>(T Value, Guid AuditEventId);
 
 /// <summary>Request for a time-bound elevated grant for the requesting principal itself.</summary>
 public sealed record BreakGlassRequest
 {
     public BreakGlassRequest(PrincipalRef requester, GrantId id, RoleId role, GrantScope scope, TimeSpan duration, string justification)
     {
-        if (requester.Value is null)
+        if (requester is null)
             throw new ArgumentException("A requester is required.", nameof(requester));
         if (!id.IsInitialized || !role.IsInitialized)
             throw new ArgumentException("Grant and role identifiers are required.");
@@ -100,35 +85,35 @@ public sealed record BreakGlassRequest
 /// </summary>
 public interface IAccessAdministrator
 {
-    Task<AccessChangeResult<StoredAccessRole>> CreateRoleAsync(PrincipalRef actor, AccessRole role, CancellationToken cancellationToken = default);
+    Task<TicketResult<AccessChangeApplied<StoredAccessRole>>> CreateRoleAsync(PrincipalRef actor, AccessRole role, CancellationToken cancellationToken = default);
 
-    Task<AccessChangeResult<StoredAccessRole>> UpdateRoleAsync(PrincipalRef actor, AccessRole role, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<AccessChangeApplied<StoredAccessRole>>> UpdateRoleAsync(PrincipalRef actor, AccessRole role, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AccessChangeResult<StoredAccessRole>> DeleteRoleAsync(PrincipalRef actor, RoleId role, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<AccessChangeApplied<StoredAccessRole>>> DeleteRoleAsync(PrincipalRef actor, RoleId role, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AccessChangeResult<StoredAccessGrant>> CreateGrantAsync(PrincipalRef actor, AccessGrant grant, CancellationToken cancellationToken = default);
+    Task<TicketResult<AccessChangeApplied<StoredAccessGrant>>> CreateGrantAsync(PrincipalRef actor, AccessGrant grant, CancellationToken cancellationToken = default);
 
-    Task<AccessChangeResult<StoredAccessGrant>> UpdateGrantAsync(PrincipalRef actor, AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<AccessChangeApplied<StoredAccessGrant>>> UpdateGrantAsync(PrincipalRef actor, AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AccessChangeResult<StoredAccessGrant>> RevokeGrantAsync(PrincipalRef actor, GrantId grant, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<AccessChangeApplied<StoredAccessGrant>>> RevokeGrantAsync(PrincipalRef actor, GrantId grant, long expectedRevision, CancellationToken cancellationToken = default);
 
     /// <summary>Revokes multiple grants in one authorized batch (loading the actor's grants once).</summary>
-    async Task<IReadOnlyList<AccessChangeResult<StoredAccessGrant>>> RevokeGrantsAsync(PrincipalRef actor, IReadOnlyList<(GrantId Id, long ExpectedRevision)> grants, CancellationToken cancellationToken = default)
+    async Task<IReadOnlyList<TicketResult<AccessChangeApplied<StoredAccessGrant>>>> RevokeGrantsAsync(PrincipalRef actor, IReadOnlyList<(GrantId Id, long ExpectedRevision)> grants, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(grants);
-        var results = new AccessChangeResult<StoredAccessGrant>[grants.Count];
+        var results = new TicketResult<AccessChangeApplied<StoredAccessGrant>>[grants.Count];
         for (var i = 0; i < grants.Count; i++)
             results[i] = await RevokeGrantAsync(actor, grants[i].Id, grants[i].ExpectedRevision, cancellationToken).ConfigureAwait(false);
         return results;
     }
 
-    Task<AccessChangeResult<StoredAccessFieldPolicy>> CreateFieldPolicyAsync(PrincipalRef actor, AccessFieldPolicy policy, CancellationToken cancellationToken = default);
+    Task<TicketResult<AccessChangeApplied<StoredAccessFieldPolicy>>> CreateFieldPolicyAsync(PrincipalRef actor, AccessFieldPolicy policy, CancellationToken cancellationToken = default);
 
-    Task<AccessChangeResult<StoredAccessFieldPolicy>> UpdateFieldPolicyAsync(PrincipalRef actor, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<AccessChangeApplied<StoredAccessFieldPolicy>>> UpdateFieldPolicyAsync(PrincipalRef actor, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AccessChangeResult<StoredAccessFieldPolicy>> DeleteFieldPolicyAsync(PrincipalRef actor, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<AccessChangeApplied<StoredAccessFieldPolicy>>> DeleteFieldPolicyAsync(PrincipalRef actor, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<AccessChangeResult<StoredAccessGrant>> ActivateBreakGlassAsync(BreakGlassRequest request, CancellationToken cancellationToken = default);
+    Task<TicketResult<AccessChangeApplied<StoredAccessGrant>>> ActivateBreakGlassAsync(BreakGlassRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Read-only check (nothing is written or audited) that <paramref name="actor"/> could confer every live allow grant in
@@ -148,27 +133,21 @@ public interface IAccessAdministrator
     Task<AccessCheckResult> CheckCanRevokeAsync(PrincipalRef actor, IEnumerable<AccessGrant> grants, CancellationToken cancellationToken = default);
 
     /// <summary>Read-only, unaudited listing of the built-in and custom roles of the actor's workspace; requires <c>access:manage</c> (standard grants).</summary>
-    Task<AccessListResult<IReadOnlyList<AccessRoleListing>>> ListRolesAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<AccessRoleListing>>> ListRolesAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Read-only, unaudited page of the grants whose scope equals <paramref name="target"/> (workspace, team or inbox of the actor's
     /// workspace; ordered by identifier, after <paramref name="after"/>, 1-<see cref="AccessLimits.MaximumTargetPage"/>); requires
     /// <c>access:manage</c> on the target (standard grants).
     /// </summary>
-    Task<AccessListResult<IReadOnlyList<StoredAccessGrant>>> ListGrantsAsync(PrincipalRef actor, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredAccessGrant>>> ListGrantsAsync(PrincipalRef actor, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default);
 
     /// <summary>Read-only, unaudited listing of the actor's workspace field policies; requires <c>access:manage</c> (standard grants).</summary>
-    Task<AccessListResult<IReadOnlyList<StoredAccessFieldPolicy>>> ListFieldPoliciesAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredAccessFieldPolicy>>> ListFieldPoliciesAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 }
 
 /// <summary>A role as listed: built-in roles have no revision.</summary>
 public sealed record AccessRoleListing(AccessRole Role, long? Revision);
-
-/// <summary>The listing was authorized.</summary>
-public sealed record AccessListed<T>(T Value);
-
-/// <summary>Outcome of an administrative listing. Switch over every case without a discard arm.</summary>
-public union AccessListResult<T>(AccessListed<T>, AccessChangeRefused);
 
 /// <summary>
 /// An allow grant whose permissions a change would extend, and the resource they would apply to. <see cref="Target"/> defaults to
@@ -198,4 +177,4 @@ public sealed record AccessCheckPassed
 }
 
 /// <summary>Outcome of a read-only administrative check. Switch over every case without a discard arm.</summary>
-public union AccessCheckResult(AccessCheckPassed, AccessChangeRefused);
+public union AccessCheckResult(AccessCheckPassed, TicketFailure);

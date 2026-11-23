@@ -4,56 +4,18 @@ using TicketFlow.Workspaces;
 
 namespace TicketFlow.Sla;
 
-public sealed record SlaValue<T>(T Value);
-
-/// <summary>The policy or conversation does not exist in the actor's scope.</summary>
-public sealed record SlaNotFound
-{
-    private SlaNotFound()
-    {
-    }
-
-    public static SlaNotFound Instance { get; } = new();
-}
-
-/// <summary>The expected revision did not match.</summary>
-public sealed record SlaConflict(long CurrentRevision);
-
-public enum SlaRefusal
-{
-    /// <summary>Access denied the operation.</summary>
-    Forbidden = 1,
-
-    /// <summary>The input is invalid; see <see cref="SlaRefused.Errors"/>.</summary>
-    Invalid = 2,
-
-    /// <summary>A store limit refused the write.</summary>
-    Rejected = 3,
-}
-
-/// <summary>The operation was refused. <see cref="Errors"/> are non-sensitive messages.</summary>
-public sealed record SlaRefused(SlaRefusal Reason, IReadOnlyList<string> Errors)
-{
-    public static SlaRefused Forbidden { get; } = new(SlaRefusal.Forbidden, []);
-
-    public static SlaRefused Invalid(string error) => new(SlaRefusal.Invalid, [error]);
-}
-
-/// <summary>Outcome of an SLA service operation. Switch over every case without a discard arm.</summary>
-public union SlaResult<T>(SlaValue<T>, SlaNotFound, SlaConflict, SlaRefused);
-
 /// <summary>Access-checked SLA policy management. Reads require <c>sla:read</c>, writes <c>sla:manage</c>, at workspace level.</summary>
 public interface ISlaPolicyService
 {
-    Task<SlaResult<StoredSlaPolicy>> GetAsync(PrincipalRef actor, SlaPolicyId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredSlaPolicy>> GetAsync(PrincipalRef actor, SlaPolicyId id, CancellationToken cancellationToken = default);
 
-    Task<SlaResult<IReadOnlyList<StoredSlaPolicy>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredSlaPolicy>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
-    Task<SlaResult<StoredSlaPolicy>> CreateAsync(PrincipalRef actor, SlaPolicy policy, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredSlaPolicy>> CreateAsync(PrincipalRef actor, SlaPolicy policy, CancellationToken cancellationToken = default);
 
-    Task<SlaResult<StoredSlaPolicy>> UpdateAsync(PrincipalRef actor, SlaPolicy policy, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredSlaPolicy>> UpdateAsync(PrincipalRef actor, SlaPolicy policy, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<SlaResult<StoredSlaPolicy>> DeleteAsync(PrincipalRef actor, SlaPolicyId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredSlaPolicy>> DeleteAsync(PrincipalRef actor, SlaPolicyId id, long expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -99,7 +61,7 @@ public sealed record SlaRiskPage(IReadOnlyList<SlaStatusView> Items, string? Nex
 /// </summary>
 public interface ISlaService
 {
-    Task<SlaResult<SlaStatusView>> GetStatusAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default);
+    Task<TicketResult<SlaStatusView>> GetStatusAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default);
 
-    Task<SlaResult<SlaRiskPage>> ListAsync(PrincipalRef actor, SlaRiskQuery query, string? cursor = null, CancellationToken cancellationToken = default);
+    Task<TicketResult<SlaRiskPage>> ListAsync(PrincipalRef actor, SlaRiskQuery query, string? cursor = null, CancellationToken cancellationToken = default);
 }

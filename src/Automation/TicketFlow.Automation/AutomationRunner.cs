@@ -239,9 +239,9 @@ public sealed class AutomationRunner
             : await executions.UpdateAsync(scope, execution, revision, cancellationToken).ConfigureAwait(false);
         return result switch
         {
-            AutomationWriteApplied<StoredAutomationExecution> applied => applied.Value.Revision,
-            AutomationWriteNotFound or AutomationWriteConflict => null,
-            AutomationWriteRejected rejected => throw new InvalidOperationException($"The execution store rejected the write: {rejected.Reason}."),
+            StoreApplied<StoredAutomationExecution> applied => applied.Value.Revision,
+            StoreNotFound or StoreConflict => null,
+            StoreRejected<AutomationWriteRejection> rejected => throw new InvalidOperationException($"The execution store rejected the write: {rejected.Reason}."),
         };
     }
 

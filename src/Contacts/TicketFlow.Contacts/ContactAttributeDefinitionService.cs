@@ -9,15 +9,15 @@ public sealed class ContactAttributeDefinitionService(IContactAttributeDefinitio
     private readonly IContactAttributeDefinitionStore store = store ?? throw new ArgumentNullException(nameof(store));
     private readonly IAccessEvaluator evaluator = evaluator ?? throw new ArgumentNullException(nameof(evaluator));
 
-    public async Task<ContactResult<IReadOnlyList<StoredContactAttributeDefinition>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<IReadOnlyList<StoredContactAttributeDefinition>, ContactRefused>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         if (!await PermittedAsync(actor, ContactPermissions.Read, cancellationToken).ConfigureAwait(false))
             return ContactRefused.Forbidden;
-        return new ContactApplied<IReadOnlyList<StoredContactAttributeDefinition>>(await store.ListAsync(scope, cancellationToken).ConfigureAwait(false));
+        return new TicketValue<IReadOnlyList<StoredContactAttributeDefinition>>(await store.ListAsync(scope, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<ContactResult<StoredContactAttributeDefinition>> CreateAsync(PrincipalRef actor, ContactAttributeDefinition definition, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredContactAttributeDefinition, ContactRefused>> CreateAsync(PrincipalRef actor, ContactAttributeDefinition definition, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(definition);
@@ -26,7 +26,7 @@ public sealed class ContactAttributeDefinitionService(IContactAttributeDefinitio
         return Map(await store.CreateAsync(scope, definition, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<ContactResult<StoredContactAttributeDefinition>> UpdateAsync(PrincipalRef actor, ContactAttributeDefinition definition, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredContactAttributeDefinition, ContactRefused>> UpdateAsync(PrincipalRef actor, ContactAttributeDefinition definition, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(definition);
@@ -41,7 +41,7 @@ public sealed class ContactAttributeDefinitionService(IContactAttributeDefinitio
         return Map(await store.UpdateAsync(scope, definition, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<ContactResult<StoredContactAttributeDefinition>> DeleteAsync(PrincipalRef actor, string key, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredContactAttributeDefinition, ContactRefused>> DeleteAsync(PrincipalRef actor, string key, long expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         ContactAttributeDefinition.RequireKey(key, nameof(key));
@@ -58,7 +58,7 @@ public sealed class ContactAttributeDefinitionService(IContactAttributeDefinitio
 
     private static TicketScope RequireActor(PrincipalRef actor)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("An actor is required.", nameof(actor));
         return actor.Scope;
     }
@@ -66,9 +66,9 @@ public sealed class ContactAttributeDefinitionService(IContactAttributeDefinitio
     private async Task<bool> PermittedAsync(PrincipalRef actor, Permission permission, CancellationToken cancellationToken) =>
         (await evaluator.AuthorizeAsync(new AccessRequest(actor, permission, ContactAccess.Workspace(actor.Scope)), cancellationToken).ConfigureAwait(false)).IsPermitted;
 
-    private static ContactResult<StoredContactAttributeDefinition> Map(AttributeDefinitionWriteResult result) => result switch
+    private static TicketResult<StoredContactAttributeDefinition, ContactRefused> Map(AttributeDefinitionWriteResult result) => result switch
     {
-        AttributeDefinitionApplied applied => new ContactApplied<StoredContactAttributeDefinition>(applied.Value),
+        AttributeDefinitionApplied applied => new TicketValue<StoredContactAttributeDefinition>(applied.Value),
         AttributeDefinitionNotFound => ContactRefused.NotFound,
         AttributeDefinitionConflict conflict => new ContactRefused(ContactRefusal.Conflict, [], conflict.CurrentRevision),
         ContactWriteRejected rejected => new ContactRefused(ContactRefusal.Rejected, [$"The store rejected the write: {rejected.Reason}."]),

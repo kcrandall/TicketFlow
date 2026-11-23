@@ -10,17 +10,17 @@ public sealed class WorkspaceSettingsService(IWorkspaceSettingsStore store, IAcc
     private readonly IWorkspaceSettingsStore store = store ?? throw new ArgumentNullException(nameof(store));
     private readonly IAccessEvaluator evaluator = evaluator ?? throw new ArgumentNullException(nameof(evaluator));
 
-    public async Task<WorkspaceResult<StoredWorkspaceSettings>> GetAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredWorkspaceSettings>> GetAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         if (await AuthorizeAsync(evaluator, actor, WorkspacePermissions.WorkspaceRead, WorkspaceResources.Workspace(actor.Scope), cancellationToken).ConfigureAwait(false) is { } refused)
             return refused;
         return await store.GetAsync(actor.Scope, cancellationToken).ConfigureAwait(false) is { } settings
-            ? new WorkspaceSucceeded<StoredWorkspaceSettings>(settings)
+            ? new TicketValue<StoredWorkspaceSettings>(settings)
             : NotFound;
     }
 
-    public async Task<WorkspaceResult<StoredWorkspaceSettings>> CreateAsync(PrincipalRef actor, WorkspaceSettings settings, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredWorkspaceSettings>> CreateAsync(PrincipalRef actor, WorkspaceSettings settings, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(settings);
@@ -31,7 +31,7 @@ public sealed class WorkspaceSettingsService(IWorkspaceSettingsStore store, IAcc
         return Map(await store.CreateAsync(actor.Scope, settings, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<WorkspaceResult<StoredWorkspaceSettings>> UpdateAsync(PrincipalRef actor, WorkspaceSettings settings, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredWorkspaceSettings>> UpdateAsync(PrincipalRef actor, WorkspaceSettings settings, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(settings);

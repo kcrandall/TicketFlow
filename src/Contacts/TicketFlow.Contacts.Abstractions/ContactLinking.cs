@@ -376,21 +376,8 @@ public sealed record ContactLinkSuggestionAccepted(ContactLinkSuggestionView Sug
 /// <summary>Outcome of accepting a suggestion. Switch over every case without a discard arm.</summary>
 public union ContactLinkSuggestionAcceptResult(ContactLinkSuggestionAccepted, ContactLinkConflict, ContactRefused);
 
-public sealed record LinkingWriteApplied<T>(T Value, bool Created = true);
-
-public sealed record LinkingWriteNotFound
-{
-    private LinkingWriteNotFound()
-    {
-    }
-
-    public static LinkingWriteNotFound Instance { get; } = new();
-}
-
-public sealed record LinkingWriteConflict(long CurrentRevision);
-
-/// <summary>Outcome of a linking store write. Switch over every case without a discard arm.</summary>
-public union ContactLinkingWriteResult<T>(LinkingWriteApplied<T>, LinkingWriteNotFound, LinkingWriteConflict, ContactWriteRejected);
+/// <summary>Result payload for <see cref="IContactLinkingStore.CreateSuggestionAsync"/>: the stored pending suggestion and whether this call created it.</summary>
+public readonly record struct StoredLinkSuggestionWrite(StoredContactLinkSuggestion Suggestion, bool Created);
 
 /// <summary>
 /// Durable linking state: the per-workspace policy and link suggestions. Contract:
@@ -398,7 +385,7 @@ public union ContactLinkingWriteResult<T>(LinkingWriteApplied<T>, LinkingWriteNo
 /// <item>Every operation is confined to one <see cref="TicketScope"/>.</item>
 /// <item>Policy puts create at revision 1 (<see langword="null"/> expected revision; conflict when present) and compare-and-set afterwards.</item>
 /// <item>At most one <see cref="ContactLinkSuggestionStatus.Pending"/> suggestion exists per (candidate, account) pair, enforced
-/// atomically: creating a duplicate returns the existing pending suggestion with <see cref="LinkingWriteApplied{T}.Created"/> false.
+/// atomically: creating a duplicate returns the existing pending suggestion with <see cref="StoredLinkSuggestionWrite.Created"/> false.
 /// At most <see cref="MaximumPendingSuggestions"/> pending suggestions exist per scope.</item>
 /// <item>Suggestion updates are compare-and-set; the pair, evidence and creation fields are immutable.</item>
 /// <item>Listing applies the <see cref="AccessFilter"/> to both the candidate and the account contact (resource shape of
@@ -413,14 +400,14 @@ public interface IContactLinkingStore
 
     Task<StoredContactLinkingPolicy?> GetPolicyAsync(TicketScope scope, CancellationToken cancellationToken = default);
 
-    Task<ContactLinkingWriteResult<StoredContactLinkingPolicy>> PutPolicyAsync(TicketScope scope, ContactLinkingPolicy policy, long? expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredContactLinkingPolicy, ContactWriteRejection>> PutPolicyAsync(TicketScope scope, ContactLinkingPolicy policy, long? expectedRevision, CancellationToken cancellationToken = default);
 
     Task<StoredContactLinkSuggestion?> GetSuggestionAsync(TicketScope scope, Guid id, CancellationToken cancellationToken = default);
 
     /// <summary>Creates a pending suggestion, or returns the pending one for the same pair.</summary>
-    Task<ContactLinkingWriteResult<StoredContactLinkSuggestion>> CreateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredLinkSuggestionWrite, ContactWriteRejection>> CreateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, CancellationToken cancellationToken = default);
 
-    Task<ContactLinkingWriteResult<StoredContactLinkSuggestion>> UpdateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredContactLinkSuggestion, ContactWriteRejection>> UpdateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, long expectedRevision, CancellationToken cancellationToken = default);
 
     Task<ContactLinkSuggestionStorePage> ListSuggestionsAsync(TicketScope scope, ContactLinkSuggestionQuery query, AccessFilter filter, CancellationToken cancellationToken = default);
 
@@ -446,7 +433,7 @@ public interface IContactLinkingService
     Task<ContactLinkResult> LinkAccountAsync(PrincipalRef actor, ContactLinkRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>Removes the verified account identity from the contact (<c>contact:link</c>, audited). Merges are undone with <see cref="IContactService.UnmergeAsync"/>.</summary>
-    Task<ContactResult<ContactView>> UnlinkAccountAsync(PrincipalRef actor, ContactId contact, long expectedRevision, ExternalAccountRef account, string? justification = null,
+    Task<TicketResult<ContactView, ContactRefused>> UnlinkAccountAsync(PrincipalRef actor, ContactId contact, long expectedRevision, ExternalAccountRef account, string? justification = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -456,13 +443,13 @@ public interface IContactLinkingService
     Task<CustomerResolution> ResolveCustomerAsync(PrincipalRef actor, CustomerResolveRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>Requires <c>contact:read</c>; no stored policy means <see cref="LinkingOff"/>.</summary>
-    Task<ContactResult<StoredContactLinkingPolicy>> GetPolicyAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredContactLinkingPolicy, ContactRefused>> GetPolicyAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
     /// <summary>Requires <c>contact-linking:manage</c>; audited. <paramref name="expectedRevision"/> is <see langword="null"/> to create.</summary>
-    Task<ContactResult<StoredContactLinkingPolicy>> SetPolicyAsync(PrincipalRef actor, ContactLinkingPolicy policy, long? expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredContactLinkingPolicy, ContactRefused>> SetPolicyAsync(PrincipalRef actor, ContactLinkingPolicy policy, long? expectedRevision, CancellationToken cancellationToken = default);
 
     /// <summary>Requires <c>contact:link</c>; rows are filtered by the planned <c>contact:read</c> filter on both contacts.</summary>
-    Task<ContactResult<ContactLinkSuggestionPage>> ListSuggestionsAsync(PrincipalRef actor, ContactLinkSuggestionQuery query, CancellationToken cancellationToken = default);
+    Task<TicketResult<ContactLinkSuggestionPage, ContactRefused>> ListSuggestionsAsync(PrincipalRef actor, ContactLinkSuggestionQuery query, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Requires <c>contact:read</c>, <c>contact:link</c> and <c>contact:merge</c> on both contacts; merges the candidate into the
@@ -477,6 +464,6 @@ public interface IContactLinkingService
         AcceptSuggestionAsync(actor, suggestion, expectedRevision, false, cancellationToken);
 
     /// <summary>Requires <c>contact:read</c> and <c>contact:link</c> on both contacts; audited.</summary>
-    Task<ContactResult<ContactLinkSuggestionView>> RejectSuggestionAsync(PrincipalRef actor, Guid suggestion, long expectedRevision, string? justification = null,
+    Task<TicketResult<ContactLinkSuggestionView, ContactRefused>> RejectSuggestionAsync(PrincipalRef actor, Guid suggestion, long expectedRevision, string? justification = null,
         CancellationToken cancellationToken = default);
 }

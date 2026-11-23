@@ -13,7 +13,7 @@ public sealed class LiveChatWidgetService(ILiveChatWidgetStore widgets, IInboxSt
     private readonly IAccessEvaluator evaluator = evaluator ?? throw new ArgumentNullException(nameof(evaluator));
     private readonly ChannelKind kind = new((options ?? throw new ArgumentNullException(nameof(options))).Value.Kind);
 
-    public async Task<LiveChatResult<StoredLiveChatWidget>> GetAsync(PrincipalRef actor, string configurationId, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredLiveChatWidget, LiveChatRefused>> GetAsync(PrincipalRef actor, string configurationId, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(configurationId);
@@ -21,11 +21,11 @@ public sealed class LiveChatWidgetService(ILiveChatWidgetStore widgets, IInboxSt
         if (stored is null)
             return LiveChatRefused.Of(LiveChatRefusal.NotFound);
         return await PermittedAsync(actor, LiveChatPermissions.Read, stored.Widget.Inbox, cancellationToken).ConfigureAwait(false)
-            ? new LiveChatValue<StoredLiveChatWidget>(stored)
+            ? new TicketValue<StoredLiveChatWidget>(stored)
             : LiveChatRefused.Of(LiveChatRefusal.Forbidden);
     }
 
-    public async Task<LiveChatResult<StoredLiveChatWidget>> CreateAsync(PrincipalRef actor, LiveChatWidget widget, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredLiveChatWidget, LiveChatRefused>> CreateAsync(PrincipalRef actor, LiveChatWidget widget, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(widget);
@@ -36,7 +36,7 @@ public sealed class LiveChatWidgetService(ILiveChatWidgetStore widgets, IInboxSt
         return Map(await widgets.CreateAsync(actor.Scope, widget, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<LiveChatResult<StoredLiveChatWidget>> UpdateAsync(PrincipalRef actor, LiveChatWidget widget, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredLiveChatWidget, LiveChatRefused>> UpdateAsync(PrincipalRef actor, LiveChatWidget widget, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(widget);
@@ -53,7 +53,7 @@ public sealed class LiveChatWidgetService(ILiveChatWidgetStore widgets, IInboxSt
         return Map(await widgets.UpdateAsync(actor.Scope, widget, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<LiveChatResult<StoredLiveChatWidget>> DeleteAsync(PrincipalRef actor, string configurationId, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredLiveChatWidget, LiveChatRefused>> DeleteAsync(PrincipalRef actor, string configurationId, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(configurationId);
@@ -80,17 +80,17 @@ public sealed class LiveChatWidgetService(ILiveChatWidgetStore widgets, IInboxSt
     private async Task<bool> PermittedAsync(PrincipalRef actor, Permission permission, InboxId inbox, CancellationToken cancellationToken) =>
         (await evaluator.AuthorizeAsync(new AccessRequest(actor, permission, WorkspaceResources.Inbox(actor.Scope, inbox)), cancellationToken).ConfigureAwait(false)).IsPermitted;
 
-    private static LiveChatResult<StoredLiveChatWidget> Map(LiveChatWriteResult<StoredLiveChatWidget> result) => result switch
+    private static TicketResult<StoredLiveChatWidget, LiveChatRefused> Map(StoreWriteResult<StoredLiveChatWidget, LiveChatWriteRejection> result) => result switch
     {
-        LiveChatWriteApplied<StoredLiveChatWidget> applied => new LiveChatValue<StoredLiveChatWidget>(applied.Value),
-        LiveChatWriteNotFound => LiveChatRefused.Of(LiveChatRefusal.NotFound),
-        LiveChatWriteConflict conflict => new LiveChatRefused(LiveChatRefusal.Conflict, conflict.CurrentRevision is { } revision ? [$"Current revision is {revision}."] : []),
-        LiveChatWriteRejected => LiveChatRefused.Of(LiveChatRefusal.Rejected, "Widget capacity reached."),
+        StoreApplied<StoredLiveChatWidget> applied => new TicketValue<StoredLiveChatWidget>(applied.Value),
+        StoreNotFound => LiveChatRefused.Of(LiveChatRefusal.NotFound),
+        StoreConflict conflict => new LiveChatRefused(LiveChatRefusal.Conflict, conflict.CurrentRevision is { } revision ? [$"Current revision is {revision}."] : []),
+        StoreRejected<LiveChatWriteRejection> => LiveChatRefused.Of(LiveChatRefusal.Rejected, "Widget capacity reached."),
     };
 
     private static void RequireActor(PrincipalRef actor)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("A principal is required.", nameof(actor));
     }
 }

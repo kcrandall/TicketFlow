@@ -30,10 +30,9 @@ public sealed class PrincipalTests
     }
 
     [TestMethod]
-    public void DefaultPrincipalRefHasNoCase()
+    public void PrincipalRefIsClosedHierarchy()
     {
-        PrincipalRef principal = default;
-        Assert.ThrowsExactly<System.Runtime.CompilerServices.SwitchExpressionException>(() => principal.Scope);
+        Assert.IsTrue(typeof(PrincipalRef).IsAbstract);
     }
 
     [TestMethod]
@@ -95,7 +94,7 @@ public sealed class PrincipalTests
     {
         foreach (var principal in TestPrincipals.AllKinds(TestScopes.Create(tenantId: "secret-tenant")))
         {
-            var text = principal.Value!.ToString()!;
+            var text = principal.ToString();
             StringAssert.Contains(text, "<redacted>");
             Assert.DoesNotContain("secret-tenant", text);
         }

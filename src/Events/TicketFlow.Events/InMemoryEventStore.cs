@@ -157,7 +157,7 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
                 .Select(entry => entry.Subscription).OrderBy(stored => stored.Subscription.Id.Value, StringComparer.Ordinal)]);
     }
 
-    public Task<EventWriteResult<StoredEventSubscription>> CreateAsync(TicketScope scope, EventSubscription subscription, long cursor, DateTimeOffset createdAt,
+    public Task<StoreWriteResult<StoredEventSubscription, EventWriteRejection>> CreateAsync(TicketScope scope, EventSubscription subscription, long cursor, DateTimeOffset createdAt,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -166,42 +166,42 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
         lock (gate)
         {
             if (subscriptions.ContainsKey((scope, subscription.Id)))
-                return Task.FromResult<EventWriteResult<StoredEventSubscription>>(new EventWriteRejected(EventWriteRejection.Duplicate));
+                return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(new StoreRejected<EventWriteRejection>(EventWriteRejection.Duplicate));
             if (subscriptions.Values.Count(entry => entry.Subscription.Scope == scope) >= IEventSubscriptionStore.MaximumSubscriptionsPerWorkspace)
-                return Task.FromResult<EventWriteResult<StoredEventSubscription>>(new EventWriteRejected(EventWriteRejection.LimitReached));
+                return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(new StoreRejected<EventWriteRejection>(EventWriteRejection.LimitReached));
             var stored = new StoredEventSubscription(scope, subscription, 1, EventText.Instant(createdAt));
             subscriptions[(scope, subscription.Id)] = new Entry(stored, new EventDeliveryState(cursor, 0, EventText.Instant(createdAt), null, null));
-            return Task.FromResult<EventWriteResult<StoredEventSubscription>>(new EventWriteApplied<StoredEventSubscription>(stored));
+            return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(new StoreApplied<StoredEventSubscription>(stored));
         }
     }
 
-    public Task<EventWriteResult<StoredEventSubscription>> UpdateAsync(TicketScope scope, EventSubscription subscription, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredEventSubscription, EventWriteRejection>> UpdateAsync(TicketScope scope, EventSubscription subscription, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(subscription);
         lock (gate)
         {
             if (!subscriptions.TryGetValue((scope, subscription.Id), out var entry))
-                return Task.FromResult<EventWriteResult<StoredEventSubscription>>(EventWriteNotFound.Instance);
+                return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(StoreNotFound.Instance);
             if (entry.Subscription.Revision != expectedRevision)
-                return Task.FromResult<EventWriteResult<StoredEventSubscription>>(new EventWriteConflict(entry.Subscription.Revision));
+                return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(new StoreConflict(entry.Subscription.Revision));
             entry.Subscription = entry.Subscription with { Subscription = subscription, Revision = expectedRevision + 1 };
             entry.State = entry.State with { Attempts = 0, Suspended = false };
-            return Task.FromResult<EventWriteResult<StoredEventSubscription>>(new EventWriteApplied<StoredEventSubscription>(entry.Subscription));
+            return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(new StoreApplied<StoredEventSubscription>(entry.Subscription));
         }
     }
 
-    public Task<EventWriteResult<StoredEventSubscription>> DeleteAsync(TicketScope scope, EventSubscriptionId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<StoreWriteResult<StoredEventSubscription, EventWriteRejection>> DeleteAsync(TicketScope scope, EventSubscriptionId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         lock (gate)
         {
             if (!subscriptions.TryGetValue((scope, Require(id)), out var entry))
-                return Task.FromResult<EventWriteResult<StoredEventSubscription>>(EventWriteNotFound.Instance);
+                return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(StoreNotFound.Instance);
             if (entry.Subscription.Revision != expectedRevision)
-                return Task.FromResult<EventWriteResult<StoredEventSubscription>>(new EventWriteConflict(entry.Subscription.Revision));
+                return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(new StoreConflict(entry.Subscription.Revision));
             subscriptions.Remove((scope, id));
-            return Task.FromResult<EventWriteResult<StoredEventSubscription>>(new EventWriteApplied<StoredEventSubscription>(entry.Subscription));
+            return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(new StoreApplied<StoredEventSubscription>(entry.Subscription));
         }
     }
 

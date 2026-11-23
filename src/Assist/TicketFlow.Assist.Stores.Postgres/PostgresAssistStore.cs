@@ -65,7 +65,7 @@ public sealed class PostgresAssistStore : IAssistStore
             current = await select.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as long? ?? 0;
         }
         if (current != expectedRevision)
-            return new AssistWriteConflict(current);
+            return new StoreConflict(current);
         var sql = current == 0
             ? $"INSERT INTO tf_assist_settings({ScopeColumns}, format_version, settings, revision) VALUES({ScopeParameters}, 1, @settings, 1)"
             : $"UPDATE tf_assist_settings SET settings=@settings, revision=revision+1 WHERE {ScopeKeyWhere} AND revision=@expected";
@@ -77,7 +77,7 @@ public sealed class PostgresAssistStore : IAssistStore
             await write.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new AssistWriteApplied<StoredAssistSettings>(new(scope, settings, current + 1));
+        return new StoreApplied<StoredAssistSettings>(new(scope, settings, current + 1));
     }
 
     public async Task<AssistReservationResult> ReserveAsync(TicketScope scope, AssistUsageRecord reservation, long dailyTokenLimit, int requestsPerMinute, CancellationToken cancellationToken = default)

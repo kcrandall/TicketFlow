@@ -78,7 +78,7 @@ else
     {
         if (Service<ITeamService>() is not { } service || Id is null)
             return;
-        if (await service.GetAsync(Actor, new TeamId(Id), Aborted) is WorkspaceSucceeded<StoredTeam> found)
+        if (await service.GetAsync(Actor, new TeamId(Id), Aborted) is TicketValue<StoredTeam> found)
         {
             team = found.Value;
             await Session.LoadUsersAsync(team.Team.Members.Select(member => (UserId?)member));

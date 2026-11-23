@@ -25,7 +25,7 @@ public static class ChannelStoreContract
         Assert.AreEqual(1, created.Revision);
         Assert.AreEqual(endpoint, created.Endpoint);
         Assert.AreEqual(scope, created.Scope);
-        Assert.AreEqual(1L, Is<ChannelWriteConflict>((await competing.CreateAsync(scope, endpoint)).Value).CurrentRevision);
+        Assert.AreEqual(1L, Is<StoreConflict>((await competing.CreateAsync(scope, endpoint)).Value).CurrentRevision);
 
         Assert.AreEqual(created, await competing.GetAsync(scope, Email, "cfg-1"));
         foreach (var variant in TestScopes.LevelVariants(scope).Skip(1))
@@ -34,7 +34,7 @@ public static class ChannelStoreContract
 
         // Address uniqueness is per partition and kind, across workspaces.
         Assert.AreEqual(ChannelWriteRejection.AddressTaken,
-            Is<ChannelWriteRejected>((await competing.CreateAsync(other, new ChannelEndpoint(Email, "cfg-2", new InboxId("inbox-2"), "mailgun:acct"))).Value).Reason);
+            Is<StoreRejected<ChannelWriteRejection>>((await competing.CreateAsync(other, new ChannelEndpoint(Email, "cfg-2", new InboxId("inbox-2"), "mailgun:acct"))).Value).Reason);
         Applied(await store.CreateAsync(other, new ChannelEndpoint(Sms, "cfg-2", new InboxId("inbox-2"), "mailgun:acct")));
         var foreign = TestScopes.Create(tenantId: "other-tenant", workspaceId: "endpoints");
         Applied(await store.CreateAsync(foreign, new ChannelEndpoint(Email, "cfg-1", new InboxId("inbox-1"), "mailgun:acct")));
@@ -45,8 +45,8 @@ public static class ChannelStoreContract
         Assert.IsNull(await store.FindByAddressAsync(AccessPartition.From(scope), Email, "MAILGUN:acct"));
         Assert.AreEqual(foreign, (await store.FindByAddressAsync(AccessPartition.From(foreign), Email, "mailgun:acct"))!.Scope);
 
-        Assert.AreEqual(1L, Is<ChannelWriteConflict>((await store.UpdateAsync(scope, endpoint with { }, 7)).Value).CurrentRevision);
-        Assert.IsInstanceOfType<ChannelWriteNotFound>((await store.UpdateAsync(scope, new ChannelEndpoint(Email, "missing", new InboxId("x")), 1)).Value);
+        Assert.AreEqual(1L, Is<StoreConflict>((await store.UpdateAsync(scope, endpoint with { }, 7)).Value).CurrentRevision);
+        Assert.IsInstanceOfType<StoreNotFound>((await store.UpdateAsync(scope, new ChannelEndpoint(Email, "missing", new InboxId("x")), 1)).Value);
         var moved = Applied(await competing.UpdateAsync(scope, new ChannelEndpoint(Email, "cfg-1", new InboxId("inbox-3"), "mailgun:acct2"), 1));
         Assert.AreEqual(2, moved.Revision);
         Assert.IsNull(await store.FindByAddressAsync(AccessPartition.From(scope), Email, "mailgun:acct"));
@@ -63,10 +63,10 @@ public static class ChannelStoreContract
         Assert.AreEqual(0, (await store.ListByAddressPrefixAsync(AccessPartition.From(scope), Sms, "mailgun:acct:", 10)).Count);
         Assert.AreEqual(0, (await store.ListByAddressPrefixAsync(AccessPartition.From(TestScopes.Create(tenantId: "nobody")), Email, "mailgun:", 10)).Count);
 
-        Assert.AreEqual(2L, Is<ChannelWriteConflict>((await store.DeleteAsync(scope, Email, "cfg-1", 1)).Value).CurrentRevision);
+        Assert.AreEqual(2L, Is<StoreConflict>((await store.DeleteAsync(scope, Email, "cfg-1", 1)).Value).CurrentRevision);
         Applied(await store.DeleteAsync(scope, Email, "cfg-1", 2));
         Assert.IsNull(await competing.GetAsync(scope, Email, "cfg-1"));
-        Assert.IsInstanceOfType<ChannelWriteNotFound>((await store.DeleteAsync(scope, Email, "cfg-1", 2)).Value);
+        Assert.IsInstanceOfType<StoreNotFound>((await store.DeleteAsync(scope, Email, "cfg-1", 2)).Value);
     }
 
     public static async Task VerifyConversationStateAsync(IChannelConversationStateStore store, IChannelConversationStateStore competing)
@@ -79,18 +79,18 @@ public static class ChannelStoreContract
         var created = Applied(await store.WriteAsync(scope, state, null));
         Assert.AreEqual(1, created.Revision);
         Assert.AreEqual(state, (await competing.GetAsync(scope, state.Conversation))!.State);
-        Assert.AreEqual(1L, Is<ChannelWriteConflict>((await competing.WriteAsync(scope, state, null)).Value).CurrentRevision);
+        Assert.AreEqual(1L, Is<StoreConflict>((await competing.WriteAsync(scope, state, null)).Value).CurrentRevision);
         foreach (var variant in TestScopes.LevelVariants(scope).Skip(1))
             Assert.IsNull(await store.GetAsync(variant, state.Conversation));
 
         var next = new ChannelConversationState(state.Conversation, state.Inbox, Email, new ChannelRecipient(ContactIdentityKind.Email, "ada2@example.com"), "thread-1",
             "Order 42", at.AddMinutes(1), "m2@example.com");
         Assert.AreEqual(2, Applied(await competing.WriteAsync(scope, next, 1)).Revision);
-        Assert.AreEqual(2L, Is<ChannelWriteConflict>((await store.WriteAsync(scope, next, 1)).Value).CurrentRevision);
+        Assert.AreEqual(2L, Is<StoreConflict>((await store.WriteAsync(scope, next, 1)).Value).CurrentRevision);
         var otherChannel = new ChannelConversationState(state.Conversation, state.Inbox, Sms, new ChannelRecipient(ContactIdentityKind.Phone, "+15550001111"));
-        Assert.IsInstanceOfType<ChannelWriteConflict>((await store.WriteAsync(scope, otherChannel, 2)).Value);
+        Assert.IsInstanceOfType<StoreConflict>((await store.WriteAsync(scope, otherChannel, 2)).Value);
         Assert.AreEqual(next, (await store.GetAsync(scope, state.Conversation))!.State);
-        Assert.IsInstanceOfType<ChannelWriteNotFound>((await store.WriteAsync(scope, new ChannelConversationState(new ConversationId("c-missing"), state.Inbox, Email, state.Recipient), 1)).Value);
+        Assert.IsInstanceOfType<StoreNotFound>((await store.WriteAsync(scope, new ChannelConversationState(new ConversationId("c-missing"), state.Inbox, Email, state.Recipient), 1)).Value);
 
         // Thread lookups are per contact.
         var ada = new ContactId("ada");
@@ -108,7 +108,7 @@ public static class ChannelStoreContract
         // Concurrent creates: exactly one wins.
         var racing = new ChannelConversationState(new ConversationId("c-race"), state.Inbox, Email, state.Recipient);
         var results = await Task.WhenAll(Enumerable.Range(0, 8).Select(index => (index % 2 == 0 ? store : competing).WriteAsync(scope, racing, null)));
-        Assert.AreEqual(1, results.Count(result => result.Value is ChannelWriteApplied<StoredChannelConversationState>));
+        Assert.AreEqual(1, results.Count(result => result.Value is StoreApplied<StoredChannelConversationState>));
 
         Assert.IsTrue(await store.DeleteAsync(scope, state.Conversation));
         Assert.IsFalse(await competing.DeleteAsync(scope, state.Conversation));
@@ -167,15 +167,15 @@ public static class ChannelStoreContract
         var at = new DateTimeOffset(2026, 3, 1, 0, 0, 0, TimeSpan.Zero);
         var sending = new ChannelDispatch(new ConversationId("c-1"), new MessageId("m-1"), new InboxId("inbox-1"), Email, ChannelDispatchState.Sending, 1, at);
         Assert.AreEqual(1, Applied(await store.WriteAsync(scope, sending, null)).Revision);
-        Assert.AreEqual(1L, Is<ChannelWriteConflict>((await competing.WriteAsync(scope, sending, null)).Value).CurrentRevision);
+        Assert.AreEqual(1L, Is<StoreConflict>((await competing.WriteAsync(scope, sending, null)).Value).CurrentRevision);
         var retry = new ChannelDispatch(sending.Conversation, sending.Message, sending.Inbox, Email, ChannelDispatchState.RetryScheduled, 1, at, at.AddSeconds(30), code: "rate-limited");
         Assert.AreEqual(2, Applied(await competing.WriteAsync(scope, retry, 1)).Revision);
-        Assert.IsInstanceOfType<ChannelWriteConflict>((await store.WriteAsync(scope, retry, 1)).Value);
-        Assert.IsInstanceOfType<ChannelWriteConflict>((await store.WriteAsync(scope,
+        Assert.IsInstanceOfType<StoreConflict>((await store.WriteAsync(scope, retry, 1)).Value);
+        Assert.IsInstanceOfType<StoreConflict>((await store.WriteAsync(scope,
             new ChannelDispatch(sending.Conversation, sending.Message, new InboxId("inbox-2"), Email, ChannelDispatchState.Accepted, 2, at), 2)).Value);
         var accepted = new ChannelDispatch(sending.Conversation, sending.Message, sending.Inbox, Email, ChannelDispatchState.Accepted, 2, at.AddMinutes(1), externalMessageId: "provider-1");
         Applied(await store.WriteAsync(scope, accepted, 2));
-        Assert.IsInstanceOfType<ChannelWriteNotFound>((await store.WriteAsync(scope,
+        Assert.IsInstanceOfType<StoreNotFound>((await store.WriteAsync(scope,
             new ChannelDispatch(sending.Conversation, new MessageId("m-missing"), sending.Inbox, Email, ChannelDispatchState.Sending, 1, at), 1)).Value);
         var stored = await competing.GetAsync(scope, sending.Conversation, sending.Message);
         Assert.IsNotNull(stored);
@@ -188,18 +188,18 @@ public static class ChannelStoreContract
 
         var racing = new ChannelDispatch(sending.Conversation, new MessageId("m-race"), sending.Inbox, Email, ChannelDispatchState.Sending, 1, at);
         var results = await Task.WhenAll(Enumerable.Range(0, 8).Select(index => (index % 2 == 0 ? store : competing).WriteAsync(scope, racing, null)));
-        Assert.AreEqual(1, results.Count(result => result.Value is ChannelWriteApplied<StoredChannelDispatch>));
+        Assert.AreEqual(1, results.Count(result => result.Value is StoreApplied<StoredChannelDispatch>));
     }
 
-    private static T Applied<T>(ChannelWriteResult<T> result) => result switch
+    private static T Applied<T>(StoreWriteResult<T, ChannelWriteRejection> result) => result switch
     {
-        ChannelWriteApplied<T> applied => applied.Value,
-        ChannelWriteNotFound => throw new AssertFailedException("Expected applied but was not found."),
-        ChannelWriteConflict conflict => throw new AssertFailedException($"Expected applied but was conflict at {conflict.CurrentRevision}."),
-        ChannelWriteRejected rejected => throw new AssertFailedException($"Expected applied but was rejected: {rejected.Reason}."),
+        StoreApplied<T> applied => applied.Value,
+        StoreNotFound => throw new AssertFailedException("Expected applied but was not found."),
+        StoreConflict conflict => throw new AssertFailedException($"Expected applied but was conflict at {conflict.CurrentRevision}."),
+        StoreRejected<ChannelWriteRejection> rejected => throw new AssertFailedException($"Expected applied but was rejected: {rejected.Reason}."),
     };
 
-    private static T Is<T>(object? value) where T : class
+    private static T Is<T>(object? value)
     {
         Assert.IsInstanceOfType<T>(value);
         return (T)value!;

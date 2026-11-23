@@ -33,16 +33,16 @@ public static class AccessFilteredListParity
         await roles.CreateAsync(scope, RandomAccessFixture.DeletedRole);
         await roles.DeleteAsync(scope, RandomAccessFixture.DeletedRole.Id, 1);
         foreach (var grant in RandomAccessFixture.Grants(random, scope, clock.GetUtcNow(), 40))
-            Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await grants.CreateAsync(grant)).Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await grants.CreateAsync(grant)).Value);
         var planner = request.ServiceProvider.GetRequiredService<IAccessQueryPlanner>();
         var evaluator = request.ServiceProvider.GetRequiredService<IAccessEvaluator>();
 
         string[] inboxIds = [.. RandomAccessFixture.Inboxes, "i-extra"];
         string[] teamIds = [.. RandomAccessFixture.Teams, "t-extra"];
         foreach (var id in inboxIds)
-            Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await inboxes.CreateAsync(scope, WorkspaceStoreContract.SampleInbox(id))).Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await inboxes.CreateAsync(scope, WorkspaceStoreContract.SampleInbox(id))).Value);
         foreach (var id in teamIds)
-            Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredTeam>>((await teams.CreateAsync(scope, new Team(new TeamId(id), "Team"))).Value);
+            Assert.IsInstanceOfType<StoreApplied<StoredTeam>>((await teams.CreateAsync(scope, new Team(new TeamId(id), "Team"))).Value);
 
         int permitted = 0, denied = 0;
         foreach (var principal in RandomAccessFixture.Principals(random, scope))
@@ -53,7 +53,7 @@ public static class AccessFilteredListParity
             foreach (var id in inboxIds.Order(StringComparer.Ordinal))
                 if ((await evaluator.AuthorizeAsync(new AccessRequest(principal, WorkspacePermissions.InboxRead, WorkspaceResources.Inbox(scope, new InboxId(id))))).IsPermitted)
                     expectedInboxes.Add(id);
-            CollectionAssert.AreEqual(expectedInboxes, listedInboxes, $"seed {seed} inboxes for {principal.Value!.GetType().Name}");
+            CollectionAssert.AreEqual(expectedInboxes, listedInboxes, $"seed {seed} inboxes for {principal.GetType().Name}");
 
             var teamFilter = await planner.PlanAsync(new AccessQuery(principal, WorkspacePermissions.TeamRead, scope));
             var listedTeams = (await teams.ListAsync(scope, teamFilter, new(200))).Items.Select(item => item.Id.Value).ToArray();
@@ -61,7 +61,7 @@ public static class AccessFilteredListParity
             foreach (var id in teamIds.Order(StringComparer.Ordinal))
                 if ((await evaluator.AuthorizeAsync(new AccessRequest(principal, WorkspacePermissions.TeamRead, WorkspaceResources.Team(scope, new TeamId(id))))).IsPermitted)
                     expectedTeams.Add(id);
-            CollectionAssert.AreEqual(expectedTeams, listedTeams, $"seed {seed} teams for {principal.Value!.GetType().Name}");
+            CollectionAssert.AreEqual(expectedTeams, listedTeams, $"seed {seed} teams for {principal.GetType().Name}");
             permitted += expectedInboxes.Count + expectedTeams.Count;
             denied += inboxIds.Length + teamIds.Length - expectedInboxes.Count - expectedTeams.Count;
         }

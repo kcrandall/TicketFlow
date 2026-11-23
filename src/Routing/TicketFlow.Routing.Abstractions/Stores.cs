@@ -3,33 +3,11 @@ using TicketFlow.Core;
 
 namespace TicketFlow.Routing;
 
-/// <summary>The write committed.</summary>
-public sealed record RoutingWriteApplied<T>(T Value);
-
-/// <summary>The record does not exist in the scope. Nothing was written.</summary>
-public sealed record RoutingWriteNotFound
-{
-    private RoutingWriteNotFound()
-    {
-    }
-
-    public static RoutingWriteNotFound Instance { get; } = new();
-}
-
-/// <summary>The revision did not match, or a create found an existing record. Nothing was written.</summary>
-public sealed record RoutingWriteConflict(long CurrentRevision);
-
 public enum RoutingWriteRejection
 {
     /// <summary>A store capacity limit would be exceeded.</summary>
     CapacityExceeded = 1,
 }
-
-/// <summary>The store refused the write for a contract reason. Nothing was written.</summary>
-public sealed record RoutingWriteRejected(RoutingWriteRejection Reason);
-
-/// <summary>Outcome of a revisioned routing write. Switch over every case without a discard arm.</summary>
-public union RoutingWriteResult<T>(RoutingWriteApplied<T>, RoutingWriteNotFound, RoutingWriteConflict, RoutingWriteRejected);
 
 /// <summary>
 /// Workspace-scoped routing policies keyed by <see cref="Workspaces.RoutingPolicyId"/>: creates start at revision 1, updates and
@@ -44,11 +22,11 @@ public interface IRoutingPolicyStore
     /// <summary>Policies ordered by identifier (ordinal).</summary>
     Task<IReadOnlyList<StoredRoutingPolicy>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default);
 
-    Task<RoutingWriteResult<StoredRoutingPolicy>> CreateAsync(TicketScope scope, RoutingPolicy policy, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredRoutingPolicy, RoutingWriteRejection>> CreateAsync(TicketScope scope, RoutingPolicy policy, CancellationToken cancellationToken = default);
 
-    Task<RoutingWriteResult<StoredRoutingPolicy>> UpdateAsync(TicketScope scope, RoutingPolicy policy, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredRoutingPolicy, RoutingWriteRejection>> UpdateAsync(TicketScope scope, RoutingPolicy policy, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<RoutingWriteResult<StoredRoutingPolicy>> DeleteAsync(TicketScope scope, Workspaces.RoutingPolicyId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredRoutingPolicy, RoutingWriteRejection>> DeleteAsync(TicketScope scope, Workspaces.RoutingPolicyId id, long expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -85,13 +63,13 @@ public interface IAgentAvailabilityStore
     /// </summary>
     Task<IReadOnlyList<StoredAgentProfile>> ListAvailableAsync(TicketScope scope, AvailableAgentQuery query, CancellationToken cancellationToken = default);
 
-    Task<RoutingWriteResult<StoredAgentProfile>> SaveSettingsAsync(TicketScope scope, AgentRoutingSettings settings, long? expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAgentProfile, RoutingWriteRejection>> SaveSettingsAsync(TicketScope scope, AgentRoutingSettings settings, long? expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<RoutingWriteResult<StoredAgentProfile>> SetStatusAsync(TicketScope scope, UserId agent, AgentStatus status, TimeSpan presenceTtl, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAgentProfile, RoutingWriteRejection>> SetStatusAsync(TicketScope scope, UserId agent, AgentStatus status, TimeSpan presenceTtl, CancellationToken cancellationToken = default);
 
-    Task<RoutingWriteResult<StoredAgentProfile>> HeartbeatAsync(TicketScope scope, UserId agent, TimeSpan presenceTtl, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAgentProfile, RoutingWriteRejection>> HeartbeatAsync(TicketScope scope, UserId agent, TimeSpan presenceTtl, CancellationToken cancellationToken = default);
 
-    Task<RoutingWriteResult<StoredAgentProfile>> DeleteAsync(TicketScope scope, UserId agent, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredAgentProfile, RoutingWriteRejection>> DeleteAsync(TicketScope scope, UserId agent, long expectedRevision, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<AgentPresenceExpired>> ExpirePresenceAsync(int limit, CancellationToken cancellationToken = default);
 

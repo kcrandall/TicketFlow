@@ -98,7 +98,7 @@ public sealed class SlaConversationTracker : IConversationOutboxHandler
             await Task.WhenAll(storedTask, snapshotTask).ConfigureAwait(false);
             var stored = storedTask.Result;
             var snapshot = snapshotTask.Result;
-            SlaWriteResult<StoredSlaTracker> result;
+            StoreWriteResult<StoredSlaTracker, SlaWriteRejection> result;
             SlaEngine? engine = null;
             if (snapshot is null)
             {
@@ -115,15 +115,15 @@ public sealed class SlaConversationTracker : IConversationOutboxHandler
             }
             switch (result)
             {
-                case SlaWriteApplied<StoredSlaTracker> applied:
+                case StoreApplied<StoredSlaTracker> applied:
                     if (engine is not null && applied.Value.Tracker.Pending.Count > 0)
                         await FlushAsync(scope, applied.Value, engine, snapshot!, claim, cancellationToken).ConfigureAwait(false);
                     return;
-                case SlaWriteNotFound or SlaWriteConflict when attempt < options.MaximumWriteAttempts:
+                case StoreNotFound or StoreConflict when attempt < options.MaximumWriteAttempts:
                     continue;
-                case SlaWriteNotFound or SlaWriteConflict:
+                case StoreNotFound or StoreConflict:
                     throw new InvalidOperationException("Concurrent SLA tracker writers kept winning.");
-                case SlaWriteRejected rejected:
+                case StoreRejected<SlaWriteRejection> rejected:
                     throw new InvalidOperationException($"The SLA tracker store rejected the write: {rejected.Reason}.");
             }
         }

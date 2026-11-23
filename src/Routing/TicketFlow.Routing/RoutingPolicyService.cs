@@ -10,27 +10,27 @@ namespace TicketFlow.Routing;
 /// </summary>
 public sealed class RoutingPolicyService(IAccessEvaluator access, IRoutingPolicyStore policies, ITeamStore teams, IInboxStore inboxes) : IRoutingPolicyService
 {
-    public async Task<RoutingResult<StoredRoutingPolicy>> GetAsync(PrincipalRef actor, RoutingPolicyId id, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredRoutingPolicy>> GetAsync(PrincipalRef actor, RoutingPolicyId id, CancellationToken cancellationToken = default)
     {
         RoutingGuards.RequireActor(actor);
         if (!id.IsInitialized)
             throw new ArgumentException("A routing policy identifier is required.", nameof(id));
         if (!await RoutingGuards.PermittedAsync(access, actor, RoutingPermissions.PolicyRead, RoutingResources.Workspace(actor.Scope), cancellationToken).ConfigureAwait(false))
-            return RoutingRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return await policies.GetAsync(actor.Scope, id, cancellationToken).ConfigureAwait(false) is { } stored
-            ? new RoutingValue<StoredRoutingPolicy>(stored)
-            : RoutingNotFound.Instance;
+            ? new TicketValue<StoredRoutingPolicy>(stored)
+            : TicketFailure.NotFound;
     }
 
-    public async Task<RoutingResult<IReadOnlyList<StoredRoutingPolicy>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<IReadOnlyList<StoredRoutingPolicy>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
     {
         RoutingGuards.RequireActor(actor);
         if (!await RoutingGuards.PermittedAsync(access, actor, RoutingPermissions.PolicyRead, RoutingResources.Workspace(actor.Scope), cancellationToken).ConfigureAwait(false))
-            return RoutingRefused.Forbidden;
-        return new RoutingValue<IReadOnlyList<StoredRoutingPolicy>>(await policies.ListAsync(actor.Scope, cancellationToken).ConfigureAwait(false));
+            return TicketFailure.Forbidden;
+        return new TicketValue<IReadOnlyList<StoredRoutingPolicy>>(await policies.ListAsync(actor.Scope, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<RoutingResult<StoredRoutingPolicy>> CreateAsync(PrincipalRef actor, RoutingPolicy policy, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredRoutingPolicy>> CreateAsync(PrincipalRef actor, RoutingPolicy policy, CancellationToken cancellationToken = default)
     {
         RoutingGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(policy);
@@ -39,7 +39,7 @@ public sealed class RoutingPolicyService(IAccessEvaluator access, IRoutingPolicy
         return RoutingGuards.FromWrite(await policies.CreateAsync(actor.Scope, policy, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<RoutingResult<StoredRoutingPolicy>> UpdateAsync(PrincipalRef actor, RoutingPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredRoutingPolicy>> UpdateAsync(PrincipalRef actor, RoutingPolicy policy, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RoutingGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(policy);
@@ -48,20 +48,20 @@ public sealed class RoutingPolicyService(IAccessEvaluator access, IRoutingPolicy
         return RoutingGuards.FromWrite(await policies.UpdateAsync(actor.Scope, policy, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<RoutingResult<StoredRoutingPolicy>> DeleteAsync(PrincipalRef actor, RoutingPolicyId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredRoutingPolicy>> DeleteAsync(PrincipalRef actor, RoutingPolicyId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RoutingGuards.RequireActor(actor);
         if (!id.IsInitialized)
             throw new ArgumentException("A routing policy identifier is required.", nameof(id));
         if (!await RoutingGuards.PermittedAsync(access, actor, RoutingPermissions.Manage, RoutingResources.Policy(actor.Scope, id), cancellationToken).ConfigureAwait(false))
-            return RoutingRefused.Forbidden;
+            return TicketFailure.Forbidden;
         return RoutingGuards.FromWrite(await policies.DeleteAsync(actor.Scope, id, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    private async Task<RoutingRefused?> AuthorizeAndValidateAsync(PrincipalRef actor, RoutingPolicy policy, CancellationToken cancellationToken)
+    private async Task<TicketFailure?> AuthorizeAndValidateAsync(PrincipalRef actor, RoutingPolicy policy, CancellationToken cancellationToken)
     {
         if (!await RoutingGuards.PermittedAsync(access, actor, RoutingPermissions.Manage, RoutingResources.Policy(actor.Scope, policy.Id), cancellationToken).ConfigureAwait(false))
-            return RoutingRefused.Forbidden;
+            return TicketFailure.Forbidden;
         var scope = actor.Scope;
         var teamSet = new HashSet<TeamId>();
         var inboxSet = new HashSet<InboxId>();
@@ -95,10 +95,10 @@ public sealed class RoutingPolicyService(IAccessEvaluator access, IRoutingPolicy
             await Task.WhenAll(inboxTasks).ConfigureAwait(false);
         for (var i = 0; i < teamTasks.Length; i++)
             if (teamTasks[i].Result is null)
-                return RoutingRefused.Invalid("A referenced team does not exist.");
+                return TicketFailure.Invalid("A referenced team does not exist.");
         for (var i = 0; i < inboxTasks.Length; i++)
             if (inboxTasks[i].Result is null)
-                return RoutingRefused.Invalid("A referenced inbox does not exist.");
+                return TicketFailure.Invalid("A referenced inbox does not exist.");
         return null;
     }
 }

@@ -18,21 +18,6 @@ public enum ReportWriteRejection
 /// <summary>Outcome of a reporting store write. Switch over every case without a discard arm.</summary>
 public union ReportWriteResult(ReportWriteApplied, ReportWriteConflict, ReportWriteRejected);
 
-/// <summary>The authorized report succeeded.</summary>
-public sealed record ReportSucceeded<T>(T Value);
-
-/// <summary>The request was refused. <see cref="Errors"/> are non-sensitive messages.</summary>
-public sealed record ReportRefused(ReportRefusal Reason, IReadOnlyList<string> Errors);
-
-public enum ReportRefusal
-{
-    Forbidden = 1,
-    Invalid = 2,
-}
-
-/// <summary>Outcome of a report service call. Switch over every case without a discard arm.</summary>
-public union ReportResult<T>(ReportSucceeded<T>, ReportRefused);
-
 /// <summary>The range's cells were recomputed from <see cref="Facts"/> facts.</summary>
 public sealed record ReportRebuilt(long Facts);
 

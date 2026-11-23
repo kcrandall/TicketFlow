@@ -79,7 +79,7 @@ internal sealed class ReportingFixture : IDisposable
         await fixture.Get<ITeamStore>().CreateAsync(fixture.Scope, new Team(new TeamId("support"), "Support"));
         using (var scope = fixture.Provider.CreateScope())
         {
-            Assert.IsInstanceOfType<ContactApplied<ContactView>>((await scope.ServiceProvider.GetRequiredService<IContactService>().CreateAsync(fixture.Owner,
+            Assert.IsInstanceOfType<TicketValue<ContactView>>((await scope.ServiceProvider.GetRequiredService<IContactService>().CreateAsync(fixture.Owner,
                 new ContactDraft(new ContactProfile("ada"), Id: new ContactId("ada")))).Value);
             await scope.ServiceProvider.GetRequiredService<ConversationOutboxDispatcher>().RegisterAsync();
         }
@@ -99,13 +99,13 @@ internal sealed class ReportingFixture : IDisposable
     {
         var grant = new AccessGrant(new GrantId($"seed-{nextGrant++:D4}"), AccessPartition.From(Scope), subject, role.Id, scope ?? new WorkspaceGrantScope(Scope.WorkspaceId),
             GrantEffect.Allow, null);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await Get<IAccessGrantStore>().CreateAsync(grant)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await Get<IAccessGrantStore>().CreateAsync(grant)).Value);
     }
 
     public async Task<AccessRole> CustomRoleAsync(string id, params Permission[] permissions)
     {
         var role = new AccessRole(new RoleId(id), id, permissions);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await Get<IAccessRoleStore>().CreateAsync(Scope, role)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await Get<IAccessRoleStore>().CreateAsync(Scope, role)).Value);
         return role;
     }
 
@@ -184,13 +184,13 @@ internal sealed class ReportingFixture : IDisposable
         return facts;
     }
 
-    public Task<ReportResult<T>> ReportAsync<T>(Func<IReportingService, Task<ReportResult<T>>> call) =>
+    public Task<TicketResult<T>> ReportAsync<T>(Func<IReportingService, Task<TicketResult<T>>> call) =>
         InScopeAsync(services => call(services.GetRequiredService<IReportingService>()));
 
-    public static T Value<T>(ReportResult<T> result) => result switch
+    public static T Value<T>(TicketResult<T> result) => result switch
     {
-        ReportSucceeded<T> succeeded => succeeded.Value,
-        ReportRefused refused => throw new AssertFailedException($"Refused: {refused.Reason} {string.Join("; ", refused.Errors)}"),
+        TicketValue<T> succeeded => succeeded.Value,
+        TicketFailure refused => throw new AssertFailedException($"Refused: {refused.Kind} {string.Join("; ", refused.Errors)}"),
     };
 
     public void Dispose() => Provider.Dispose();

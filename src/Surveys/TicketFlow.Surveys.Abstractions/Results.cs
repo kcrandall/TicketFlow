@@ -1,24 +1,5 @@
 namespace TicketFlow.Surveys;
 
-/// <summary>The store write was applied; <see cref="Value"/> is the stored state (for deletes, the removed state).</summary>
-public sealed record SurveyWriteApplied<T>(T Value);
-
-/// <summary>No record exists for the key in the requested scope.</summary>
-public sealed record SurveyWriteNotFound
-{
-    private SurveyWriteNotFound()
-    {
-    }
-
-    public static SurveyWriteNotFound Instance { get; } = new();
-}
-
-/// <summary>The expected revision did not match, or a create found an existing record. Nothing was written.</summary>
-public sealed record SurveyWriteConflict(long CurrentRevision);
-
-/// <summary>The store refused the write for a contract reason. Nothing was written.</summary>
-public sealed record SurveyWriteRejected(SurveyWriteRejection Reason);
-
 public enum SurveyWriteRejection
 {
     /// <summary>A capacity in <see cref="SurveyLimits"/> would be exceeded.</summary>
@@ -27,9 +8,6 @@ public enum SurveyWriteRejection
     /// <summary>The survey still has invitations, or a fixed invitation field (survey, conversation, contact, kind) changed.</summary>
     InUse = 2,
 }
-
-/// <summary>Outcome of a revision-fenced store write. Switch over every case without a discard arm.</summary>
-public union SurveyWriteResult<T>(SurveyWriteApplied<T>, SurveyWriteNotFound, SurveyWriteConflict, SurveyWriteRejected);
 
 /// <summary>A new invitation was stored.</summary>
 public sealed record InvitationCreated(StoredInvitation Invitation);
@@ -67,24 +45,6 @@ public sealed record ResponseInvitationExpired(DateTimeOffset ExpiredAt);
 
 /// <summary>Outcome of an atomic single-response write. Switch over every case without a discard arm.</summary>
 public union ResponseRecordResult(ResponseRecorded, ResponseAlreadyRecorded, ResponseInvitationNotFound, ResponseInvitationExpired);
-
-/// <summary>The authorized read or change succeeded.</summary>
-public sealed record SurveySucceeded<T>(T Value);
-
-/// <summary>The request was refused. <see cref="Errors"/> are non-sensitive messages; <see cref="CurrentRevision"/> accompanies conflicts.</summary>
-public sealed record SurveyRefused(SurveyRefusal Reason, IReadOnlyList<string> Errors, long? CurrentRevision = null);
-
-public enum SurveyRefusal
-{
-    Forbidden = 1,
-    Invalid = 2,
-    NotFound = 3,
-    Conflict = 4,
-    Rejected = 5,
-}
-
-/// <summary>Outcome of a survey service call. Switch over every case without a discard arm.</summary>
-public union SurveyResult<T>(SurveySucceeded<T>, SurveyRefused);
 
 /// <summary>Capacity limits survey stores enforce atomically with writes.</summary>
 public static class SurveyLimits

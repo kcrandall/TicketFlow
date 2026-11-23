@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using TicketFlow.Core;
 
 namespace TicketFlow.Access;
@@ -50,8 +51,103 @@ public sealed record AccessPartition
     public override string ToString() => "AccessPartition { <redacted> }";
 }
 
-/// <summary>Who a grant applies to: a user, every user whose team snapshot contains a team, or an API client.</summary>
-public union GrantSubject(UserId, TeamId, ApiClientId);
+/// <summary>
+/// Who a grant applies to: a user, every user whose team snapshot contains a team, or an API client. Stored inline as a
+/// non-boxing C# 15 union so authorization lookups never box identifier structs.
+/// </summary>
+[Union]
+public readonly struct GrantSubject : IUnion, IEquatable<GrantSubject>
+{
+    private readonly byte tag;
+    private readonly string? raw;
+
+    public GrantSubject(UserId user)
+    {
+        tag = 1;
+        raw = user == default ? null : user.Value;
+    }
+
+    public GrantSubject(TeamId team)
+    {
+        tag = 2;
+        raw = team == default ? null : team.Value;
+    }
+
+    public GrantSubject(ApiClientId client)
+    {
+        tag = 3;
+        raw = client == default ? null : client.Value;
+    }
+
+    public bool HasValue => tag != 0;
+
+    internal bool IsInitialized => tag != 0 && raw is not null;
+
+    public object? Value => tag switch
+    {
+        1 => raw is null ? default(UserId) : new UserId(raw),
+        2 => raw is null ? default(TeamId) : new TeamId(raw),
+        3 => raw is null ? default(ApiClientId) : new ApiClientId(raw),
+        _ => null,
+    };
+
+    public bool TryGetValue(out UserId value)
+    {
+        if (tag == 1)
+        {
+            value = raw is null ? default : new UserId(raw);
+            return true;
+        }
+        value = default;
+        return false;
+    }
+
+    public bool TryGetValue(out TeamId value)
+    {
+        if (tag == 2)
+        {
+            value = raw is null ? default : new TeamId(raw);
+            return true;
+        }
+        value = default;
+        return false;
+    }
+
+    public bool TryGetValue(out ApiClientId value)
+    {
+        if (tag == 3)
+        {
+            value = raw is null ? default : new ApiClientId(raw);
+            return true;
+        }
+        value = default;
+        return false;
+    }
+
+    public bool Equals(GrantSubject other) => tag == other.tag && string.Equals(raw, other.raw, StringComparison.Ordinal);
+
+    public override bool Equals(object? obj) => obj is GrantSubject other && Equals(other);
+
+    public override int GetHashCode() => HashCode.Combine(tag, raw is null ? 0 : StringComparer.Ordinal.GetHashCode(raw));
+
+    public override string ToString() => tag switch
+    {
+        1 => $"UserId {{ Value = {raw} }}",
+        2 => $"TeamId {{ Value = {raw} }}",
+        3 => $"ApiClientId {{ Value = {raw} }}",
+        _ => string.Empty,
+    };
+
+    public static bool operator ==(GrantSubject left, GrantSubject right) => left.Equals(right);
+
+    public static bool operator !=(GrantSubject left, GrantSubject right) => !left.Equals(right);
+
+    public static implicit operator GrantSubject(UserId user) => new(user);
+
+    public static implicit operator GrantSubject(TeamId team) => new(team);
+
+    public static implicit operator GrantSubject(ApiClientId client) => new(client);
+}
 
 /// <summary>Grant resource scope. Grants inherit downward: tenant → workspace → team/inbox → resources in that team/inbox.</summary>
 public closed record GrantScope;
@@ -210,13 +306,7 @@ public sealed record AccessGrant
 
     public override string ToString() => "AccessGrant { <redacted> }";
 
-    internal static bool IsInitialized(GrantSubject subject) => subject.Value switch
-    {
-        UserId user => user != default,
-        TeamId team => team != default,
-        ApiClientId client => client != default,
-        _ => false,
-    };
+    internal static bool IsInitialized(GrantSubject subject) => subject.IsInitialized;
 
     private static DateTimeOffset? Normalize(DateTimeOffset? value) =>
         value is { } instant ? new DateTimeOffset(instant.UtcTicks - instant.UtcTicks % 10, TimeSpan.Zero) : null;

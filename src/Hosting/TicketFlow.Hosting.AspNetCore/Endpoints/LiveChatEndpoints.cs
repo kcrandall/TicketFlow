@@ -66,9 +66,9 @@ internal static class LiveChatEndpoints
         return group;
     }
 
-    private static IResult Map<T>(HttpContext http, LiveChatResult<T> result, Func<T, IResult> success) => result switch
+    private static IResult Map<T>(HttpContext http, TicketResult<T, LiveChatRefused> result, Func<T, IResult> success) => result switch
     {
-        LiveChatValue<T> value => success(value.Value),
+        TicketValue<T> value => success(value.Value),
         LiveChatRefused refused => refused.Reason switch
         {
             LiveChatRefusal.Forbidden => TicketFlowHttp.Refused(http, RefusalKind.Forbidden, refused.Errors),
@@ -81,18 +81,7 @@ internal static class LiveChatEndpoints
         },
     };
 
-    private static IResult Map<T>(HttpContext http, ChannelResult<T> result, Func<T, IResult> success) => result switch
-    {
-        ChannelValue<T> value => success(value.Value),
-        ChannelNotFound => TicketFlowHttp.NotFound(),
-        ChannelConflict conflict => TicketFlowHttp.Conflict(http, conflict.CurrentRevision),
-        ChannelRefused refused => TicketFlowHttp.Refused(http, refused.Reason switch
-        {
-            ChannelRefusal.Forbidden => RefusalKind.Forbidden,
-            ChannelRefusal.Invalid => RefusalKind.Invalid,
-            _ => RefusalKind.Rejected,
-        }, refused.Errors),
-    };
+    private static IResult Map<T>(HttpContext http, TicketResult<T> result, Func<T, IResult> success) => TicketFlowHttp.Map(http, result, success);
 
     private static LiveChatWidget Widget(WidgetRequest request) =>
         LiveChatCodec.DecodeWidget(request.ConfigurationId, new InboxId(request.InboxId), Json.Raw(request.Definition, "definition"));

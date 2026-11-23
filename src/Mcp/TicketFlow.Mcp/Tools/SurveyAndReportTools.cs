@@ -77,18 +77,7 @@ public sealed class SurveyTools(TicketFlowToolContext context)
                     row.Negative, row.NpsScore, row.AverageScore))], result.Truncated));
         }, cancellationToken);
 
-    private static object Map<T>(SurveyResult<T> result, Func<T, object> success) => result switch
-    {
-        SurveySucceeded<T> succeeded => success(succeeded.Value),
-        SurveyRefused refused => refused.Reason switch
-        {
-            SurveyRefusal.Forbidden => TicketFlowToolError.Forbidden(),
-            SurveyRefusal.Invalid => TicketFlowToolError.Invalid(refused.Errors),
-            SurveyRefusal.NotFound => TicketFlowToolError.NotFound(),
-            SurveyRefusal.Conflict => TicketFlowToolError.Conflict(refused.CurrentRevision),
-            _ => TicketFlowToolError.Rejected(refused.Errors),
-        },
-    };
+    private static object Map<T>(TicketResult<T> result, Func<T, object> success) => TicketFlowToolError.Map(result, success);
 }
 
 /// <summary>Report tools over <see cref="IReportingService"/>: rows are filtered by the caller's Access plan inside the store.</summary>
@@ -173,13 +162,5 @@ public sealed class ReportTools(TicketFlowToolContext context)
     private static SatisfactionOutput? Satisfaction(ReportSatisfaction? satisfaction) => satisfaction is null ? null
         : new(satisfaction.CsatResponses, satisfaction.CsatPercent, satisfaction.NpsResponses, satisfaction.NpsScore);
 
-    private static object Map<T>(ReportResult<T> result, Func<T, object> success) => result switch
-    {
-        ReportSucceeded<T> succeeded => success(succeeded.Value),
-        ReportRefused refused => refused.Reason switch
-        {
-            ReportRefusal.Forbidden => TicketFlowToolError.Forbidden(),
-            _ => TicketFlowToolError.Invalid(refused.Errors),
-        },
-    };
+    private static object Map<T>(TicketResult<T> result, Func<T, object> success) => TicketFlowToolError.Map(result, success);
 }

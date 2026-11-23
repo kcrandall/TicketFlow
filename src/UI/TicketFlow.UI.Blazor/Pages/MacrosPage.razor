@@ -42,7 +42,7 @@
 
     protected override async Task OnInitializedAsync()
     {
-        if (Service<IMacroService>() is { } service && await service.ListAsync(Actor, Aborted) is AutomationValue<IReadOnlyList<StoredMacro>> list)
+        if (Service<IMacroService>() is { } service && await service.ListAsync(Actor, Aborted) is TicketValue<IReadOnlyList<StoredMacro>> list)
             macros = [.. list.Value];
     }
 }

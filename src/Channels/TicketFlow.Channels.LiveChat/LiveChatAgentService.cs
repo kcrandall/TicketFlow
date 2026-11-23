@@ -16,9 +16,9 @@ public sealed class LiveChatAgentService(IConversationStore conversations, ICont
     private readonly IAccessEvaluator evaluator = evaluator ?? throw new ArgumentNullException(nameof(evaluator));
     private readonly IAccessFieldPolicyStore policies = policies ?? throw new ArgumentNullException(nameof(policies));
 
-    public async Task<LiveChatResult<LiveChatVisitorView>> GetVisitorAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<LiveChatVisitorView, LiveChatRefused>> GetVisitorAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("A principal is required.", nameof(actor));
         var scope = actor.Scope;
         var stored = conversation == default ? null : await conversations.GetAsync(scope, conversation, cancellationToken).ConfigureAwait(false);
@@ -133,7 +133,7 @@ public sealed class LiveChatAgentService(IConversationStore conversations, ICont
                 Array.Sort(arr, static (a, b) => a.Field.CompareTo(b.Field));
             maskedFields = arr;
         }
-        return new LiveChatValue<LiveChatVisitorView>(new LiveChatVisitorView(session.VisitorId, session.Identity is not null, session.Identity?.Namespace,
+        return new TicketValue<LiveChatVisitorView>(new LiveChatVisitorView(session.VisitorId, session.Identity is not null, session.Identity?.Namespace,
             identityHidden ? null : session.Identity?.Value, maskAll ? null : session.DisplayName, answers, session.CreatedAt, maskedFields));
     }
 }

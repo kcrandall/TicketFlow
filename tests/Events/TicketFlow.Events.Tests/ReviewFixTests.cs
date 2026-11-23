@@ -22,16 +22,16 @@ public sealed class ReviewFixTests
     {
         using var fixture = await EventsFixture.CreateAsync();
         // narrow-manager holds events:manage but not conversation:read/contact:read, which the hooks principal holds.
-        var refused = (EventRefused)(await fixture.SubscribeAsync("s1", principal: "hooks", actor: fixture.NarrowManager)).Value!;
-        Assert.AreEqual(EventRefusal.Forbidden, refused.Reason);
+        var refused = (TicketFailure)(await fixture.SubscribeAsync("s1", principal: "hooks", actor: fixture.NarrowManager)).Value!;
+        Assert.AreEqual(TicketFailureKind.Forbidden, refused.Kind);
         StringAssert.Contains(refused.Errors.Single(), "delegate");
         EventsFixture.Value(await fixture.SubscribeAsync("s1", principal: "billing-hooks", actor: fixture.Manager));
 
         // The same rule applies when an update switches the principal.
         var escalate = new EventSubscription(new EventSubscriptionId("s1"), "s1", new EventSinkRef("in-process", "recorder"), EventSubscriptionFilter.Everything,
             new ApiClientId("content-hooks"));
-        Assert.AreEqual(EventRefusal.Forbidden, ((EventRefused)(await fixture.InScopeAsync(provider => Service(provider).UpdateAsync(fixture.Manager, escalate, 1))).Value!).Reason);
-        Assert.IsInstanceOfType<EventSucceeded<EventSubscriptionView>>((await fixture.InScopeAsync(provider => Service(provider).UpdateAsync(fixture.Owner, escalate, 1))).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)(await fixture.InScopeAsync(provider => Service(provider).UpdateAsync(fixture.Manager, escalate, 1))).Value!).Kind);
+        Assert.IsInstanceOfType<TicketValue<EventSubscriptionView>>((await fixture.InScopeAsync(provider => Service(provider).UpdateAsync(fixture.Owner, escalate, 1))).Value);
     }
 
     [TestMethod]
@@ -51,7 +51,7 @@ public sealed class ReviewFixTests
                      (await fixture.InScopeAsync(provider => Service(provider).ReplayAsync(fixture.Agent, missing, 0))).Value,
                      (await fixture.InScopeAsync(provider => Service(provider).ListDeadLettersAsync(fixture.Agent, missing))).Value,
                  })
-            Assert.AreEqual(EventRefusal.Forbidden, ((EventRefused)result!).Reason, "Unauthorized actors learn nothing about existence or revisions.");
+            Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)result!).Kind, "Unauthorized actors learn nothing about existence or revisions.");
     }
 
     [TestMethod]

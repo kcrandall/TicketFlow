@@ -160,10 +160,10 @@ public sealed class EngineRegressionTests
             return inner.ListAsync(scope, cancellationToken);
         }
 
-        public Task<AccessWriteResult<StoredAccessRole>> CreateAsync(TicketScope scope, AccessRole role, CancellationToken cancellationToken = default) => inner.CreateAsync(scope, role, cancellationToken);
+        public Task<StoreWriteResult<StoredAccessRole, AccessWriteRejection>> CreateAsync(TicketScope scope, AccessRole role, CancellationToken cancellationToken = default) => inner.CreateAsync(scope, role, cancellationToken);
 
-        public Task<AccessWriteResult<StoredAccessRole>> UpdateAsync(TicketScope scope, AccessRole role, long expectedRevision, CancellationToken cancellationToken = default) => inner.UpdateAsync(scope, role, expectedRevision, cancellationToken);
+        public Task<StoreWriteResult<StoredAccessRole, AccessWriteRejection>> UpdateAsync(TicketScope scope, AccessRole role, long expectedRevision, CancellationToken cancellationToken = default) => inner.UpdateAsync(scope, role, expectedRevision, cancellationToken);
 
-        public Task<AccessWriteResult<StoredAccessRole>> DeleteAsync(TicketScope scope, RoleId id, long expectedRevision, CancellationToken cancellationToken = default) => inner.DeleteAsync(scope, id, expectedRevision, cancellationToken);
+        public Task<StoreWriteResult<StoredAccessRole, AccessWriteRejection>> DeleteAsync(TicketScope scope, RoleId id, long expectedRevision, CancellationToken cancellationToken = default) => inner.DeleteAsync(scope, id, expectedRevision, cancellationToken);
     }
 }

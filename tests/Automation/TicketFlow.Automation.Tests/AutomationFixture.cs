@@ -79,7 +79,7 @@ internal sealed class AutomationFixture : IDisposable
         await definitions.CreateAsync(fixture.Scope, new ConversationAttributeDefinition("ssn", ConversationAttributeType.Text, sensitive: true));
         await fixture.InScopeAsync(async services =>
         {
-            Assert.IsInstanceOfType<ContactApplied<ContactView>>((await services.GetRequiredService<IContactService>().CreateAsync(fixture.Owner,
+            Assert.IsInstanceOfType<TicketValue<ContactView>>((await services.GetRequiredService<IContactService>().CreateAsync(fixture.Owner,
                 new ContactDraft(new ContactProfile("Ada", locale: "de"), Id: new ContactId("ada")))).Value);
             await services.GetRequiredService<ConversationOutboxDispatcher>().RegisterAsync();
             return 0;
@@ -93,13 +93,13 @@ internal sealed class AutomationFixture : IDisposable
     {
         var grant = new AccessGrant(new GrantId($"seed-{nextGrant++:D4}"), AccessPartition.From(Scope), subject, role.Id, scope ?? new WorkspaceGrantScope(Scope.WorkspaceId),
             GrantEffect.Allow, null);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await Get<IAccessGrantStore>().CreateAsync(grant)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await Get<IAccessGrantStore>().CreateAsync(grant)).Value);
     }
 
     public async Task<AccessRole> CustomRoleAsync(string id, params Permission[] permissions)
     {
         var role = new AccessRole(new RoleId(id), id, permissions);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await Get<IAccessRoleStore>().CreateAsync(Scope, role)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await Get<IAccessRoleStore>().CreateAsync(Scope, role)).Value);
         return role;
     }
 
@@ -131,7 +131,7 @@ internal sealed class AutomationFixture : IDisposable
     public Task<T> RulesAsync<T>(Func<IAutomationRuleService, Task<T>> action) => InScopeAsync(services => action(services.GetRequiredService<IAutomationRuleService>()));
 
     public async Task<StoredAutomationRule> CreateRuleAsync(AutomationRule rule) =>
-        Assert.IsInstanceOfType<AutomationValue<StoredAutomationRule>>((await RulesAsync(service => service.CreateAsync(Owner, rule))).Value).Value;
+        Assert.IsInstanceOfType<TicketValue<StoredAutomationRule>>((await RulesAsync(service => service.CreateAsync(Owner, rule))).Value).Value;
 
     public async Task StartAsync(string id, string message = "Hello", IReadOnlyDictionary<string, ConversationAttributeValue>? attributes = null)
     {

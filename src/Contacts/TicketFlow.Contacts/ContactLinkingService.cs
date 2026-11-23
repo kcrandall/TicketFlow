@@ -157,19 +157,14 @@ public sealed class ContactLinkingService : IContactLinkingService
             var batch = new ContactWriteBatch(puts: [new ContactPut(updated, subject.Revision)], changes: [Change(ContactChangeKind.Updated, subject.Id, now), Change(ContactChangeKind.IdentityLinked, subject.Id, now)],
                 audit: auditEvent);
             var result = await store.WriteAsync(scope, batch, cancellationToken).ConfigureAwait(false);
-            switch (result)
+            return result switch
             {
-                case ContactWriteApplied applied:
-                    await NotifyAsync(applied.Changes, cancellationToken).ConfigureAwait(false);
-                    return new ContactLinked(await ViewAsync(actor, applied.Contacts[0], cancellationToken).ConfigureAwait(false), auditEvent.Id);
-                case ContactWriteConflict:
-                case ContactWriteNotFound:
-                case ContactIdentityTaken:
-                    return null;
-                case ContactWriteRejected rejected:
-                    return new ContactRefused(ContactRefusal.Rejected, [$"The store rejected the write: {rejected.Reason}."]);
-            }
-            throw new InvalidOperationException("Unknown write outcome.");
+                ContactWriteApplied applied => await FinishLinkWriteAsync(actor, applied, auditEvent.Id, cancellationToken).ConfigureAwait(false),
+                ContactWriteConflict => (ContactLinkResult?)null,
+                ContactWriteNotFound => null,
+                ContactIdentityTaken => null,
+                ContactWriteRejected rejected => new ContactRefused(ContactRefusal.Rejected, [$"The store rejected the write: {rejected.Reason}."]),
+            };
         }
 
         if (!(await decisions.DecideAsync(ContactPermissions.Link, ContactAccess.Resource(holder), cancellationToken).ConfigureAwait(false)).IsPermitted)
@@ -177,21 +172,29 @@ public sealed class ContactLinkingService : IContactLinkingService
         // Like the auto-merge and accept paths: never combine two different verified accounts of one namespace.
         if (SharesNamespaceWithOtherAccount(subject.Contact, holder.Contact))
             return new ContactLinkConflict(ContactLinkConflictReason.OtherAccount, [subject.Id]);
-        switch (await MergeAsync(actor, scope, holder, subject, request.Justification ?? LinkJustification, cancellationToken).ConfigureAwait(false))
+        return await MergeAsync(actor, scope, holder, subject, request.Justification ?? LinkJustification, cancellationToken).ConfigureAwait(false) switch
         {
-            case ContactMergedInto merged:
-                await audit.RecordAsync(new ContactAuditEvent(Guid.CreateVersion7(), Now, scope, ContactAuditKind.Linked, AccessActor.From(actor), subject.Id, holder.Id,
-                    merged.MergeId, justification: request.Justification), cancellationToken).ConfigureAwait(false);
-                return merged;
-            case ContactRefused { Reason: ContactRefusal.Conflict or ContactRefusal.Merged or ContactRefusal.NotFound }:
-                return null;
-            case ContactRefused refused:
-                return refused;
-        }
-        throw new InvalidOperationException("Unknown merge outcome.");
+            ContactMergedInto merged => await FinishLinkMergeAsync(actor, scope, subject.Id, holder.Id, merged, request.Justification, cancellationToken).ConfigureAwait(false),
+            ContactRefused { Reason: ContactRefusal.Conflict or ContactRefusal.Merged or ContactRefusal.NotFound } => (ContactLinkResult?)null,
+            ContactRefused refused => refused,
+        };
     }
 
-    public async Task<ContactResult<ContactView>> UnlinkAccountAsync(PrincipalRef actor, ContactId contact, long expectedRevision, ExternalAccountRef account, string? justification = null,
+    private async Task<ContactLinkResult?> FinishLinkWriteAsync(PrincipalRef actor, ContactWriteApplied applied, Guid auditEventId, CancellationToken cancellationToken)
+    {
+        await NotifyAsync(applied.Changes, cancellationToken).ConfigureAwait(false);
+        return new ContactLinked(await ViewAsync(actor, applied.Contacts[0], cancellationToken).ConfigureAwait(false), auditEventId);
+    }
+
+    private async Task<ContactLinkResult?> FinishLinkMergeAsync(PrincipalRef actor, TicketScope scope, ContactId sourceId, ContactId holderId, ContactMergedInto merged,
+        string? justification, CancellationToken cancellationToken)
+    {
+        await audit.RecordAsync(new ContactAuditEvent(Guid.CreateVersion7(), Now, scope, ContactAuditKind.Linked, AccessActor.From(actor), sourceId, holderId,
+            merged.MergeId, justification: justification), cancellationToken).ConfigureAwait(false);
+        return merged;
+    }
+
+    public async Task<TicketResult<ContactView, ContactRefused>> UnlinkAccountAsync(PrincipalRef actor, ContactId contact, long expectedRevision, ExternalAccountRef account, string? justification = null,
         CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
@@ -226,21 +229,20 @@ public sealed class ContactLinkingService : IContactLinkingService
             updatedAt: Later(stored.Contact.UpdatedAt, now));
         var batch = new ContactWriteBatch(puts: [new ContactPut(updated, expectedRevision)], changes: [Change(ContactChangeKind.Updated, contact, now), Change(ContactChangeKind.IdentityUnlinked, contact, now)],
             audit: auditEvent);
-        switch (await store.WriteAsync(scope, batch, cancellationToken).ConfigureAwait(false))
+        return await store.WriteAsync(scope, batch, cancellationToken).ConfigureAwait(false) switch
         {
-            case ContactWriteApplied applied:
-                await NotifyAsync(applied.Changes, cancellationToken).ConfigureAwait(false);
-                return new ContactApplied<ContactView>(await ViewAsync(actor, applied.Contacts[0], cancellationToken).ConfigureAwait(false));
-            case ContactWriteConflict conflict:
-                return new ContactRefused(ContactRefusal.Conflict, [], conflict.CurrentRevision);
-            case ContactWriteNotFound:
-                return ContactRefused.NotFound;
-            case ContactIdentityTaken:
-                return new ContactRefused(ContactRefusal.Rejected, ["The store refused the write."]);
-            case ContactWriteRejected rejected:
-                return new ContactRefused(ContactRefusal.Rejected, [$"The store rejected the write: {rejected.Reason}."]);
-        }
-        throw new InvalidOperationException("Unknown write outcome.");
+            ContactWriteApplied applied => await FinishUnlinkAsync(actor, applied, cancellationToken).ConfigureAwait(false),
+            ContactWriteConflict conflict => new ContactRefused(ContactRefusal.Conflict, [], conflict.CurrentRevision),
+            ContactWriteNotFound => ContactRefused.NotFound,
+            ContactIdentityTaken => new ContactRefused(ContactRefusal.Rejected, ["The store refused the write."]),
+            ContactWriteRejected rejected => new ContactRefused(ContactRefusal.Rejected, [$"The store rejected the write: {rejected.Reason}."]),
+        };
+    }
+
+    private async Task<TicketResult<ContactView, ContactRefused>> FinishUnlinkAsync(PrincipalRef actor, ContactWriteApplied applied, CancellationToken cancellationToken)
+    {
+        await NotifyAsync(applied.Changes, cancellationToken).ConfigureAwait(false);
+        return new TicketValue<ContactView>(await ViewAsync(actor, applied.Contacts[0], cancellationToken).ConfigureAwait(false));
     }
 
     // ---- Login helper ----
@@ -328,7 +330,7 @@ public sealed class ContactLinkingService : IContactLinkingService
         {
             switch (await AttachClaimsAsync(actor, scope, account, request, cancellationToken).ConfigureAwait(false))
             {
-                case ContactApplied<StoredContact> attached:
+                case TicketValue<StoredContact> attached:
                     account = attached.Value;
                     break;
                 case ContactRefused refused:
@@ -342,7 +344,7 @@ public sealed class ContactLinkingService : IContactLinkingService
     }
 
     /// <summary>Adds missing claims (verified ones as verified unless another contact holds them verified) in one audited batch.</summary>
-    private async Task<ContactResult<StoredContact>> AttachClaimsAsync(PrincipalRef actor, TicketScope scope, StoredContact account, CustomerResolveRequest request, CancellationToken cancellationToken)
+    private async Task<TicketResult<StoredContact, ContactRefused>> AttachClaimsAsync(PrincipalRef actor, TicketScope scope, StoredContact account, CustomerResolveRequest request, CancellationToken cancellationToken)
     {
         for (var attempt = 0; attempt < MaximumAttempts; attempt++)
         {
@@ -373,7 +375,7 @@ public sealed class ContactLinkingService : IContactLinkingService
                 added++;
             }
             if (added == 0)
-                return new ContactApplied<StoredContact>(account);
+                return new TicketValue<StoredContact>(account);
             Contact updated;
             try
             {
@@ -381,7 +383,7 @@ public sealed class ContactLinkingService : IContactLinkingService
             }
             catch (ArgumentException)
             {
-                return new ContactApplied<StoredContact>(account);
+                return new TicketValue<StoredContact>(account);
             }
             var batch = new ContactWriteBatch(puts: [new ContactPut(updated, account.Revision)], changes: [Change(ContactChangeKind.Updated, account.Id, now)],
                 audit: new ContactAuditEvent(Guid.CreateVersion7(), now, scope, ContactAuditKind.Linked, AccessActor.From(actor), account.Id, count: added));
@@ -389,7 +391,7 @@ public sealed class ContactLinkingService : IContactLinkingService
             {
                 case ContactWriteApplied applied:
                     await NotifyAsync(applied.Changes, cancellationToken).ConfigureAwait(false);
-                    return new ContactApplied<StoredContact>(applied.Contacts[0]);
+                    return new TicketValue<StoredContact>(applied.Contacts[0]);
                 case ContactWriteConflict:
                 case ContactIdentityTaken:
                     var reloaded = await store.GetAsync(scope, account.Id, cancellationToken).ConfigureAwait(false);
@@ -471,12 +473,12 @@ public sealed class ContactLinkingService : IContactLinkingService
             var now = Now;
             var suggestion = new ContactLinkSuggestion(Guid.CreateVersion7(), candidate.Id, account.Id, address,
                 claims.First(claim => claim.Address == address).Verified, ContactLinkSuggestionStatus.Pending, now, now, AccessActor.From(actor));
-            if (await linking.CreateSuggestionAsync(scope, suggestion, cancellationToken).ConfigureAwait(false) is { Value: LinkingWriteApplied<StoredContactLinkSuggestion> stored })
+            if (await linking.CreateSuggestionAsync(scope, suggestion, cancellationToken).ConfigureAwait(false) is StoreApplied<StoredLinkSuggestionWrite> stored)
             {
-                if (stored.Created)
+                if (stored.Value.Created)
                     await audit.RecordAsync(new ContactAuditEvent(Guid.CreateVersion7(), now, scope, ContactAuditKind.LinkSuggested, AccessActor.From(actor), candidate.Id, account.Id)
-                        { Suggestion = stored.Value.Suggestion.Id }, cancellationToken).ConfigureAwait(false);
-                suggestions.Add(stored.Value.Suggestion.Id);
+                        { Suggestion = stored.Value.Suggestion.Suggestion.Id }, cancellationToken).ConfigureAwait(false);
+                suggestions.Add(stored.Value.Suggestion.Suggestion.Id);
             }
         }
         return account;
@@ -484,16 +486,16 @@ public sealed class ContactLinkingService : IContactLinkingService
 
     // ---- Policy ----
 
-    public async Task<ContactResult<StoredContactLinkingPolicy>> GetPolicyAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredContactLinkingPolicy, ContactRefused>> GetPolicyAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         if (!await PermittedAsync(actor, ContactPermissions.Read, ContactAccess.Workspace(scope), cancellationToken).ConfigureAwait(false))
             return ContactRefused.Forbidden;
-        return new ContactApplied<StoredContactLinkingPolicy>(await linking.GetPolicyAsync(scope, cancellationToken).ConfigureAwait(false)
+        return new TicketValue<StoredContactLinkingPolicy>(await linking.GetPolicyAsync(scope, cancellationToken).ConfigureAwait(false)
             ?? new StoredContactLinkingPolicy(scope, LinkingOff.Instance, 0));
     }
 
-    public async Task<ContactResult<StoredContactLinkingPolicy>> SetPolicyAsync(PrincipalRef actor, ContactLinkingPolicy policy, long? expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<StoredContactLinkingPolicy, ContactRefused>> SetPolicyAsync(PrincipalRef actor, ContactLinkingPolicy policy, long? expectedRevision, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         if (policy.Value is null)
@@ -502,25 +504,25 @@ public sealed class ContactLinkingService : IContactLinkingService
             throw new ArgumentOutOfRangeException(nameof(expectedRevision));
         if (!await PermittedAsync(actor, ContactPermissions.ManageLinking, ContactAccess.Workspace(scope), cancellationToken).ConfigureAwait(false))
             return ContactRefused.Forbidden;
-        switch (await linking.PutPolicyAsync(scope, policy, expectedRevision, cancellationToken).ConfigureAwait(false))
+        return await linking.PutPolicyAsync(scope, policy, expectedRevision, cancellationToken).ConfigureAwait(false) switch
         {
-            case LinkingWriteApplied<StoredContactLinkingPolicy> applied:
-                await audit.RecordAsync(new ContactAuditEvent(Guid.CreateVersion7(), Now, scope, ContactAuditKind.LinkingPolicyChanged, AccessActor.From(actor)), cancellationToken)
-                    .ConfigureAwait(false);
-                return new ContactApplied<StoredContactLinkingPolicy>(applied.Value);
-            case LinkingWriteNotFound:
-                return ContactRefused.NotFound;
-            case LinkingWriteConflict conflict:
-                return new ContactRefused(ContactRefusal.Conflict, [], conflict.CurrentRevision);
-            case ContactWriteRejected rejected:
-                return new ContactRefused(ContactRefusal.Rejected, [$"The store rejected the write: {rejected.Reason}."]);
-        }
-        throw new InvalidOperationException("Unknown write outcome.");
+            StoreApplied<StoredContactLinkingPolicy> applied => await FinishSetPolicyAsync(actor, scope, applied.Value, cancellationToken).ConfigureAwait(false),
+            StoreNotFound => ContactRefused.NotFound,
+            StoreConflict conflict => new ContactRefused(ContactRefusal.Conflict, [], conflict.CurrentRevision),
+            StoreRejected<ContactWriteRejection> rejected => new ContactRefused(ContactRefusal.Rejected, [$"The store rejected the write: {rejected.Reason}."]),
+        };
+    }
+
+    private async Task<TicketResult<StoredContactLinkingPolicy, ContactRefused>> FinishSetPolicyAsync(PrincipalRef actor, TicketScope scope, StoredContactLinkingPolicy value, CancellationToken cancellationToken)
+    {
+        await audit.RecordAsync(new ContactAuditEvent(Guid.CreateVersion7(), Now, scope, ContactAuditKind.LinkingPolicyChanged, AccessActor.From(actor)), cancellationToken)
+            .ConfigureAwait(false);
+        return new TicketValue<StoredContactLinkingPolicy>(value);
     }
 
     // ---- Suggestions ----
 
-    public async Task<ContactResult<ContactLinkSuggestionPage>> ListSuggestionsAsync(PrincipalRef actor, ContactLinkSuggestionQuery query, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ContactLinkSuggestionPage, ContactRefused>> ListSuggestionsAsync(PrincipalRef actor, ContactLinkSuggestionQuery query, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
@@ -530,7 +532,7 @@ public sealed class ContactLinkingService : IContactLinkingService
         var page = await linking.ListSuggestionsAsync(scope, query, filter, cancellationToken).ConfigureAwait(false);
         if (page.Suggestions.Any(stored => stored.Scope != scope || stored.Suggestion.Status != query.Status))
             throw new InvalidOperationException("The linking store returned a suggestion outside the query contract.");
-        return new ContactApplied<ContactLinkSuggestionPage>(new([.. page.Suggestions.Select(ContactLinkSuggestionView.From)], page.Next));
+        return new TicketValue<ContactLinkSuggestionPage>(new([.. page.Suggestions.Select(ContactLinkSuggestionView.From)], page.Next));
     }
 
     public Task<ContactLinkSuggestionAcceptResult> AcceptSuggestionAsync(PrincipalRef actor, Guid suggestion, long expectedRevision, CancellationToken cancellationToken = default) =>
@@ -553,18 +555,21 @@ public sealed class ContactLinkingService : IContactLinkingService
         }
         if (SharesNamespaceWithOtherAccount(candidate.Contact, account.Contact))
             return new ContactLinkConflict(ContactLinkConflictReason.OtherAccount, [candidate.Id]);
-        switch (await MergeAsync(actor, scope, account, candidate, AcceptJustification, cancellationToken).ConfigureAwait(false))
+        return await MergeAsync(actor, scope, account, candidate, AcceptJustification, cancellationToken).ConfigureAwait(false) switch
         {
-            case ContactMergedInto merged:
-                var decided = await DecideAsync(actor, scope, stored!, ContactLinkSuggestionStatus.Accepted, merged.MergeId, cancellationToken).ConfigureAwait(false);
-                return new ContactLinkSuggestionAccepted(ContactLinkSuggestionView.From(decided), merged);
-            case ContactRefused mergeRefused:
-                return mergeRefused;
-        }
-        throw new InvalidOperationException("Unknown merge outcome.");
+            ContactMergedInto merged => await FinishAcceptSuggestionAsync(actor, scope, stored!, merged, cancellationToken).ConfigureAwait(false),
+            ContactRefused mergeRefused => mergeRefused,
+        };
     }
 
-    public async Task<ContactResult<ContactLinkSuggestionView>> RejectSuggestionAsync(PrincipalRef actor, Guid suggestion, long expectedRevision, string? justification = null,
+    private async Task<ContactLinkSuggestionAcceptResult> FinishAcceptSuggestionAsync(PrincipalRef actor, TicketScope scope, StoredContactLinkSuggestion stored,
+        ContactMergedInto merged, CancellationToken cancellationToken)
+    {
+        var decided = await DecideAsync(actor, scope, stored, ContactLinkSuggestionStatus.Accepted, merged.MergeId, cancellationToken).ConfigureAwait(false);
+        return new ContactLinkSuggestionAccepted(ContactLinkSuggestionView.From(decided), merged);
+    }
+
+    public async Task<TicketResult<ContactLinkSuggestionView, ContactRefused>> RejectSuggestionAsync(PrincipalRef actor, Guid suggestion, long expectedRevision, string? justification = null,
         CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
@@ -577,7 +582,7 @@ public sealed class ContactLinkingService : IContactLinkingService
         var decided = await DecideAsync(actor, scope, stored!, ContactLinkSuggestionStatus.Rejected, null, cancellationToken, justification).ConfigureAwait(false);
         return decided.Revision == stored!.Revision
             ? new ContactRefused(ContactRefusal.Conflict, [], decided.Revision)
-            : new ContactApplied<ContactLinkSuggestionView>(ContactLinkSuggestionView.From(decided));
+            : new TicketValue<ContactLinkSuggestionView>(ContactLinkSuggestionView.From(decided));
     }
 
     private async Task<(StoredContactLinkSuggestion? Stored, StoredContact? Candidate, StoredContact? Account, ContactRefused? Refused)> LoadPendingAsync(
@@ -616,21 +621,24 @@ public sealed class ContactLinkingService : IContactLinkingService
         var now = Now;
         var actorRecord = AccessActor.From(actor);
         var decided = stored.Suggestion.Decide(status, status == ContactLinkSuggestionStatus.Superseded ? null : actorRecord, now, merge);
-        switch (await linking.UpdateSuggestionAsync(scope, decided, stored.Revision, cancellationToken).ConfigureAwait(false))
+        return await linking.UpdateSuggestionAsync(scope, decided, stored.Revision, cancellationToken).ConfigureAwait(false) switch
         {
-            case LinkingWriteApplied<StoredContactLinkSuggestion> applied:
-                if (status != ContactLinkSuggestionStatus.Superseded)
-                    await audit.RecordAsync(new ContactAuditEvent(Guid.CreateVersion7(), now, scope,
-                        status == ContactLinkSuggestionStatus.Accepted ? ContactAuditKind.LinkSuggestionAccepted : ContactAuditKind.LinkSuggestionRejected,
-                        actorRecord, stored.Suggestion.Candidate, stored.Suggestion.Account, merge, justification: justification) { Suggestion = stored.Suggestion.Id }, cancellationToken)
-                        .ConfigureAwait(false);
-                return applied.Value;
-            case LinkingWriteNotFound:
-            case LinkingWriteConflict:
-            case ContactWriteRejected:
-                return await linking.GetSuggestionAsync(scope, stored.Suggestion.Id, cancellationToken).ConfigureAwait(false) ?? stored;
-        }
-        throw new InvalidOperationException("Unknown write outcome.");
+            StoreApplied<StoredContactLinkSuggestion> applied => await FinishDecideAsync(scope, stored, status, actorRecord, now, merge, justification, applied.Value, cancellationToken).ConfigureAwait(false),
+            StoreNotFound => await linking.GetSuggestionAsync(scope, stored.Suggestion.Id, cancellationToken).ConfigureAwait(false) ?? stored,
+            StoreConflict => await linking.GetSuggestionAsync(scope, stored.Suggestion.Id, cancellationToken).ConfigureAwait(false) ?? stored,
+            StoreRejected<ContactWriteRejection> => await linking.GetSuggestionAsync(scope, stored.Suggestion.Id, cancellationToken).ConfigureAwait(false) ?? stored,
+        };
+    }
+
+    private async Task<StoredContactLinkSuggestion> FinishDecideAsync(TicketScope scope, StoredContactLinkSuggestion stored, ContactLinkSuggestionStatus status,
+        AccessActor actorRecord, DateTimeOffset now, Guid? merge, string? justification, StoredContactLinkSuggestion applied, CancellationToken cancellationToken)
+    {
+        if (status != ContactLinkSuggestionStatus.Superseded)
+            await audit.RecordAsync(new ContactAuditEvent(Guid.CreateVersion7(), now, scope,
+                status == ContactLinkSuggestionStatus.Accepted ? ContactAuditKind.LinkSuggestionAccepted : ContactAuditKind.LinkSuggestionRejected,
+                actorRecord, stored.Suggestion.Candidate, stored.Suggestion.Account, merge, justification: justification) { Suggestion = stored.Suggestion.Id }, cancellationToken)
+                .ConfigureAwait(false);
+        return applied;
     }
 
     // ---- Helpers ----
@@ -641,7 +649,7 @@ public sealed class ContactLinkingService : IContactLinkingService
         var request = new ContactMergeRequest(target.Id, target.Revision, source.Id, source.Revision, ContactAttributeConflict.PreferTarget, justification);
         return await contacts.MergeAsync(actor, request, cancellationToken).ConfigureAwait(false) switch
         {
-            ContactApplied<ContactMergeOutcome> applied => new ContactMergedInto(applied.Value.Target, source.Id, applied.Value.MergeId),
+            TicketValue<ContactMergeOutcome> applied => new ContactMergedInto(applied.Value.Target, source.Id, applied.Value.MergeId),
             ContactRefused refused => refused,
         };
     }
@@ -745,7 +753,7 @@ public sealed class ContactLinkingService : IContactLinkingService
 
     private static TicketScope RequireActor(PrincipalRef actor)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("An actor is required.", nameof(actor));
         return actor.Scope;
     }

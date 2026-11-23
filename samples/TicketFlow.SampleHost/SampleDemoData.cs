@@ -34,7 +34,7 @@ internal static class SampleDemoData
         var scope = settings.Scope;
         var admin = new UserPrincipal(scope, new UserId("admin"));
         var contacts = services.GetRequiredService<IContactService>();
-        if (await contacts.GetAsync(admin, new ContactId("c-olivia"), cancellationToken) is ContactApplied<ContactView>)
+        if (await contacts.GetAsync(admin, new ContactId("c-olivia"), cancellationToken) is TicketValue<ContactView>)
             return;
         var clock = services.GetRequiredService<SampleClock>();
         var now = clock.GetUtcNow();
@@ -197,7 +197,7 @@ internal static class SampleDemoData
         async Task ArticleAsync(string id, string collection, string title, string excerpt, string body, string[] tags, bool publish)
         {
             if (await helpCenter.CreateArticleAsync(admin, new Article(new ArticleId(id), portal, [new ArticleTranslation(en, title, new HelpCenterSlug(id), body, excerpt, tags)],
-                new CollectionId(collection)), cancellationToken) is HelpCenterSucceeded<StoredArticle> created && publish)
+                new CollectionId(collection)), cancellationToken) is TicketValue<StoredArticle> created && publish)
                 await helpCenter.PublishArticleAsync(admin, created.Value.Id, created.Value.Revision, cancellationToken);
         }
         await ArticleAsync("track-your-order", "getting-started", "Track your order", "Follow your delivery from warehouse to doorstep.",

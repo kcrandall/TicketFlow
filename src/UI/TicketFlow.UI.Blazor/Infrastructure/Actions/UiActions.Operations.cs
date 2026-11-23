@@ -87,11 +87,9 @@ public static partial class UiActions
         var request = new AutomationDryRunRequest(new ConversationId(context.Require("conversation", "A conversation")), automationEvent, null, draft, context.Text("message"));
         return await rules.DryRunAsync(context.Actor, request, context.Aborted) switch
         {
-            AutomationValue<AutomationDryRunResult> result => new UiActionResult(new UiOutcome(UiOutcomeKind.Info, "Dry run complete — nothing was changed",
+            TicketValue<AutomationDryRunResult> result => new UiActionResult(new UiOutcome(UiOutcomeKind.Info, "Dry run complete — nothing was changed",
                 [result.Value.Rules.Any(rule => rule.Match == AutomationMatch.Matched) ? "The rule would run." : "The rule would not run for this conversation."]), result.Value),
-            AutomationNotFound => UiOutcome.NotFound(),
-            AutomationConflict conflict => UiOutcome.Conflict(conflict.CurrentRevision),
-            AutomationRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors),
+            TicketFailure failure => UiOutcome.FromFailure(failure),
         };
     }
 }

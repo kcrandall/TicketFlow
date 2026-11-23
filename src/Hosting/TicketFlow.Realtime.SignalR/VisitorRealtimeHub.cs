@@ -40,7 +40,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         {
             switch (await visitors.StartSessionAsync(partition, widgetKey, origin, Context.ConnectionAborted).ConfigureAwait(false))
             {
-                case LiveChatValue<VisitorSessionGrant> grant:
+                case TicketValue<VisitorSessionGrant> grant:
                     session = grant.Value.Context;
                     issued = grant.Value.Token;
                     break;
@@ -54,7 +54,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         {
             switch (await visitors.AuthenticateAsync(partition, token, origin, Context.ConnectionAborted).ConfigureAwait(false))
             {
-                case LiveChatValue<VisitorSessionContext> authenticated:
+                case TicketValue<VisitorSessionContext> authenticated:
                     session = authenticated.Value;
                     break;
                 case LiveChatRefused refused:
@@ -62,7 +62,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
                 default:
                     return HubResult.Failure("unavailable");
             }
-            if (session.RotationRecommended && await visitors.RotateTokenAsync(session, Context.ConnectionAborted).ConfigureAwait(false) is { Value: LiveChatValue<VisitorTokenRotated> rotated })
+            if (session.RotationRecommended && await visitors.RotateTokenAsync(session, Context.ConnectionAborted).ConfigureAwait(false) is TicketValue<VisitorTokenRotated> rotated)
             {
                 session = rotated.Value.Context;
                 issued = rotated.Value.Token;
@@ -88,8 +88,8 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             ["visitorId"] = session.Session.Session.VisitorId,
             ["verified"] = session.Session.Session.Identity is not null,
             ["prechatAnswered"] = session.Session.Session.Prechat.Count > 0,
-            ["widget"] = widget.Value is LiveChatValue<LiveChatWidgetState> state ? Widget(state.Value) : null,
-            ["conversations"] = conversations.Value is LiveChatValue<IReadOnlyList<VisitorConversationView>> list ? Conversations(list.Value) : [],
+            ["widget"] = widget.Value is TicketValue<LiveChatWidgetState> state ? Widget(state.Value) : null,
+            ["conversations"] = conversations.Value is TicketValue<IReadOnlyList<VisitorConversationView>> list ? Conversations(list.Value) : [],
         });
     }
 
@@ -122,7 +122,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             return HubResult.Failure("unauthenticated");
         return await visitors.SendMessageAsync(session, new VisitorMessageDraft(clientMessageId ?? string.Empty, text, attachments), Context.ConnectionAborted).ConfigureAwait(false) switch
         {
-            LiveChatValue<VisitorMessageAccepted> accepted => HubResult.Success(new Dictionary<string, object?>(5)
+            TicketValue<VisitorMessageAccepted> accepted => HubResult.Success(new Dictionary<string, object?>(5)
             {
                 ["conversation"] = accepted.Value.Conversation.Value,
                 ["message"] = accepted.Value.Message.Value,
@@ -140,7 +140,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             return HubResult.Failure("unauthenticated");
         return await visitors.ListConversationsAsync(session, Context.ConnectionAborted).ConfigureAwait(false) switch
         {
-            LiveChatValue<IReadOnlyList<VisitorConversationView>> list => HubResult.Success(Conversations(list.Value)),
+            TicketValue<IReadOnlyList<VisitorConversationView>> list => HubResult.Success(Conversations(list.Value)),
             LiveChatRefused refused => Failure(refused),
         };
     }
@@ -154,7 +154,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             return HubResult.Failure("invalid");
         return await visitors.ReadMessagesAsync(session, id, afterSequence, limit <= 0 ? 50 : limit, Context.ConnectionAborted).ConfigureAwait(false) switch
         {
-            LiveChatValue<VisitorMessagePage> page => HubResult.Success(BuildMessagePage(page.Value)),
+            TicketValue<VisitorMessagePage> page => HubResult.Success(BuildMessagePage(page.Value)),
             LiveChatRefused refused => Failure(refused),
         };
     }
@@ -178,7 +178,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             return HubResult.Failure("invalid");
         return await visitors.MarkReadAsync(session, id, upToSequence, Context.ConnectionAborted).ConfigureAwait(false) switch
         {
-            LiveChatValue<long> read => HubResult.Success(read.Value),
+            TicketValue<long> read => HubResult.Success(read.Value),
             LiveChatRefused refused => Failure(refused),
         };
     }
@@ -189,7 +189,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             return HubResult.Failure("unauthenticated");
         return await visitors.SearchArticlesAsync(session, text ?? string.Empty, Context.ConnectionAborted).ConfigureAwait(false) switch
         {
-            LiveChatValue<IReadOnlyList<TicketFlow.HelpCenter.ArticleSnippet>> hits => HubResult.Success(hits.Value.Select(hit => new Dictionary<string, object?>
+            TicketValue<IReadOnlyList<TicketFlow.HelpCenter.ArticleSnippet>> hits => HubResult.Success(hits.Value.Select(hit => new Dictionary<string, object?>
             {
                 ["article"] = hit.Article.Value,
                 ["title"] = hit.Title,
@@ -215,11 +215,11 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
 
     private VisitorSessionContext? Session() => Context.Items.TryGetValue(ContextKey, out var value) && value is VisitorSessionContext session ? session : null;
 
-    private HubResult Store(LiveChatResult<VisitorSessionContext> result)
+    private HubResult Store(TicketResult<VisitorSessionContext, LiveChatRefused> result)
     {
         switch (result)
         {
-            case LiveChatValue<VisitorSessionContext> updated:
+            case TicketValue<VisitorSessionContext> updated:
                 Context.Items[ContextKey] = updated.Value;
                 return HubResult.Success(new Dictionary<string, object?> { ["verified"] = updated.Value.Session.Session.Identity is not null });
             case LiveChatRefused refused:
@@ -228,9 +228,9 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         return HubResult.Failure("unavailable");
     }
 
-    private static HubResult Simple(LiveChatResult<bool> result) => result switch
+    private static HubResult Simple(TicketResult<bool, LiveChatRefused> result) => result switch
     {
-        LiveChatValue<bool> => HubResult.Success(),
+        TicketValue<bool> => HubResult.Success(),
         LiveChatRefused refused => Failure(refused),
     };
 

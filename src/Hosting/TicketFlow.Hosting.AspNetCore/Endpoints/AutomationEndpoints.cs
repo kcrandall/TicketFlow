@@ -131,18 +131,7 @@ internal static class AutomationEndpoints
         return group;
     }
 
-    private static IResult Map<T>(HttpContext http, AutomationResult<T> result, Func<T, IResult> success) => result switch
-    {
-        AutomationValue<T> value => success(value.Value),
-        AutomationNotFound => TicketFlowHttp.NotFound(),
-        AutomationConflict conflict => TicketFlowHttp.Conflict(http, conflict.CurrentRevision),
-        AutomationRefused refused => TicketFlowHttp.Refused(http, refused.Reason switch
-        {
-            AutomationRefusal.Forbidden => RefusalKind.Forbidden,
-            AutomationRefusal.Invalid => RefusalKind.Invalid,
-            _ => RefusalKind.Rejected,
-        }, refused.Errors),
-    };
+    private static IResult Map<T>(HttpContext http, TicketResult<T> result, Func<T, IResult> success) => TicketFlowHttp.Map(http, result, success);
 
     private static AutomationEvent Event(AutomationEventInput? dto)
     {

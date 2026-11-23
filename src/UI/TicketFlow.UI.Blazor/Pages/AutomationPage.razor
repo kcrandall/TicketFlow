@@ -90,13 +90,13 @@
         var rulesTask = service.ListAsync(Actor, Aborted);
         var execTask = service.ListExecutionsAsync(Actor, new AutomationExecutionQuery(from: Now.AddDays(-7), limit: 100), Aborted);
         await Task.WhenAll(rulesTask, execTask);
-        if (await rulesTask is AutomationValue<IReadOnlyList<StoredAutomationRule>> list)
+        if (await rulesTask is TicketValue<IReadOnlyList<StoredAutomationRule>> list)
         {
             rules = [.. list.Value.OrderBy(rule => rule.Rule.Priority).ThenBy(rule => rule.Id.Value, StringComparer.Ordinal)];
             foreach (var r in rules)
                 ruleNames[r.Id] = r.Rule.Name;
         }
-        if (await execTask is AutomationValue<AutomationExecutionPage> page)
+        if (await execTask is TicketValue<AutomationExecutionPage> page)
         {
             foreach (var execution in page.Value.Executions)
                 runs[execution.Execution.Rule.Value] = runs.GetValueOrDefault(execution.Execution.Rule.Value) + 1;

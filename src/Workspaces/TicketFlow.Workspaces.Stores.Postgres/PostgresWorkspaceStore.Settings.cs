@@ -17,7 +17,7 @@ public sealed partial class PostgresWorkspaceStore
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadSettings(reader, scope) : null;
     }
 
-    public async Task<WorkspaceWriteResult<StoredWorkspaceSettings>> CreateAsync(TicketScope scope, WorkspaceSettings settings, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredWorkspaceSettings, WorkspaceWriteRejection>> CreateAsync(TicketScope scope, WorkspaceSettings settings, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(settings);
@@ -30,16 +30,16 @@ public sealed partial class PostgresWorkspaceStore
         {
             BindSettings(insert, scope, settings);
             if (await insert.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                return new WorkspaceWriteApplied<StoredWorkspaceSettings>(new(scope, settings, revision));
+                return new StoreApplied<StoredWorkspaceSettings>(new(scope, settings, revision));
         }
         await using var current = new NpgsqlCommand($"SELECT revision FROM tf_workspace_settings WHERE {ScopeKeyWhere}", connection);
         AddScope(current, scope);
         return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
-            ? new WorkspaceWriteConflict(existing)
-            : WorkspaceWriteNotFound.Instance;
+            ? new StoreConflict(existing)
+            : StoreNotFound.Instance;
     }
 
-    public async Task<WorkspaceWriteResult<StoredWorkspaceSettings>> UpdateAsync(TicketScope scope, WorkspaceSettings settings, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredWorkspaceSettings, WorkspaceWriteRejection>> UpdateAsync(TicketScope scope, WorkspaceSettings settings, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(settings);
@@ -53,13 +53,13 @@ public sealed partial class PostgresWorkspaceStore
             BindSettings(update, scope, settings);
             AddLong(update, "expected", expectedRevision);
             if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-                return new WorkspaceWriteApplied<StoredWorkspaceSettings>(new(scope, settings, revision));
+                return new StoreApplied<StoredWorkspaceSettings>(new(scope, settings, revision));
         }
         await using var current = new NpgsqlCommand($"SELECT revision FROM tf_workspace_settings WHERE {ScopeKeyWhere}", connection);
         AddScope(current, scope);
         return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
-            ? new WorkspaceWriteConflict(existing)
-            : WorkspaceWriteNotFound.Instance;
+            ? new StoreConflict(existing)
+            : StoreNotFound.Instance;
     }
 
     private static void BindSettings(NpgsqlCommand command, TicketScope scope, WorkspaceSettings settings)

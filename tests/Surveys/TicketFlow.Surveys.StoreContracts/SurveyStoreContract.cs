@@ -17,16 +17,16 @@ public static class SurveyStoreContract
 
     public static TicketScope NewScope() => TestScopes.Create(workspaceId: "sv-" + Guid.NewGuid().ToString("N"));
 
-    public static string Describe<T>(SurveyWriteResult<T> result, Func<T, long> revision) => result switch
+    public static string Describe<T>(StoreWriteResult<T, SurveyWriteRejection> result, Func<T, long> revision) => result switch
     {
-        SurveyWriteApplied<T> applied => $"applied:{revision(applied.Value)}",
-        SurveyWriteNotFound => "not-found",
-        SurveyWriteConflict conflict => $"conflict:{conflict.CurrentRevision}",
-        SurveyWriteRejected rejected => $"rejected:{rejected.Reason}",
+        StoreApplied<T> applied => $"applied:{revision(applied.Value)}",
+        StoreNotFound => "not-found",
+        StoreConflict conflict => $"conflict:{conflict.CurrentRevision}",
+        StoreRejected<SurveyWriteRejection> rejected => $"rejected:{rejected.Reason}",
     };
 
-    public static string S(SurveyWriteResult<StoredSurvey> result) => Describe(result, stored => stored.Revision);
-    public static string I(SurveyWriteResult<StoredInvitation> result) => Describe(result, stored => stored.Revision);
+    public static string S(StoreWriteResult<StoredSurvey, SurveyWriteRejection> result) => Describe(result, stored => stored.Revision);
+    public static string I(StoreWriteResult<StoredInvitation, SurveyWriteRejection> result) => Describe(result, stored => stored.Revision);
 
     public static string C(InvitationCreateResult result) => result switch
     {
@@ -61,7 +61,7 @@ public static class SurveyStoreContract
         var sent = invitation.Issue(token.Hash(), sentAt, lifetime ?? TimeSpan.FromDays(3)).MarkSent();
         var updated = await store.UpdateInvitationAsync(scope, sent, 1);
         Assert.AreEqual("applied:2", I(updated));
-        return ((SurveyWriteApplied<StoredInvitation>)updated.Value!).Value;
+        return ((StoreApplied<StoredInvitation>)updated.Value!).Value;
     }
 
     public static async Task VerifySurveysAsync(ISurveyStore primary, ISurveyStore competing)

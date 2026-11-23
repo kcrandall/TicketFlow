@@ -76,7 +76,7 @@ public sealed class CompositionTests
     {
         Assert.ThrowsExactly<ArgumentNullException>(() => AccessTicketFlowBuilderExtensions.AddAccessControl(null!));
         Assert.ThrowsExactly<ArgumentNullException>(() => AccessTicketFlowBuilderExtensions.AddInMemoryAccessStores(null!));
-        Assert.ThrowsExactly<ArgumentException>(() => new AccessRequest(default, AccessPermissions.ConversationRead, new AccessResource(Testing.TestScopes.Create())));
+        Assert.ThrowsExactly<ArgumentException>(() => new AccessRequest(null!, AccessPermissions.ConversationRead, new AccessResource(Testing.TestScopes.Create())));
         Assert.ThrowsExactly<ArgumentException>(() => new AccessResource(Testing.TestScopes.Create(), team: default(TeamId)));
         Assert.ThrowsExactly<ArgumentException>(() => new AccessResource(Testing.TestScopes.Create(), attributes: [new("Bad Key", "v")]));
         Assert.ThrowsExactly<ArgumentException>(() => new FieldPath("contact"));

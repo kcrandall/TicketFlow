@@ -101,11 +101,9 @@ public static partial class UiActions
         var response = context.Text("canned") ?? throw new UiInputException("Choose a canned response to insert.");
         return await canned.RenderAsync(context.Actor, new CannedResponseId(response), ConversationFromPath(context), null, context.Aborted) switch
         {
-            AutomationValue<RenderedCannedResponse> rendered => new UiActionResult(new UiOutcome(UiOutcomeKind.Info, "Canned response inserted — review and send", []),
+            TicketValue<RenderedCannedResponse> rendered => new UiActionResult(new UiOutcome(UiOutcomeKind.Info, "Canned response inserted — review and send", []),
                 new ConversationDetailPage.ComposerState(Join(context.Raw("body"), rendered.Value.Body), null)),
-            AutomationNotFound => UiOutcome.NotFound(),
-            AutomationConflict conflict => UiOutcome.Conflict(conflict.CurrentRevision),
-            AutomationRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors),
+            TicketFailure failure => UiOutcome.FromFailure(failure),
         };
     }
 

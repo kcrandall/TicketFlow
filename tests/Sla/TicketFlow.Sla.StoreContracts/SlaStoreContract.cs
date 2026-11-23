@@ -17,12 +17,12 @@ public static class SlaStoreContract
 {
     public static readonly DateTimeOffset At = TestClock.DefaultStart;
 
-    public static string Describe<T>(SlaWriteResult<T> result) => result switch
+    public static string Describe<T>(StoreWriteResult<T, SlaWriteRejection> result) => result switch
     {
-        SlaWriteApplied<T> => "applied",
-        SlaWriteNotFound => "not-found",
-        SlaWriteConflict conflict => $"conflict:{conflict.CurrentRevision}",
-        SlaWriteRejected rejected => $"rejected:{rejected.Reason}",
+        StoreApplied<T> => "applied",
+        StoreNotFound => "not-found",
+        StoreConflict conflict => $"conflict:{conflict.CurrentRevision}",
+        StoreRejected<SlaWriteRejection> rejected => $"rejected:{rejected.Reason}",
     };
 
     public static SlaPolicy Policy(string id, string name = "Standard", int firstResponseHours = 4) => new(new SlaPolicyId(id), name,
@@ -48,7 +48,7 @@ public static class SlaStoreContract
     public static async Task VerifyPoliciesAsync(ISlaPolicyStore primary, ISlaPolicyStore competing)
     {
         var scope = TestScopes.Create();
-        var created = Assert.IsInstanceOfType<SlaWriteApplied<StoredSlaPolicy>>((await primary.CreateAsync(scope, Policy("standard"))).Value).Value;
+        var created = Assert.IsInstanceOfType<StoreApplied<StoredSlaPolicy>>((await primary.CreateAsync(scope, Policy("standard"))).Value).Value;
         Assert.AreEqual(1, created.Revision);
         Assert.AreEqual("conflict:1", Describe(await competing.CreateAsync(scope, Policy("standard"))));
         var read = await competing.GetAsync(scope, new SlaPolicyId("standard"));
@@ -56,7 +56,7 @@ public static class SlaStoreContract
         Assert.AreEqual(Policy("standard"), read.Policy);
         Assert.AreEqual(scope, read.Scope);
 
-        var updated = Assert.IsInstanceOfType<SlaWriteApplied<StoredSlaPolicy>>((await competing.UpdateAsync(scope, Policy("standard", "Renamed"), 1)).Value).Value;
+        var updated = Assert.IsInstanceOfType<StoreApplied<StoredSlaPolicy>>((await competing.UpdateAsync(scope, Policy("standard", "Renamed"), 1)).Value).Value;
         Assert.AreEqual(2, updated.Revision);
         Assert.AreEqual("conflict:2", Describe(await primary.UpdateAsync(scope, Policy("standard", "Stale"), 1)));
         Assert.AreEqual("not-found", Describe(await primary.UpdateAsync(scope, Policy("missing"), 1)));
@@ -86,7 +86,7 @@ public static class SlaStoreContract
     {
         var scope = TestScopes.Create();
         var tracker = Tracker("c1", team: "billing", labels: ["vip"], attributes: [new("tier", "gold")]);
-        var created = Assert.IsInstanceOfType<SlaWriteApplied<StoredSlaTracker>>((await primary.WriteAsync(scope, tracker, null)).Value).Value;
+        var created = Assert.IsInstanceOfType<StoreApplied<StoredSlaTracker>>((await primary.WriteAsync(scope, tracker, null)).Value).Value;
         Assert.AreEqual(1, created.Revision);
         Assert.AreEqual("conflict:1", Describe(await competing.WriteAsync(scope, tracker, null)));
         var read = await competing.GetAsync(scope, new ConversationId("c1"));
@@ -108,7 +108,7 @@ public static class SlaStoreContract
 
         // Concurrent compare-and-set writers: exactly one wins per revision.
         var results = await Task.WhenAll(Enumerable.Range(0, 8).Select(index => (index % 2 == 0 ? primary : competing).WriteAsync(scope, Tracker("c1", lastSequence: 10 + index), 2)));
-        Assert.AreEqual(1, results.Count(result => result.Value is SlaWriteApplied<StoredSlaTracker>));
+        Assert.AreEqual(1, results.Count(result => result.Value is StoreApplied<StoredSlaTracker>));
 
         Assert.AreEqual("conflict:3", Describe(await primary.DeleteAsync(scope, new ConversationId("c1"), 2)));
         Assert.AreEqual("applied", Describe(await competing.DeleteAsync(scope, new ConversationId("c1"), 3)));

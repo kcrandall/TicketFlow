@@ -312,7 +312,7 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         return list;
     }
 
-    public async Task<EventWriteResult<StoredEventSubscription>> CreateAsync(TicketScope scope, EventSubscription subscription, long cursor, DateTimeOffset createdAt,
+    public async Task<StoreWriteResult<StoredEventSubscription, EventWriteRejection>> CreateAsync(TicketScope scope, EventSubscription subscription, long cursor, DateTimeOffset createdAt,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -359,12 +359,12 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         if (inserted)
         {
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return new EventWriteApplied<StoredEventSubscription>(new StoredEventSubscription(scope, subscription, 1, createdAt));
+            return new StoreApplied<StoredEventSubscription>(new StoredEventSubscription(scope, subscription, 1, createdAt));
         }
-        return new EventWriteRejected(duplicate ? EventWriteRejection.Duplicate : EventWriteRejection.LimitReached);
+        return new StoreRejected<EventWriteRejection>(duplicate ? EventWriteRejection.Duplicate : EventWriteRejection.LimitReached);
     }
 
-    public async Task<EventWriteResult<StoredEventSubscription>> UpdateAsync(TicketScope scope, EventSubscription subscription, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredEventSubscription, EventWriteRejection>> UpdateAsync(TicketScope scope, EventSubscription subscription, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(subscription);
@@ -378,14 +378,14 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
             BindSubscription(command, scope, subscription);
             AddLong(command, "expected", expectedRevision);
             if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is DateTime created)
-                return new EventWriteApplied<StoredEventSubscription>(new StoredEventSubscription(scope, subscription, expectedRevision + 1, Instant(created)));
+                return new StoreApplied<StoredEventSubscription>(new StoredEventSubscription(scope, subscription, expectedRevision + 1, Instant(created)));
         }
         return await SubscriptionRevisionAsync(connection, scope, subscription.Id, cancellationToken).ConfigureAwait(false) is { } current
-            ? new EventWriteConflict(current)
-            : EventWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
-    public async Task<EventWriteResult<StoredEventSubscription>> DeleteAsync(TicketScope scope, EventSubscriptionId id, long expectedRevision, CancellationToken cancellationToken = default)
+    public async Task<StoreWriteResult<StoredEventSubscription, EventWriteRejection>> DeleteAsync(TicketScope scope, EventSubscriptionId id, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         Require(id);
@@ -397,11 +397,11 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
             AddLong(command, "expected", expectedRevision);
             await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new EventWriteApplied<StoredEventSubscription>(ReadSubscription(reader).Subscription);
+                return new StoreApplied<StoredEventSubscription>(ReadSubscription(reader).Subscription);
         }
         return await SubscriptionRevisionAsync(connection, scope, id, cancellationToken).ConfigureAwait(false) is { } current
-            ? new EventWriteConflict(current)
-            : EventWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
     public async Task<EventDeliveryState?> GetStateAsync(TicketScope scope, EventSubscriptionId id, CancellationToken cancellationToken = default) =>

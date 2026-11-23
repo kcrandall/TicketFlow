@@ -224,31 +224,6 @@ public interface IStaffIdentityStore
         CancellationToken cancellationToken = default);
 }
 
-public enum StaffIdentityRefusal
-{
-    Forbidden = 1,
-    Invalid = 2,
-    NotFound = 3,
-    Conflict = 4,
-
-    /// <summary>The identity is already linked to another user.</summary>
-    Taken = 5,
-
-    Rejected = 6,
-}
-
-public sealed record StaffIdentityApplied<T>(T Value);
-
-/// <summary>The operation was refused. <see cref="Errors"/> never contain subjects or profile values.</summary>
-public sealed record StaffIdentityRefused(StaffIdentityRefusal Reason, IReadOnlyList<string> Errors, long? CurrentRevision = null)
-{
-    public static StaffIdentityRefused Forbidden { get; } = new(StaffIdentityRefusal.Forbidden, []);
-    public static StaffIdentityRefused NotFound { get; } = new(StaffIdentityRefusal.NotFound, []);
-}
-
-/// <summary>Outcome of a staff identity command or read. Switch over every case without a discard arm.</summary>
-public union StaffIdentityResult<T>(StaffIdentityApplied<T>, StaffIdentityRefused);
-
 /// <summary>
 /// Authorized staff identity management. Linking and unlinking require <c>staff-identity:manage</c> and that the actor could confer
 /// every grant the target user holds in the workspace (directly or through teams), so a mapping can never hand an actor more
@@ -256,20 +231,20 @@ public union StaffIdentityResult<T>(StaffIdentityApplied<T>, StaffIdentityRefuse
 /// </summary>
 public interface IStaffIdentityService
 {
-    Task<StaffIdentityResult<StoredStaffIdentityLink>> LinkAsync(PrincipalRef actor, StaffIdentityRef identity, UserId user, string? justification = null,
+    Task<TicketResult<StoredStaffIdentityLink>> LinkAsync(PrincipalRef actor, StaffIdentityRef identity, UserId user, string? justification = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>Returns the user the identity was linked to.</summary>
-    Task<StaffIdentityResult<UserId>> UnlinkAsync(PrincipalRef actor, StaffIdentityRef identity, string? justification = null, CancellationToken cancellationToken = default);
+    Task<TicketResult<UserId>> UnlinkAsync(PrincipalRef actor, StaffIdentityRef identity, string? justification = null, CancellationToken cancellationToken = default);
 
     /// <summary>The actor's own identities (<c>workspace:read</c>) or anyone's (<c>staff-identity:manage</c>).</summary>
-    Task<StaffIdentityResult<IReadOnlyList<StoredStaffIdentityLink>>> ListAsync(PrincipalRef actor, UserId user, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredStaffIdentityLink>>> ListAsync(PrincipalRef actor, UserId user, CancellationToken cancellationToken = default);
 
     /// <summary>Requires <c>team:read</c>; the notification email is masked per <see cref="StaffFieldPaths.NotificationEmail"/> policies except for the user itself.</summary>
-    Task<StaffIdentityResult<StaffProfileView>> GetProfileAsync(PrincipalRef actor, UserId user, CancellationToken cancellationToken = default);
+    Task<TicketResult<StaffProfileView>> GetProfileAsync(PrincipalRef actor, UserId user, CancellationToken cancellationToken = default);
 
     /// <summary>The actor's own profile (<c>workspace:read</c>) or anyone's (<c>staff-identity:manage</c>); audited.</summary>
-    Task<StaffIdentityResult<StaffProfileView>> SetProfileAsync(PrincipalRef actor, StaffProfile profile, long? expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StaffProfileView>> SetProfileAsync(PrincipalRef actor, StaffProfile profile, long? expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

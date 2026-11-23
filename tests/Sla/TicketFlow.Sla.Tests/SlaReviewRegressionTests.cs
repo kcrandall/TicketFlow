@@ -105,7 +105,7 @@ public sealed class SlaReviewRegressionTests
         await fixture.InScopeAsync(async services =>
         {
             var policies = services.GetRequiredService<ISlaPolicyService>();
-            Assert.IsInstanceOfType<SlaValue<StoredSlaPolicy>>((await policies.UpdateAsync(fixture.Owner, new SlaPolicy(new SlaPolicyId("standard"), "VIP only",
+            Assert.IsInstanceOfType<TicketValue<StoredSlaPolicy>>((await policies.UpdateAsync(fixture.Owner, new SlaPolicy(new SlaPolicyId("standard"), "VIP only",
                 [new SlaRule("vip", new SlaCondition(labels: [new LabelId("vip")]), new SlaTargets(TimeSpan.FromHours(1)), SlaClockBasis.CalendarTime)]), 1)).Value);
             return 0;
         });

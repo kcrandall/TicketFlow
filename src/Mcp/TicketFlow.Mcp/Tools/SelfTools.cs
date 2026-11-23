@@ -203,7 +203,7 @@ public sealed class SelfTools(TicketFlowToolContext context)
         if (contactId is not null)
         {
             var id = new ContactId(contactId);
-            if (await context.Service<IContactService>().GetAsync(principal, id, cancellationToken) is not ContactApplied<ContactView>)
+            if (await context.Service<IContactService>().GetAsync(principal, id, cancellationToken) is not TicketValue<ContactView>)
                 return (null, "The contact");
             var stored = await context.Service<IContactStore>().GetAsync(scope, id, cancellationToken);
             return stored is null ? (null, "The contact") : (ContactAccess.Resource(stored), $"contact:{contactId}");

@@ -73,7 +73,7 @@ public sealed class ServiceTests
         Assert.AreEqual("Comment for c3", Value(await fixture.Service.GetResponseAsync(manager, c3)).Comment);
 
         // A field policy masks comments for survey:read unless the grant uses an unmasked role.
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessFieldPolicy>>((await fixture.Policies.CreateAsync(fixture.Scope,
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessFieldPolicy>>((await fixture.Policies.CreateAsync(fixture.Scope,
             new AccessFieldPolicy(SurveyFieldPaths.Comment, [SurveyPermissions.Read], null, null))).Value);
         var masked = Value(await fixture.Service.GetResponseAsync(manager, c3));
         Assert.IsNull(masked.Comment);

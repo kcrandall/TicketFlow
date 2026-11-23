@@ -458,16 +458,16 @@ else
         if (activityTask is not null) pending.Add(activityTask);
         await Task.WhenAll(pending);
 
-        if (slaTask is not null && await slaTask is SlaValue<SlaStatusView> status)
+        if (slaTask is not null && await slaTask is TicketValue<SlaStatusView> status)
             sla = status.Value;
-        if (contactTask is not null && await contactTask is ContactApplied<ContactView> found)
+        if (contactTask is not null && await contactTask is TicketValue<ContactView> found)
         {
             contact = found.Value;
             SeedContact(contact);
         }
 
         var people = new HashSet<string>(StringComparer.Ordinal);
-        if (availabilityTask is not null && await availabilityTask is RoutingValue<IReadOnlyList<StoredAgentProfile>> profiles)
+        if (availabilityTask is not null && await availabilityTask is TicketValue<IReadOnlyList<StoredAgentProfile>> profiles)
             foreach (var profile in profiles.Value)
                 people.Add(profile.Agent.Value);
         // Assignee options: agents with routing profiles, the current assignee and participants (no per-team member reads).
@@ -479,13 +479,13 @@ else
             people.Add(me.Value);
         agents = [.. people.Order(StringComparer.Ordinal)];
 
-        if (macroTask is not null && await macroTask is AutomationValue<IReadOnlyList<StoredMacro>> macroList)
+        if (macroTask is not null && await macroTask is TicketValue<IReadOnlyList<StoredMacro>> macroList)
             macros = [.. macroList.Value];
-        if (cannedTask is not null && await cannedTask is AutomationValue<CannedResponsePage> cannedPage)
+        if (cannedTask is not null && await cannedTask is TicketValue<CannedResponsePage> cannedPage)
             canned = [.. cannedPage.Value.Responses];
-        if (lockTask is not null && await lockTask is RoutingValue<ReplyLock?> { Value: { } held } && held.Holder != Session.UserId)
+        if (lockTask is not null && await lockTask is TicketValue<ReplyLock?> { Value: { } held } && held.Holder != Session.UserId)
             lockHolder = held.Holder.Value;
-        if (activityTask is not null && await activityTask is RoutingValue<IReadOnlyList<ConversationPresence>> presence)
+        if (activityTask is not null && await activityTask is TicketValue<IReadOnlyList<ConversationPresence>> presence)
             viewers = [.. presence.Value.Where(item => item.User != Session.UserId).Select(item => item.User.Value)];
 
         assistAvailable = Session.Has<IAssistService>() && Session.Can(AssistPermissions.Use);

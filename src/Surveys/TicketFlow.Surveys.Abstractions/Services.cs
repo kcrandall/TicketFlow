@@ -150,21 +150,21 @@ public sealed record SurveyResponseViewPage(IReadOnlyList<SurveyResponseView> It
 /// </summary>
 public interface ISurveyService
 {
-    Task<SurveyResult<StoredSurvey>> GetSurveyAsync(PrincipalRef actor, SurveyId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredSurvey>> GetSurveyAsync(PrincipalRef actor, SurveyId id, CancellationToken cancellationToken = default);
 
-    Task<SurveyResult<IReadOnlyList<StoredSurvey>>> ListSurveysAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredSurvey>>> ListSurveysAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
-    Task<SurveyResult<StoredSurvey>> CreateSurveyAsync(PrincipalRef actor, SurveyDefinition survey, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredSurvey>> CreateSurveyAsync(PrincipalRef actor, SurveyDefinition survey, CancellationToken cancellationToken = default);
 
-    Task<SurveyResult<StoredSurvey>> UpdateSurveyAsync(PrincipalRef actor, SurveyDefinition survey, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredSurvey>> UpdateSurveyAsync(PrincipalRef actor, SurveyDefinition survey, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<SurveyResult<StoredSurvey>> DeleteSurveyAsync(PrincipalRef actor, SurveyId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredSurvey>> DeleteSurveyAsync(PrincipalRef actor, SurveyId id, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<SurveyResult<StoredInvitation>> GetInvitationAsync(PrincipalRef actor, SurveyInvitationId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredInvitation>> GetInvitationAsync(PrincipalRef actor, SurveyInvitationId id, CancellationToken cancellationToken = default);
 
-    Task<SurveyResult<SurveyResponseView>> GetResponseAsync(PrincipalRef actor, SurveyInvitationId invitation, CancellationToken cancellationToken = default);
+    Task<TicketResult<SurveyResponseView>> GetResponseAsync(PrincipalRef actor, SurveyInvitationId invitation, CancellationToken cancellationToken = default);
 
-    Task<SurveyResult<SurveyResponseViewPage>> ListResponsesAsync(PrincipalRef actor, SurveyResponseQuery query, CancellationToken cancellationToken = default);
+    Task<TicketResult<SurveyResponseViewPage>> ListResponsesAsync(PrincipalRef actor, SurveyResponseQuery query, CancellationToken cancellationToken = default);
 
-    Task<SurveyResult<SurveyAggregateResult>> AggregateAsync(PrincipalRef actor, SurveyAggregateQuery query, CancellationToken cancellationToken = default);
+    Task<TicketResult<SurveyAggregateResult>> AggregateAsync(PrincipalRef actor, SurveyAggregateQuery query, CancellationToken cancellationToken = default);
 }

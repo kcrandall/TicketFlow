@@ -12,11 +12,11 @@ namespace TicketFlow.Workspaces;
 /// </summary>
 public interface IWorkspaceSettingsService
 {
-    Task<WorkspaceResult<StoredWorkspaceSettings>> GetAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredWorkspaceSettings>> GetAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<StoredWorkspaceSettings>> CreateAsync(PrincipalRef actor, WorkspaceSettings settings, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredWorkspaceSettings>> CreateAsync(PrincipalRef actor, WorkspaceSettings settings, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<StoredWorkspaceSettings>> UpdateAsync(PrincipalRef actor, WorkspaceSettings settings, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredWorkspaceSettings>> UpdateAsync(PrincipalRef actor, WorkspaceSettings settings, long expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -26,26 +26,26 @@ public interface IWorkspaceSettingsService
 /// </summary>
 public interface IInboxService
 {
-    Task<WorkspaceResult<StoredInbox>> GetAsync(PrincipalRef actor, InboxId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredInbox>> GetAsync(PrincipalRef actor, InboxId id, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<WorkspacePage<StoredInbox>>> ListAsync(PrincipalRef actor, WorkspacePageRequest? page = null, CancellationToken cancellationToken = default);
+    Task<TicketResult<WorkspacePage<StoredInbox>>> ListAsync(PrincipalRef actor, WorkspacePageRequest? page = null, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<StoredInbox>> CreateAsync(PrincipalRef actor, Inbox inbox, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredInbox>> CreateAsync(PrincipalRef actor, Inbox inbox, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<StoredInbox>> UpdateAsync(PrincipalRef actor, Inbox inbox, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredInbox>> UpdateAsync(PrincipalRef actor, Inbox inbox, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<StoredInbox>> DeleteAsync(PrincipalRef actor, InboxId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredInbox>> DeleteAsync(PrincipalRef actor, InboxId id, long expectedRevision, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Grants <paramref name="agent"/> <paramref name="role"/> (default <see cref="BuiltInRoles.Agent"/>) on the inbox. Requires
     /// <c>inbox:manage</c> on the inbox plus everything <see cref="IAccessAdministrator.CreateGrantAsync"/> requires (including
     /// <c>access:manage</c> on the inbox and no escalation). The grant identifier is <see cref="InboxAgentGrants.For"/>, so adding
-    /// twice is a <see cref="WorkspaceRefusal.Conflict"/>.
+    /// twice is a <see cref="TicketFailureKind.Conflict"/>.
     /// </summary>
-    Task<WorkspaceResult<StoredAccessGrant>> AddAgentAsync(PrincipalRef actor, InboxId inbox, UserId agent, RoleId? role = null, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredAccessGrant>> AddAgentAsync(PrincipalRef actor, InboxId inbox, UserId agent, RoleId? role = null, CancellationToken cancellationToken = default);
 
     /// <summary>Revokes the grant created by <see cref="AddAgentAsync"/> for the same inbox, agent and role.</summary>
-    Task<WorkspaceResult<StoredAccessGrant>> RemoveAgentAsync(PrincipalRef actor, InboxId inbox, UserId agent, RoleId? role = null, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredAccessGrant>> RemoveAgentAsync(PrincipalRef actor, InboxId inbox, UserId agent, RoleId? role = null, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -56,20 +56,20 @@ public interface IInboxService
 /// </summary>
 public interface ITeamService
 {
-    Task<WorkspaceResult<StoredTeam>> GetAsync(PrincipalRef actor, TeamId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredTeam>> GetAsync(PrincipalRef actor, TeamId id, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<WorkspacePage<TeamSummary>>> ListAsync(PrincipalRef actor, WorkspacePageRequest? page = null, CancellationToken cancellationToken = default);
+    Task<TicketResult<WorkspacePage<TeamSummary>>> ListAsync(PrincipalRef actor, WorkspacePageRequest? page = null, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<StoredTeam>> CreateAsync(PrincipalRef actor, Team team, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredTeam>> CreateAsync(PrincipalRef actor, Team team, CancellationToken cancellationToken = default);
 
     /// <summary>Replaces name, description and members together (revision-fenced).</summary>
-    Task<WorkspaceResult<StoredTeam>> UpdateAsync(PrincipalRef actor, Team team, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredTeam>> UpdateAsync(PrincipalRef actor, Team team, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<StoredTeam>> DeleteAsync(PrincipalRef actor, TeamId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredTeam>> DeleteAsync(PrincipalRef actor, TeamId id, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<StoredTeam>> AddMemberAsync(PrincipalRef actor, TeamId team, UserId member, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredTeam>> AddMemberAsync(PrincipalRef actor, TeamId team, UserId member, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<StoredTeam>> RemoveMemberAsync(PrincipalRef actor, TeamId team, UserId member, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredTeam>> RemoveMemberAsync(PrincipalRef actor, TeamId team, UserId member, long expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -78,15 +78,15 @@ public interface ITeamService
 /// </summary>
 public interface IBusinessCalendarService
 {
-    Task<WorkspaceResult<StoredBusinessCalendar>> GetAsync(PrincipalRef actor, BusinessCalendarId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredBusinessCalendar>> GetAsync(PrincipalRef actor, BusinessCalendarId id, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<IReadOnlyList<StoredBusinessCalendar>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredBusinessCalendar>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<StoredBusinessCalendar>> CreateAsync(PrincipalRef actor, BusinessCalendar calendar, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredBusinessCalendar>> CreateAsync(PrincipalRef actor, BusinessCalendar calendar, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<StoredBusinessCalendar>> UpdateAsync(PrincipalRef actor, BusinessCalendar calendar, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredBusinessCalendar>> UpdateAsync(PrincipalRef actor, BusinessCalendar calendar, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<WorkspaceResult<StoredBusinessCalendar>> DeleteAsync(PrincipalRef actor, BusinessCalendarId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredBusinessCalendar>> DeleteAsync(PrincipalRef actor, BusinessCalendarId id, long expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

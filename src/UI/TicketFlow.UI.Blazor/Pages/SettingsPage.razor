@@ -52,7 +52,7 @@
                 <dt>Signed in as</dt><dd>@Session.DisplayName</dd>
                 <dt>Principal</dt><dd class="tf-mono">@PrincipalLabel</dd>
                 <dt>Workspace</dt><dd class="tf-mono">@Session.Scope.WorkspaceId.Value</dd>
-                <dt>Teams</dt><dd>@(Session.Principal.Value is UserPrincipal user && user.Teams.Count > 0 ? string.Join(", ", user.Teams.Select(team => team.Value)) : "—")</dd>
+                <dt>Teams</dt><dd>@(Session.Principal is UserPrincipal user && user.Teams.Count > 0 ? string.Join(", ", user.Teams.Select(team => team.Value)) : "—")</dd>
             </dl>
             <div class="tf-divider"></div>
             <div class="tf-small tf-muted">Workspace-level permissions (@Session.Permissions.Count)</div>
@@ -69,18 +69,17 @@
 @code {
     private StoredWorkspaceSettings? settings;
 
-    private string PrincipalLabel => Session.Principal.Value switch
+    private string PrincipalLabel => Session.Principal switch
     {
         UserPrincipal user => "user:" + user.UserId.Value,
         ApiClientPrincipal client => "client:" + client.ClientId.Value,
         AutomationPrincipal automation => "automation:" + automation.AutomationId,
         SystemPrincipal system => "system:" + system.Component,
-        _ => "—",
     };
 
     protected override async Task OnInitializedAsync()
     {
-        if (Service<IWorkspaceSettingsService>() is { } service && await service.GetAsync(Actor, Aborted) is WorkspaceSucceeded<StoredWorkspaceSettings> found)
+        if (Service<IWorkspaceSettingsService>() is { } service && await service.GetAsync(Actor, Aborted) is TicketValue<StoredWorkspaceSettings> found)
             settings = found.Value;
     }
 }

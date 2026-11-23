@@ -246,9 +246,9 @@ public sealed class AllToolsTests
     {
         await using var scope = host.Services.CreateAsyncScope();
         var services = scope.ServiceProvider;
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await services.GetRequiredService<IAccessRoleStore>().CreateAsync(host.Scope,
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await services.GetRequiredService<IAccessRoleStore>().CreateAsync(host.Scope,
             new AccessRole(new RoleId(role), role, permissions))).Value);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await services.GetRequiredService<IAccessGrantStore>().CreateAsync(new AccessGrant(new GrantId(role),
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await services.GetRequiredService<IAccessGrantStore>().CreateAsync(new AccessGrant(new GrantId(role),
             AccessPartition.From(host.Scope), new UserId(user), new RoleId(role), new WorkspaceGrantScope(host.Scope.WorkspaceId)))).Value);
     }
 

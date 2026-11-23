@@ -122,9 +122,9 @@
         foreach (var (policyId, names) in grouped)
             policyInboxes[policyId] = string.Join(", ", names);
 
-        if (policyTask is not null && await policyTask is SlaValue<IReadOnlyList<StoredSlaPolicy>> list)
+        if (policyTask is not null && await policyTask is TicketValue<IReadOnlyList<StoredSlaPolicy>> list)
             policies = [.. list.Value];
-        if (riskTask is not null && await riskTask is SlaValue<SlaRiskPage> page)
+        if (riskTask is not null && await riskTask is TicketValue<SlaRiskPage> page)
             risk = [.. page.Value.Items];
         if (risk.Count > 0 && Service<IConversationService>() is { } service)
         {

@@ -39,7 +39,7 @@ public sealed class ChannelsOptions
     {
         var principal = WorkerPrincipal?.Invoke(scope)
             ?? throw new InvalidOperationException("ChannelsOptions.WorkerPrincipal must be configured with a grant-holding principal.");
-        if (principal.Value is null || principal.Scope != scope)
+        if (principal is null || principal.Scope != scope)
             throw new InvalidOperationException("ChannelsOptions.WorkerPrincipal must return a principal of the requested scope.");
         return principal;
     }

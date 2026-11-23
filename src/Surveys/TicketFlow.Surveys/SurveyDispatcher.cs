@@ -106,7 +106,7 @@ public sealed class SurveyDispatcher : ISurveyDispatcher
 
     /// <summary>Revision-fenced write; returns the stored invitation or null when another writer got there first.</summary>
     private async Task<StoredInvitation?> WriteAsync(TicketScope scope, SurveyInvitation invitation, long revision) =>
-        await store.UpdateInvitationAsync(scope, invitation, revision, CancellationToken.None).ConfigureAwait(false) is { Value: SurveyWriteApplied<StoredInvitation> applied }
+        await store.UpdateInvitationAsync(scope, invitation, revision, CancellationToken.None).ConfigureAwait(false) is StoreApplied<StoredInvitation> applied
             ? applied.Value
             : null;
 

@@ -54,9 +54,3 @@ public sealed record AssistProviderFailed(AssistProviderFailure Failure, bool Re
 
 /// <summary>Outcome of an assistant feature. Switch over every case without a discard arm.</summary>
 public union AssistResult<T>(AssistSucceeded<T>, AssistRefused, AssistProviderFailed);
-
-/// <summary>The administrative read or change succeeded.</summary>
-public sealed record AssistValue<T>(T Value);
-
-/// <summary>Outcome of an administrative call. Switch over every case without a discard arm.</summary>
-public union AssistAdminResult<T>(AssistValue<T>, AssistRefused);

@@ -31,18 +31,18 @@ public sealed class OutcomeTests
     [TestMethod]
     public void WorkspaceAccessAndContactRefusalsKeepValidationMessagesAndRevision()
     {
-        var invalid = UiOutcomes.From<StoredInbox>(new WorkspaceRefused(WorkspaceRefusal.Invalid, ["Names are 1-128 characters."]), _ => UiOutcome.Success("ok"));
+        var invalid = UiOutcomes.From<StoredInbox>(new TicketFailure(TicketFailureKind.Invalid, ["Names are 1-128 characters."]), _ => UiOutcome.Success("ok"));
         Assert.AreEqual(UiOutcomeKind.Invalid, invalid.Kind);
         CollectionAssert.AreEqual(new[] { "Names are 1-128 characters." }, invalid.Messages.ToArray());
 
-        var stale = UiOutcomes.From<StoredAccessRole>(new AccessChangeRefused(AccessChangeRefusal.Conflict, [], 4), _ => UiOutcome.Success("ok"));
+        var stale = UiOutcomes.From<StoredAccessRole>(new TicketFailure(TicketFailureKind.Conflict, [], 4), _ => UiOutcome.Success("ok"));
         Assert.AreEqual(UiOutcomeKind.Conflict, stale.Kind);
         Assert.AreEqual(4, stale.CurrentRevision);
 
         var taken = UiOutcomes.From<ContactView>(new ContactRefused(ContactRefusal.IdentityTaken, ["That email belongs to another contact."]), _ => UiOutcome.Success("ok"));
         Assert.AreEqual(UiOutcomeKind.Conflict, taken.Kind);
 
-        var forbidden = UiOutcomes.From<StoredAccessRole>(new AccessChangeRefused(AccessChangeRefusal.Forbidden, []), _ => UiOutcome.Success("ok"));
+        var forbidden = UiOutcomes.From<StoredAccessRole>(new TicketFailure(TicketFailureKind.Forbidden, []), _ => UiOutcome.Success("ok"));
         Assert.AreEqual(UiOutcomeKind.Forbidden, forbidden.Kind);
         Assert.IsNotEmpty(forbidden.Messages);
     }

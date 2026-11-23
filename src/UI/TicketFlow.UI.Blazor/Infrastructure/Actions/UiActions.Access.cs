@@ -13,7 +13,7 @@ public static partial class UiActions
             var permissions = context.All("permission").Select(permission => new Permission(permission));
             var role = new AccessRole(new RoleId(existing ?? context.Text("newid") ?? Slug(context.Require("name", "Name"))), context.Require("name", "Name"), permissions);
             return existing is null
-                ? UiOutcomes.From(await administrator.CreateRoleAsync(context.Actor, role, context.Aborted), stored => UiOutcome.Success("Role created", $"access/roles/{stored.Role.Id.Value}"))
+                ? UiOutcomes.From(await administrator.CreateRoleAsync(context.Actor, role, context.Aborted), stored => UiOutcome.Success("Role created", $"access/roles/{stored.Value.Role.Id.Value}"))
                 : UiOutcomes.From(await administrator.UpdateRoleAsync(context.Actor, role, context.RequireRevision(), context.Aborted), _ => UiOutcome.Success("Role saved"));
         });
         handlers["access.role.delete"] = context => WithAsync<IAccessAdministrator>(context, async administrator =>
@@ -50,7 +50,7 @@ public static partial class UiActions
             var minutes = context.Int("minutes") ?? 60;
             var request = new BreakGlassRequest(context.Actor, new GrantId(Guid.CreateVersion7().ToString("N")), new RoleId(context.Require("role", "Role")), Scope(context, context.Text("scope")),
                 TimeSpan.FromMinutes(Math.Clamp(minutes, 1, 24 * 60)), context.Require("justification", "A justification"));
-            return UiOutcomes.From(await administrator.ActivateBreakGlassAsync(request, context.Aborted), stored => UiOutcome.Success($"Break-glass active until {UiFormat.Short(stored.Grant.ValidUntil)}"));
+            return UiOutcomes.From(await administrator.ActivateBreakGlassAsync(request, context.Aborted), stored => UiOutcome.Success($"Break-glass active until {UiFormat.Short(stored.Value.Grant.ValidUntil)}"));
         });
     }
 

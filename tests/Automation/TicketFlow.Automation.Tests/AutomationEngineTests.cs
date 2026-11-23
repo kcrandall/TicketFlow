@@ -46,10 +46,10 @@ public sealed class AutomationEngineTests
         foreach (var produced in automated)
             Assert.AreEqual(execution.Id, (await fixture.Get<IAutomationExecutionStore>().FindCauseAsync(fixture.Scope, C1, produced.Sequence))!.Execution);
 
-        var log = Assert.IsInstanceOfType<AutomationValue<AutomationExecutionPage>>((await fixture.RulesAsync(service =>
+        var log = Assert.IsInstanceOfType<TicketValue<AutomationExecutionPage>>((await fixture.RulesAsync(service =>
             service.ListExecutionsAsync(fixture.Owner, new AutomationExecutionQuery(rule: new AutomationRuleId("refunds"))))).Value).Value;
         Assert.AreEqual(1, log.Executions.Count);
-        Assert.IsInstanceOfType<AutomationRefused>((await fixture.RulesAsync(service => service.ListExecutionsAsync(fixture.Agent, new AutomationExecutionQuery()))).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await fixture.RulesAsync(service => service.ListExecutionsAsync(fixture.Agent, new AutomationExecutionQuery()))).Value).Kind);
     }
 
     [TestMethod]
@@ -227,16 +227,16 @@ public sealed class AutomationEngineTests
         await fixture.CreateRuleAsync(new AutomationRule(new AutomationRuleId("created"), "Created", ConversationCreatedTrigger.Instance, null, [new AddLabelsAction(new LabelId("new"))], 9));
         var before = await fixture.Get<IConversationStore>().GetAsync(fixture.Scope, C1);
 
-        var result = Assert.IsInstanceOfType<AutomationValue<AutomationDryRunResult>>((await fixture.RulesAsync(service => service.DryRunAsync(fixture.Owner,
+        var result = Assert.IsInstanceOfType<TicketValue<AutomationDryRunResult>>((await fixture.RulesAsync(service => service.DryRunAsync(fixture.Owner,
             new AutomationDryRunRequest(C1, AutomationEvent.MessageReceived(), MessageBody: "Need a refund")))).Value).Value;
         Assert.AreEqual(AutomationMatch.Matched, result.Rules.Single(rule => rule.Rule.Value == "refunds").Match);
         var reply = result.Rules.Single(rule => rule.Rule.Value == "reply");
         Assert.AreEqual("Hallo Ada", reply.Actions.Single().RenderedText, "Rendered in the contact's locale.");
         Assert.AreEqual(AutomationMatch.NotTriggered, result.Rules.Single(rule => rule.Rule.Value == "created").Match);
-        var noMessage = Assert.IsInstanceOfType<AutomationValue<AutomationDryRunResult>>((await fixture.RulesAsync(service => service.DryRunAsync(fixture.Owner,
+        var noMessage = Assert.IsInstanceOfType<TicketValue<AutomationDryRunResult>>((await fixture.RulesAsync(service => service.DryRunAsync(fixture.Owner,
             new AutomationDryRunRequest(C1, AutomationEvent.MessageReceived())))).Value).Value;
         Assert.AreEqual(AutomationMatch.Unknown, noMessage.Rules.Single(rule => rule.Rule.Value == "refunds").Match);
-        var draft = Assert.IsInstanceOfType<AutomationValue<AutomationDryRunResult>>((await fixture.RulesAsync(service => service.DryRunAsync(fixture.Owner,
+        var draft = Assert.IsInstanceOfType<TicketValue<AutomationDryRunResult>>((await fixture.RulesAsync(service => service.DryRunAsync(fixture.Owner,
             new AutomationDryRunRequest(C1, AutomationEvent.ConversationCreated(), Draft: new AutomationRule(new AutomationRuleId("draft"), "Draft", ConversationCreatedTrigger.Instance,
                 new BusinessHoursCondition(true), [new AddLabelsAction(new LabelId("open"))], enabled: false))))).Value).Value;
         Assert.AreEqual(AutomationMatch.Matched, draft.Rules.Single().Match, "Monday 10:00 New York is open.");
@@ -247,10 +247,10 @@ public sealed class AutomationEngineTests
         Assert.AreEqual(0, (await fixture.ExecutionsAsync()).Count);
         Assert.AreEqual(0, (await fixture.DispatchAsync()).Handled, "No outbox entries were produced.");
 
-        Assert.IsInstanceOfType<AutomationRefused>((await fixture.RulesAsync(service => service.DryRunAsync(fixture.Agent,
-            new AutomationDryRunRequest(C1, AutomationEvent.MessageReceived())))).Value);
-        Assert.IsInstanceOfType<AutomationNotFound>((await fixture.RulesAsync(service => service.DryRunAsync(fixture.Owner,
-            new AutomationDryRunRequest(new ConversationId("missing"), AutomationEvent.MessageReceived())))).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await fixture.RulesAsync(service => service.DryRunAsync(fixture.Agent,
+            new AutomationDryRunRequest(C1, AutomationEvent.MessageReceived())))).Value).Kind);
+        Assert.AreEqual(TicketFailureKind.NotFound, Assert.IsInstanceOfType<TicketFailure>((await fixture.RulesAsync(service => service.DryRunAsync(fixture.Owner,
+            new AutomationDryRunRequest(new ConversationId("missing"), AutomationEvent.MessageReceived())))).Value).Kind);
     }
 
     [TestMethod]
@@ -261,7 +261,7 @@ public sealed class AutomationEngineTests
         var start = fixture.Clock.GetUtcNow();
         await fixture.StartAsync("c1", "refund now");
         await fixture.DispatchAsync();
-        var result = Assert.IsInstanceOfType<AutomationValue<AutomationReplayResult>>((await fixture.RulesAsync(service => service.ReplayAsync(fixture.Owner,
+        var result = Assert.IsInstanceOfType<TicketValue<AutomationReplayResult>>((await fixture.RulesAsync(service => service.ReplayAsync(fixture.Owner,
             new AutomationReplayRequest(C1, start.AddMinutes(-1), start.AddHours(1))))).Value).Value;
         var message = result.Items.Single(item => item.Event.Kind == AutomationEventKind.MessageReceived);
         Assert.AreEqual(1, message.Sequence);
@@ -272,8 +272,8 @@ public sealed class AutomationEngineTests
         Assert.AreEqual(1, labels.Cause!.Depth, "Automation-caused events report their cause.");
         Assert.IsFalse(result.Truncated);
         Assert.ThrowsExactly<ArgumentException>(() => new AutomationReplayRequest(C1, start, start.AddDays(8)));
-        Assert.IsInstanceOfType<AutomationRefused>((await fixture.RulesAsync(service => service.ReplayAsync(fixture.Agent,
-            new AutomationReplayRequest(C1, start, start.AddHours(1))))).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await fixture.RulesAsync(service => service.ReplayAsync(fixture.Agent,
+            new AutomationReplayRequest(C1, start, start.AddHours(1))))).Value).Kind);
     }
 
     [TestMethod]
@@ -341,7 +341,7 @@ public sealed class AutomationEngineTests
         await fixture.InScopeAsync(async services =>
         {
             var contacts = services.GetRequiredService<Contacts.IContactService>();
-            var current = Assert.IsInstanceOfType<Contacts.ContactApplied<Contacts.ContactView>>((await contacts.GetAsync(fixture.Owner, new ContactId("ada"))).Value).Value;
+            var current = Assert.IsInstanceOfType<TicketValue<Contacts.ContactView>>((await contacts.GetAsync(fixture.Owner, new ContactId("ada"))).Value).Value;
             return await contacts.UpdateAsync(fixture.Owner, new ContactId("ada"), current.Revision, [new Contacts.AddContactLabel(new LabelId("vip"))]);
         });
         Assert.IsTrue(await follower() > 0);
@@ -353,15 +353,15 @@ public sealed class AutomationEngineTests
     public async Task RuleManagementIsAccessChecked()
     {
         using var fixture = await AutomationFixture.CreateAsync();
-        Assert.IsInstanceOfType<AutomationRefused>((await fixture.RulesAsync(service => service.CreateAsync(fixture.Agent, RefundRule()))).Value);
-        Assert.IsInstanceOfType<AutomationRefused>((await fixture.RulesAsync(service => service.ListAsync(fixture.Agent))).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await fixture.RulesAsync(service => service.CreateAsync(fixture.Agent, RefundRule()))).Value).Kind);
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await fixture.RulesAsync(service => service.ListAsync(fixture.Agent))).Value).Kind);
         var created = await fixture.CreateRuleAsync(RefundRule());
-        Assert.IsInstanceOfType<AutomationConflict>((await fixture.RulesAsync(service => service.UpdateAsync(fixture.Owner, RefundRule(5), 9))).Value);
-        Assert.IsInstanceOfType<AutomationValue<StoredAutomationRule>>((await fixture.RulesAsync(service => service.UpdateAsync(fixture.Owner, RefundRule(5), created.Revision))).Value);
+        Assert.AreEqual(TicketFailureKind.Conflict, Assert.IsInstanceOfType<TicketFailure>((await fixture.RulesAsync(service => service.UpdateAsync(fixture.Owner, RefundRule(5), 9))).Value).Kind);
+        Assert.IsInstanceOfType<TicketValue<StoredAutomationRule>>((await fixture.RulesAsync(service => service.UpdateAsync(fixture.Owner, RefundRule(5), created.Revision))).Value);
         var invalid = await fixture.RulesAsync(service => service.CreateAsync(fixture.Owner, new AutomationRule(new AutomationRuleId("tz"), "TZ",
             new ScheduledTrigger(new AutomationSchedule("0 9 * * *", "Mars/Olympus_Mons"), [ConversationStatusKind.Open]), null, [new AddLabelsAction(new LabelId("x"))])));
-        Assert.AreEqual(AutomationRefusal.Invalid, ((AutomationRefused)invalid.Value!).Reason);
-        Assert.IsInstanceOfType<AutomationValue<StoredAutomationRule>>((await fixture.RulesAsync(service => service.DeleteAsync(fixture.Owner, created.Id, 2))).Value);
-        Assert.IsInstanceOfType<AutomationNotFound>((await fixture.RulesAsync(service => service.GetAsync(fixture.Owner, created.Id))).Value);
+        Assert.AreEqual(TicketFailureKind.Invalid, ((TicketFailure)invalid.Value!).Kind);
+        Assert.IsInstanceOfType<TicketValue<StoredAutomationRule>>((await fixture.RulesAsync(service => service.DeleteAsync(fixture.Owner, created.Id, 2))).Value);
+        Assert.AreEqual(TicketFailureKind.NotFound, Assert.IsInstanceOfType<TicketFailure>((await fixture.RulesAsync(service => service.GetAsync(fixture.Owner, created.Id))).Value).Kind);
     }
 }

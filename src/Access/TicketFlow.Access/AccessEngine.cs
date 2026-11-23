@@ -9,7 +9,7 @@ internal sealed record ResolvedGrant(AccessGrant Grant, AccessRole? Role);
 internal sealed class AccessContext(PrincipalRef principal, TicketScope scope, DateTimeOffset now, IReadOnlyList<ResolvedGrant> grants)
 {
     public PrincipalRef Principal { get; } = principal;
-    public UserPrincipal? User { get; } = principal.Value as UserPrincipal;
+    public UserPrincipal? User { get; } = principal as UserPrincipal;
     public TicketScope Scope { get; } = scope;
     public DateTimeOffset Now { get; } = now;
     public IReadOnlyList<ResolvedGrant> Grants { get; } = grants;
@@ -59,7 +59,7 @@ internal sealed class AccessEngine(IPermissionCatalog catalog, IAccessGrantStore
     {
         if (!knownPermission)
             return AccessDenialReason.UnknownPermission;
-        if (principal.Value is not (UserPrincipal or ApiClientPrincipal))
+        if (principal is not (UserPrincipal or ApiClientPrincipal))
             return AccessDenialReason.UnsupportedPrincipal;
         return principal.Scope == scope ? null : AccessDenialReason.ScopeMismatch;
     }

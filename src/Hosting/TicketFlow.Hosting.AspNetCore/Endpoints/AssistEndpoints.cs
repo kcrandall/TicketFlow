@@ -50,17 +50,17 @@ internal static class AssistEndpoints
             .WithName("AssistRewrite").Produces<AssistResponse<AssistRewriteResponse>>();
 
         group.MapGet("/assist/settings", async (TicketFlowActor actor, [FromServices] IAssistAdministration administration, HttpContext http) =>
-            Map(http, await administration.GetSettingsAsync(actor.Principal, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Settings(stored), stored.Revision)))
+            TicketFlowHttp.Map(http, await administration.GetSettingsAsync(actor.Principal, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Settings(stored), stored.Revision)))
             .WithName("GetAssistSettings").Produces<AssistSettingsResponse>();
         group.MapPut("/assist/settings", async (TicketFlowActor actor, AssistSettingsRequest request, [FromServices] IAssistAdministration administration, HttpContext http) =>
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
                 return failure;
-            return Map(http, await administration.UpdateSettingsAsync(actor.Principal, AssistJsonCodec.DecodeSettings(Json.Raw(request.Settings, "settings")), revision, http.RequestAborted),
+            return TicketFlowHttp.Map(http, await administration.UpdateSettingsAsync(actor.Principal, AssistJsonCodec.DecodeSettings(Json.Raw(request.Settings, "settings")), revision, http.RequestAborted),
                 stored => TicketFlowHttp.Ok(http, Settings(stored), stored.Revision));
         }).WithName("UpdateAssistSettings").Produces<AssistSettingsResponse>();
         group.MapGet("/assist/usage", async (TicketFlowActor actor, DateTimeOffset from, DateTimeOffset to, [FromServices] IAssistAdministration administration, HttpContext http) =>
-            Map(http, await administration.GetUsageAsync(actor.Principal, from, to, http.RequestAborted), summary => TicketFlowHttp.Ok(http, new AssistUsageSummaryResponse(summary.From, summary.To,
+            TicketFlowHttp.Map(http, await administration.GetUsageAsync(actor.Principal, from, to, http.RequestAborted), summary => TicketFlowHttp.Ok(http, new AssistUsageSummaryResponse(summary.From, summary.To,
                 [.. summary.Totals.Select(total => new AssistUsageTotalResponse(TicketFlowHttp.Token(total.Feature), total.Model, total.Requests, total.Failed, total.InputTokens, total.OutputTokens,
                     total.CacheReadInputTokens, total.CacheCreationInputTokens))]))))
             .WithName("GetAssistUsage").Produces<AssistUsageSummaryResponse>();
@@ -73,12 +73,6 @@ internal static class AssistEndpoints
             succeeded.Usage.CacheReadInputTokens, succeeded.Usage.CacheCreationInputTokens, succeeded.Model, succeeded.UsageId, TicketFlowHttp.Token(succeeded.Recording)))),
         AssistRefused refused => Refused(http, refused),
         AssistProviderFailed failed => Failed(http, failed),
-    };
-
-    private static IResult Map<T>(HttpContext http, AssistAdminResult<T> result, Func<T, IResult> success) => result switch
-    {
-        AssistValue<T> value => success(value.Value),
-        AssistRefused refused => Refused(http, refused),
     };
 
     private static IResult Refused(HttpContext http, AssistRefused refused)

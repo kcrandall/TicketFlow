@@ -212,7 +212,7 @@ public sealed class PostgresContactStoreTests
         var access = new PostgresAccessStore(database.Primary);
         await access.InitializeAsync();
         var scope = TestScopes.Create();
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await access.CreateAsync(new AccessGrant(new GrantId("owner"), AccessPartition.From(scope),
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await access.CreateAsync(new AccessGrant(new GrantId("owner"), AccessPartition.From(scope),
             new UserId("owner"), BuiltInRoles.Owner.Id, new WorkspaceGrantScope(scope.WorkspaceId)))).Value);
         var owner = TestPrincipals.User(scope, "owner");
         var providers = new List<ServiceProvider>();
@@ -260,11 +260,11 @@ public sealed class PostgresContactStoreTests
         services.AddTicketFlow().AddAccessControl().AddPostgresAccessStores(database.Primary).AddContacts().AddPostgresContactStores(database.Primary);
         await using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
         var scope = TestScopes.Create();
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await access.CreateAsync(new AccessGrant(new GrantId("owner"), AccessPartition.From(scope),
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await access.CreateAsync(new AccessGrant(new GrantId("owner"), AccessPartition.From(scope),
             new UserId("owner"), BuiltInRoles.Owner.Id, new WorkspaceGrantScope(scope.WorkspaceId)))).Value);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await access.CreateAsync(new AccessGrant(new GrantId("agent"), AccessPartition.From(scope),
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await access.CreateAsync(new AccessGrant(new GrantId("agent"), AccessPartition.From(scope),
             new UserId("agent"), BuiltInRoles.Agent.Id, new WorkspaceGrantScope(scope.WorkspaceId), condition: new HasLabelCondition(new LabelId("vip"))))).Value);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessFieldPolicy>>((await access.CreateAsync(scope,
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessFieldPolicy>>((await access.CreateAsync(scope,
             new AccessFieldPolicy(ContactFieldPaths.Email, [ContactPermissions.Read], [], ContactPermissions.Reveal))).Value);
         using var request = provider.CreateScope();
         var contacts = request.ServiceProvider.GetRequiredService<IContactService>();
@@ -274,16 +274,16 @@ public sealed class PostgresContactStoreTests
         var email = ContactIdentityAddress.Parse(ContactIdentityKind.Email, "ada@example.com");
         var created = (ContactCreated)(await contacts.ResolveAsync(owner, new ContactResolveRequest(
             [new ContactIdentityEvidence(email, new IdentityVerified("dkim", ContactStoreContract.At))], new ContactProfile("Ada")))).Value!;
-        var other = (ContactApplied<ContactView>)(await contacts.CreateAsync(owner, new ContactDraft(new ContactProfile("Ada Byron"), Labels: [new LabelId("vip")]))).Value!;
+        var other = (TicketValue<ContactView>)(await contacts.CreateAsync(owner, new ContactDraft(new ContactProfile("Ada Byron"), Labels: [new LabelId("vip")]))).Value!;
         var page = (ContactSearchPage)(await contacts.SearchAsync(agent, ContactSearch.ByName("ada"))).Value!;
         Assert.AreEqual(other.Value.Id, page.Contacts.Single().Id);
         Assert.IsTrue(((ContactSearchPage)(await contacts.SearchAsync(owner, ContactSearch.ByName("ada"))).Value!).Contacts.Count == 2);
 
-        var merged = (ContactApplied<ContactMergeOutcome>)(await contacts.MergeAsync(owner, new ContactMergeRequest(other.Value.Id, 1, created.Contact.Id, 1))).Value!;
+        var merged = (TicketValue<ContactMergeOutcome>)(await contacts.MergeAsync(owner, new ContactMergeRequest(other.Value.Id, 1, created.Contact.Id, 1))).Value!;
         Assert.IsTrue(merged.Value.Target.Identities.Single().Masked);
         var revealed = (ContactFieldRevealed)(await contacts.RevealAsync(owner, other.Value.Id, ContactFieldPaths.Email, "verify")).Value!;
         Assert.AreEqual(email, revealed.Identities.Single());
-        var unmerged = (ContactApplied<ContactUnmergeOutcome>)(await contacts.UnmergeAsync(owner, merged.Value.MergeId)).Value!;
+        var unmerged = (TicketValue<ContactUnmergeOutcome>)(await contacts.UnmergeAsync(owner, merged.Value.MergeId)).Value!;
         Assert.IsEmpty(unmerged.Value.Target.Identities);
         Assert.AreEqual(created.Contact.Id, unmerged.Value.Source.Id);
         var changes = await database.Store.ReadChangesAsync(scope, 0, 100);

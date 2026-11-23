@@ -96,7 +96,7 @@ public sealed partial class PostgresAutomationStore
         return new AutomationExecutionExists(existing);
     }
 
-    public Task<AutomationWriteResult<StoredAutomationExecution>> UpdateAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
+    public Task<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>> UpdateAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -104,7 +104,7 @@ public sealed partial class PostgresAutomationStore
         return UpdateCoreAsync(scope, execution, expectedRevision, execution.Conversation is not null ? execution.ProducedSequences : [], cancellationToken);
     }
 
-    public Task<AutomationWriteResult<StoredAutomationExecution>> UpdateProgressAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
+    public Task<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>> UpdateProgressAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
         IReadOnlyList<long> newSequences, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -113,7 +113,7 @@ public sealed partial class PostgresAutomationStore
         return UpdateCoreAsync(scope, execution, expectedRevision, execution.Conversation is not null ? newSequences : [], cancellationToken);
     }
 
-    private async Task<AutomationWriteResult<StoredAutomationExecution>> UpdateCoreAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
+    private async Task<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>> UpdateCoreAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
         IReadOnlyList<long> sequences, CancellationToken cancellationToken)
     {
         // Single auto-committed writable CTE updates the execution + cause index atomically in 1 RTT; fresh-snapshot SELECT only on miss.
@@ -132,13 +132,13 @@ public sealed partial class PostgresAutomationStore
             revision = await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as long?;
         }
         if (revision is { } updated)
-            return new AutomationWriteApplied<StoredAutomationExecution>(new StoredAutomationExecution(scope, execution, updated));
+            return new StoreApplied<StoredAutomationExecution>(new StoredAutomationExecution(scope, execution, updated));
         await using var check = new NpgsqlCommand($"SELECT revision FROM tf_automation_executions WHERE {ExecutionWhere}", connection);
         AddScope(check, scope);
         AddUuid(check, "execution", execution.Id);
         return await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long current
-            ? new AutomationWriteConflict(current)
-            : AutomationWriteNotFound.Instance;
+            ? new StoreConflict(current)
+            : StoreNotFound.Instance;
     }
 
     public async Task<StoredAutomationExecution?> GetAsync(TicketScope scope, Guid execution, CancellationToken cancellationToken = default)

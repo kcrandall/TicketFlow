@@ -151,7 +151,7 @@
                 next = page.NextCursor;
                 // SLA badges come from one risk-list read (only at-risk and breached clocks are badged), not a status read per row.
                 var risk = new Dictionary<ConversationId, SlaStatusView>();
-                if (slaTask is not null && await slaTask is SlaValue<SlaRiskPage> riskPage)
+                if (slaTask is not null && await slaTask is TicketValue<SlaRiskPage> riskPage)
                     foreach (var item in riskPage.Value.Items)
                         risk[item.Conversation] = item;
                 foreach (var conversation in page.Conversations)

@@ -20,28 +20,28 @@ public sealed class ReviewRegressionTests
         var kind = new ChannelKind("email");
         var store = host.Services.GetRequiredService<IChannelEndpointStore>();
         var victim = TestScopes.Create(workspaceId: "victim");
-        Assert.IsInstanceOfType<ChannelWriteApplied<StoredChannelEndpoint>>((await store.CreateAsync(victim,
+        Assert.IsInstanceOfType<StoreApplied<StoredChannelEndpoint>>((await store.CreateAsync(victim,
             new ChannelEndpoint(kind, "cfg-victim", new InboxId("victim-inbox"), "mailgun:acct"))).Value);
-        Assert.IsInstanceOfType<ChannelWriteApplied<StoredChannelEndpoint>>((await store.CreateAsync(victim,
+        Assert.IsInstanceOfType<StoreApplied<StoredChannelEndpoint>>((await store.CreateAsync(victim,
             new ChannelEndpoint(kind, "cfg-victim-2", new InboxId("victim-inbox"), "twilio:AC9:+1555"))).Value);
         var inboxes = host.Services.GetRequiredService<IInboxStore>();
         await inboxes.CreateAsync(host.Scope, new Inbox(new InboxId("email-2"), "Email 2", new ChannelBinding(kind, "cfg-email-2")));
 
         // Shadowing: a narrow address under another scope's account.
-        Assert.AreEqual(ChannelRefusal.AddressNotOwned, ChannelHost.Is<ChannelRefused>((await host.Endpoints.CreateAsync(host.Owner,
-            new ChannelEndpoint(kind, "cfg-email-2", new InboxId("email-2"), "mailgun:acct:support@acme.example"))).Value).Reason);
+        Assert.AreEqual("address-not-owned", ChannelHost.Is<TicketFailure>((await host.Endpoints.CreateAsync(host.Owner,
+            new ChannelEndpoint(kind, "cfg-email-2", new InboxId("email-2"), "mailgun:acct:support@acme.example"))).Value).Code);
         // Enclosing: an account-level address over another scope's narrow address.
-        Assert.AreEqual(ChannelRefusal.AddressNotOwned, ChannelHost.Is<ChannelRefused>((await host.Endpoints.CreateAsync(host.Owner,
-            new ChannelEndpoint(kind, "cfg-email-2", new InboxId("email-2"), "twilio:AC9"))).Value).Reason);
+        Assert.AreEqual("address-not-owned", ChannelHost.Is<TicketFailure>((await host.Endpoints.CreateAsync(host.Owner,
+            new ChannelEndpoint(kind, "cfg-email-2", new InboxId("email-2"), "twilio:AC9"))).Value).Code);
         // Moving an existing endpoint onto a shadowing address is refused too.
-        var existing = ChannelHost.Is<ChannelValue<StoredChannelEndpoint>>((await host.Endpoints.GetAsync(host.Owner, kind, "cfg-email")).Value).Value;
-        Assert.AreEqual(ChannelRefusal.AddressNotOwned, ChannelHost.Is<ChannelRefused>((await host.Endpoints.UpdateAsync(host.Owner,
-            new ChannelEndpoint(kind, "cfg-email", existing.Endpoint.Inbox, "mailgun:acct:x"), existing.Revision)).Value).Reason);
+        var existing = ChannelHost.Is<TicketValue<StoredChannelEndpoint>>((await host.Endpoints.GetAsync(host.Owner, kind, "cfg-email")).Value).Value;
+        Assert.AreEqual("address-not-owned", ChannelHost.Is<TicketFailure>((await host.Endpoints.UpdateAsync(host.Owner,
+            new ChannelEndpoint(kind, "cfg-email", existing.Endpoint.Inbox, "mailgun:acct:x"), existing.Revision)).Value).Code);
 
         // Own nesting and unrelated addresses are fine.
-        Assert.IsInstanceOfType<ChannelValue<StoredChannelEndpoint>>((await host.Endpoints.CreateAsync(host.Owner,
+        Assert.IsInstanceOfType<TicketValue<StoredChannelEndpoint>>((await host.Endpoints.CreateAsync(host.Owner,
             new ChannelEndpoint(kind, "cfg-email-2", new InboxId("email-2"), "email:cfg-email:narrow"))).Value);
-        Assert.IsInstanceOfType<ChannelValue<StoredChannelEndpoint>>((await host.Endpoints.UpdateAsync(host.Owner,
+        Assert.IsInstanceOfType<TicketValue<StoredChannelEndpoint>>((await host.Endpoints.UpdateAsync(host.Owner,
             new ChannelEndpoint(kind, "cfg-email", existing.Endpoint.Inbox, "mailgun:acctx"), existing.Revision)).Value);
     }
 
@@ -52,7 +52,7 @@ public sealed class ReviewRegressionTests
         await using var host = await HostAsync(slack);
         var kind = new ChannelKind("slack");
         await host.Services.GetRequiredService<IInboxStore>().CreateAsync(host.Scope, new Inbox(new InboxId("slack-inbox"), "Slack", new ChannelBinding(kind, "cfg-slack")));
-        Assert.IsInstanceOfType<ChannelValue<StoredChannelEndpoint>>((await host.Endpoints.CreateAsync(host.Owner, new ChannelEndpoint(kind, "cfg-slack", new InboxId("slack-inbox")))).Value);
+        Assert.IsInstanceOfType<TicketValue<StoredChannelEndpoint>>((await host.Endpoints.CreateAsync(host.Owner, new ChannelEndpoint(kind, "cfg-slack", new InboxId("slack-inbox")))).Value);
         InboundChannelMessage Message(string id, string user) => new(host.Scope, kind, "cfg-slack", id,
             new ChannelSenderEvidence(ContactIdentityKind.ExternalUser, user, verified: true, "slack"), host.Clock.GetUtcNow(), $"from {user}", externalThreadId: "C1:100.000100");
 
@@ -97,7 +97,7 @@ public sealed class ReviewRegressionTests
         var inbound = Recorded(await host.Pipeline.ReceiveAsync(host.Worker, host.Email("<root@x>")));
         await host.DispatchAsync();
         var messageId = OutgoingId(Applied(await ReplyAsync(host, inbound.Conversation)));
-        Assert.IsInstanceOfType<ChannelWriteApplied<StoredChannelDispatch>>((await host.Dispatches.WriteAsync(host.Scope, new ChannelDispatch(inbound.Conversation, messageId,
+        Assert.IsInstanceOfType<StoreApplied<StoredChannelDispatch>>((await host.Dispatches.WriteAsync(host.Scope, new ChannelDispatch(inbound.Conversation, messageId,
             new InboxId("email-inbox"), new ChannelKind("email"), ChannelDispatchState.RetryScheduled, 1, host.Clock.GetUtcNow(), host.Clock.GetUtcNow().AddMinutes(2), code: "rate-limited"), null)).Value);
         Assert.AreEqual(1, (await host.Outbox.RunOnceAsync()).Retried);
         Assert.AreEqual(0, email.Requests.Count);

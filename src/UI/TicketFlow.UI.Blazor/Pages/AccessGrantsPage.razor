@@ -99,11 +99,11 @@
         foreach (var inbox in Inboxes)
             targets.Add(new InboxGrantScope(Session.Scope.WorkspaceId, inbox.Inbox.Id));
         var administrator = Service<IAccessAdministrator>()!;
-        var tasks = new Task<AccessListResult<IReadOnlyList<StoredAccessGrant>>>[targets.Count];
+        var tasks = new Task<TicketResult<IReadOnlyList<StoredAccessGrant>>>[targets.Count];
         for (var i = 0; i < targets.Count; i++)
             tasks[i] = administrator.ListGrantsAsync(Actor, targets[i], 200, null, Aborted);
         foreach (var result in await Task.WhenAll(tasks))
-            if (result is AccessListed<IReadOnlyList<StoredAccessGrant>> listed)
+            if (result is TicketValue<IReadOnlyList<StoredAccessGrant>> listed)
                 grants.AddRange(listed.Value);
         await Session.LoadUsersAsync(grants.Select(grant => grant.Grant.Subject.Value is UserId user ? (UserId?)user : null));
     }

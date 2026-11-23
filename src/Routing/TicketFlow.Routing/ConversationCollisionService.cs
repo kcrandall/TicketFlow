@@ -32,21 +32,21 @@ public sealed class ConversationCollisionService : IConversationCollisionService
         this.time = time ?? throw new ArgumentNullException(nameof(time));
     }
 
-    public async Task<RoutingResult<ConversationPresence>> ReportActivityAsync(PrincipalRef actor, ConversationId conversation, ConversationActivity activity, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ConversationPresence>> ReportActivityAsync(PrincipalRef actor, ConversationId conversation, ConversationActivity activity, CancellationToken cancellationToken = default)
     {
         if (!Enum.IsDefined(activity))
-            return RoutingRefused.Invalid("Unknown activity.");
+            return TicketFailure.Invalid("Unknown activity.");
         var check = await AuthorizeAsync(actor, conversation, RoutingPermissions.PresenceReport, cancellationToken).ConfigureAwait(false);
         if (check.User is not { } user)
             return check.Fail<ConversationPresence>();
         return await presence.TouchAsync(actor.Scope, conversation, user.UserId, activity, options.ConversationPresenceTtl, cancellationToken).ConfigureAwait(false) switch
         {
             PresenceTouched touched => await PublishedAsync(touched, actor.Scope, conversation, cancellationToken).ConfigureAwait(false),
-            PresenceCapacityExceeded => RoutingRefused.Rejected("The conversation has the maximum number of present agents."),
+            PresenceCapacityExceeded => TicketFailure.Rejected("The conversation has the maximum number of present agents."),
         };
     }
 
-    public async Task<RoutingResult<bool>> LeaveAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<bool>> LeaveAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default)
     {
         var check = await AuthorizeAsync(actor, conversation, RoutingPermissions.PresenceReport, cancellationToken).ConfigureAwait(false);
         if (check.User is not { } user)
@@ -54,22 +54,22 @@ public sealed class ConversationCollisionService : IConversationCollisionService
         var left = await presence.LeaveAsync(actor.Scope, conversation, user.UserId, cancellationToken).ConfigureAwait(false);
         if (left)
             await events.PublishAsync(new ConversationPresenceChanged(actor.Scope, conversation, user.UserId, null, time.GetUtcNow()), cancellationToken).ConfigureAwait(false);
-        return new RoutingValue<bool>(left);
+        return new TicketValue<bool>(left);
     }
 
-    public async Task<RoutingResult<IReadOnlyList<ConversationPresence>>> ListActivityAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<IReadOnlyList<ConversationPresence>>> ListActivityAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default)
     {
         var check = await AuthorizeAsync(actor, conversation, RoutingPermissions.PresenceReport, cancellationToken).ConfigureAwait(false);
         if (check.User is not { } user)
             return check.Fail<IReadOnlyList<ConversationPresence>>();
-        return new RoutingValue<IReadOnlyList<ConversationPresence>>(await presence.ListAsync(actor.Scope, conversation, cancellationToken).ConfigureAwait(false));
+        return new TicketValue<IReadOnlyList<ConversationPresence>>(await presence.ListAsync(actor.Scope, conversation, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<RoutingResult<ReplyLockResult>> AcquireReplyLockAsync(PrincipalRef actor, ConversationId conversation, TimeSpan? duration = null, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ReplyLockResult>> AcquireReplyLockAsync(PrincipalRef actor, ConversationId conversation, TimeSpan? duration = null, CancellationToken cancellationToken = default)
     {
         var lease = duration ?? options.ReplyLockDuration;
         if (lease <= TimeSpan.Zero || lease > options.MaximumReplyLockDuration)
-            return RoutingRefused.Invalid("The lock duration is out of range.");
+            return TicketFailure.Invalid("The lock duration is out of range.");
         var check = await AuthorizeAsync(actor, conversation, RoutingPermissions.ReplyLock, cancellationToken).ConfigureAwait(false);
         if (check.User is not { } user)
             return check.Fail<ReplyLockResult>();
@@ -82,18 +82,18 @@ public sealed class ConversationCollisionService : IConversationCollisionService
             case ReplyLockHeld:
                 break;
         }
-        return new RoutingValue<ReplyLockResult>(result);
+        return new TicketValue<ReplyLockResult>(result);
     }
 
-    public async Task<RoutingResult<ReplyLock?>> GetReplyLockAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<ReplyLock?>> GetReplyLockAsync(PrincipalRef actor, ConversationId conversation, CancellationToken cancellationToken = default)
     {
         var check = await AuthorizeAsync(actor, conversation, RoutingPermissions.PresenceReport, cancellationToken).ConfigureAwait(false);
         if (check.User is not { } user)
             return check.Fail<ReplyLock?>();
-        return new RoutingValue<ReplyLock?>(await presence.GetLockAsync(actor.Scope, conversation, cancellationToken).ConfigureAwait(false));
+        return new TicketValue<ReplyLock?>(await presence.GetLockAsync(actor.Scope, conversation, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<RoutingResult<bool>> ReleaseReplyLockAsync(PrincipalRef actor, ConversationId conversation, long fence, CancellationToken cancellationToken = default)
+    public async Task<TicketResult<bool>> ReleaseReplyLockAsync(PrincipalRef actor, ConversationId conversation, long fence, CancellationToken cancellationToken = default)
     {
         var check = await AuthorizeAsync(actor, conversation, RoutingPermissions.ReplyLock, cancellationToken).ConfigureAwait(false);
         if (check.User is not { } user)
@@ -101,14 +101,14 @@ public sealed class ConversationCollisionService : IConversationCollisionService
         var released = await presence.ReleaseLockAsync(actor.Scope, conversation, user.UserId, fence, cancellationToken).ConfigureAwait(false);
         if (released)
             await events.PublishAsync(new ReplyLockChanged(actor.Scope, conversation, null, null, time.GetUtcNow()), cancellationToken).ConfigureAwait(false);
-        return new RoutingValue<bool>(released);
+        return new TicketValue<bool>(released);
     }
 
-    private async Task<RoutingResult<ConversationPresence>> PublishedAsync(PresenceTouched touched, TicketScope scope, ConversationId conversation, CancellationToken cancellationToken)
+    private async Task<TicketResult<ConversationPresence>> PublishedAsync(PresenceTouched touched, TicketScope scope, ConversationId conversation, CancellationToken cancellationToken)
     {
         if (touched.Changed)
             await events.PublishAsync(new ConversationPresenceChanged(scope, conversation, touched.Presence.User, touched.Presence.Activity, time.GetUtcNow()), cancellationToken).ConfigureAwait(false);
-        return new RoutingValue<ConversationPresence>(touched.Presence);
+        return new TicketValue<ConversationPresence>(touched.Presence);
     }
 
     /// <summary>User principal → existence → authorization on the current conversation.</summary>
@@ -117,17 +117,17 @@ public sealed class ConversationCollisionService : IConversationCollisionService
         RoutingGuards.RequireActor(actor);
         if (conversation == default)
             throw new ArgumentException("A conversation identifier is required.", nameof(conversation));
-        if (actor.Value is not UserPrincipal user)
-            return new Check(null, RoutingRefused.Rejected("Only user principals take part in collision detection."), false);
+        if (actor is not UserPrincipal user)
+            return new Check(null, TicketFailure.Rejected("Only user principals take part in collision detection."), false);
         if (await conversations.GetAsync(actor.Scope, conversation, cancellationToken).ConfigureAwait(false) is not { } stored)
             return new Check(null, null, true);
         if (!await RoutingGuards.PermittedAsync(access, actor, permission, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
-            return new Check(null, RoutingRefused.Forbidden, false);
+            return new Check(null, TicketFailure.Forbidden, false);
         return new Check(user, null, false);
     }
 
-    private readonly record struct Check(UserPrincipal? User, RoutingRefused? Refused, bool NotFound)
+    private readonly record struct Check(UserPrincipal? User, TicketFailure? Refused, bool NotFound)
     {
-        public RoutingResult<T> Fail<T>() => NotFound ? RoutingNotFound.Instance : Refused!;
+        public TicketResult<T> Fail<T>() => NotFound ? TicketFailure.NotFound : Refused!;
     }
 }

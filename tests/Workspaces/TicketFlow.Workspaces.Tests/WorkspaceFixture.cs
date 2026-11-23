@@ -66,14 +66,14 @@ internal sealed class WorkspaceFixture : IDisposable
     public async Task<AccessGrant> GrantAsync(GrantSubject subject, AccessRole role, GrantScope? scope = null, GrantEffect effect = GrantEffect.Allow, AccessCondition? condition = null)
     {
         var grant = new AccessGrant(new GrantId($"seed-{nextGrant++:D4}"), Partition, subject, role.Id, scope ?? Workspace, effect, condition);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await Grants.CreateAsync(grant)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await Grants.CreateAsync(grant)).Value);
         return grant;
     }
 
     public async Task<AccessRole> CustomRoleAsync(string id, params Permission[] permissions)
     {
         var role = new AccessRole(new RoleId(id), id, permissions);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await Roles.CreateAsync(Scope, role)).Value);
         return role;
     }
 
@@ -81,16 +81,16 @@ internal sealed class WorkspaceFixture : IDisposable
 
     public TeamGrantScope TeamScope(string team) => new(Scope.WorkspaceId, new TeamId(team));
 
-    public static string Describe<T>(WorkspaceResult<T> result) => result switch
+    public static string Describe<T>(TicketResult<T> result) => result switch
     {
-        WorkspaceSucceeded<T> => "ok",
-        WorkspaceRefused refused => $"refused:{refused.Reason}" + (refused.CurrentRevision is { } revision ? $":{revision}" : ""),
+        TicketValue<T> => "ok",
+        TicketFailure refused => $"refused:{refused.Kind}" + (refused.CurrentRevision is { } revision ? $":{revision}" : ""),
     };
 
-    public static T Value<T>(WorkspaceResult<T> result) => result switch
+    public static T Value<T>(TicketResult<T> result) => result switch
     {
-        WorkspaceSucceeded<T> succeeded => succeeded.Value,
-        WorkspaceRefused refused => throw new AssertFailedException($"Expected success but was refused: {refused.Reason} {string.Join("; ", refused.Errors)}"),
+        TicketValue<T> succeeded => succeeded.Value,
+        TicketFailure refused => throw new AssertFailedException($"Expected success but was refused: {refused.Kind} {string.Join("; ", refused.Errors)}"),
     };
 
     public void Dispose()

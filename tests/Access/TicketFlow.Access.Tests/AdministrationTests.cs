@@ -29,8 +29,8 @@ public sealed class AdministrationTests
             new AccessGrant(new GrantId("self"), fixture.Partition, admin.UserId, narrow.Id, fixture.Workspace))));
 
         var widened = new AccessRole(narrow.Id, "R", [AccessPermissions.ConversationRead, AccessPermissions.WorkspaceManage, AccessPermissions.AccessManageTenant]);
-        var refused = (AccessChangeRefused)(await fixture.Admin.UpdateRoleAsync(admin, widened, 1)).Value!;
-        Assert.AreEqual(AccessChangeRefusal.Forbidden, refused.Reason);
+        var refused = (TicketFailure)(await fixture.Admin.UpdateRoleAsync(admin, widened, 1)).Value!;
+        Assert.AreEqual(TicketFailureKind.Forbidden, refused.Kind);
         CollectionAssert.AreEqual(new[] { "The actor does not hold 'access:manage-tenant' on the target.", "The actor does not hold 'workspace:manage' on the target." }, refused.Errors.ToArray());
         Assert.AreEqual(narrow, (await fixture.Roles.GetAsync(fixture.Scope, narrow.Id))!.Role);
         Assert.AreEqual("denied:NoMatchingGrant", await fixture.DescribeAsync(admin, AccessPermissions.WorkspaceManage));
@@ -69,8 +69,8 @@ public sealed class AdministrationTests
         var workspaceOwner = fixture.User("workspace-owner");
         await fixture.GrantAsync(workspaceOwner.UserId, BuiltInRoles.Owner);
         var tenantViewer = new AccessGrant(new GrantId("tenant-viewer"), fixture.Partition, new UserId("x"), BuiltInRoles.Viewer.Id, TenantGrantScope.Instance);
-        var refused = (AccessChangeRefused)(await fixture.Admin.CreateGrantAsync(workspaceOwner, tenantViewer)).Value!;
-        Assert.AreEqual(AccessChangeRefusal.Forbidden, refused.Reason);
+        var refused = (TicketFailure)(await fixture.Admin.CreateGrantAsync(workspaceOwner, tenantViewer)).Value!;
+        Assert.AreEqual(TicketFailureKind.Forbidden, refused.Kind);
         Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(owner, tenantViewer)));
         Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(workspaceOwner, tenantViewer.Id, 1)));
         // Workspace-level management by the workspace Owner is unaffected.
@@ -109,8 +109,8 @@ public sealed class AdministrationTests
         Assert.AreEqual("allowed:break-glass", await fixture.DescribeAsync(granter, AccessPermissions.ConversationReply));
 
         AccessGrant Grant(string id, AccessRole granted) => new(new GrantId(id), fixture.Partition, new UserId("newcomer"), granted.Id, fixture.Workspace);
-        var escalation = (AccessChangeRefused)(await fixture.Admin.CreateGrantAsync(granter, Grant("sup", BuiltInRoles.Supervisor))).Value!;
-        Assert.AreEqual(AccessChangeRefusal.Forbidden, escalation.Reason);
+        var escalation = (TicketFailure)(await fixture.Admin.CreateGrantAsync(granter, Grant("sup", BuiltInRoles.Supervisor))).Value!;
+        Assert.AreEqual(TicketFailureKind.Forbidden, escalation.Kind);
         CollectionAssert.Contains(escalation.Errors.ToArray(), "The actor does not hold 'conversation:reply' on the target.");
         Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(granter, new AccessRole(new RoleId("replier"), "x", [AccessPermissions.ConversationReply]))));
         var reader = new AccessRole(new RoleId("reader"), "Reader", [AccessPermissions.ConversationRead]);
@@ -129,7 +129,7 @@ public sealed class AdministrationTests
         Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateFieldPolicyAsync(admin, email)));
         Assert.AreEqual("refused:Conflict:1", AccessFixture.Describe(await fixture.Admin.CreateFieldPolicyAsync(admin, email)));
         var unknown = new AccessFieldPolicy(new FieldPath("contact.phone"), [new Permission("contact:peek")], [], new Permission("contact:unmask"));
-        var invalid = (AccessChangeRefused)(await fixture.Admin.CreateFieldPolicyAsync(admin, unknown)).Value!;
+        var invalid = (TicketFailure)(await fixture.Admin.CreateFieldPolicyAsync(admin, unknown)).Value!;
         CollectionAssert.AreEqual(new[] { "Unknown permission 'contact:peek'.", "Unknown permission 'contact:unmask'." }, invalid.Errors.ToArray());
         var relaxed = new AccessFieldPolicy(email.Field, [AccessPermissions.ContactRead], [BuiltInRoles.Agent.Id]);
         Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateFieldPolicyAsync(agent, relaxed, 1)));

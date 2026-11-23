@@ -30,60 +30,60 @@ public sealed record ArticlePreview(ArticleId Article, HelpCenterLocale Locale, 
 /// </summary>
 public interface IHelpCenterService
 {
-    Task<HelpCenterResult<StoredPortal>> GetPortalAsync(PrincipalRef actor, PortalId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredPortal>> GetPortalAsync(PrincipalRef actor, PortalId id, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<IReadOnlyList<StoredPortal>>> ListPortalsAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredPortal>>> ListPortalsAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<StoredPortal>> CreatePortalAsync(PrincipalRef actor, Portal portal, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredPortal>> CreatePortalAsync(PrincipalRef actor, Portal portal, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<StoredPortal>> UpdatePortalAsync(PrincipalRef actor, Portal portal, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredPortal>> UpdatePortalAsync(PrincipalRef actor, Portal portal, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<StoredPortal>> DeletePortalAsync(PrincipalRef actor, PortalId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredPortal>> DeletePortalAsync(PrincipalRef actor, PortalId id, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<StoredCollection>> GetCollectionAsync(PrincipalRef actor, CollectionId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredCollection>> GetCollectionAsync(PrincipalRef actor, CollectionId id, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<IReadOnlyList<StoredCollection>>> ListCollectionsAsync(PrincipalRef actor, PortalId portal, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<StoredCollection>>> ListCollectionsAsync(PrincipalRef actor, PortalId portal, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<StoredCollection>> CreateCollectionAsync(PrincipalRef actor, HelpCollection collection, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredCollection>> CreateCollectionAsync(PrincipalRef actor, HelpCollection collection, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<StoredCollection>> UpdateCollectionAsync(PrincipalRef actor, HelpCollection collection, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredCollection>> UpdateCollectionAsync(PrincipalRef actor, HelpCollection collection, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<StoredCollection>> DeleteCollectionAsync(PrincipalRef actor, CollectionId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredCollection>> DeleteCollectionAsync(PrincipalRef actor, CollectionId id, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<StoredArticle>> GetArticleAsync(PrincipalRef actor, ArticleId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredArticle>> GetArticleAsync(PrincipalRef actor, ArticleId id, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<HelpCenterPage<StoredArticle>>> ListArticlesAsync(PrincipalRef actor, ArticleListQuery query, CancellationToken cancellationToken = default);
+    Task<TicketResult<HelpCenterPage<StoredArticle>>> ListArticlesAsync(PrincipalRef actor, ArticleListQuery query, CancellationToken cancellationToken = default);
 
     /// <summary>Creates a draft article authored by <paramref name="actor"/>.</summary>
-    Task<HelpCenterResult<StoredArticle>> CreateArticleAsync(PrincipalRef actor, Article article, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredArticle>> CreateArticleAsync(PrincipalRef actor, Article article, CancellationToken cancellationToken = default);
 
     /// <summary>Replaces the draft content, collection and position. The live revision of a published article is unchanged.</summary>
-    Task<HelpCenterResult<StoredArticle>> UpdateArticleAsync(PrincipalRef actor, Article article, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredArticle>> UpdateArticleAsync(PrincipalRef actor, Article article, long expectedRevision, CancellationToken cancellationToken = default);
 
     /// <summary>Snapshots the draft into a new immutable revision and serves it.</summary>
-    Task<HelpCenterResult<StoredArticle>> PublishArticleAsync(PrincipalRef actor, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredArticle>> PublishArticleAsync(PrincipalRef actor, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default);
 
     /// <summary>Stops serving the article (state Draft); its revisions are kept.</summary>
-    Task<HelpCenterResult<StoredArticle>> UnpublishArticleAsync(PrincipalRef actor, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredArticle>> UnpublishArticleAsync(PrincipalRef actor, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<StoredArticle>> ArchiveArticleAsync(PrincipalRef actor, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredArticle>> ArchiveArticleAsync(PrincipalRef actor, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default);
 
     /// <summary>Moves an archived article back to Draft.</summary>
-    Task<HelpCenterResult<StoredArticle>> RestoreArticleAsync(PrincipalRef actor, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredArticle>> RestoreArticleAsync(PrincipalRef actor, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default);
 
     /// <summary>Republishes the content of revision <paramref name="revision"/> as a new revision and resets the draft to it.</summary>
-    Task<HelpCenterResult<StoredArticle>> RollbackArticleAsync(PrincipalRef actor, ArticleId id, int revision, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredArticle>> RollbackArticleAsync(PrincipalRef actor, ArticleId id, int revision, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<StoredArticle>> DeleteArticleAsync(PrincipalRef actor, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<TicketResult<StoredArticle>> DeleteArticleAsync(PrincipalRef actor, ArticleId id, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<ArticleRevision>> GetRevisionAsync(PrincipalRef actor, ArticleId id, int revision, CancellationToken cancellationToken = default);
+    Task<TicketResult<ArticleRevision>> GetRevisionAsync(PrincipalRef actor, ArticleId id, int revision, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<HelpCenterPage<ArticleRevision>>> ListRevisionsAsync(PrincipalRef actor, ArticleId id, int limit = 20, int? before = null, CancellationToken cancellationToken = default);
+    Task<TicketResult<HelpCenterPage<ArticleRevision>>> ListRevisionsAsync(PrincipalRef actor, ArticleId id, int limit = 20, int? before = null, CancellationToken cancellationToken = default);
 
     /// <summary>Renders the draft translation in <paramref name="locale"/> to sanitized HTML.</summary>
-    Task<HelpCenterResult<ArticlePreview>> PreviewArticleAsync(PrincipalRef actor, ArticleId id, HelpCenterLocale locale, CancellationToken cancellationToken = default);
+    Task<TicketResult<ArticlePreview>> PreviewArticleAsync(PrincipalRef actor, ArticleId id, HelpCenterLocale locale, CancellationToken cancellationToken = default);
 
-    Task<HelpCenterResult<ArticleFeedbackCounts>> GetFeedbackAsync(PrincipalRef actor, ArticleId id, CancellationToken cancellationToken = default);
+    Task<TicketResult<ArticleFeedbackCounts>> GetFeedbackAsync(PrincipalRef actor, ArticleId id, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -92,7 +92,7 @@ public interface IHelpCenterService
 public interface IHelpCenterSearch
 {
     /// <summary>Agent or assistant search in any portal of the actor's workspace; requires <c>helpcenter:read</c>.</summary>
-    Task<HelpCenterResult<IReadOnlyList<ArticleSnippet>>> SearchAsync(PrincipalRef actor, HelpCenterSearchQuery query, CancellationToken cancellationToken = default);
+    Task<TicketResult<IReadOnlyList<ArticleSnippet>>> SearchAsync(PrincipalRef actor, HelpCenterSearchQuery query, CancellationToken cancellationToken = default);
 
     /// <summary>Anonymous search; returns no hits unless the portal is public and supports the locale.</summary>
     Task<IReadOnlyList<ArticleSnippet>> SearchPublicAsync(TicketScope scope, HelpCenterSearchQuery query, CancellationToken cancellationToken = default);

@@ -40,7 +40,7 @@ public sealed class RealtimeAgentActions(IConversationStore conversations, IAcce
 
     private async Task<(StoredConversation? Stored, RealtimeRefusal Refusal)> AuthorizeAsync(PrincipalRef actor, ConversationId conversation, Permission permission, CancellationToken cancellationToken)
     {
-        if (actor.Value is null)
+        if (actor is null)
             throw new ArgumentException("A principal is required.", nameof(actor));
         if (conversation == default)
             return (null, RealtimeRefusal.Invalid);
@@ -73,5 +73,5 @@ public sealed class RealtimeAgentActions(IConversationStore conversations, IAcce
             await convTask.ConfigureAwait(false);
     }
 
-    private static RealtimeActor Actor(PrincipalRef actor) => actor.Value is UserPrincipal user ? new AgentActor(user.UserId) : SupportActor.Instance;
+    private static RealtimeActor Actor(PrincipalRef actor) => actor is UserPrincipal user ? new AgentActor(user.UserId) : SupportActor.Instance;
 }

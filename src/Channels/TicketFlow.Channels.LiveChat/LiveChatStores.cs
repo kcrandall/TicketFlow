@@ -4,30 +4,11 @@ using TicketFlow.Realtime;
 
 namespace TicketFlow.Channels.LiveChat;
 
-public sealed record LiveChatWriteApplied<T>(T Value);
-
-public sealed record LiveChatWriteNotFound
-{
-    private LiveChatWriteNotFound()
-    {
-    }
-
-    public static LiveChatWriteNotFound Instance { get; } = new();
-}
-
-/// <summary>The revision did not match (or a create found an existing record: <see cref="CurrentRevision"/> is its revision).</summary>
-public sealed record LiveChatWriteConflict(long? CurrentRevision);
-
 public enum LiveChatWriteRejection
 {
     /// <summary>A store capacity limit (widgets per scope, links per session) would be exceeded.</summary>
     CapacityExceeded = 1,
 }
-
-public sealed record LiveChatWriteRejected(LiveChatWriteRejection Reason);
-
-/// <summary>Outcome of a live-chat store write. Switch over every case without a discard arm.</summary>
-public union LiveChatWriteResult<T>(LiveChatWriteApplied<T>, LiveChatWriteNotFound, LiveChatWriteConflict, LiveChatWriteRejected);
 
 /// <summary>
 /// Widget configurations keyed by (scope, configuration id): scope-confined; create at revision 1 (conflict when present);
@@ -39,11 +20,11 @@ public interface ILiveChatWidgetStore
 
     Task<StoredLiveChatWidget?> GetAsync(TicketScope scope, string configurationId, CancellationToken cancellationToken = default);
 
-    Task<LiveChatWriteResult<StoredLiveChatWidget>> CreateAsync(TicketScope scope, LiveChatWidget widget, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredLiveChatWidget, LiveChatWriteRejection>> CreateAsync(TicketScope scope, LiveChatWidget widget, CancellationToken cancellationToken = default);
 
-    Task<LiveChatWriteResult<StoredLiveChatWidget>> UpdateAsync(TicketScope scope, LiveChatWidget widget, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredLiveChatWidget, LiveChatWriteRejection>> UpdateAsync(TicketScope scope, LiveChatWidget widget, long expectedRevision, CancellationToken cancellationToken = default);
 
-    Task<LiveChatWriteResult<StoredLiveChatWidget>> DeleteAsync(TicketScope scope, string configurationId, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredLiveChatWidget, LiveChatWriteRejection>> DeleteAsync(TicketScope scope, string configurationId, long expectedRevision, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -63,14 +44,14 @@ public interface ILiveChatSessionStore
     public const int MaximumLinksPerSession = 256;
     public const int MaximumPrune = 10_000;
 
-    Task<LiveChatWriteResult<StoredVisitorSession>> CreateAsync(TicketScope scope, VisitorSession session, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredVisitorSession, LiveChatWriteRejection>> CreateAsync(TicketScope scope, VisitorSession session, CancellationToken cancellationToken = default);
 
     Task<StoredVisitorSession?> GetAsync(AccessPartition partition, VisitorSessionId id, CancellationToken cancellationToken = default);
 
-    Task<LiveChatWriteResult<StoredVisitorSession>> UpdateAsync(TicketScope scope, VisitorSession session, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<StoredVisitorSession, LiveChatWriteRejection>> UpdateAsync(TicketScope scope, VisitorSession session, long expectedRevision, CancellationToken cancellationToken = default);
 
     /// <summary>Links (idempotently) a conversation to an existing session. NotFound when the session does not exist in the scope.</summary>
-    Task<LiveChatWriteResult<VisitorConversationLink>> LinkAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, DateTimeOffset linkedAt, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<VisitorConversationLink, LiveChatWriteRejection>> LinkAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, DateTimeOffset linkedAt, CancellationToken cancellationToken = default);
 
     Task<VisitorConversationLink?> GetLinkAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, CancellationToken cancellationToken = default);
 
@@ -93,7 +74,7 @@ public interface ILiveChatSessionStore
     }
 
     /// <summary>Moves the read cursor forward (never back); returns the stored link, or NotFound when not linked.</summary>
-    Task<LiveChatWriteResult<VisitorConversationLink>> AdvanceCursorAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, long readSequence, CancellationToken cancellationToken = default);
+    Task<StoreWriteResult<VisitorConversationLink, LiveChatWriteRejection>> AdvanceCursorAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, long readSequence, CancellationToken cancellationToken = default);
 
     Task<int> PruneExpiredAsync(DateTimeOffset expiredBefore, int limit, CancellationToken cancellationToken = default);
 }

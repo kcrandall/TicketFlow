@@ -55,9 +55,9 @@
         // Activation is decided by the administrator (access:break-glass); listings below need access:manage and are optional here.
         if (Service<IAccessAdministrator>() is { } administrator)
         {
-            if (await administrator.ListRolesAsync(Actor, Aborted) is AccessListed<IReadOnlyList<AccessRoleListing>> custom)
+            if (await administrator.ListRolesAsync(Actor, Aborted) is TicketValue<IReadOnlyList<AccessRoleListing>> custom)
                 roles.AddRange(custom.Value.Where(item => item.Revision is not null).Select(item => item.Role).Where(role => !role.Permissions.Contains(AccessPermissions.AccessManage)));
-            if (await administrator.ListGrantsAsync(Actor, new WorkspaceGrantScope(Session.Scope.WorkspaceId), AccessLimits.MaximumTargetPage, null, Aborted) is AccessListed<IReadOnlyList<StoredAccessGrant>> listed)
+            if (await administrator.ListGrantsAsync(Actor, new WorkspaceGrantScope(Session.Scope.WorkspaceId), AccessLimits.MaximumTargetPage, null, Aborted) is TicketValue<IReadOnlyList<StoredAccessGrant>> listed)
                 active.AddRange(listed.Value.Where(grant => grant.Grant.Kind == GrantKind.BreakGlass && grant.Grant.ValidUntil > Now));
         }
         await Session.LoadUsersAsync(active.Select(grant => grant.Grant.Subject.Value is UserId user ? (UserId?)user : null));

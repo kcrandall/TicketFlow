@@ -77,20 +77,20 @@ internal sealed class SignalRHost : IAsyncDisposable
         var services = serviceScope.ServiceProvider;
         var grants = services.GetRequiredService<IAccessGrantStore>();
         var index = 0;
-        async Task GrantAsync(GrantSubject subject, RoleId role) => Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessGrant>>((await grants.CreateAsync(
+        async Task GrantAsync(GrantSubject subject, RoleId role) => Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await grants.CreateAsync(
             new AccessGrant(new GrantId($"seed-{index++}"), AccessPartition.From(Scope), subject, role, new WorkspaceGrantScope(Scope.WorkspaceId)))).Value);
         await GrantAsync(new UserId("owner"), BuiltInRoles.Owner.Id);
         await GrantAsync(new UserId("agent"), BuiltInRoles.Agent.Id);
         var worker = new AccessRole(new RoleId("channel-worker"), "Channel worker",
             [ConversationPermissions.Create, ConversationPermissions.Ingest, ContactPermissions.Read, ContactPermissions.Create]);
-        Assert.IsInstanceOfType<AccessWriteApplied<StoredAccessRole>>((await services.GetRequiredService<IAccessRoleStore>().CreateAsync(Scope, worker)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await services.GetRequiredService<IAccessRoleStore>().CreateAsync(Scope, worker)).Value);
         await GrantAsync(new ApiClientId("channels"), worker.Id);
 
-        Assert.IsInstanceOfType<WorkspaceWriteApplied<StoredInbox>>((await services.GetRequiredService<IInboxStore>().CreateAsync(Scope,
+        Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await services.GetRequiredService<IInboxStore>().CreateAsync(Scope,
             new Inbox(new InboxId("chat-inbox"), "Chat", new ChannelBinding(new ChannelKind("livechat"), "cfg-chat")))).Value);
-        Assert.IsInstanceOfType<ChannelWriteApplied<StoredChannelEndpoint>>((await services.GetRequiredService<IChannelEndpointStore>().CreateAsync(Scope,
+        Assert.IsInstanceOfType<StoreApplied<StoredChannelEndpoint>>((await services.GetRequiredService<IChannelEndpointStore>().CreateAsync(Scope,
             new ChannelEndpoint(new ChannelKind("livechat"), "cfg-chat", new InboxId("chat-inbox"), WidgetKey))).Value);
-        Assert.IsInstanceOfType<LiveChatWriteApplied<StoredLiveChatWidget>>((await services.GetRequiredService<ILiveChatWidgetStore>().CreateAsync(Scope,
+        Assert.IsInstanceOfType<StoreApplied<StoredLiveChatWidget>>((await services.GetRequiredService<ILiveChatWidgetStore>().CreateAsync(Scope,
             new LiveChatWidget("cfg-chat", new InboxId("chat-inbox"), [Origin], attachments: LiveChatAttachmentPolicy.Default))).Value);
         await services.GetRequiredService<ConversationOutboxDispatcher>().RegisterAsync();
     }

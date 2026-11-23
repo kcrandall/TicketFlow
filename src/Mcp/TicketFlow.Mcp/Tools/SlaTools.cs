@@ -98,16 +98,5 @@ public sealed class SlaTools(TicketFlowToolContext context)
 
     private static long Seconds(TimeSpan value) => (long)Math.Floor(value.TotalSeconds);
 
-    private static object Map<T>(SlaResult<T> result, Func<T, object> success) => result switch
-    {
-        SlaValue<T> value => success(value.Value),
-        SlaNotFound => TicketFlowToolError.NotFound(),
-        SlaConflict conflict => TicketFlowToolError.Conflict(conflict.CurrentRevision),
-        SlaRefused refused => refused.Reason switch
-        {
-            SlaRefusal.Forbidden => TicketFlowToolError.Forbidden(),
-            SlaRefusal.Invalid => TicketFlowToolError.Invalid(refused.Errors),
-            _ => TicketFlowToolError.Rejected(refused.Errors),
-        },
-    };
+    private static object Map<T>(TicketResult<T> result, Func<T, object> success) => TicketFlowToolError.Map(result, success);
 }

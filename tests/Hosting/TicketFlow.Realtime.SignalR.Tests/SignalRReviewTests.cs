@@ -20,7 +20,7 @@ public sealed class SignalRReviewTests
         Ok(await visitor.InvokeAsync<JsonElement>("Connect", WidgetKey, null));
         var conversation = Ok(await visitor.InvokeAsync<JsonElement>("SendMessage", "c1", "hi", null)).GetProperty("conversation").GetString()!;
         var agent = host.Hub(AgentPath, "agent");
-        var agentEvents = Events(agent);
+        var agentEvents = SignalRHost.Events(agent);
         await agent.StartAsync();
         Ok(await agent.InvokeAsync<JsonElement>("Subscribe", "conversation", conversation));
 
@@ -60,7 +60,7 @@ public sealed class SignalRReviewTests
         var token = Ok(await tabA.InvokeAsync<JsonElement>("Connect", WidgetKey, null)).GetProperty("token").GetString()!;
         Ok(await tabA.InvokeAsync<JsonElement>("SendMessage", "c1", "hi", null));
         var tabB = host.Hub(VisitorPath);
-        var tabBEvents = Events(tabB);
+        var tabBEvents = SignalRHost.Events(tabB);
         var tabBClosed = new TaskCompletionSource();
         tabB.Closed += _ =>
         {

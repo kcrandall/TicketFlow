@@ -15,7 +15,7 @@ public sealed class SignalRHubTests
     {
         await using var host = await CreateAsync();
         var visitor = host.Hub(VisitorPath);
-        var visitorEvents = Events(visitor);
+        var visitorEvents = SignalRHost.Events(visitor);
         await visitor.StartAsync();
         var connected = Ok(await visitor.InvokeAsync<JsonElement>("Connect", WidgetKey, null));
         var token = connected.GetProperty("token").GetString()!;
@@ -28,7 +28,7 @@ public sealed class SignalRHubTests
         Assert.AreEqual("incoming", (await NextAsync(visitorEvents, "message")).GetProperty("data").GetProperty("direction").GetString());
 
         var agent = host.Hub(AgentPath, "agent");
-        var agentEvents = Events(agent);
+        var agentEvents = SignalRHost.Events(agent);
         await agent.StartAsync();
         Ok(await agent.InvokeAsync<JsonElement>("Subscribe", "conversation", conversation));
         Ok(await agent.InvokeAsync<JsonElement>("Subscribe", "agent", null));

@@ -53,18 +53,28 @@ public sealed class AutomationContactFollower
         var changes = await contacts.ReadChangesAsync(scope, checkpoint ?? 0, limit, cancellationToken).ConfigureAwait(false);
         if (changes.Count == 0)
             return 0;
-        var contactRules = (await cache.GetAsync(rules, scope, cancellationToken).ConfigureAwait(false))
-            .Where(rule => rule.Enabled && rule.Trigger.Value is ContactUpdatedTrigger).ToList();
-        if (contactRules.Count > 0)
+        var compiled = await cache.GetCompiledAsync(rules, scope, cancellationToken).ConfigureAwait(false);
+        var contactRules = compiled.ForEvent(AutomationEventKind.ContactUpdated);
+        if (contactRules.Length > 0)
         {
             var filter = await planner.PlanAsync(new AccessQuery(runner.Principal(scope), AccessPermissions.ConversationRead, scope), cancellationToken).ConfigureAwait(false);
-            foreach (var change in changes.Where(item => item.Event.Kind == ContactChangeKind.Updated))
+            var contextCache = new AutomationContextCache();
+            for (var i = 0; i < changes.Count; i++)
             {
+                var change = changes[i];
+                if (change.Event.Kind != ContactChangeKind.Updated)
+                    continue;
                 var page = await conversations.ListAsync(scope, new ConversationListQuery(contact: change.Event.Contact, limit: options.MaximumContactConversations), filter,
                     cancellationToken).ConfigureAwait(false);
-                foreach (var stored in page.Conversations.Where(item => item.Conversation.Status.Kind != ConversationStatusKind.Closed))
-                    await runner.RunAsync(new AutomationOccurrence(scope, stored.Id, AutomationEvent.ContactUpdated(), AutomationTriggerKeys.ContactChange(change.Sequence),
-                        false, null, null), contactRules, cancellationToken).ConfigureAwait(false);
+                var triggerKey = AutomationTriggerKeys.ContactChange(change.Sequence);
+                for (var j = 0; j < page.Conversations.Count; j++)
+                {
+                    var stored = page.Conversations[j];
+                    if (stored.Conversation.Status.Kind == ConversationStatusKind.Closed)
+                        continue;
+                    await runner.RunCompiledAsync(new AutomationOccurrence(scope, stored.Id, AutomationEvent.ContactUpdated(), triggerKey,
+                        false, null, null), contactRules, contextCache, cancellationToken).ConfigureAwait(false);
+                }
             }
         }
         // A lost race means another follower advanced the checkpoint over the same changes (executions are idempotent).

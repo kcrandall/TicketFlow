@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Net;
 using System.Text;
 
@@ -45,11 +46,27 @@ public sealed record AutomationTemplate
     public const string ConversationPriority = "conversation.priority";
     public const string ConversationAttributePrefix = "conversation.attributes.";
 
+    private static readonly SearchValues<char> MarkdownEscapeChars = SearchValues.Create("\\`*_[](){}#+-!.<>|~");
+    private static readonly SearchValues<char> ControlCharsToStrip = CreateControlChars();
+
+    private static SearchValues<char> CreateControlChars()
+    {
+        var chars = new List<char>(64);
+        for (var c = '\u0000'; c <= '\u001F'; c++)
+            if (c is not ('\t' or '\r' or '\n'))
+                chars.Add(c);
+        for (var c = '\u007F'; c <= '\u009F'; c++)
+            chars.Add(c);
+        return SearchValues.Create(chars.ToArray());
+    }
+
     public AutomationTemplate(string source)
     {
         Source = AutomationText.RequireContent(source, MaximumLength, nameof(source));
         var segments = new List<TemplateSegment>();
         var variables = new List<string>();
+        HashSet<string>? seenVariables = null;
+        var placeholderCount = 0;
         var position = 0;
         while (position < Source.Length)
         {
@@ -64,21 +81,31 @@ public sealed record AutomationTemplate
             var close = Source.IndexOf("}}", open + 2, StringComparison.Ordinal);
             if (close < 0)
                 throw new ArgumentException("A template placeholder is not closed.", nameof(source));
-            var body = Source[(open + 2)..close];
+            var body = Source.AsSpan(open + 2, close - open - 2);
             if (body.Contains("{{", StringComparison.Ordinal))
                 throw new ArgumentException("Template placeholders cannot nest.", nameof(source));
             var pipe = body.IndexOf('|');
-            var variable = (pipe < 0 ? body : body[..pipe]).Trim();
-            var fallback = pipe < 0 ? null : body[(pipe + 1)..].Trim();
+            var variableSpan = (pipe < 0 ? body : body[..pipe]).Trim();
+            var variable = variableSpan.ToString();
+            var fallback = pipe < 0 ? null : body[(pipe + 1)..].Trim().ToString();
             if (!IsVariable(variable))
                 throw new ArgumentException("A template references an unknown variable.", nameof(source));
             if (fallback is { Length: > MaximumFallbackLength })
                 throw new ArgumentException($"Template fallbacks are at most {MaximumFallbackLength} characters.", nameof(source));
-            segments.Add(new TemplateSegment(null, variable, fallback));
-            if (!variables.Contains(variable, StringComparer.Ordinal))
-                variables.Add(variable);
-            if (segments.Count(segment => segment.Variable is not null) > MaximumVariables)
+            if (++placeholderCount > MaximumVariables)
                 throw new ArgumentException($"Templates have at most {MaximumVariables} placeholders.", nameof(source));
+            segments.Add(new TemplateSegment(null, variable, fallback));
+            if (seenVariables is not null)
+            {
+                if (seenVariables.Add(variable))
+                    variables.Add(variable);
+            }
+            else if (!variables.Contains(variable, StringComparer.Ordinal))
+            {
+                variables.Add(variable);
+                if (variables.Count == 8)
+                    seenVariables = new HashSet<string>(variables, StringComparer.Ordinal);
+            }
             position = close + 2;
         }
         Segments = segments.AsReadOnly();
@@ -109,9 +136,12 @@ public sealed record AutomationTemplate
     {
         ArgumentNullException.ThrowIfNull(values);
         AutomationText.Defined(escaping, nameof(escaping));
-        var output = new StringBuilder();
-        foreach (var segment in Segments)
+        if (Variables.Count == 0)
+            return Encoding.UTF8.GetByteCount(Source) > MaximumOutputBytes ? null : Source;
+        var output = new StringBuilder(Source.Length);
+        for (var i = 0; i < Segments.Count; i++)
         {
+            var segment = Segments[i];
             if (segment.Text is { } text)
             {
                 output.Append(text);
@@ -135,9 +165,47 @@ public sealed record AutomationTemplate
         return Encoding.UTF8.GetByteCount(rendered) > MaximumOutputBytes ? null : rendered;
     }
 
+    /// <summary>
+    /// Renders using a lazy variable lookup delegate without allocating a full values dictionary.
+    /// </summary>
+    public string? Render(Func<string, string?> resolve, TemplateEscaping escaping = TemplateEscaping.None)
+    {
+        ArgumentNullException.ThrowIfNull(resolve);
+        AutomationText.Defined(escaping, nameof(escaping));
+        if (Variables.Count == 0)
+            return Encoding.UTF8.GetByteCount(Source) > MaximumOutputBytes ? null : Source;
+        var output = new StringBuilder(Source.Length);
+        for (var i = 0; i < Segments.Count; i++)
+        {
+            var segment = Segments[i];
+            if (segment.Text is { } text)
+            {
+                output.Append(text);
+            }
+            else
+            {
+                var supplied = resolve(segment.Variable!);
+                if (string.IsNullOrEmpty(supplied))
+                {
+                    output.Append(segment.Fallback);
+                    continue;
+                }
+                var value = supplied.Length > MaximumValueLength ? supplied[..MaximumValueLength] : supplied;
+                output.Append(Escape(Sanitize(value), escaping));
+            }
+            if (output.Length > MaximumOutputBytes)
+                return null;
+        }
+        var rendered = output.ToString();
+        return Encoding.UTF8.GetByteCount(rendered) > MaximumOutputBytes ? null : rendered;
+    }
+
     /// <summary>Removes control characters other than tab/CR/LF and lone surrogates from substituted values.</summary>
     private static string Sanitize(string value)
     {
+        var span = value.AsSpan();
+        if (!span.ContainsAny(ControlCharsToStrip) && !span.ContainsAnyInRange('\uD800', '\uDFFF'))
+            return value;
         var builder = new StringBuilder(value.Length);
         for (var index = 0; index < value.Length; index++)
         {
@@ -164,10 +232,16 @@ public sealed record AutomationTemplate
 
     private static string EscapeMarkdown(string value)
     {
+        var span = value.AsSpan();
+        var first = span.IndexOfAny(MarkdownEscapeChars);
+        if (first < 0)
+            return value;
         var builder = new StringBuilder(value.Length + 8);
-        foreach (var character in value)
+        builder.Append(span[..first]);
+        for (var i = first; i < span.Length; i++)
         {
-            if (character is '\\' or '`' or '*' or '_' or '{' or '}' or '[' or ']' or '(' or ')' or '#' or '+' or '-' or '.' or '!' or '|' or '<' or '>' or '~')
+            var character = span[i];
+            if (MarkdownEscapeChars.Contains(character))
                 builder.Append('\\');
             builder.Append(character);
         }

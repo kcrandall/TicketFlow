@@ -64,9 +64,13 @@ public sealed class IdentityFlowVisitorTokenValidator : IVisitorTokenValidator, 
     private readonly IdentityFlowVisitorTokenOptions options;
     private readonly ConfigurationManager<OpenIdConnectConfiguration>? configuration;
     private readonly HttpClient? backchannel;
-    private const int RotationRetries = 10;
-    private static readonly TimeSpan RotationRetryDelay = TimeSpan.FromMilliseconds(100);
     private readonly JsonWebTokenHandler handler = new() { MapInboundClaims = false };
+    private readonly string[]? validTypes;
+    private readonly string[]? validIssuers;
+    private readonly SecurityKey[]? signingKeys;
+    private readonly string[] defaultAudiences;
+    private readonly TokenValidationParameters? frozenParameters;
+    private long lastForcedRefreshTicks;
 
     public IdentityFlowVisitorTokenValidator(IOptions<IdentityFlowVisitorTokenOptions> options)
     {
@@ -77,29 +81,33 @@ public sealed class IdentityFlowVisitorTokenValidator : IVisitorTokenValidator, 
         if (this.options.MaximumTokenLength is < 256 or > 65_536)
             throw new InvalidOperationException("IdentityFlowVisitorTokenOptions.MaximumTokenLength must be 256-65536.");
         _ = new VisitorTokenAccepted(this.options.Namespace, "probe");
+        validTypes = this.options.ValidTokenTypes.Count > 0 ? [.. this.options.ValidTokenTypes] : null;
+        validIssuers = this.options.ValidIssuers.Count > 0 ? [.. this.options.ValidIssuers] : null;
+        defaultAudiences = [.. this.options.Audiences];
         if (this.options.IssuerSigningKeys.Count > 0)
         {
-            if (this.options.ValidIssuers.Count == 0)
+            if (validIssuers is null)
                 throw new InvalidOperationException("Static signing keys require explicit ValidIssuers.");
-            return;
+            signingKeys = [.. this.options.IssuerSigningKeys];
         }
-        var metadata = this.options.MetadataAddress ?? (this.options.Authority is { } authority ? authority.TrimEnd('/') + "/.well-known/openid-configuration" : null)
-            ?? throw new InvalidOperationException("IdentityFlowVisitorTokenOptions requires an Authority, a MetadataAddress or static signing keys.");
-        backchannel = new HttpClient(this.options.BackchannelHandler ?? new HttpClientHandler(), disposeHandler: this.options.BackchannelHandler is null) { Timeout = TimeSpan.FromSeconds(30) };
-        configuration = new ConfigurationManager<OpenIdConnectConfiguration>(metadata, new OpenIdConnectConfigurationRetriever(),
-            new HttpDocumentRetriever(backchannel) { RequireHttps = this.options.RequireHttpsMetadata })
+        else
         {
-            AutomaticRefreshInterval = this.options.AutomaticRefreshInterval,
-            RefreshInterval = this.options.RefreshInterval,
-        };
+            var metadata = this.options.MetadataAddress ?? (this.options.Authority is { } authority ? authority.TrimEnd('/') + "/.well-known/openid-configuration" : null)
+                ?? throw new InvalidOperationException("IdentityFlowVisitorTokenOptions requires an Authority, a MetadataAddress or static signing keys.");
+            backchannel = new HttpClient(this.options.BackchannelHandler ?? new HttpClientHandler(), disposeHandler: this.options.BackchannelHandler is null) { Timeout = TimeSpan.FromSeconds(30) };
+            configuration = new ConfigurationManager<OpenIdConnectConfiguration>(metadata, new OpenIdConnectConfigurationRetriever(),
+                new HttpDocumentRetriever(backchannel) { RequireHttps = this.options.RequireHttpsMetadata })
+            {
+                AutomaticRefreshInterval = this.options.AutomaticRefreshInterval,
+                RefreshInterval = this.options.RefreshInterval,
+            };
+        }
+        if (this.options.AudienceResolver is null)
+            frozenParameters = BuildParameters(defaultAudiences);
     }
 
-    public async Task<VisitorTokenValidation> ValidateAsync(TicketScope scope, string configurationId, string token, CancellationToken cancellationToken = default)
+    private TokenValidationParameters BuildParameters(IReadOnlyCollection<string> audiences)
     {
-        ArgumentNullException.ThrowIfNull(scope);
-        if (string.IsNullOrEmpty(token) || token.Length > options.MaximumTokenLength)
-            return VisitorTokenRejected.Instance;
-        var audiences = options.AudienceResolver?.Invoke(scope, configurationId) is { Count: > 0 } resolved ? resolved : [.. options.Audiences];
         var parameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
@@ -110,33 +118,52 @@ public sealed class IdentityFlowVisitorTokenValidator : IVisitorTokenValidator, 
             RequireSignedTokens = true,
             ValidateIssuerSigningKey = true,
             ClockSkew = options.ClockSkew,
-            ValidTypes = options.ValidTokenTypes.Count > 0 ? [.. options.ValidTokenTypes] : null,
+            ValidTypes = validTypes,
         };
         if (configuration is null)
         {
-            parameters.ValidIssuers = [.. options.ValidIssuers];
-            parameters.IssuerSigningKeys = [.. options.IssuerSigningKeys];
+            parameters.ValidIssuers = validIssuers;
+            parameters.IssuerSigningKeys = signingKeys;
         }
         else
         {
-            // The handler reads issuer and signing keys from the configuration manager and refreshes it when a token names an unknown
-            // key (key rotation), rate-limited by RefreshInterval.
             parameters.ConfigurationManager = configuration;
-            if (options.ValidIssuers.Count > 0)
-                parameters.ValidIssuers = [.. options.ValidIssuers];
+            if (validIssuers is not null)
+                parameters.ValidIssuers = validIssuers;
+        }
+        return parameters;
+    }
+
+    public async Task<VisitorTokenValidation> ValidateAsync(TicketScope scope, string configurationId, string token, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        if (string.IsNullOrEmpty(token) || token.Length > options.MaximumTokenLength)
+            return VisitorTokenRejected.Instance;
+        TokenValidationParameters parameters;
+        if (frozenParameters is not null)
+            parameters = frozenParameters;
+        else
+        {
+            var audiences = options.AudienceResolver?.Invoke(scope, configurationId) is { Count: > 0 } resolved ? resolved : defaultAudiences;
+            parameters = BuildParameters(audiences);
         }
         TokenValidationResult result;
         try
         {
             result = await handler.ValidateTokenAsync(token, parameters).ConfigureAwait(false);
-            // An unknown key identifier means the issuer rotated keys: ask the configuration manager to refresh (rate-limited by
-            // RefreshInterval; the refresh completes in the background) and retry briefly.
-            for (var attempt = 0; configuration is not null && !result.IsValid && result.Exception is SecurityTokenSignatureKeyNotFoundException && attempt < RotationRetries; attempt++)
+            // An unknown key identifier may mean the issuer rotated keys: trigger at most one rate-limited refresh per RefreshInterval and retry once.
+            if (configuration is not null && !result.IsValid && result.Exception is SecurityTokenSignatureKeyNotFoundException && TryBeginForcedRefresh())
             {
-                if (attempt == 0)
-                    configuration.RequestRefresh();
-                await Task.Delay(RotationRetryDelay, cancellationToken).ConfigureAwait(false);
-                result = await handler.ValidateTokenAsync(token, parameters).ConfigureAwait(false);
+                var before = await configuration.GetConfigurationAsync(cancellationToken).ConfigureAwait(false);
+                configuration.RequestRefresh();
+                var current = await configuration.GetConfigurationAsync(cancellationToken).ConfigureAwait(false);
+                for (var attempt = 0; ReferenceEquals(current, before) && attempt < 12; attempt++)
+                {
+                    await Task.Delay(attempt < 2 ? 10 : attempt < 4 ? 50 : 100, cancellationToken).ConfigureAwait(false);
+                    current = await configuration.GetConfigurationAsync(cancellationToken).ConfigureAwait(false);
+                }
+                if (!ReferenceEquals(current, before))
+                    result = await handler.ValidateTokenAsync(token, parameters).ConfigureAwait(false);
             }
         }
         catch (Exception error) when (error is ArgumentException or SecurityTokenException)
@@ -155,6 +182,20 @@ public sealed class IdentityFlowVisitorTokenValidator : IVisitorTokenValidator, 
         catch (ArgumentException)
         {
             return VisitorTokenRejected.Instance;
+        }
+    }
+
+    private bool TryBeginForcedRefresh()
+    {
+        var now = DateTime.UtcNow.Ticks;
+        var minInterval = options.RefreshInterval.Ticks;
+        while (true)
+        {
+            var previous = Volatile.Read(ref lastForcedRefreshTicks);
+            if (previous != 0 && now - previous < minInterval)
+                return false;
+            if (Interlocked.CompareExchange(ref lastForcedRefreshTicks, now, previous) == previous)
+                return true;
         }
     }
 

@@ -118,8 +118,6 @@ public sealed record BusinessCalendar
     public const int MaximumSpansPerDay = 8;
     public const int MaximumOverrides = 1024;
 
-    private static readonly DayOfWeek[] Days = [DayOfWeek.Sunday, DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday, DayOfWeek.Saturday];
-
     private readonly BusinessHours[][] weekly;
     private readonly FrozenDictionary<DateOnly, CalendarDateOverride> overridesByDate;
 
@@ -136,26 +134,71 @@ public sealed record BusinessCalendar
         Name = WorkspaceText.RequireText(name, MaximumNameLength, nameof(name));
         TimeZoneId = WorkspaceTimeZones.RequireId(timeZoneId, nameof(timeZoneId));
 
-        var byDay = Days.ToDictionary(day => day, _ => new List<BusinessHours>());
-        foreach (var entry in weeklyHours ?? [])
+        var byDay = new List<BusinessHours>?[7];
+        if (weeklyHours is not null)
         {
-            ArgumentNullException.ThrowIfNull(entry, nameof(weeklyHours));
-            byDay[entry.Day].Add(entry.Hours);
+            foreach (var entry in weeklyHours)
+            {
+                ArgumentNullException.ThrowIfNull(entry, nameof(weeklyHours));
+                var dayIndex = (int)entry.Day;
+                (byDay[dayIndex] ??= []).Add(entry.Hours);
+            }
         }
-        weekly = [.. Days.Select(day => BusinessHours.Normalize(byDay[day], MaximumSpansPerDay, nameof(weeklyHours)))];
+        weekly = new BusinessHours[7][];
+        var totalWeekly = 0;
+        for (var day = 0; day < 7; day++)
+        {
+            weekly[day] = byDay[day] is { Count: > 0 } spans
+                ? BusinessHours.Normalize(spans, MaximumSpansPerDay, nameof(weeklyHours))
+                : [];
+            totalWeekly += weekly[day].Length;
+        }
 
-        var dated = new Dictionary<DateOnly, CalendarDateOverride>();
-        foreach (var entry in overrides ?? [])
+        if (overrides is null)
         {
-            ArgumentNullException.ThrowIfNull(entry, nameof(overrides));
-            if (!dated.TryAdd(entry.Date, entry))
-                throw new ArgumentException("Date overrides must have unique dates.", nameof(overrides));
-            if (dated.Count > MaximumOverrides)
-                throw new ArgumentException($"A calendar can have at most {MaximumOverrides} date overrides.", nameof(overrides));
+            overridesByDate = FrozenDictionary<DateOnly, CalendarDateOverride>.Empty;
+            Overrides = [];
         }
-        overridesByDate = dated.ToFrozenDictionary();
-        Overrides = [.. dated.Values.OrderBy(entry => entry.Date)];
-        WeeklyHours = [.. Days.SelectMany(day => weekly[(int)day].Select(hours => new WeeklyBusinessHours(day, hours)))];
+        else
+        {
+            var dated = new Dictionary<DateOnly, CalendarDateOverride>();
+            foreach (var entry in overrides)
+            {
+                ArgumentNullException.ThrowIfNull(entry, nameof(overrides));
+                if (!dated.TryAdd(entry.Date, entry))
+                    throw new ArgumentException("Date overrides must have unique dates.", nameof(overrides));
+                if (dated.Count > MaximumOverrides)
+                    throw new ArgumentException($"A calendar can have at most {MaximumOverrides} date overrides.", nameof(overrides));
+            }
+            if (dated.Count == 0)
+            {
+                overridesByDate = FrozenDictionary<DateOnly, CalendarDateOverride>.Empty;
+                Overrides = [];
+            }
+            else
+            {
+                overridesByDate = dated.ToFrozenDictionary();
+                var orderedOverrides = new CalendarDateOverride[dated.Count];
+                dated.Values.CopyTo(orderedOverrides, 0);
+                Array.Sort(orderedOverrides, static (left, right) => left.Date.CompareTo(right.Date));
+                Overrides = orderedOverrides;
+            }
+        }
+
+        if (totalWeekly == 0)
+            WeeklyHours = [];
+        else
+        {
+            var flatWeekly = new WeeklyBusinessHours[totalWeekly];
+            var index = 0;
+            for (var day = 0; day < 7; day++)
+            {
+                var spans = weekly[day];
+                for (var s = 0; s < spans.Length; s++)
+                    flatWeekly[index++] = new WeeklyBusinessHours((DayOfWeek)day, spans[s]);
+            }
+            WeeklyHours = flatWeekly;
+        }
     }
 
     public BusinessCalendarId Id { get; }

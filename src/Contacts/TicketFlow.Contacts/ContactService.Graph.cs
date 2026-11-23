@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Text;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -64,12 +65,21 @@ public sealed partial class ContactService
     /// <summary>Lists only candidates the actor may read, so ambiguity never discloses unreadable contact identifiers.</summary>
     private async Task<ContactResolution> AmbiguousAsync(PrincipalRef actor, IEnumerable<string> candidates, CancellationToken cancellationToken)
     {
-        var readable = new List<ContactId>();
+        var ids = new List<ContactId>();
         foreach (var candidate in candidates)
+            ids.Add(new ContactId(candidate));
+        if (ids.Count == 0)
+            return ContactRefused.Forbidden;
+        var loadedTask = store.GetManyAsync(actor.Scope, ids, cancellationToken);
+        var decisionsTask = evaluator.LoadDecisionContextAsync(actor, actor.Scope, [ContactPermissions.Read], cancellationToken);
+        await Task.WhenAll(loadedTask, decisionsTask).ConfigureAwait(false);
+        var loaded = loadedTask.Result;
+        var decisions = decisionsTask.Result;
+        var readable = new List<ContactId>(loaded.Count);
+        foreach (var id in ids)
         {
-            var stored = await store.GetAsync(actor.Scope, new ContactId(candidate), cancellationToken).ConfigureAwait(false);
-            if (stored is not null
-                && (await AuthorizeAsync(actor, ContactPermissions.Read, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false)).IsPermitted)
+            if (loaded.TryGetValue(id, out var stored)
+                && (await decisions.DecideAsync(ContactPermissions.Read, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false)).IsPermitted)
                 readable.Add(stored.Id);
         }
         return readable.Count == 0 ? ContactRefused.Forbidden : new ContactAmbiguous(readable);
@@ -114,6 +124,8 @@ public sealed partial class ContactService
 
         var filter = await planner.PlanAsync(new AccessQuery(actor, ContactPermissions.Read, scope), cancellationToken).ConfigureAwait(false);
         var page = await store.SearchAsync(scope, search, filter, cancellationToken).ConfigureAwait(false);
+        if (page.Contacts.Count == 0)
+            return new ContactSearchPage([], page.Next is { } emptyNext ? EncodeCursor(search, emptyNext) : null);
         var masking = await MaskingAsync(scope, ContactPermissions.Read, cancellationToken).ConfigureAwait(false);
         var decisions = Decisions(actor, ContactPermissions.Read);
         var views = new List<ContactView>(page.Contacts.Count);
@@ -191,16 +203,16 @@ public sealed partial class ContactService
         ArgumentNullException.ThrowIfNull(request);
         if (request.Target == request.Source)
             return ContactRefused.Invalid("A contact cannot be merged into itself.");
-        var target = await store.GetAsync(scope, request.Target, cancellationToken).ConfigureAwait(false);
-        var source = await store.GetAsync(scope, request.Source, cancellationToken).ConfigureAwait(false);
-        if (target is null || source is null)
+        var loaded = await store.GetManyAsync(scope, [request.Target, request.Source], cancellationToken).ConfigureAwait(false);
+        if (!loaded.TryGetValue(request.Target, out var target) || !loaded.TryGetValue(request.Source, out var source))
             return ContactRefused.NotFound;
         if (target.Revision != request.ExpectedTargetRevision)
             return new ContactRefused(ContactRefusal.Conflict, ["The target revision changed."], target.Revision);
         if (source.Revision != request.ExpectedSourceRevision)
             return new ContactRefused(ContactRefusal.Conflict, ["The source revision changed."], source.Revision);
-        if (!(await AuthorizeAsync(actor, ContactPermissions.Merge, ContactAccess.Resource(target), cancellationToken).ConfigureAwait(false)).IsPermitted
-            || !(await AuthorizeAsync(actor, ContactPermissions.Merge, ContactAccess.Resource(source), cancellationToken).ConfigureAwait(false)).IsPermitted)
+        var decisions = await evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Merge], cancellationToken).ConfigureAwait(false);
+        if (!(await decisions.DecideAsync(ContactPermissions.Merge, ContactAccess.Resource(target), cancellationToken).ConfigureAwait(false)).IsPermitted
+            || !(await decisions.DecideAsync(ContactPermissions.Merge, ContactAccess.Resource(source), cancellationToken).ConfigureAwait(false)).IsPermitted)
             return ContactRefused.Forbidden;
         if (target.Contact.MergedInto is { } targetMerged)
             return new ContactRefused(ContactRefusal.Merged, ["The target was merged."], target.Revision, targetMerged);
@@ -219,7 +231,7 @@ public sealed partial class ContactService
         {
             return new ContactRefused(ContactRefusal.Rejected, ["The merged contact would exceed contact limits."]);
         }
-        if (!(await AuthorizeAsync(actor, ContactPermissions.Merge, ContactAccess.Resource(scope, computation.Target), cancellationToken).ConfigureAwait(false)).IsPermitted)
+        if (!(await decisions.DecideAsync(ContactPermissions.Merge, ContactAccess.Resource(scope, computation.Target), cancellationToken).ConfigureAwait(false)).IsPermitted)
             return ContactRefused.Forbidden;
 
         var auditEvent = new ContactAuditEvent(Guid.CreateVersion7(), now, scope, ContactAuditKind.Merged, actorRecord, request.Source, request.Target, mergeId,
@@ -242,12 +254,12 @@ public sealed partial class ContactService
         var record = await store.GetMergeAsync(scope, mergeId, cancellationToken).ConfigureAwait(false);
         if (record is null)
             return ContactRefused.NotFound;
-        var target = await store.GetAsync(scope, record.Target, cancellationToken).ConfigureAwait(false);
-        var source = await store.GetAsync(scope, record.Source, cancellationToken).ConfigureAwait(false);
-        if (target is null || source is null)
+        var loaded = await store.GetManyAsync(scope, [record.Target, record.Source], cancellationToken).ConfigureAwait(false);
+        if (!loaded.TryGetValue(record.Target, out var target) || !loaded.TryGetValue(record.Source, out var source))
             return ContactRefused.NotFound;
-        if (!(await AuthorizeAsync(actor, ContactPermissions.Merge, ContactAccess.Resource(target), cancellationToken).ConfigureAwait(false)).IsPermitted
-            || !(await AuthorizeAsync(actor, ContactPermissions.Merge, ContactAccess.Resource(scope, record.SourceSnapshot), cancellationToken).ConfigureAwait(false)).IsPermitted)
+        var decisions = await evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Merge, ContactPermissions.Read], cancellationToken).ConfigureAwait(false);
+        if (!(await decisions.DecideAsync(ContactPermissions.Merge, ContactAccess.Resource(target), cancellationToken).ConfigureAwait(false)).IsPermitted
+            || !(await decisions.DecideAsync(ContactPermissions.Merge, ContactAccess.Resource(scope, record.SourceSnapshot), cancellationToken).ConfigureAwait(false)).IsPermitted)
             return ContactRefused.Forbidden;
         if (target.Contact.MergedInto is { } targetMerged)
             return new ContactRefused(ContactRefusal.Merged, ["Unmerge the target from its own merge first."], target.Revision, targetMerged);
@@ -256,7 +268,7 @@ public sealed partial class ContactService
 
         var now = Now;
         var (restoredTarget, restoredSource) = ContactMerger.Unmerge(record, target.Contact, now);
-        if (!(await AuthorizeAsync(actor, ContactPermissions.Merge, ContactAccess.Resource(scope, restoredTarget), cancellationToken).ConfigureAwait(false)).IsPermitted)
+        if (!(await decisions.DecideAsync(ContactPermissions.Merge, ContactAccess.Resource(scope, restoredTarget), cancellationToken).ConfigureAwait(false)).IsPermitted)
             return ContactRefused.Forbidden;
         var auditEvent = new ContactAuditEvent(Guid.CreateVersion7(), now, scope, ContactAuditKind.Unmerged, AccessActor.From(actor), record.Source, record.Target, mergeId);
         var batch = new ContactWriteBatch(
@@ -264,29 +276,56 @@ public sealed partial class ContactService
             changes: [Change(ContactChangeKind.Unmerged, record.Source, now, record.Target, mergeId), Change(ContactChangeKind.Updated, record.Target, now, merge: mergeId)],
             deleteMerge: mergeId,
             audit: auditEvent);
-        return await WriteAsync(actor, scope, batch, async applied => new ContactUnmergeOutcome(
-                await ViewAsync(actor, applied.Contacts[0], cancellationToken).ConfigureAwait(false),
-                await ViewAsync(actor, applied.Contacts[1], cancellationToken).ConfigureAwait(false),
-                auditEvent.Id), cancellationToken)
+        return await WriteAsync(actor, scope, batch, async applied =>
+            {
+                var masking = await MaskingAsync(scope, ContactPermissions.Read, cancellationToken).ConfigureAwait(false);
+                var targetDecision = await decisions.DecideAsync(ContactPermissions.Read, ContactAccess.Resource(applied.Contacts[0]), cancellationToken).ConfigureAwait(false);
+                var sourceDecision = await decisions.DecideAsync(ContactPermissions.Read, ContactAccess.Resource(applied.Contacts[1]), cancellationToken).ConfigureAwait(false);
+                return new ContactUnmergeOutcome(
+                    masking.Project(applied.Contacts[0], targetDecision),
+                    masking.Project(applied.Contacts[1], sourceDecision),
+                    auditEvent.Id);
+            }, cancellationToken)
             .ConfigureAwait(false);
     }
 
+    [ThreadStatic]
+    private static ArrayBufferWriter<byte>? cursorBuffer;
+
+    [ThreadStatic]
+    private static Utf8JsonWriter? cursorWriter;
+
     private static string EncodeCursor(ContactSearch search, ContactSearchCursor next)
     {
-        using var buffer = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(buffer))
+        var buffer = cursorBuffer;
+        if (buffer is null)
+            cursorBuffer = buffer = new ArrayBufferWriter<byte>(256);
+        else
+            buffer.Clear();
+        var writer = cursorWriter;
+        if (writer is null)
+            cursorWriter = writer = new Utf8JsonWriter(buffer);
+        else
+            writer.Reset(buffer);
+        try
         {
             writer.WriteStartObject();
-            writer.WriteNumber("v", 1);
-            writer.WriteNumber("m", (int)search.Mode);
-            writer.WriteNumber("k", search.Kind is { } kind ? (int)kind : 0);
-            writer.WriteString("ns", search.Namespace);
-            writer.WriteString("p", search.Prefix);
-            writer.WriteString("s", next.SortKey);
-            writer.WriteString("id", next.Contact.Value);
+            writer.WriteNumber("v"u8, 1);
+            writer.WriteNumber("m"u8, (int)search.Mode);
+            writer.WriteNumber("k"u8, search.Kind is { } kind ? (int)kind : 0);
+            writer.WriteString("ns"u8, search.Namespace);
+            writer.WriteString("p"u8, search.Prefix);
+            writer.WriteString("s"u8, next.SortKey);
+            writer.WriteString("id"u8, next.Contact.Value);
             writer.WriteEndObject();
+            writer.Flush();
+            return Base64Url.EncodeToString(buffer.WrittenSpan);
         }
-        return Base64Url.EncodeToString(buffer.ToArray());
+        finally
+        {
+            buffer.Clear();
+            writer.Reset(buffer);
+        }
     }
 
     private static ContactSearchCursor? DecodeCursor(string cursor, ContactSearch search)
@@ -297,11 +336,67 @@ public sealed partial class ContactService
         {
             using var document = JsonDocument.Parse(Base64Url.DecodeFromChars(cursor), new JsonDocumentOptions { MaxDepth = 4 });
             var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Count() != 7 || root.GetProperty("v").GetInt32() != 1
-                || root.GetProperty("m").GetInt32() != (int)search.Mode || root.GetProperty("k").GetInt32() != (search.Kind is { } kind ? (int)kind : 0)
-                || root.GetProperty("ns").GetString() != search.Namespace || root.GetProperty("p").GetString() != search.Prefix)
+            if (root.ValueKind != JsonValueKind.Object)
                 return null;
-            return new ContactSearchCursor(root.GetProperty("s").GetString()!, new ContactId(root.GetProperty("id").GetString()!));
+            var expectedKind = search.Kind is { } kind ? (int)kind : 0;
+            uint seen = 0;
+            string? sortKey = null, id = null;
+            foreach (var prop in root.EnumerateObject())
+            {
+                int bit;
+                if (prop.NameEquals("v"u8))
+                {
+                    if (prop.Value.GetInt32() != 1)
+                        return null;
+                    bit = 0;
+                }
+                else if (prop.NameEquals("m"u8))
+                {
+                    if (prop.Value.GetInt32() != (int)search.Mode)
+                        return null;
+                    bit = 1;
+                }
+                else if (prop.NameEquals("k"u8))
+                {
+                    if (prop.Value.GetInt32() != expectedKind)
+                        return null;
+                    bit = 2;
+                }
+                else if (prop.NameEquals("ns"u8))
+                {
+                    if (prop.Value.GetString() != search.Namespace)
+                        return null;
+                    bit = 3;
+                }
+                else if (prop.NameEquals("p"u8))
+                {
+                    if (prop.Value.GetString() != search.Prefix)
+                        return null;
+                    bit = 4;
+                }
+                else if (prop.NameEquals("s"u8))
+                {
+                    sortKey = prop.Value.GetString();
+                    if (sortKey is null)
+                        return null;
+                    bit = 5;
+                }
+                else if (prop.NameEquals("id"u8))
+                {
+                    id = prop.Value.GetString();
+                    if (id is null)
+                        return null;
+                    bit = 6;
+                }
+                else
+                    return null;
+
+                var mask = 1u << bit;
+                if ((seen & mask) != 0)
+                    return null;
+                seen |= mask;
+            }
+            return seen == 0b1111111u ? new ContactSearchCursor(sortKey!, new ContactId(id!)) : null;
         }
         catch (Exception error) when (error is FormatException or JsonException or ArgumentException or InvalidOperationException or KeyNotFoundException)
         {

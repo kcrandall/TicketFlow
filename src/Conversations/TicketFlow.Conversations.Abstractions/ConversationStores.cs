@@ -18,11 +18,13 @@ public sealed record ConversationWrite
         ArgumentNullException.ThrowIfNull(conversation);
         if (expectedRevision is < 1)
             throw new ArgumentOutOfRangeException(nameof(expectedRevision));
-        Events = [.. events ?? []];
-        if (Events.Count > MaximumEvents || Events.Any(item => item is null))
+        Events = events is null || events is IReadOnlyList<TimelineEvent> { Count: 0 } ? [] : [.. events];
+        if (Events.Count > MaximumEvents)
             throw new ArgumentException($"A write appends at most {MaximumEvents} events.", nameof(events));
         for (var index = 0; index < Events.Count; index++)
         {
+            if (Events[index] is null)
+                throw new ArgumentException($"A write appends at most {MaximumEvents} events.", nameof(events));
             if (Events[index].Conversation != conversation.Id)
                 throw new ArgumentException("Events must belong to the written conversation.", nameof(events));
             if (index > 0 && Events[index].Sequence != Events[index - 1].Sequence + 1)
@@ -34,9 +36,17 @@ public sealed record ConversationWrite
             throw new ArgumentException("A created conversation's timeline starts at sequence 1.", nameof(events));
         if (expectedRevision is null && Events.Count == 0 && conversation.LastSequence != 0)
             throw new ArgumentException("A created conversation without events has an empty timeline.", nameof(conversation));
-        var messages = Events.Select(item => item.Event.Value).OfType<MessageEvent>().Select(message => message.Id).ToList();
-        if (messages.Distinct().Count() != messages.Count)
-            throw new ArgumentException("Message identifiers must be distinct.", nameof(events));
+        if (Events.Count > 1)
+        {
+            for (var i = 0; i < Events.Count; i++)
+            {
+                if (Events[i].Event.Value is not MessageEvent left)
+                    continue;
+                for (var j = i + 1; j < Events.Count; j++)
+                    if (Events[j].Event.Value is MessageEvent right && left.Id == right.Id)
+                        throw new ArgumentException("Message identifiers must be distinct.", nameof(events));
+            }
+        }
         if (change is not null && (change.Conversation != conversation.Id || change.Inbox != conversation.Inbox))
             throw new ArgumentException("The change must describe the written conversation.", nameof(change));
         Conversation = conversation;
@@ -249,6 +259,18 @@ public interface IConversationStore
     public const int MaximumTimelineRead = 200;
 
     Task<StoredConversation?> GetAsync(TicketScope scope, ConversationId id, CancellationToken cancellationToken = default);
+
+    /// <summary>Loads conversations by identifier in one scope; missing identifiers are omitted.</summary>
+    async Task<IReadOnlyDictionary<ConversationId, StoredConversation>> GetManyAsync(TicketScope scope, IReadOnlyCollection<ConversationId> ids, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(ids);
+        var result = new Dictionary<ConversationId, StoredConversation>(ids.Count);
+        foreach (var id in ids)
+            if (!result.ContainsKey(id) && await GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is { } stored)
+                result[id] = stored;
+        return result;
+    }
 
     Task<ConversationWriteResult> WriteAsync(TicketScope scope, ConversationWrite write, CancellationToken cancellationToken = default);
 

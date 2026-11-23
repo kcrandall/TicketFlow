@@ -37,12 +37,14 @@ public sealed class SlaTimerScheduler
     {
         int evaluated = 0, retried = 0, lost = 0;
         var claims = await store.ClaimDueAsync(options.TimerBatchSize, options.TimerLease, cancellationToken).ConfigureAwait(false);
-        foreach (var claim in claims)
+        var cache = claims.Count > 1 ? new SlaRunCache() : null;
+        for (var i = 0; i < claims.Count; i++)
         {
+            var claim = claims[i];
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                await tracker.SyncAsync(claim.Scope, claim.Conversation, claim, cancellationToken).ConfigureAwait(false);
+                await tracker.SyncInternalAsync(claim.Scope, claim.Conversation, claim, cache, cancellationToken).ConfigureAwait(false);
                 evaluated++;
                 continue;
             }

@@ -1,7 +1,9 @@
+using System.Buffers;
 using System.Globalization;
 using System.Text;
 using Microsoft.Extensions.Options;
 using TicketFlow.Access;
+using TicketFlow.Conversations;
 using TicketFlow.Core;
 using TicketFlow.Workspaces;
 
@@ -16,6 +18,8 @@ namespace TicketFlow.Reporting;
 /// </summary>
 public sealed class ReportingService : IReportingService
 {
+    private const int ExportFlushThreshold = 32_768;
+
     private static readonly ReportMetric[] LeaderboardMetrics =
     [
         ReportMetric.ConversationResolved, ReportMetric.MessageSent, ReportMetric.Assignment, ReportMetric.Handoff,
@@ -47,21 +51,40 @@ public sealed class ReportingService : IReportingService
         var scope = actor.Scope;
         var range = ReportBuckets.Range(query.From, query.To);
         var filter = await ViewFilterAsync(actor, cancellationToken).ConfigureAwait(false);
+        var satisfactionGroup = SatisfactionGroup(query.Filter);
         ReportAggregateResult aggregate = new([], false);
         long backlog = 0;
+        ReportSatisfaction? overall = null;
         if (filter is not DenyAllFilter)
         {
-            aggregate = await store.AggregateAsync(scope, new ReportAggregateQuery(range, ReportMetrics.All, query.Filter, histograms: true), filter, cancellationToken).ConfigureAwait(false);
-            backlog = await store.CountBacklogAsync(scope, query.Filter, filter, cancellationToken).ConfigureAwait(false);
+            var aggregateTask = store.AggregateAsync(scope, new ReportAggregateQuery(range, ReportMetrics.All, query.Filter, histograms: true), filter, cancellationToken);
+            var backlogTask = store.CountBacklogAsync(scope, query.Filter, filter, cancellationToken);
+            if (satisfactionGroup is { } group)
+            {
+                var satisfactionTask = SatisfactionAsync(scope, range[0], range[1], group.Dimension, filter, cancellationToken);
+                await Task.WhenAll(aggregateTask, backlogTask, satisfactionTask).ConfigureAwait(false);
+                aggregate = aggregateTask.Result;
+                backlog = backlogTask.Result;
+                var sum = ReportSatisfaction.Empty;
+                var satRows = satisfactionTask.Result;
+                for (var i = 0; i < satRows.Count; i++)
+                {
+                    var row = satRows[i];
+                    if (group.Key is null || row.Group == group.Key)
+                        sum = sum.Add(row.Satisfaction);
+                }
+                overall = sum;
+            }
+            else
+            {
+                await Task.WhenAll(aggregateTask, backlogTask).ConfigureAwait(false);
+                aggregate = aggregateTask.Result;
+                backlog = backlogTask.Result;
+            }
         }
-        var totals = new Totals(aggregate.Rows);
-        var satisfactionGroup = SatisfactionGroup(query.Filter);
-        ReportSatisfaction? overall = null;
-        if (satisfactionGroup is { } group)
-        {
-            var rows = await SatisfactionAsync(scope, range[0], range[1], group.Dimension, filter, cancellationToken).ConfigureAwait(false);
-            overall = rows.Where(row => group.Key is null || row.Group == group.Key).Aggregate(ReportSatisfaction.Empty, (sum, row) => sum.Add(row.Satisfaction));
-        }
+        else if (satisfactionGroup is not null)
+            overall = ReportSatisfaction.Empty;
+        var totals = new Totals(aggregate.Rows, 0, aggregate.Rows.Count);
         return new ReportSucceeded<ReportOverview>(new ReportOverview(range[0], range[1],
             totals.Count(ReportMetric.ConversationCreated), totals.Count(ReportMetric.ConversationResolved), totals.Count(ReportMetric.ConversationReopened),
             totals.Count(ReportMetric.MessageReceived), totals.Count(ReportMetric.MessageSent), totals.Count(ReportMetric.Assignment), totals.Count(ReportMetric.Handoff),
@@ -80,20 +103,46 @@ public sealed class ReportingService : IReportingService
         var filter = await ViewFilterAsync(actor, cancellationToken).ConfigureAwait(false);
         if (filter is DenyAllFilter)
             return new ReportSucceeded<ReportLeaderboard>(new(range[0], range[1], [], false));
-        var aggregate = await store.AggregateAsync(scope, new ReportAggregateQuery(range, LeaderboardMetrics, query.Query.Filter, ReportDimension.Agent, histograms: true), filter,
-            cancellationToken).ConfigureAwait(false);
         var restriction = query.Query.Filter;
+        var wantSatisfaction = restriction.Inbox is null && restriction.Team is null && restriction.Channel is null && restriction.Priority is null && restriction.Label is null;
+        var aggregateTask = store.AggregateAsync(scope, new ReportAggregateQuery(range, LeaderboardMetrics, restriction, ReportDimension.Agent, histograms: true), filter,
+            cancellationToken);
         Dictionary<string, ReportSatisfaction>? perAgent = null;
-        if (restriction.Inbox is null && restriction.Team is null && restriction.Channel is null && restriction.Priority is null && restriction.Label is null)
-            perAgent = (await SatisfactionAsync(scope, range[0], range[1], ReportDimension.Agent, filter, cancellationToken).ConfigureAwait(false))
-                .Where(row => row.Group is not null).ToDictionary(row => row.Group!, row => row.Satisfaction, StringComparer.Ordinal);
-        var rows = aggregate.Rows.Where(row => row.Group is not null).GroupBy(row => row.Group!, StringComparer.Ordinal).Select(agentRows =>
+        ReportAggregateResult aggregate;
+        if (wantSatisfaction)
         {
-            var totals = new Totals(agentRows);
-            return new ReportLeaderboardRow(new UserId(agentRows.Key), totals.Count(ReportMetric.ConversationResolved), totals.Count(ReportMetric.MessageSent),
+            var satisfactionTask = SatisfactionAsync(scope, range[0], range[1], ReportDimension.Agent, filter, cancellationToken);
+            await Task.WhenAll(aggregateTask, satisfactionTask).ConfigureAwait(false);
+            aggregate = aggregateTask.Result;
+            var satRows = satisfactionTask.Result;
+            perAgent = new Dictionary<string, ReportSatisfaction>(satRows.Count, StringComparer.Ordinal);
+            for (var i = 0; i < satRows.Count; i++)
+                if (satRows[i].Group is { } key)
+                    perAgent[key] = satRows[i].Satisfaction;
+        }
+        else
+            aggregate = await aggregateTask.ConfigureAwait(false);
+
+        var sourceRows = aggregate.Rows;
+        var rows = new List<ReportLeaderboardRow>();
+        var idx = 0;
+        while (idx < sourceRows.Count)
+        {
+            var agent = sourceRows[idx].Group;
+            if (agent is null)
+            {
+                idx++;
+                continue;
+            }
+            var start = idx;
+            idx++;
+            while (idx < sourceRows.Count && string.Equals(sourceRows[idx].Group, agent, StringComparison.Ordinal))
+                idx++;
+            var totals = new Totals(sourceRows, start, idx);
+            rows.Add(new ReportLeaderboardRow(new UserId(agent), totals.Count(ReportMetric.ConversationResolved), totals.Count(ReportMetric.MessageSent),
                 totals.Count(ReportMetric.Assignment), totals.Count(ReportMetric.Handoff), totals.Duration(ReportMetric.FirstResponseTime), totals.Duration(ReportMetric.ResponseTime),
-                totals.Duration(ReportMetric.ResolutionTime), perAgent is null ? null : perAgent.GetValueOrDefault(agentRows.Key, ReportSatisfaction.Empty));
-        });
+                totals.Duration(ReportMetric.ResolutionTime), perAgent is null ? null : perAgent.GetValueOrDefault(agent, ReportSatisfaction.Empty)));
+        }
         var ordered = query.Sort switch
         {
             ReportLeaderboardSort.Resolved => rows.OrderByDescending(row => row.Resolved),
@@ -112,7 +161,11 @@ public sealed class ReportingService : IReportingService
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
         var scope = actor.Scope;
-        var (zoneId, zone) = await ZoneAsync(scope, cancellationToken).ConfigureAwait(false);
+        var zoneTask = ZoneAsync(scope, cancellationToken);
+        var filterTask = ViewFilterAsync(actor, cancellationToken);
+        await Task.WhenAll(zoneTask, filterTask).ConfigureAwait(false);
+        var (zoneId, zone) = zoneTask.Result;
+        var filter = filterTask.Result;
         IReadOnlyList<DateTimeOffset> boundaries;
         try
         {
@@ -122,24 +175,57 @@ public sealed class ReportingService : IReportingService
         {
             return new ReportRefused(ReportRefusal.Invalid, [$"The range spans more than {ReportBuckets.MaximumBuckets} buckets."]);
         }
-        var filter = await ViewFilterAsync(actor, cancellationToken).ConfigureAwait(false);
         ReportAggregateResult aggregate = new([], false);
         if (filter is not DenyAllFilter)
-            aggregate = await store.AggregateAsync(scope, new ReportAggregateQuery(boundaries, query.Metrics, query.Query.Filter, query.GroupBy,
-                query.Metrics.Any(ReportMetrics.IsDuration)), filter, cancellationToken).ConfigureAwait(false);
-        var points = aggregate.Rows.GroupBy(row => (row.Bucket, row.Group, row.Metric)).Select(rows =>
         {
-            var count = rows.Sum(row => row.Count);
-            var sum = rows.Sum(row => row.Sum);
-            TimeSpan? median = null, p90 = null;
-            if (ReportMetrics.IsDuration(rows.Key.Metric))
+            var hasDuration = false;
+            for (var i = 0; i < query.Metrics.Count; i++)
+                if (ReportMetrics.IsDuration(query.Metrics[i]))
+                {
+                    hasDuration = true;
+                    break;
+                }
+            aggregate = await store.AggregateAsync(scope, new ReportAggregateQuery(boundaries, query.Metrics, query.Query.Filter, query.GroupBy, hasDuration), filter,
+                cancellationToken).ConfigureAwait(false);
+        }
+        var sourceRows = aggregate.Rows;
+        var points = new List<ReportTrendPoint>();
+        List<ReportHistogramBin>? bins = null;
+        var idx = 0;
+        while (idx < sourceRows.Count)
+        {
+            var first = sourceRows[idx];
+            var bucket = first.Bucket;
+            var group = first.Group;
+            var metric = first.Metric;
+            var isDuration = ReportMetrics.IsDuration(metric);
+            long count = 0;
+            long sum = 0;
+            if (isDuration)
             {
-                var bins = rows.Select(row => new ReportHistogramBin(row.Bin, row.Count, row.Minimum, row.Maximum)).ToList();
-                median = Micro(ReportHistogram.Percentile(bins, 0.5));
-                p90 = Micro(ReportHistogram.Percentile(bins, 0.9));
+                bins ??= [];
+                bins.Clear();
             }
-            return new ReportTrendPoint(boundaries[rows.Key.Bucket], DisplayGroup(query.GroupBy, rows.Key.Group), rows.Key.Metric, count, sum, median, p90);
-        }).ToList();
+            while (idx < sourceRows.Count)
+            {
+                var row = sourceRows[idx];
+                if (row.Bucket != bucket || row.Metric != metric || !string.Equals(row.Group, group, StringComparison.Ordinal))
+                    break;
+                count += row.Count;
+                sum += row.Sum;
+                if (isDuration)
+                    bins!.Add(new ReportHistogramBin(row.Bin, row.Count, row.Minimum, row.Maximum));
+                idx++;
+            }
+            TimeSpan? median = null, p90 = null;
+            if (isDuration)
+            {
+                var (p50Val, p90Val) = ReportHistogram.Percentiles(bins!, 0.5, 0.9);
+                median = Micro(p50Val);
+                p90 = Micro(p90Val);
+            }
+            points.Add(new ReportTrendPoint(boundaries[bucket], DisplayGroup(query.GroupBy, group), metric, count, sum, median, p90));
+        }
         return new ReportSucceeded<ReportTrend>(new ReportTrend(boundaries[0], boundaries[^1], zoneId, query.Granularity, boundaries, points, aggregate.Truncated));
     }
 
@@ -163,30 +249,40 @@ public sealed class ReportingService : IReportingService
         {
             filter = DenyAllFilter.Instance;
         }
-        await output.WriteLineAsync("source_id,metric,occurred_at,conversation_id,inbox_id,team_id,agent_id,channel,priority,labels,value,unit".AsMemory(), cancellationToken)
-            .ConfigureAwait(false);
+        var newLine = output.NewLine;
+        var buffer = new StringBuilder(ExportFlushThreshold + 512);
+        buffer.Append("source_id,metric,occurred_at,conversation_id,inbox_id,team_id,agent_id,channel,priority,labels,value,unit").Append(newLine);
         long rows = 0;
         var truncated = false;
         if (filter is not DenyAllFilter)
         {
             ReportFactCursor? after = null;
-            var line = new StringBuilder();
             do
             {
                 var limit = (int)Math.Min(ReportFactQuery.MaximumLimit, query.MaximumRows - rows + 1);
                 var page = await store.ListFactsAsync(scope, new ReportFactQuery(query.Query.From, query.Query.To, query.Query.Filter, limit, after), filter, cancellationToken)
                     .ConfigureAwait(false);
-                foreach (var fact in page.Items)
+                var items = page.Items;
+                for (var i = 0; i < items.Count; i++)
                 {
                     if (rows == query.MaximumRows)
                     {
                         truncated = true;
                         break;
                     }
-                    line.Clear();
-                    AppendCsv(line, fact);
-                    await output.WriteLineAsync(line, cancellationToken).ConfigureAwait(false);
+                    AppendCsv(buffer, items[i]);
+                    buffer.Append(newLine);
                     rows++;
+                    if (buffer.Length >= ExportFlushThreshold)
+                    {
+                        await output.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
+                        buffer.Clear();
+                    }
+                }
+                if (buffer.Length > 0)
+                {
+                    await output.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
+                    buffer.Clear();
                 }
                 await output.FlushAsync(cancellationToken).ConfigureAwait(false);
                 after = page.Next;
@@ -195,6 +291,11 @@ public sealed class ReportingService : IReportingService
             }
             while (after is not null && !truncated);
         }
+        if (buffer.Length > 0)
+        {
+            await output.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
+            buffer.Clear();
+        }
         await output.FlushAsync(cancellationToken).ConfigureAwait(false);
         return new ReportSucceeded<ReportExportSummary>(new ReportExportSummary(rows, truncated));
     }
@@ -202,10 +303,13 @@ public sealed class ReportingService : IReportingService
     /// <summary>The <c>report:view</c> plan, widened by <c>report:view-own</c> to rows attributed to the calling user.</summary>
     private async Task<AccessFilter> ViewFilterAsync(PrincipalRef actor, CancellationToken cancellationToken)
     {
-        var view = await planner.PlanAsync(new AccessQuery(actor, ReportPermissions.View, actor.Scope), cancellationToken).ConfigureAwait(false);
         if (actor.Value is not UserPrincipal user)
-            return view;
-        var own = await planner.PlanAsync(new AccessQuery(actor, ReportPermissions.ViewOwn, actor.Scope), cancellationToken).ConfigureAwait(false);
+            return await planner.PlanAsync(new AccessQuery(actor, ReportPermissions.View, actor.Scope), cancellationToken).ConfigureAwait(false);
+        var viewTask = planner.PlanAsync(new AccessQuery(actor, ReportPermissions.View, actor.Scope), cancellationToken);
+        var ownTask = planner.PlanAsync(new AccessQuery(actor, ReportPermissions.ViewOwn, actor.Scope), cancellationToken);
+        await Task.WhenAll(viewTask, ownTask).ConfigureAwait(false);
+        var view = viewTask.Result;
+        var own = ownTask.Result;
         if (own is DenyAllFilter)
             return view;
         try
@@ -254,28 +358,112 @@ public sealed class ReportingService : IReportingService
 
     private static string? DisplayGroup(ReportDimension dimension, string? group) =>
         dimension == ReportDimension.Priority && int.TryParse(group, NumberStyles.None, CultureInfo.InvariantCulture, out var value)
-            && Enum.IsDefined((Conversations.ConversationPriority)value)
-            ? ((Conversations.ConversationPriority)value).ToString().ToLowerInvariant()
+            && Enum.IsDefined((ConversationPriority)value)
+            ? PriorityName((ConversationPriority)value)
             : group;
+
+    private static string PriorityName(ConversationPriority priority) => priority switch
+    {
+        ConversationPriority.None => "none",
+        ConversationPriority.Low => "low",
+        ConversationPriority.Medium => "medium",
+        ConversationPriority.High => "high",
+        ConversationPriority.Urgent => "urgent",
+        _ => priority.ToString().ToLowerInvariant(),
+    };
 
     private static TimeSpan? Micro(long? microseconds) => microseconds is { } value ? TimeSpan.FromTicks(value * 10) : null;
 
     private static void AppendCsv(StringBuilder line, ReportFact fact)
     {
         var dimensions = fact.Dimensions;
-        string[] fields =
-        [
-            fact.SourceId.ToString("D"), ReportMetricNames.Name(fact.Metric), fact.OccurredAt.ToString("yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture),
-            fact.Conversation.Value, dimensions.Inbox.Value, dimensions.Team?.Value ?? string.Empty, dimensions.Agent?.Value ?? string.Empty, dimensions.Channel ?? string.Empty,
-            dimensions.Priority.ToString().ToLowerInvariant(), string.Join(';', dimensions.Labels.Select(label => label.Value)),
-            fact.Value.ToString(CultureInfo.InvariantCulture), ReportMetrics.IsDuration(fact.Metric) ? "us" : "count",
-        ];
-        for (var index = 0; index < fields.Length; index++)
+        Span<char> scratch = stackalloc char[40];
+        // 1. source_id (36-char GUID "D" — always safe for CSV)
+        fact.SourceId.TryFormat(scratch, out var written, "D");
+        line.Append(scratch[..written]);
+        // 2. metric (lowercase kebab-case — always safe)
+        line.Append(',').Append(ReportMetricNames.Name(fact.Metric));
+        // 3. occurred_at (UTC ISO-8601 microsecond — always safe)
+        line.Append(',');
+        FormatUtcInstant(scratch, fact.OccurredAt);
+        line.Append(scratch[..27]);
+        // 4. conversation_id
+        line.Append(',');
+        Csv.Append(line, fact.Conversation.Value);
+        // 5. inbox_id
+        line.Append(',');
+        Csv.Append(line, dimensions.Inbox.Value);
+        // 6. team_id
+        line.Append(',');
+        if (dimensions.Team is { } team)
+            Csv.Append(line, team.Value);
+        // 7. agent_id
+        line.Append(',');
+        if (dimensions.Agent is { } agent)
+            Csv.Append(line, agent.Value);
+        // 8. channel
+        line.Append(',');
+        if (dimensions.Channel is { } channel)
+            Csv.Append(line, channel);
+        // 9. priority (always lowercase alpha — safe)
+        line.Append(',').Append(PriorityName(dimensions.Priority));
+        // 10. labels (';'-joined)
+        line.Append(',');
+        var labels = dimensions.Labels;
+        if (labels.Count == 1)
+            Csv.Append(line, labels[0].Value);
+        else if (labels.Count > 1)
         {
-            if (index > 0)
-                line.Append(',');
-            Csv.Append(line, fields[index]);
+            var joined = new StringBuilder();
+            for (var i = 0; i < labels.Count; i++)
+            {
+                if (i > 0)
+                    joined.Append(';');
+                joined.Append(labels[i].Value);
+            }
+            Csv.Append(line, joined.ToString());
         }
+        // 11. value (non-negative long — always safe)
+        line.Append(',');
+        fact.Value.TryFormat(scratch, out written, provider: CultureInfo.InvariantCulture);
+        line.Append(scratch[..written]);
+        // 12. unit
+        line.Append(ReportMetrics.IsDuration(fact.Metric) ? ",us" : ",count");
+    }
+
+    private static void FormatUtcInstant(Span<char> dest, DateTimeOffset instant)
+    {
+        var utc = instant.UtcDateTime;
+        var year = utc.Year;
+        dest[0] = (char)('0' + year / 1000);
+        dest[1] = (char)('0' + year / 100 % 10);
+        dest[2] = (char)('0' + year / 10 % 10);
+        dest[3] = (char)('0' + year % 10);
+        dest[4] = '-';
+        WriteTwo(dest, 5, utc.Month);
+        dest[7] = '-';
+        WriteTwo(dest, 8, utc.Day);
+        dest[10] = 'T';
+        WriteTwo(dest, 11, utc.Hour);
+        dest[13] = ':';
+        WriteTwo(dest, 14, utc.Minute);
+        dest[16] = ':';
+        WriteTwo(dest, 17, utc.Second);
+        dest[19] = '.';
+        var micros = (int)(utc.Ticks % TimeSpan.TicksPerSecond / 10);
+        dest[20] = (char)('0' + micros / 100000);
+        dest[21] = (char)('0' + micros / 10000 % 10);
+        dest[22] = (char)('0' + micros / 1000 % 10);
+        dest[23] = (char)('0' + micros / 100 % 10);
+        dest[24] = (char)('0' + micros / 10 % 10);
+        dest[25] = (char)('0' + micros % 10);
+        dest[26] = 'Z';
+    }
+
+    private static void WriteTwo(Span<char> dest, int offset, int value)
+    {
+        dest[offset] = (char)('0' + value / 10);
+        dest[offset + 1] = (char)('0' + value % 10);
     }
 
     private static void RequireActor(PrincipalRef actor)
@@ -287,30 +475,35 @@ public sealed class ReportingService : IReportingService
     /// <summary>Per-metric totals and duration summaries over aggregate rows (any grouping).</summary>
     private sealed class Totals
     {
-        private readonly Dictionary<ReportMetric, List<ReportAggregateRow>> rows = [];
+        private readonly long[] counts = new long[17];
+        private readonly long[] sums = new long[17];
+        private readonly List<ReportHistogramBin>?[] bins = new List<ReportHistogramBin>?[17];
 
-        public Totals(IEnumerable<ReportAggregateRow> source)
+        public Totals(IReadOnlyList<ReportAggregateRow> source, int start, int end)
         {
-            foreach (var row in source)
+            for (var i = start; i < end; i++)
             {
-                if (!rows.TryGetValue(row.Metric, out var list))
-                    rows[row.Metric] = list = [];
-                list.Add(row);
+                var row = source[i];
+                var m = (int)row.Metric;
+                counts[m] += row.Count;
+                sums[m] += row.Sum;
+                if (ReportMetrics.IsDuration(row.Metric))
+                    (bins[m] ??= []).Add(new ReportHistogramBin(row.Bin, row.Count, row.Minimum, row.Maximum));
             }
         }
 
-        public long Count(ReportMetric metric) => rows.TryGetValue(metric, out var list) ? list.Sum(row => row.Count) : 0;
+        public long Count(ReportMetric metric) => counts[(int)metric];
 
         public ReportDurationSummary Duration(ReportMetric metric)
         {
-            if (!rows.TryGetValue(metric, out var list))
-                return ReportDurationSummary.Empty;
-            var count = list.Sum(row => row.Count);
+            var m = (int)metric;
+            var count = counts[m];
             if (count <= 0)
                 return ReportDurationSummary.Empty;
-            var sum = list.Sum(row => row.Sum);
-            var bins = list.Select(row => new ReportHistogramBin(row.Bin, row.Count, row.Minimum, row.Maximum)).ToList();
-            return new ReportDurationSummary(count, TimeSpan.FromTicks(sum / count * 10), Micro(ReportHistogram.Percentile(bins, 0.5)), Micro(ReportHistogram.Percentile(bins, 0.9)));
+            var sum = sums[m];
+            var list = bins[m];
+            var (p50, p90) = list is not null ? ReportHistogram.Percentiles(list, 0.5, 0.9) : (null, null);
+            return new ReportDurationSummary(count, TimeSpan.FromTicks(sum / count * 10), Micro(p50), Micro(p90));
         }
     }
 }
@@ -318,36 +511,61 @@ public sealed class ReportingService : IReportingService
 /// <summary>Stable lowercase kebab-case metric names used in exports (for example <c>first-response-time</c>).</summary>
 public static class ReportMetricNames
 {
-    public static string Name(ReportMetric metric)
+    public static string Name(ReportMetric metric) => metric switch
     {
-        ReportMetrics.Require(metric, nameof(metric));
-        var text = metric.ToString();
-        var builder = new StringBuilder(text.Length + 4);
-        foreach (var character in text)
-        {
-            if (char.IsUpper(character) && builder.Length > 0)
-                builder.Append('-');
-            builder.Append(char.ToLowerInvariant(character));
-        }
-        return builder.ToString();
-    }
+        ReportMetric.ConversationCreated => "conversation-created",
+        ReportMetric.ConversationResolved => "conversation-resolved",
+        ReportMetric.ConversationReopened => "conversation-reopened",
+        ReportMetric.MessageReceived => "message-received",
+        ReportMetric.MessageSent => "message-sent",
+        ReportMetric.FirstResponseTime => "first-response-time",
+        ReportMetric.FirstResponseBusinessTime => "first-response-business-time",
+        ReportMetric.ResponseTime => "response-time",
+        ReportMetric.ResponseBusinessTime => "response-business-time",
+        ReportMetric.ResolutionTime => "resolution-time",
+        ReportMetric.ResolutionBusinessTime => "resolution-business-time",
+        ReportMetric.Assignment => "assignment",
+        ReportMetric.Handoff => "handoff",
+        ReportMetric.TeamTransfer => "team-transfer",
+        ReportMetric.SlaAchieved => "sla-achieved",
+        ReportMetric.SlaBreached => "sla-breached",
+        _ => throw new ArgumentOutOfRangeException(nameof(metric), "Unknown report metric."),
+    };
 }
 
 /// <summary>RFC 4180 field encoding with spreadsheet formula neutralization.</summary>
 public static class Csv
 {
+    private static readonly SearchValues<char> Special = SearchValues.Create(",\"\r\n");
+
     public static void Append(StringBuilder line, string value)
     {
         ArgumentNullException.ThrowIfNull(line);
         ArgumentNullException.ThrowIfNull(value);
+        var span = value.AsSpan();
         // A leading = + - @ (or tab/CR) would be evaluated as a formula by spreadsheet applications.
-        if (value.Length > 0 && value[0] is '=' or '+' or '-' or '@' or '\t' or '\r')
-            value = "'" + value;
-        if (value.AsSpan().IndexOfAny(",\"\r\n") < 0)
+        var neutralize = span.Length > 0 && span[0] is '=' or '+' or '-' or '@' or '\t' or '\r';
+        if (span.IndexOfAny(Special) < 0)
         {
+            if (neutralize)
+                line.Append('\'');
             line.Append(value);
             return;
         }
-        line.Append('"').Append(value.Replace("\"", "\"\"", StringComparison.Ordinal)).Append('"');
+        line.Append('"');
+        if (neutralize)
+            line.Append('\'');
+        while (true)
+        {
+            var quote = span.IndexOf('"');
+            if (quote < 0)
+            {
+                line.Append(span);
+                break;
+            }
+            line.Append(span[..quote]).Append("\"\"");
+            span = span[(quote + 1)..];
+        }
+        line.Append('"');
     }
 }

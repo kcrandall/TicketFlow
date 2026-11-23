@@ -229,9 +229,15 @@ else
         contact = found.Value;
         revealed = Session.PageStateAs<ContactFieldRevealed>();
         mergePreview = Session.PageStateAs<TicketFlow.UI.Blazor.Infrastructure.UiActions.MergePreview>();
-        await LoadWorkspaceAsync();
-        if (Service<IConversationService>() is { } conversationService && Session.Can(AccessPermissions.ConversationRead)
-            && await conversationService.ListAsync(Actor, new ConversationListQuery(contact: id, limit: 10), null, Aborted) is ConversationListPage page)
+        var inboxesTask = LoadInboxesAsync();
+        var convTask = Service<IConversationService>() is { } conversationService && Session.Can(AccessPermissions.ConversationRead)
+            ? conversationService.ListAsync(Actor, new ConversationListQuery(contact: id, limit: 10), null, Aborted)
+            : null;
+        if (convTask is not null)
+            await Task.WhenAll(inboxesTask, convTask);
+        else
+            await inboxesTask;
+        if (convTask is not null && await convTask is ConversationListPage page)
             conversations.AddRange(page.Conversations);
         await Session.LoadUsersAsync(conversations.Select(conversation => conversation.Assignee));
     }

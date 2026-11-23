@@ -43,8 +43,6 @@ public sealed class ChannelReplyService : IChannelReplyService
         var channel = await ChannelAsync(stored, cancellationToken).ConfigureAwait(false);
         if (channel is not null)
         {
-            if (await WindowAsync(stored, channel, cancellationToken).ConfigureAwait(false) is { Value: ReplyWindowClosed closed })
-                return closed;
             var attachments = message.Attachments?.Count ?? 0;
             if (attachments > channel.Capabilities.MaximumAttachments)
                 return ConversationRefused.Invalid(channel.Capabilities.Has(ChannelFeatures.Attachments)
@@ -52,6 +50,9 @@ public sealed class ChannelReplyService : IChannelReplyService
                     : "The channel cannot send attachments.");
             if (message.Body.Length > channel.Capabilities.MaximumBodyLength)
                 return ConversationRefused.Invalid($"The channel accepts bodies of at most {channel.Capabilities.MaximumBodyLength} characters.");
+            if (channel.Capabilities.ReplyWindow is not null
+                && await WindowAsync(stored, channel, cancellationToken).ConfigureAwait(false) is { Value: ReplyWindowClosed closed })
+                return closed;
         }
         return await conversations.ReplyAsync(actor, conversation, message, expectedRevision, cancellationToken).ConfigureAwait(false) switch
         {
@@ -99,6 +100,8 @@ public sealed class ChannelReplyService : IChannelReplyService
 
     private async Task<ReplyWindowState> WindowAsync(StoredConversation stored, ITicketChannel channel, CancellationToken cancellationToken)
     {
+        if (channel.Capabilities.ReplyWindow is null)
+            return new ReplyWindowOpen(null);
         var state = await states.GetAsync(stored.Scope, stored.Id, cancellationToken).ConfigureAwait(false);
         return ChannelReplyWindow.Evaluate(channel.Capabilities, state?.State.LastIncomingAt ?? stored.Conversation.LastIncomingAt, time.GetUtcNow());
     }

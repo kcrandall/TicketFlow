@@ -112,16 +112,17 @@ public sealed class TicketFlowMcpResources(IServiceProvider services)
         return (context, principal);
     }
 
-    private static string Serialize(object value, int maximumBytes)
-    {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(value, TicketFlowToolJson.Options.GetTypeInfo(value.GetType()));
-        if (bytes.Length > maximumBytes)
-            throw new McpException($"result-too-large: The resource exceeds {maximumBytes} bytes.");
-        return Encoding.UTF8.GetString(bytes);
-    }
+    private static string? cachedDefaultGuide;
+
+    private static string Serialize(object value, int maximumBytes) =>
+        TicketFlowToolResults.SerializeBoundedString(value, maximumBytes)
+        ?? throw new McpException($"result-too-large: The resource exceeds {maximumBytes} bytes.");
 
     /// <summary>The guide Markdown; <paramref name="registry"/> (optional) marks which toolsets this server enables.</summary>
-    public static string Render(TicketFlowMcpRegistry? registry)
+    public static string Render(TicketFlowMcpRegistry? registry) =>
+        registry is null ? (cachedDefaultGuide ??= RenderCore(null)) : registry.GetOrRenderGuide(RenderCore);
+
+    private static string RenderCore(TicketFlowMcpRegistry? registry)
     {
         var text = new StringBuilder();
         text.AppendLine("# TicketFlow MCP tools").AppendLine();

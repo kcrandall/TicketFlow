@@ -19,18 +19,22 @@
                 }
             </div>
             <div class="tf-card__content tf-stack tf-stack--sm">
+                @{ var byDay = GroupByDay(calendar); }
                 @foreach (var day in Days)
                 {
-                    var hours = calendar.WeeklyHours.Where(entry => entry.Day == day).Select(entry => entry.Hours).ToList();
+                    var hours = byDay[(int)day];
                     <div class="tf-row" style="flex-wrap:nowrap">
-                        <span style="width:44px" class="tf-small tf-muted">@day.ToString()[..3]</span>
+                        <span style="width:44px" class="tf-small tf-muted">@DayLabels[(int)day]</span>
                         <div style="position:relative;flex:1;height:10px;border-radius:999px;background:var(--muted)">
-                            @foreach (var span in hours)
+                            @if (hours is not null)
                             {
-                                <span style="position:absolute;top:0;bottom:0;border-radius:999px;background:var(--chart-2);left:@Pct(span.Start);width:@Pct(span.End - span.Start)" title="@Format(span)"></span>
+                                @foreach (var span in hours)
+                                {
+                                    <span style="position:absolute;top:0;bottom:0;border-radius:999px;background:var(--chart-2);left:@Pct(span.Start);width:@Pct(span.End - span.Start)" title="@Format(span)"></span>
+                                }
                             }
                         </div>
-                        <span style="width:110px;text-align:right" class="tf-small">@(hours.Count == 0 ? "Closed" : string.Join(", ", hours.Select(Format)))</span>
+                        <span style="width:110px;text-align:right" class="tf-small">@(hours is null ? "Closed" : string.Join(", ", hours.Select(Format)))</span>
                     </div>
                 }
                 @if (calendar.Overrides.Count > 0)
@@ -76,7 +80,16 @@
 
 @code {
     private static readonly DayOfWeek[] Days = [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday, DayOfWeek.Saturday, DayOfWeek.Sunday];
+    private static readonly string[] DayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     private IReadOnlyList<StoredBusinessCalendar> calendars = [];
+
+    private static List<BusinessHours>?[] GroupByDay(BusinessCalendar calendar)
+    {
+        var byDay = new List<BusinessHours>?[7];
+        foreach (var entry in calendar.WeeklyHours)
+            (byDay[(int)entry.Day] ??= []).Add(entry.Hours);
+        return byDay;
+    }
 
     private static string Pct(TimeSpan value) => (value.TotalMinutes / 1440 * 100).ToString("0.##", CultureInfo.InvariantCulture) + "%";
 

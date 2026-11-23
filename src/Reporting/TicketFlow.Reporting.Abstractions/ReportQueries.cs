@@ -65,7 +65,15 @@ public static class ReportGroups
         ReportDimension.Team => team?.Value,
         ReportDimension.Agent => agent?.Value,
         ReportDimension.Channel => channel,
-        ReportDimension.Priority => ((int)priority).ToString(CultureInfo.InvariantCulture),
+        ReportDimension.Priority => priority switch
+        {
+            ConversationPriority.None => "1",
+            ConversationPriority.Low => "2",
+            ConversationPriority.Medium => "3",
+            ConversationPriority.High => "4",
+            ConversationPriority.Urgent => "5",
+            _ => ((int)priority).ToString(CultureInfo.InvariantCulture),
+        },
         ReportDimension.Label => label?.Value,
         _ => throw new ArgumentOutOfRangeException(nameof(dimension)),
     };
@@ -88,10 +96,19 @@ public sealed record ReportAggregateQuery
         bool histograms = false)
     {
         ArgumentNullException.ThrowIfNull(boundaries);
-        Boundaries = [.. boundaries.Select(ReportText.Instant)];
-        if (Boundaries.Count < 2 || Boundaries.Count > ReportBuckets.MaximumBuckets + 1 || Boundaries.Any(boundary => !ReportBuckets.IsCellAligned(boundary))
-            || Boundaries.Zip(Boundaries.Skip(1)).Any(pair => pair.First >= pair.Second))
+        var list = new List<DateTimeOffset>();
+        foreach (var boundary in boundaries)
+        {
+            var instant = ReportText.Instant(boundary);
+            if (!ReportBuckets.IsCellAligned(instant) || (list.Count > 0 && list[^1] >= instant))
+                throw new ArgumentException("Boundaries must be 2-1001 strictly increasing, 15-minute aligned instants.", nameof(boundaries));
+            list.Add(instant);
+            if (list.Count > ReportBuckets.MaximumBuckets + 1)
+                throw new ArgumentException("Boundaries must be 2-1001 strictly increasing, 15-minute aligned instants.", nameof(boundaries));
+        }
+        if (list.Count < 2)
             throw new ArgumentException("Boundaries must be 2-1001 strictly increasing, 15-minute aligned instants.", nameof(boundaries));
+        Boundaries = list;
         Metrics = ReportMetrics.Set(metrics, nameof(metrics));
         Filter = filter ?? ReportFilter.None;
         GroupBy = ReportGroups.Require(groupBy, nameof(groupBy));
@@ -164,8 +181,14 @@ public sealed record ReportFactQuery
     public static int Compare(DateTimeOffset leftAt, Guid leftSource, ReportMetric leftMetric, DateTimeOffset rightAt, Guid rightSource, ReportMetric rightMetric)
     {
         var order = leftAt.CompareTo(rightAt);
-        if (order == 0)
-            order = string.CompareOrdinal(leftSource.ToString("N"), rightSource.ToString("N"));
+        if (order == 0 && leftSource != rightSource)
+        {
+            Span<byte> leftBytes = stackalloc byte[16];
+            Span<byte> rightBytes = stackalloc byte[16];
+            leftSource.TryWriteBytes(leftBytes, bigEndian: true, out _);
+            rightSource.TryWriteBytes(rightBytes, bigEndian: true, out _);
+            order = leftBytes.SequenceCompareTo(rightBytes);
+        }
         return order != 0 ? order : ((int)leftMetric).CompareTo((int)rightMetric);
     }
 }

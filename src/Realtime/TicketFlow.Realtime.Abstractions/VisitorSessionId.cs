@@ -19,7 +19,17 @@ public readonly record struct VisitorSessionId
     public bool IsInitialized => value is not null;
 
     /// <summary>A new random identifier (<c>vs_</c> + 128 random bits, base32 lowercase).</summary>
-    public static VisitorSessionId New() => new("vs_" + RealtimeText.RandomToken(16));
+    public static VisitorSessionId New()
+    {
+        Span<byte> random = stackalloc byte[16];
+        RandomNumberGenerator.Fill(random);
+        Span<char> chars = stackalloc char[3 + 26];
+        chars[0] = 'v';
+        chars[1] = 's';
+        chars[2] = '_';
+        var written = RealtimeText.EncodeBase32(random, chars[3..]);
+        return new VisitorSessionId(new string(chars[..(3 + written)]));
+    }
 
     public override string ToString() => value ?? string.Empty;
 }
@@ -42,11 +52,18 @@ public static class RealtimeText
     /// <summary>Lowercase unpadded base32.</summary>
     public static string Base32(ReadOnlySpan<byte> data)
     {
-        var output = new char[(data.Length * 8 + 4) / 5];
+        var len = (data.Length * 8 + 4) / 5;
+        Span<char> output = len <= 256 ? stackalloc char[len] : new char[len];
+        var written = EncodeBase32(data, output);
+        return new string(output[..written]);
+    }
+
+    internal static int EncodeBase32(ReadOnlySpan<byte> data, Span<char> output)
+    {
         int buffer = 0, bits = 0, index = 0;
-        foreach (var value in data)
+        for (var i = 0; i < data.Length; i++)
         {
-            buffer = (buffer << 8) | value;
+            buffer = (buffer << 8) | data[i];
             bits += 8;
             while (bits >= 5)
             {
@@ -56,6 +73,6 @@ public static class RealtimeText
         }
         if (bits > 0)
             output[index++] = Alphabet[(buffer << (5 - bits)) & 31];
-        return new string(output, 0, index);
+        return index;
     }
 }

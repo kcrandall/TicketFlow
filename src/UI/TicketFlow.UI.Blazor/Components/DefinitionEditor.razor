@@ -36,10 +36,16 @@
     [Parameter] public bool Open { get; set; }
     [Parameter] public RenderFragment? Extra { get; set; }
 
+    private static readonly System.Text.Json.JsonSerializerOptions PrettyOptions = new()
+    {
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
     /// <summary>Indents compact codec JSON for editing.</summary>
     public static string Pretty(string json)
     {
         using var document = System.Text.Json.JsonDocument.Parse(json);
-        return System.Text.Json.JsonSerializer.Serialize(document.RootElement, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+        return System.Text.Json.JsonSerializer.Serialize(document.RootElement, PrettyOptions);
     }
 }

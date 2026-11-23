@@ -18,21 +18,27 @@ internal static class AccessEndpoints
         group.MapGet("/me", async (TicketFlowActor actor, bool? includeSensitive, [FromServices] IAccessEvaluator evaluator, [FromServices] IPermissionCatalog catalog, HttpContext http) =>
         {
             var resource = WorkspaceResources.Workspace(actor.Scope);
+            var chunks = catalog.Definitions.Where(definition => includeSensitive == true || !definition.IsSensitive).Select(definition => definition.Permission).Chunk(DecisionBatch).ToArray();
+            var contextTasks = new Task<IAccessDecisionContext>[chunks.Length];
+            for (var i = 0; i < chunks.Length; i++)
+                contextTasks[i] = evaluator.LoadDecisionContextAsync(actor.Principal, actor.Scope, chunks[i], http.RequestAborted);
+            var contexts = await Task.WhenAll(contextTasks);
             var held = new List<string>();
-            foreach (var chunk in catalog.Definitions.Where(definition => includeSensitive == true || !definition.IsSensitive).Select(definition => definition.Permission).Chunk(DecisionBatch))
+            for (var i = 0; i < chunks.Length; i++)
             {
-                var context = await evaluator.LoadDecisionContextAsync(actor.Principal, actor.Scope, chunk, http.RequestAborted);
-                foreach (var permission in chunk)
-                    if ((await context.DecideAsync(permission, resource, http.RequestAborted)).IsPermitted)
-                        held.Add(permission.Value);
+                var chunk = chunks[i];
+                var context = contexts[i];
+                for (var j = 0; j < chunk.Length; j++)
+                    if ((await context.DecideAsync(chunk[j], resource, http.RequestAborted)).IsPermitted)
+                        held.Add(chunk[j].Value);
             }
-            IReadOnlyList<string> permissions = [.. held.Order(StringComparer.Ordinal)];
+            held.Sort(StringComparer.Ordinal);
             return TicketFlowHttp.Ok(http, actor.Principal switch
             {
-                UserPrincipal user => new MeResponse("user", user.UserId.Value, [.. user.Teams.Select(team => team.Value).Order(StringComparer.Ordinal)], permissions),
-                ApiClientPrincipal client => new MeResponse("apiClient", client.ClientId.Value, [], permissions),
-                AutomationPrincipal automation => new MeResponse("automation", automation.AutomationId, [], permissions),
-                SystemPrincipal system => new MeResponse("system", system.Component, [], permissions),
+                UserPrincipal user => new MeResponse("user", user.UserId.Value, [.. user.Teams.Select(team => team.Value).Order(StringComparer.Ordinal)], held),
+                ApiClientPrincipal client => new MeResponse("apiClient", client.ClientId.Value, [], held),
+                AutomationPrincipal automation => new MeResponse("automation", automation.AutomationId, [], held),
+                SystemPrincipal system => new MeResponse("system", system.Component, [], held),
             });
         }).WithName("GetMe").Produces<MeResponse>();
 

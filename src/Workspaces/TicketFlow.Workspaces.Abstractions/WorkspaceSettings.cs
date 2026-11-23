@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections.Frozen;
 using TicketFlow.Core;
 
@@ -32,10 +33,15 @@ public sealed record WorkspaceSettings
 
     public bool IsEnabled(string feature) => feature is not null && FeatureToggles.TryGetValue(feature, out var enabled) && enabled;
 
-    public bool Equals(WorkspaceSettings? other) =>
-        other is not null && Name == other.Name && DefaultLocale == other.DefaultLocale && TimeZoneId == other.TimeZoneId
-        && FeatureToggles.Count == other.FeatureToggles.Count
-        && FeatureToggles.All(pair => other.FeatureToggles.TryGetValue(pair.Key, out var value) && value == pair.Value);
+    public bool Equals(WorkspaceSettings? other)
+    {
+        if (other is null || Name != other.Name || DefaultLocale != other.DefaultLocale || TimeZoneId != other.TimeZoneId || FeatureToggles.Count != other.FeatureToggles.Count)
+            return false;
+        foreach (var pair in FeatureToggles)
+            if (!other.FeatureToggles.TryGetValue(pair.Key, out var value) || value != pair.Value)
+                return false;
+        return true;
+    }
 
     public override int GetHashCode() => HashCode.Combine(Name, DefaultLocale, TimeZoneId, FeatureToggles.Count);
 
@@ -64,14 +70,28 @@ public static class WorkspaceLocales
 {
     public const int MaximumLength = 35;
 
+    private static readonly SearchValues<char> AsciiLetters = SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+    private static readonly SearchValues<char> AsciiLettersOrDigits = SearchValues.Create("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+
     public static bool IsValid(string? value)
     {
         if (value is null || value.Length is 0 or > MaximumLength)
             return false;
-        var segments = value.Split('-');
-        if (segments[0].Length is < 2 or > 8 || !segments[0].All(char.IsAsciiLetter))
-            return false;
-        return segments.Skip(1).All(segment => segment.Length is >= 1 and <= 8 && segment.All(char.IsAsciiLetterOrDigit));
+        var span = value.AsSpan();
+        var first = true;
+        foreach (var range in span.Split('-'))
+        {
+            var segment = span[range];
+            if (first)
+            {
+                if (segment.Length is < 2 or > 8 || segment.ContainsAnyExcept(AsciiLetters))
+                    return false;
+                first = false;
+            }
+            else if (segment.Length is < 1 or > 8 || segment.ContainsAnyExcept(AsciiLettersOrDigits))
+                return false;
+        }
+        return !first;
     }
 
     internal static string Require(string value, string parameterName)
@@ -88,9 +108,11 @@ public static class WorkspaceTimeZones
 {
     public const int MaximumIdLength = 64;
 
+    private static readonly SearchValues<char> AllowedIdChars = SearchValues.Create("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz/_+- ");
+
     /// <summary>True when <paramref name="value"/> has identifier syntax: 1-64 characters of letters, digits, '/', '_', '+' or '-'.</summary>
     public static bool IsValidId(string? value) =>
-        value is { Length: > 0 and <= MaximumIdLength } && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '/' or '_' or '+' or '-' or ' ');
+        value is { Length: > 0 and <= MaximumIdLength } && !value.AsSpan().ContainsAnyExcept(AllowedIdChars);
 
     /// <summary>Resolves a syntactically valid identifier on this host; returns false when the zone is unknown.</summary>
     public static bool TryResolve(string? value, out TimeZoneInfo timeZone)
@@ -112,7 +134,7 @@ public static class WorkspaceTimeZones
     internal static string RequireId(string value, string parameterName)
     {
         ArgumentNullException.ThrowIfNull(value, parameterName);
-        if (!IsValidId(value) || value.Trim() != value)
+        if (!IsValidId(value) || value[0] == ' ' || value[^1] == ' ')
             throw new ArgumentException("Time-zone identifiers must be 1-64 characters of letters, digits, '/', '_', '+', '-' or inner spaces.", parameterName);
         return value;
     }

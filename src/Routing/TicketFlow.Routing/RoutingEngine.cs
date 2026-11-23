@@ -166,7 +166,7 @@ public sealed class RoutingEngine : IRoutingEngine
             return new RoutingQueued(RoutingQueueReason.Manual);
 
         var candidates = await CandidatesAsync(scope, stored, conversation.Team ?? policy.Team, channel, required, manualFallback ? preferred : null, preferred,
-            entry.TargetInbox.Value, cancellationToken)
+            selection, entry.TargetInbox.Value, cancellationToken)
             .ConfigureAwait(false);
         if (candidates.Count == 0)
             return new RoutingQueued(RoutingQueueReason.NoEligibleAgent);
@@ -213,61 +213,215 @@ public sealed class RoutingEngine : IRoutingEngine
     /// rotation order (plus the sticky preference), so no eligible agent is starved by an identifier cutoff.
     /// </summary>
     private async Task<IReadOnlyList<RoutingCandidate>> CandidatesAsync(TicketScope scope, StoredConversation stored, TeamId? team, ChannelKind channel,
-        IReadOnlyDictionary<string, int> required, UserId? only, UserId? preferred, string cursorKey, CancellationToken cancellationToken)
+        IReadOnlyDictionary<string, int> required, UserId? only, UserId? preferred, RoutingSelection selection, string cursorKey, CancellationToken cancellationToken)
     {
         IEnumerable<UserId>? allowed = null;
         if (team is { } teamId)
-            allowed = (IEnumerable<UserId>?)(await teams.GetAsync(scope, teamId, cancellationToken).ConfigureAwait(false))?.Team.Members ?? [];
+        {
+            var members = (await teams.GetAsync(scope, teamId, cancellationToken).ConfigureAwait(false))?.Team.Members;
+            if (members is null || members.Count == 0)
+                return [];
+            allowed = members;
+        }
         if (only is { } single)
-            allowed = allowed is null || allowed.Contains(single) ? [single] : [];
-        if (allowed is not null && !allowed.Any())
-            return [];
+        {
+            if (allowed is not null && !allowed.Contains(single))
+                return [];
+            allowed = [single];
+        }
         var resource = ConversationAccess.Resource(stored);
         var eligible = new List<RoutingCandidate>();
-        var query = new AvailableAgentQuery(channel, allowed, required);
+        var baseQuery = new AvailableAgentQuery(channel, allowed, required);
+
+        // RoundRobin fast-path: start scanning after the stored cursor (wrapping around if needed) so large workspaces
+        // stop as soon as MaximumCandidates eligible agents are collected instead of paging all 10,000 agents.
+        if (selection == RoutingSelection.RoundRobin && preferred is null && only is null)
+        {
+            var cursor = await assignments.GetCursorAsync(scope, cursorKey, cancellationToken).ConfigureAwait(false);
+            var startAfter = cursor is not null ? new UserId(cursor) : (UserId?)null;
+            var query = startAfter is { } afterId ? baseQuery.WithAfter(afterId) : baseQuery;
+            var maxPages = IAgentAvailabilityStore.MaximumAgentsPerWorkspace / IAgentAvailabilityStore.MaximumAvailableList;
+            for (var pages = 0; pages < maxPages && eligible.Count < RoutingReservationRequest.MaximumCandidates; pages++)
+            {
+                var page = await agents.ListAvailableAsync(scope, query, cancellationToken).ConfigureAwait(false);
+                if (page.Count == 0)
+                    break;
+                await CollectEligibleAsync(scope, page, channel, resource, eligible, RoutingReservationRequest.MaximumCandidates, cancellationToken).ConfigureAwait(false);
+                if (page.Count < query.Limit || eligible.Count >= RoutingReservationRequest.MaximumCandidates)
+                    break;
+                query = query.WithAfter(page[^1].Agent);
+            }
+            if (startAfter is { } wrapLimit && eligible.Count < RoutingReservationRequest.MaximumCandidates)
+            {
+                query = baseQuery;
+                for (var pages = 0; pages < maxPages && eligible.Count < RoutingReservationRequest.MaximumCandidates; pages++)
+                {
+                    var page = await agents.ListAvailableAsync(scope, query, cancellationToken).ConfigureAwait(false);
+                    if (page.Count == 0)
+                        break;
+                    var take = page.Count;
+                    for (var i = 0; i < page.Count; i++)
+                    {
+                        if (string.CompareOrdinal(page[i].Agent.Value, wrapLimit.Value) > 0)
+                        {
+                            take = i;
+                            break;
+                        }
+                    }
+                    if (take == 0)
+                        break;
+                    var slice = take == page.Count ? page : page.Take(take).ToList();
+                    await CollectEligibleAsync(scope, slice, channel, resource, eligible, RoutingReservationRequest.MaximumCandidates, cancellationToken).ConfigureAwait(false);
+                    if (take < page.Count || page.Count < query.Limit || eligible.Count >= RoutingReservationRequest.MaximumCandidates)
+                        break;
+                    query = query.WithAfter(page[^1].Agent);
+                }
+            }
+            return eligible;
+        }
+
+        var scanQuery = baseQuery;
         for (var pages = 0; pages * IAgentAvailabilityStore.MaximumAvailableList < IAgentAvailabilityStore.MaximumAgentsPerWorkspace; pages++)
         {
-            var page = await agents.ListAvailableAsync(scope, query, cancellationToken).ConfigureAwait(false);
-            var filters = await EligibilityAsync(scope, [.. page.Select(profile => profile.Agent)], cancellationToken).ConfigureAwait(false);
-            foreach (var profile in page)
-                if (AccessFilterEvaluator.Matches(filters[profile.Agent], resource))
-                    eligible.Add(new RoutingCandidate(profile.Agent, profile.Settings.CapacityFor(channel)));
-            if (page.Count < query.Limit)
+            var page = await agents.ListAvailableAsync(scope, scanQuery, cancellationToken).ConfigureAwait(false);
+            if (page.Count == 0)
                 break;
-            query = query.WithAfter(page[^1].Agent);
+            await CollectEligibleAsync(scope, page, channel, resource, eligible, int.MaxValue, cancellationToken).ConfigureAwait(false);
+            if (page.Count < scanQuery.Limit)
+                break;
+            scanQuery = scanQuery.WithAfter(page[^1].Agent);
         }
         if (eligible.Count <= RoutingReservationRequest.MaximumCandidates)
             return eligible;
-        var cursor = await assignments.GetCursorAsync(scope, cursorKey, cancellationToken).ConfigureAwait(false);
-        var rotation = cursor is null ? eligible
-            : [.. eligible.Where(c => string.CompareOrdinal(c.Agent.Value, cursor) > 0), .. eligible.Where(c => string.CompareOrdinal(c.Agent.Value, cursor) <= 0)];
-        var window = rotation.Take(RoutingReservationRequest.MaximumCandidates).ToList();
-        if (preferred is { } sticky && !window.Any(c => c.Agent == sticky) && eligible.FirstOrDefault(c => c.Agent == sticky) is { } owner)
-            window[^1] = owner;
+        var currentCursor = await assignments.GetCursorAsync(scope, cursorKey, cancellationToken).ConfigureAwait(false);
+        var startIndex = currentCursor is null ? 0 : FindFirstAfter(eligible, currentCursor);
+        var window = new List<RoutingCandidate>(RoutingReservationRequest.MaximumCandidates);
+        var hasSticky = false;
+        for (var i = 0; i < RoutingReservationRequest.MaximumCandidates; i++)
+        {
+            var item = eligible[(startIndex + i) % eligible.Count];
+            if (preferred is { } p && item.Agent == p)
+                hasSticky = true;
+            window.Add(item);
+        }
+        if (preferred is { } sticky && !hasSticky)
+        {
+            for (var i = 0; i < eligible.Count; i++)
+                if (eligible[i].Agent == sticky)
+                {
+                    window[^1] = eligible[i];
+                    break;
+                }
+        }
         return window;
+    }
+
+    private async Task CollectEligibleAsync(TicketScope scope, IReadOnlyList<StoredAgentProfile> page, ChannelKind channel, AccessResource resource,
+        List<RoutingCandidate> eligible, int maxCount, CancellationToken cancellationToken)
+    {
+        var ids = new UserId[page.Count];
+        for (var i = 0; i < page.Count; i++)
+            ids[i] = page[i].Agent;
+        var filters = await EligibilityAsync(scope, ids, cancellationToken).ConfigureAwait(false);
+        for (var i = 0; i < page.Count && eligible.Count < maxCount; i++)
+        {
+            var profile = page[i];
+            if (AccessFilterEvaluator.Matches(filters[profile.Agent], resource))
+                eligible.Add(new RoutingCandidate(profile.Agent, profile.Settings.CapacityFor(channel)));
+        }
+    }
+
+    private static int FindFirstAfter(List<RoutingCandidate> sorted, string cursor)
+    {
+        int lo = 0, hi = sorted.Count;
+        while (lo < hi)
+        {
+            var mid = lo + ((hi - lo) >> 1);
+            if (string.CompareOrdinal(sorted[mid].Agent.Value, cursor) <= 0)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        return lo == sorted.Count ? 0 : lo;
     }
 
     /// <summary>One Access plan per agent, reused within this engine instance (one run); missing plans are resolved in one batch.</summary>
     private async Task<IReadOnlyDictionary<UserId, AccessFilter>> EligibilityAsync(TicketScope scope, IReadOnlyList<UserId> agentIds, CancellationToken cancellationToken)
     {
         var now = time.GetUtcNow();
-        var filters = new Dictionary<UserId, AccessFilter>();
-        var missing = new List<UserId>();
-        foreach (var agent in agentIds)
+        var filters = new Dictionary<UserId, AccessFilter>(agentIds.Count);
+        List<UserId>? missing = null;
+        for (var i = 0; i < agentIds.Count; i++)
+        {
+            var agent = agentIds[i];
             if (eligibility.TryGetValue((scope, agent), out var cached) && cached.Until > now)
                 filters[agent] = cached.Filter;
             else
+            {
+                missing ??= [];
                 missing.Add(agent);
-        if (missing.Count == 0)
+            }
+        }
+        if (missing is null)
             return filters;
         var teamsByAgent = await memberships.GetTeamsAsync(scope, missing, cancellationToken).ConfigureAwait(false);
-        foreach (var agent in missing)
+        var planUntil = options.RunEligibilityPlanLifetime > TimeSpan.Zero ? now + options.RunEligibilityPlanLifetime : (DateTimeOffset?)null;
+        if (missing.Count == 1)
         {
+            var agent = missing[0];
             var principal = new UserPrincipal(scope, agent, teamsByAgent.GetValueOrDefault(agent) ?? []);
             var filter = await planner.PlanAsync(new AccessQuery(principal, ConversationPermissions.Reply, scope), cancellationToken).ConfigureAwait(false);
             filters[agent] = filter;
-            if (options.RunEligibilityPlanLifetime > TimeSpan.Zero)
-                eligibility[(scope, agent)] = (filter, now + options.RunEligibilityPlanLifetime);
+            if (planUntil is { } until)
+                eligibility[(scope, agent)] = (filter, until);
+            return filters;
+        }
+        const int maxConcurrency = 8;
+        var results = new AccessFilter[missing.Count];
+        if (missing.Count <= maxConcurrency)
+        {
+            var tasks = new Task<AccessFilter>[missing.Count];
+            for (var i = 0; i < missing.Count; i++)
+            {
+                var agent = missing[i];
+                var principal = new UserPrincipal(scope, agent, teamsByAgent.GetValueOrDefault(agent) ?? []);
+                tasks[i] = planner.PlanAsync(new AccessQuery(principal, ConversationPermissions.Reply, scope), cancellationToken);
+            }
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+            for (var i = 0; i < missing.Count; i++)
+                results[i] = tasks[i].Result;
+        }
+        else
+        {
+            using var semaphore = new SemaphoreSlim(maxConcurrency, maxConcurrency);
+            var tasks = new Task[missing.Count];
+            for (var i = 0; i < missing.Count; i++)
+            {
+                var idx = i;
+                var agent = missing[idx];
+                var principal = new UserPrincipal(scope, agent, teamsByAgent.GetValueOrDefault(agent) ?? []);
+                tasks[idx] = Task.Run(async () =>
+                {
+                    await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        results[idx] = await planner.PlanAsync(new AccessQuery(principal, ConversationPermissions.Reply, scope), cancellationToken).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                }, cancellationToken);
+            }
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+        for (var i = 0; i < missing.Count; i++)
+        {
+            var agent = missing[i];
+            var filter = results[i];
+            filters[agent] = filter;
+            if (planUntil is { } until)
+                eligibility[(scope, agent)] = (filter, until);
         }
         return filters;
     }

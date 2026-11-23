@@ -75,9 +75,12 @@ public sealed record ConversationChange
         if (!Enum.IsDefined(kind))
             throw new ArgumentOutOfRangeException(nameof(kind));
         ArgumentNullException.ThrowIfNull(events);
-        Events = [.. events];
-        if (Events.Count > MaximumEvents || Events.Any(summary => summary is null))
+        Events = events is IReadOnlyList<ConversationEventSummary> { Count: 0 } ? [] : [.. events];
+        if (Events.Count > MaximumEvents)
             throw new ArgumentException($"A change summarizes at most {MaximumEvents} events.", nameof(events));
+        for (var i = 0; i < Events.Count; i++)
+            if (Events[i] is null)
+                throw new ArgumentException($"A change summarizes at most {MaximumEvents} events.", nameof(events));
         if ((kind == ConversationChangeKind.DeliveryUpdated) != (message is not null && delivery is not null) || message == default(MessageId)
             || (delivery is { } state && !Enum.IsDefined(state)))
             throw new ArgumentException("Delivery changes, and only they, name a message and delivery state.");
@@ -107,8 +110,17 @@ public sealed record ConversationChange
     public DateTimeOffset OccurredAt { get; }
 
     /// <summary>Outgoing messages in this change that the channel layer must dispatch.</summary>
-    public IReadOnlyList<MessageId> OutgoingMessages =>
-        [.. Events.Where(summary => summary.Direction == MessageDirection.Outgoing).Select(summary => summary.Message!.Value)];
+    public IReadOnlyList<MessageId> OutgoingMessages
+    {
+        get
+        {
+            List<MessageId>? outgoing = null;
+            for (var i = 0; i < Events.Count; i++)
+                if (Events[i].Direction == MessageDirection.Outgoing)
+                    (outgoing ??= []).Add(Events[i].Message!.Value);
+            return outgoing is null ? [] : outgoing;
+        }
+    }
 
     public bool Equals(ConversationChange? other) =>
         other is not null && Id == other.Id && Scope == other.Scope && Conversation == other.Conversation && Inbox == other.Inbox && Revision == other.Revision
@@ -165,6 +177,39 @@ public interface IConversationOutbox
     Task<bool> ReleaseAsync(string consumer, long sequence, long fence, DateTimeOffset retryAt, CancellationToken cancellationToken = default);
 
     Task<bool> DeadLetterAsync(string consumer, long sequence, long fence, CancellationToken cancellationToken = default);
+
+    /// <summary>Acknowledges a batch of claimed deliveries for <paramref name="consumer"/> and returns how many succeeded.</summary>
+    async Task<int> AcknowledgeBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> claims, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(claims);
+        var count = 0;
+        for (var i = 0; i < claims.Count; i++)
+            if (await AcknowledgeAsync(consumer, claims[i].Sequence, claims[i].Fence, cancellationToken).ConfigureAwait(false))
+                count++;
+        return count;
+    }
+
+    /// <summary>Releases a batch of claimed deliveries for <paramref name="consumer"/> and returns how many succeeded.</summary>
+    async Task<int> ReleaseBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence, DateTimeOffset RetryAt)> claims, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(claims);
+        var count = 0;
+        for (var i = 0; i < claims.Count; i++)
+            if (await ReleaseAsync(consumer, claims[i].Sequence, claims[i].Fence, claims[i].RetryAt, cancellationToken).ConfigureAwait(false))
+                count++;
+        return count;
+    }
+
+    /// <summary>Dead-letters a batch of claimed deliveries for <paramref name="consumer"/> and returns how many succeeded.</summary>
+    async Task<int> DeadLetterBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> claims, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(claims);
+        var count = 0;
+        for (var i = 0; i < claims.Count; i++)
+            if (await DeadLetterAsync(consumer, claims[i].Sequence, claims[i].Fence, cancellationToken).ConfigureAwait(false))
+                count++;
+        return count;
+    }
 
     Task<int> PruneAsync(DateTimeOffset olderThan, int limit, CancellationToken cancellationToken = default);
 

@@ -34,8 +34,9 @@ public sealed class AccessEvaluator : IAccessEvaluator
         ArgumentNullException.ThrowIfNull(request);
         var permission = request.Permission;
         var resource = request.Resource;
-        var sensitive = engine.Catalog.Find(permission)?.IsSensitive == true;
-        if (engine.Precheck(request.Principal, permission, resource.Scope) is { } reason)
+        var definition = engine.Catalog.Find(permission);
+        var sensitive = definition?.IsSensitive == true;
+        if (AccessEngine.Precheck(request.Principal, definition is not null, resource.Scope) is { } reason)
         {
             AccessDecision rejected = new AccessDenied(permission, reason);
             if (sensitive)
@@ -80,7 +81,7 @@ public sealed class AccessEvaluator : IAccessEvaluator
             case MaskOutcome.Masked:
                 if (policy.RevealPermission is not { } revealPermission || !engine.Catalog.Contains(revealPermission))
                     return await RefuseAsync(request, RevealRefusal.NotRevealable, context.Now, cancellationToken).ConfigureAwait(false);
-                var reveal = AccessEngine.Evaluate(context, revealPermission, resource, includeBreakGlass: true);
+                var reveal = AccessEngine.EvaluateSimple(context, revealPermission, resource, includeBreakGlass: true);
                 if (!reveal.Allowed)
                     return await RefuseAsync(request, RevealRefusal.RevealDenied, context.Now, cancellationToken).ConfigureAwait(false);
                 usedBreakGlass |= reveal.UsedBreakGlass;
@@ -103,43 +104,104 @@ public sealed class AccessEvaluator : IAccessEvaluator
     /// <summary>Masking is decided from standard allows first, so a break-glass grant that changes the outcome is detected and audited.</summary>
     private static MaskOutcome Unmasking(AccessFieldPolicy policy, PointResult result)
     {
-        if (result.StandardAllows.Any(allow => policy.UnmaskedRoles.Contains(allow.Grant.Role)))
-            return MaskOutcome.UnmaskedByStandard;
-        return result.BreakGlassAllows.Any(allow => policy.UnmaskedRoles.Contains(allow.Grant.Role)) ? MaskOutcome.UnmaskedByBreakGlass : MaskOutcome.Masked;
+        var unmasked = policy.UnmaskedRoles;
+        if (unmasked.Count == 0)
+            return MaskOutcome.Masked;
+        var standard = result.StandardAllows;
+        for (var i = 0; i < standard.Count; i++)
+            if (unmasked.Contains(standard[i].Grant.Role))
+                return MaskOutcome.UnmaskedByStandard;
+        var breakGlass = result.BreakGlassAllows;
+        for (var i = 0; i < breakGlass.Count; i++)
+            if (unmasked.Contains(breakGlass[i].Grant.Role))
+                return MaskOutcome.UnmaskedByBreakGlass;
+        return MaskOutcome.Masked;
     }
 
-    private async Task<AccessDecision> MaskAsync(AccessContext context, Permission permission, AccessResource resource, PointResult result, CancellationToken cancellationToken) =>
-        Mask(context, permission, resource, result, await policies.ListAsync(resource.Scope, cancellationToken).ConfigureAwait(false));
+    private async Task<AccessDecision> MaskAsync(AccessContext context, Permission permission, AccessResource resource, PointResult result, CancellationToken cancellationToken)
+    {
+        var stored = await policies.ListAsync(resource.Scope, cancellationToken).ConfigureAwait(false);
+        return stored.Count == 0 ? new AccessAllowed(permission, result.UsedBreakGlass) : Mask(context, permission, resource, result, stored);
+    }
 
     private AccessDecision Mask(AccessContext context, Permission permission, AccessResource resource, PointResult result, IReadOnlyList<StoredAccessFieldPolicy> stored)
     {
         var usedBreakGlass = result.UsedBreakGlass;
-        var masked = new List<MaskedField>();
-        foreach (var entry in stored)
+        List<MaskedField>? masked = null;
+        Permission? cachedRevealPerm = null;
+        SimplePointResult cachedReveal = default;
+        Dictionary<Permission, SimplePointResult>? revealCache = null;
+
+        for (var i = 0; i < stored.Count; i++)
         {
-            var policy = entry.Policy;
+            var policy = stored[i].Policy;
             if (!policy.AppliesTo.Contains(permission))
                 continue;
-            switch (Unmasking(policy, result))
-            {
-                case MaskOutcome.UnmaskedByStandard:
-                    continue;
-                case MaskOutcome.UnmaskedByBreakGlass:
-                    usedBreakGlass = true;
-                    continue;
-                case MaskOutcome.Masked:
-                    var revealable = false;
-                    if (policy.RevealPermission is { } revealPermission && engine.Catalog.Contains(revealPermission))
-                    {
-                        var reveal = AccessEngine.Evaluate(context, revealPermission, resource, includeBreakGlass: true);
-                        revealable = reveal.Allowed;
-                        usedBreakGlass |= reveal.UsedBreakGlass;
-                    }
-                    masked.Add(new(policy.Field, revealable));
-                    break;
-            }
+            EvaluatePolicy(context, resource, result, policy, ref usedBreakGlass, ref masked, ref cachedRevealPerm, ref cachedReveal, ref revealCache);
         }
-        return masked.Count == 0 ? new AccessAllowed(permission, usedBreakGlass) : new AccessMasked(permission, masked, usedBreakGlass);
+        return masked is null ? new AccessAllowed(permission, usedBreakGlass) : new AccessMasked(permission, masked, usedBreakGlass);
+    }
+
+    private AccessDecision MaskFiltered(AccessContext context, Permission permission, AccessResource resource, PointResult result, AccessFieldPolicy[] applicable)
+    {
+        var usedBreakGlass = result.UsedBreakGlass;
+        List<MaskedField>? masked = null;
+        Permission? cachedRevealPerm = null;
+        SimplePointResult cachedReveal = default;
+        Dictionary<Permission, SimplePointResult>? revealCache = null;
+
+        for (var i = 0; i < applicable.Length; i++)
+            EvaluatePolicy(context, resource, result, applicable[i], ref usedBreakGlass, ref masked, ref cachedRevealPerm, ref cachedReveal, ref revealCache);
+        return masked is null ? new AccessAllowed(permission, usedBreakGlass) : new AccessMasked(permission, masked, usedBreakGlass);
+    }
+
+    private void EvaluatePolicy(
+        AccessContext context,
+        AccessResource resource,
+        PointResult result,
+        AccessFieldPolicy policy,
+        ref bool usedBreakGlass,
+        ref List<MaskedField>? masked,
+        ref Permission? cachedRevealPerm,
+        ref SimplePointResult cachedReveal,
+        ref Dictionary<Permission, SimplePointResult>? revealCache)
+    {
+        switch (Unmasking(policy, result))
+        {
+            case MaskOutcome.UnmaskedByStandard:
+                return;
+            case MaskOutcome.UnmaskedByBreakGlass:
+                usedBreakGlass = true;
+                return;
+            case MaskOutcome.Masked:
+                var revealable = false;
+                if (policy.RevealPermission is { } revealPermission && engine.Catalog.Contains(revealPermission))
+                {
+                    SimplePointResult reveal;
+                    if (cachedRevealPerm == revealPermission)
+                        reveal = cachedReveal;
+                    else if (revealCache is not null && revealCache.TryGetValue(revealPermission, out var cached))
+                        reveal = cached;
+                    else
+                    {
+                        reveal = AccessEngine.EvaluateSimple(context, revealPermission, resource, includeBreakGlass: true);
+                        if (cachedRevealPerm is null)
+                        {
+                            cachedRevealPerm = revealPermission;
+                            cachedReveal = reveal;
+                        }
+                        else
+                        {
+                            revealCache ??= new Dictionary<Permission, SimplePointResult> { [cachedRevealPerm.Value] = cachedReveal };
+                            revealCache[revealPermission] = reveal;
+                        }
+                    }
+                    revealable = reveal.Allowed;
+                    usedBreakGlass |= reveal.UsedBreakGlass;
+                }
+                (masked ??= []).Add(new(policy.Field, revealable));
+                return;
+        }
     }
 
     /// <summary>
@@ -149,19 +211,50 @@ public sealed class AccessEvaluator : IAccessEvaluator
     public async Task<IAccessDecisionContext> LoadDecisionContextAsync(PrincipalRef principal, TicketScope scope, IEnumerable<Permission> permissions, CancellationToken cancellationToken = default)
     {
         var loaded = AccessDecisionContexts.Validate(principal, scope, permissions);
-        var prechecks = loaded.ToDictionary(permission => permission, permission => engine.Precheck(principal, permission, scope));
-        AccessContext? context = null;
-        IReadOnlyList<StoredAccessFieldPolicy> stored = [];
-        if (prechecks.Values.Any(reason => reason is null))
+        var entries = new Dictionary<Permission, LoadedPermission>(loaded.Count);
+        var anyAllowed = false;
+        foreach (var permission in loaded)
         {
-            context = await engine.LoadAsync(principal, scope, cancellationToken).ConfigureAwait(false);
-            stored = await policies.ListAsync(scope, cancellationToken).ConfigureAwait(false);
+            var definition = engine.Catalog.Find(permission);
+            var precheck = AccessEngine.Precheck(principal, definition is not null, scope);
+            anyAllowed |= precheck is null;
+            entries[permission] = new(precheck, definition?.IsSensitive == true, null);
         }
-        return new BatchContext(this, principal, scope, loaded, prechecks, context, stored);
+
+        AccessContext? context = null;
+        if (anyAllowed)
+        {
+            var contextTask = engine.LoadAsync(principal, scope, cancellationToken);
+            var policiesTask = policies.ListAsync(scope, cancellationToken);
+            await Task.WhenAll(contextTask, policiesTask).ConfigureAwait(false);
+            context = await contextTask.ConfigureAwait(false);
+            var stored = await policiesTask.ConfigureAwait(false);
+            if (stored.Count > 0)
+            {
+                foreach (var permission in loaded)
+                {
+                    var entry = entries[permission];
+                    if (entry.Precheck is not null)
+                        continue;
+                    List<AccessFieldPolicy>? matching = null;
+                    for (var i = 0; i < stored.Count; i++)
+                    {
+                        var policy = stored[i].Policy;
+                        if (policy.AppliesTo.Contains(permission))
+                            (matching ??= []).Add(policy);
+                    }
+                    if (matching is not null)
+                        entries[permission] = entry with { Policies = [.. matching] };
+                }
+            }
+        }
+        return new BatchContext(this, principal, scope, loaded, entries, context);
     }
 
+    private readonly record struct LoadedPermission(AccessDenialReason? Precheck, bool Sensitive, AccessFieldPolicy[]? Policies);
+
     private sealed class BatchContext(AccessEvaluator owner, PrincipalRef principal, TicketScope scope, IReadOnlySet<Permission> permissions,
-        IReadOnlyDictionary<Permission, AccessDenialReason?> prechecks, AccessContext? context, IReadOnlyList<StoredAccessFieldPolicy> policies) : IAccessDecisionContext
+        Dictionary<Permission, LoadedPermission> entries, AccessContext? context) : IAccessDecisionContext
     {
         public PrincipalRef Principal { get; } = principal;
         public TicketScope Scope { get; } = scope;
@@ -169,22 +262,27 @@ public sealed class AccessEvaluator : IAccessEvaluator
 
         public ValueTask<AccessDecision> DecideAsync(Permission permission, AccessResource resource, CancellationToken cancellationToken = default)
         {
-            AccessDecisionContexts.RequireLoaded(Permissions, permission);
+            if (!entries.TryGetValue(permission, out var entry))
+                throw new ArgumentException("The permission was not loaded into this decision context.", nameof(permission));
             ArgumentNullException.ThrowIfNull(resource);
-            var sensitive = owner.engine.Catalog.Find(permission)?.IsSensitive == true;
             AccessDecision decision;
-            if (prechecks[permission] is { } reason)
+            if (entry.Precheck is { } reason)
                 decision = new AccessDenied(permission, reason);
             else if (resource.Scope != Scope)
                 decision = new AccessDenied(permission, AccessDenialReason.ScopeMismatch);
+            else if (entry.Policies is null)
+            {
+                var simple = AccessEngine.EvaluateSimple(context!, permission, resource, includeBreakGlass: true);
+                decision = simple.Denial is { } denial ? new AccessDenied(permission, denial) : new AccessAllowed(permission, simple.UsedBreakGlass);
+            }
             else
             {
                 var result = AccessEngine.Evaluate(context!, permission, resource, includeBreakGlass: true);
-                decision = result.Denial is { } denial ? new AccessDenied(permission, denial) : owner.Mask(context!, permission, resource, result, policies);
+                decision = result.Denial is { } denial ? new AccessDenied(permission, denial) : owner.MaskFiltered(context!, permission, resource, result, entry.Policies);
             }
             // Same audit semantics as AuthorizeAsync: sensitive permissions and every decision relying on break-glass are recorded
             // per resource; standard-grant decisions of non-sensitive permissions stay on the synchronous fast path.
-            if (!sensitive && !UsedBreakGlass(decision))
+            if (!entry.Sensitive && !UsedBreakGlass(decision))
                 return ValueTask.FromResult(decision);
             return RecordAsync(permission, resource, decision, cancellationToken);
         }

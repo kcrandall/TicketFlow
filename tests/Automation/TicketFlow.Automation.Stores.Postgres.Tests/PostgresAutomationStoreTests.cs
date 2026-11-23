@@ -160,7 +160,7 @@ public sealed class PostgresAutomationStoreTests
         await using var database = await Database.CreateAsync();
         await database.Competing.InitializeAsync();
         var inspection = await new PostgresMigrationRunner(database.Storage.First, PostgresAutomationMigrations.Catalog).InspectAsync();
-        Assert.AreEqual(2, inspection.CurrentVersion);
+        Assert.AreEqual(3, inspection.CurrentVersion);
         Assert.AreEqual("ticketflow.automation", inspection.Component);
     }
 }

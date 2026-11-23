@@ -11,15 +11,18 @@ function tfLiveInit() {
   const conversation = root.dataset.conversation;
   const users = JSON.parse(root.dataset.users || '{}');
   const RS = '\u001e';
-  let socket, invocation = 0, typingTimer, lastTyping = 0, refreshTimer, retry = 1000, stopped = false;
+  let socket, invocation = 0, typingTimer, lastTyping = 0, refreshTimer, reconnectTimer, refreshController = null, retry = 1000, stopped = false;
 
   const send = (message) => socket && socket.readyState === 1 && socket.send(JSON.stringify(message) + RS);
   const invoke = (target, ...args) => send({ type: 1, invocationId: String(++invocation), target, arguments: args });
 
   async function refresh() {
+    refreshController?.abort();
+    const controller = new AbortController();
+    refreshController = controller;
     try {
-      const response = await fetch(location.href, { headers: { 'Accept': 'text/html' }, credentials: 'same-origin' });
-      if (!response.ok) return;
+      const response = await fetch(location.href, { headers: { 'Accept': 'text/html' }, credentials: 'same-origin', signal: controller.signal });
+      if (!response.ok || controller.signal.aborted || stopped) return;
       const html = new DOMParser().parseFromString(await response.text(), 'text/html');
       const next = html.getElementById('tf-timeline');
       const current = document.getElementById('tf-timeline');
@@ -30,7 +33,8 @@ function tfLiveInit() {
       }
       const revision = html.querySelector('#tf-composer input[name="_revision"]');
       document.querySelectorAll('form input[name="_revision"]').forEach((input) => { if (revision) input.value = revision.value; });
-    } catch { /* offline: the next event retries */ }
+    } catch { /* offline or aborted: the next event retries */ }
+    finally { if (refreshController === controller) refreshController = null; }
   }
 
   function showTyping(data) {
@@ -68,11 +72,22 @@ function tfLiveInit() {
       if (!handshaken) { handshaken = true; retry = 1000; invoke('Subscribe', 'conversation', conversation); return; }
       onMessage(event.data);
     };
-    socket.onclose = () => { if (!stopped) { setTimeout(connect, retry); retry = Math.min(retry * 2, 30000); } };
+    socket.onclose = () => { if (!stopped) { clearTimeout(reconnectTimer); reconnectTimer = setTimeout(connect, retry); retry = Math.min(retry * 2, 30000); } };
   }
 
   const ping = setInterval(() => send({ type: 6 }), 15000);
-  tfLiveSocket = { conversation, stop: () => { stopped = true; clearInterval(ping); socket?.close(); } };
+  tfLiveSocket = {
+    conversation,
+    stop: () => {
+      stopped = true;
+      clearInterval(ping);
+      clearTimeout(reconnectTimer);
+      clearTimeout(refreshTimer);
+      clearTimeout(typingTimer);
+      refreshController?.abort();
+      socket?.close();
+    },
+  };
   const composer = document.querySelector('#tf-composer textarea[name="body"]');
   if (composer) {
     composer.addEventListener('input', () => {

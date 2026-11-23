@@ -109,14 +109,24 @@ public readonly record struct HelpCenterLocale : IComparable<HelpCenterLocale>
     public bool IsInitialized => value is not null;
 
     /// <summary>The lowercase primary language subtag (<c>pt</c> for <c>pt-BR</c>).</summary>
-    public string Language => Value.Split('-')[0];
+    public string Language
+    {
+        get
+        {
+            var v = Value;
+            var dash = v.IndexOf('-');
+            return dash < 0 ? v : v[..dash];
+        }
+    }
 
     public static bool TryParse(string? value, out HelpCenterLocale locale)
     {
         var canonical = value is null ? null : Canonicalize(value);
-        locale = canonical is null ? default : new HelpCenterLocale(canonical);
+        locale = canonical is null ? default : new HelpCenterLocale(canonical, true);
         return canonical is not null;
     }
+
+    private HelpCenterLocale(string canonical, bool _) => value = canonical;
 
     public int CompareTo(HelpCenterLocale other) => string.CompareOrdinal(value, other.value);
 
@@ -126,23 +136,87 @@ public readonly record struct HelpCenterLocale : IComparable<HelpCenterLocale>
     {
         if (string.IsNullOrEmpty(value) || value.Length > MaximumLength)
             return null;
-        var parts = value.Split('-');
-        if (parts.Length > 4 || parts[0].Length is < 2 or > 3 || !parts[0].All(char.IsAsciiLetter))
-            return null;
-        var result = new string[parts.Length];
-        result[0] = parts[0].ToLowerInvariant();
-        for (var index = 1; index < parts.Length; index++)
+        var span = value.AsSpan();
+        Span<char> dest = stackalloc char[span.Length];
+        var pos = 0;
+        var partIndex = 0;
+        var changed = false;
+        while (true)
         {
-            var part = parts[index];
-            if (part.Length is < 2 or > 8 || !part.All(char.IsAsciiLetterOrDigit))
+            if (partIndex >= 4)
                 return null;
-            result[index] = part.Length switch
+            var dash = span[pos..].IndexOf('-');
+            var partLen = dash < 0 ? span.Length - pos : dash;
+            var part = span.Slice(pos, partLen);
+            if (partIndex == 0)
             {
-                2 when part.All(char.IsAsciiLetter) => part.ToUpperInvariant(),
-                4 when part.All(char.IsAsciiLetter) => char.ToUpperInvariant(part[0]) + part[1..].ToLowerInvariant(),
-                _ => part.ToLowerInvariant(),
-            };
+                if (partLen is < 2 or > 3)
+                    return null;
+                for (var i = 0; i < partLen; i++)
+                {
+                    var c = part[i];
+                    if (!char.IsAsciiLetter(c))
+                        return null;
+                    var lower = char.ToLowerInvariant(c);
+                    dest[pos + i] = lower;
+                    if (lower != c)
+                        changed = true;
+                }
+            }
+            else
+            {
+                if (partLen is < 2 or > 8)
+                    return null;
+                var allLetters = true;
+                for (var i = 0; i < partLen; i++)
+                {
+                    var c = part[i];
+                    if (!char.IsAsciiLetterOrDigit(c))
+                        return null;
+                    if (!char.IsAsciiLetter(c))
+                        allLetters = false;
+                }
+                if (partLen == 2 && allLetters)
+                {
+                    for (var i = 0; i < partLen; i++)
+                    {
+                        var upper = char.ToUpperInvariant(part[i]);
+                        dest[pos + i] = upper;
+                        if (upper != part[i])
+                            changed = true;
+                    }
+                }
+                else if (partLen == 4 && allLetters)
+                {
+                    var first = char.ToUpperInvariant(part[0]);
+                    dest[pos] = first;
+                    if (first != part[0])
+                        changed = true;
+                    for (var i = 1; i < partLen; i++)
+                    {
+                        var lower = char.ToLowerInvariant(part[i]);
+                        dest[pos + i] = lower;
+                        if (lower != part[i])
+                            changed = true;
+                    }
+                }
+                else
+                {
+                    for (var i = 0; i < partLen; i++)
+                    {
+                        var lower = char.ToLowerInvariant(part[i]);
+                        dest[pos + i] = lower;
+                        if (lower != part[i])
+                            changed = true;
+                    }
+                }
+            }
+            partIndex++;
+            if (dash < 0)
+                break;
+            dest[pos + partLen] = '-';
+            pos += partLen + 1;
         }
-        return string.Join('-', result);
+        return changed ? new string(dest) : value;
     }
 }

@@ -110,11 +110,41 @@ public sealed record EventSubscriptionFilter
     {
         ArgumentNullException.ThrowIfNull(stored);
         var type = stored.Event.Type;
-        if (!Types.Any(pattern => pattern.Matches(type)))
+        var matchedType = false;
+        for (var i = 0; i < Types.Count; i++)
+        {
+            if (Types[i].Matches(type))
+            {
+                matchedType = true;
+                break;
+            }
+        }
+        if (!matchedType)
             return false;
-        if (Inboxes.Count > 0 && (stored.Resource.Inbox is not { } inbox || !Inboxes.Contains(inbox)))
+        if (Inboxes.Count > 0)
+        {
+            if (stored.Resource.Inbox is not { } inbox)
+                return false;
+            var foundInbox = false;
+            for (var i = 0; i < Inboxes.Count; i++)
+                if (Inboxes[i] == inbox)
+                {
+                    foundInbox = true;
+                    break;
+                }
+            if (!foundInbox)
+                return false;
+        }
+        if (Teams.Count > 0)
+        {
+            if (stored.Resource.Team is not { } team)
+                return false;
+            for (var i = 0; i < Teams.Count; i++)
+                if (Teams[i] == team)
+                    return true;
             return false;
-        return Teams.Count == 0 || stored.Resource.Team is { } team && Teams.Contains(team);
+        }
+        return true;
     }
 
     public bool Equals(EventSubscriptionFilter? other) =>
@@ -179,7 +209,16 @@ public sealed record EventDeliveryState(long Cursor, int Attempts, DateTimeOffse
     bool Suspended = false);
 
 /// <summary>A leased claim of one subscription's delivery. Completion, failure and dead-lettering succeed only with the current fence while the lease is held.</summary>
-public sealed record EventDeliveryClaim(StoredEventSubscription Subscription, EventDeliveryState State, long Fence, DateTimeOffset LeaseUntil);
+public sealed record EventDeliveryClaim(StoredEventSubscription Subscription, EventDeliveryState State, long Fence, DateTimeOffset LeaseUntil)
+{
+    /// <summary>Optional workspace event log head sequence observed at claim time to avoid an extra head query.</summary>
+    public long? HeadSequence { get; init; }
+
+    public bool Equals(EventDeliveryClaim? other) =>
+        other is not null && Subscription == other.Subscription && State == other.State && Fence == other.Fence && LeaseUntil == other.LeaseUntil;
+
+    public override int GetHashCode() => HashCode.Combine(Subscription, State, Fence, LeaseUntil);
+}
 
 /// <summary>An event a subscription gave up on after its retries (or a permanent sink failure). Failure codes never contain payloads.</summary>
 public sealed record EventDeadLetter(EventSubscriptionId Subscription, long Sequence, Guid EventId, string Type, int Attempts, string Error, DateTimeOffset DeadLetteredAt);

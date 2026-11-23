@@ -66,15 +66,25 @@
 
     protected override async Task OnInitializedAsync()
     {
-        await LoadWorkspaceAsync();
-        if (Service<ITeamService>() is not { } service)
+        await LoadTeamsAsync();
+        if (Service<ITeamService>() is not { } service || Teams.Count == 0)
             return;
-        foreach (var team in Teams)
-            if (await service.GetAsync(Actor, team.Id, Aborted) is WorkspaceSucceeded<StoredTeam> stored)
+        var detailTasks = new Task<WorkspaceResult<StoredTeam>>[Teams.Count];
+        var backlogTasks = new Task<long?>[Teams.Count];
+        for (var i = 0; i < Teams.Count; i++)
+        {
+            var teamId = Teams[i].Id;
+            detailTasks[i] = service.GetAsync(Actor, teamId, Aborted);
+            backlogTasks[i] = OpenBacklogAsync(new TicketFlow.Reporting.ReportFilter(team: teamId));
+        }
+        await Task.WhenAll(Task.WhenAll(detailTasks), Task.WhenAll(backlogTasks));
+        for (var i = 0; i < Teams.Count; i++)
+        {
+            if (await detailTasks[i] is WorkspaceSucceeded<StoredTeam> stored)
                 details.Add(stored.Value);
-        foreach (var team in Teams)
-            if (await OpenBacklogAsync(new TicketFlow.Reporting.ReportFilter(team: team.Id)) is { } count)
-                open[team.Id.Value] = count;
-        await Session.LoadUsersAsync(details.SelectMany(team => team.Team.Members).Select(member => (UserId?)member));
+            if (await backlogTasks[i] is { } count)
+                open[Teams[i].Id.Value] = count;
+        }
+        await Session.LoadUsersAsync(details.SelectMany(team => team.Team.Members.Take(6)).Select(member => (UserId?)member));
     }
 }

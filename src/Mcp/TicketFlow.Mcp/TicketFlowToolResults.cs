@@ -1,4 +1,6 @@
+using System.Buffers;
 using System.Buffers.Text;
+using System.Collections.Frozen;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -56,25 +58,66 @@ public static class TicketFlowToolJson
     public static JsonSerializerOptions Options { get; } = TicketFlowMcpJsonContext.Default.Options;
 
     /// <summary>The camelCase token of an enum value (<c>WhatsApp</c> → <c>whatsApp</c>).</summary>
-    public static string Token<TEnum>(TEnum value) where TEnum : struct, Enum => JsonNamingPolicy.CamelCase.ConvertName(value.ToString());
+    public static string Token<TEnum>(TEnum value) where TEnum : struct, Enum => EnumTokenCache<TEnum>.Token(value);
 
-    public static string? Token<TEnum>(TEnum? value) where TEnum : struct, Enum => value is { } some ? Token(some) : null;
+    public static string? Token<TEnum>(TEnum? value) where TEnum : struct, Enum => value is { } some ? EnumTokenCache<TEnum>.Token(some) : null;
 
     /// <summary>Parses a camelCase or PascalCase token of <typeparamref name="TEnum"/>; throws <see cref="ArgumentException"/> naming <paramref name="parameter"/>.</summary>
     public static TEnum Parse<TEnum>(string value, string parameter) where TEnum : struct, Enum
     {
         ArgumentNullException.ThrowIfNull(value, parameter);
-        if (value.Length > 0 && char.IsAsciiLetter(value[0]) && Enum.TryParse<TEnum>(value, ignoreCase: true, out var parsed) && Enum.IsDefined(parsed))
+        if (EnumTokenCache<TEnum>.TryParse(value, out var parsed))
             return parsed;
-        throw new ArgumentException($"'{parameter}' must be one of: {string.Join(", ", Enum.GetValues<TEnum>().Select(item => Token(item)))}.", parameter);
+        throw new ArgumentException($"'{parameter}' must be one of: {EnumTokenCache<TEnum>.AllowedList}.", parameter);
     }
 
     public static TEnum? ParseOptional<TEnum>(string? value, string parameter) where TEnum : struct, Enum =>
         value is null ? null : Parse<TEnum>(value, parameter);
 
     /// <summary>An opaque cursor of 1-4 parts (base64url of the joined parts).</summary>
-    public static string EncodeCursor(params string[] parts) =>
-        Base64Url.EncodeToString(Encoding.UTF8.GetBytes(string.Join('\n', parts)));
+    public static string EncodeCursor(params string[] parts)
+    {
+        var joined = parts.Length == 1 ? parts[0] : string.Join('\n', parts);
+        var maxBytes = Encoding.UTF8.GetMaxByteCount(joined.Length);
+        if (maxBytes <= 512)
+        {
+            Span<byte> buffer = stackalloc byte[maxBytes];
+            var written = Encoding.UTF8.GetBytes(joined, buffer);
+            return Base64Url.EncodeToString(buffer[..written]);
+        }
+        return Base64Url.EncodeToString(Encoding.UTF8.GetBytes(joined));
+    }
+
+    private static class EnumTokenCache<TEnum> where TEnum : struct, Enum
+    {
+        private static readonly FrozenDictionary<TEnum, string> ToToken;
+        private static readonly FrozenDictionary<string, TEnum> FromToken;
+        public static readonly string AllowedList;
+
+        static EnumTokenCache()
+        {
+            var values = Enum.GetValues<TEnum>();
+            var toToken = new Dictionary<TEnum, string>(values.Length);
+            var fromToken = new Dictionary<string, TEnum>(values.Length, StringComparer.OrdinalIgnoreCase);
+            var names = new string[values.Length];
+            for (var i = 0; i < values.Length; i++)
+            {
+                var value = values[i];
+                var name = value.ToString();
+                var token = JsonNamingPolicy.CamelCase.ConvertName(name);
+                toToken[value] = token;
+                fromToken[token] = value;
+                names[i] = token;
+            }
+            ToToken = toToken.ToFrozenDictionary();
+            FromToken = fromToken.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
+            AllowedList = string.Join(", ", names);
+        }
+
+        public static string Token(TEnum value) => ToToken.TryGetValue(value, out var token) ? token : JsonNamingPolicy.CamelCase.ConvertName(value.ToString());
+
+        public static bool TryParse(string value, out TEnum parsed) => FromToken.TryGetValue(value, out parsed);
+    }
 
     /// <summary>Decodes a cursor produced by <see cref="EncodeCursor"/> with exactly <paramref name="count"/> parts.</summary>
     public static string[] DecodeCursor(string cursor, int count)
@@ -125,6 +168,11 @@ public static class TicketFlowToolJson
 /// <summary>Builds MCP <see cref="CallToolResult"/>s: JSON structured content plus the same JSON as one text block.</summary>
 public static class TicketFlowToolResults
 {
+    private const int MaximumPooledCapacity = 65_536;
+
+    [ThreadStatic]
+    private static ArrayBufferWriter<byte>? pooledBuffer;
+
     /// <summary>
     /// A success result for <paramref name="value"/> (a type registered in <see cref="TicketFlowMcpJsonContext"/>). The bound applies to
     /// the whole payload: structured content plus its text copy.
@@ -132,28 +180,109 @@ public static class TicketFlowToolResults
     public static CallToolResult Success(object value, int maximumBytes = int.MaxValue)
     {
         ArgumentNullException.ThrowIfNull(value);
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(value, TicketFlowToolJson.Options.GetTypeInfo(value.GetType()));
-        if ((long)bytes.Length * 2 > maximumBytes)
+        var limit = maximumBytes == int.MaxValue ? int.MaxValue : maximumBytes / 2;
+        var buffer = RentBuffer();
+        try
+        {
+            var bounded = new BoundedBufferWriter(buffer, limit);
+            using (var writer = new Utf8JsonWriter(bounded))
+                JsonSerializer.Serialize(writer, value, TicketFlowToolJson.Options.GetTypeInfo(value.GetType()));
+            return Create(buffer.WrittenMemory, isError: false);
+        }
+        catch (PayloadTooLargeException)
+        {
             return Error(new TicketFlowToolError("result-too-large",
                 $"The result exceeds {maximumBytes} bytes; request a smaller page (lower 'limit') or a narrower range."));
-        return Create(bytes, isError: false);
+        }
+        finally
+        {
+            ReturnBuffer(buffer);
+        }
     }
 
     /// <summary>An error result (<c>isError</c>) for <paramref name="error"/>.</summary>
     public static CallToolResult Error(TicketFlowToolError error)
     {
         ArgumentNullException.ThrowIfNull(error);
-        return Create(JsonSerializer.SerializeToUtf8Bytes(new ToolErrorEnvelope(error), TicketFlowMcpJsonContext.Default.ToolErrorEnvelope), isError: true);
+        var buffer = RentBuffer();
+        try
+        {
+            using (var writer = new Utf8JsonWriter(buffer))
+                JsonSerializer.Serialize(writer, new ToolErrorEnvelope(error), TicketFlowMcpJsonContext.Default.ToolErrorEnvelope);
+            return Create(buffer.WrittenMemory, isError: true);
+        }
+        finally
+        {
+            ReturnBuffer(buffer);
+        }
     }
 
-    private static CallToolResult Create(byte[] bytes, bool isError)
+    /// <summary>Serializes a resource payload into a bounded pooled buffer, returning <see langword="null"/> when exceeding <paramref name="maximumBytes"/>.</summary>
+    internal static string? SerializeBoundedString(object value, int maximumBytes)
+    {
+        var buffer = RentBuffer();
+        try
+        {
+            var bounded = new BoundedBufferWriter(buffer, maximumBytes);
+            using (var writer = new Utf8JsonWriter(bounded))
+                JsonSerializer.Serialize(writer, value, TicketFlowToolJson.Options.GetTypeInfo(value.GetType()));
+            return Encoding.UTF8.GetString(buffer.WrittenSpan);
+        }
+        catch (PayloadTooLargeException)
+        {
+            return null;
+        }
+        finally
+        {
+            ReturnBuffer(buffer);
+        }
+    }
+
+    private static ArrayBufferWriter<byte> RentBuffer()
+    {
+        var buffer = pooledBuffer;
+        if (buffer is not null)
+        {
+            pooledBuffer = null;
+            buffer.ResetWrittenCount();
+            return buffer;
+        }
+        return new ArrayBufferWriter<byte>(4096);
+    }
+
+    private static void ReturnBuffer(ArrayBufferWriter<byte> buffer)
+    {
+        if (buffer.Capacity <= MaximumPooledCapacity)
+        {
+            buffer.ResetWrittenCount();
+            pooledBuffer = buffer;
+        }
+    }
+
+    private static CallToolResult Create(ReadOnlyMemory<byte> bytes, bool isError)
     {
         using var document = JsonDocument.Parse(bytes);
         return new CallToolResult
         {
             StructuredContent = document.RootElement.Clone(),
-            Content = [new TextContentBlock { Text = Encoding.UTF8.GetString(bytes) }],
+            Content = [new TextContentBlock { Text = Encoding.UTF8.GetString(bytes.Span) }],
             IsError = isError ? true : null,
         };
     }
+
+    private sealed class BoundedBufferWriter(ArrayBufferWriter<byte> inner, int limit) : IBufferWriter<byte>
+    {
+        public void Advance(int count)
+        {
+            if ((long)inner.WrittenCount + count > limit)
+                throw new PayloadTooLargeException();
+            inner.Advance(count);
+        }
+
+        public Memory<byte> GetMemory(int sizeHint = 0) => inner.GetMemory(sizeHint);
+
+        public Span<byte> GetSpan(int sizeHint = 0) => inner.GetSpan(sizeHint);
+    }
+
+    private sealed class PayloadTooLargeException : Exception;
 }

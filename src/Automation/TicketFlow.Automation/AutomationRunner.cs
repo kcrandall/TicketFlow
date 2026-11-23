@@ -67,24 +67,54 @@ public sealed class AutomationRunner
 
     public PrincipalRef Principal(TicketScope scope) => new ApiClientPrincipal(scope, options.ClientId);
 
-    public async Task<AutomationRunResult> RunAsync(AutomationOccurrence occurrence, IEnumerable<AutomationRule> rules, CancellationToken cancellationToken = default)
+    public Task<AutomationRunResult> RunAsync(AutomationOccurrence occurrence, IEnumerable<AutomationRule> rules, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(occurrence);
         ArgumentNullException.ThrowIfNull(rules);
+        var ordered = Order(rules);
+        var firing = new List<AutomationRule>();
+        foreach (var rule in ordered)
+            if (rule.Enabled && occurrence.Event.Fires(rule.Trigger) && (!occurrence.CausedByAutomation || rule.RunOnAutomationEvents))
+                firing.Add(rule);
+        return RunFiringAsync(occurrence, firing, cache: null, cancellationToken);
+    }
+
+    internal Task<AutomationRunResult> RunCompiledAsync(AutomationOccurrence occurrence, IReadOnlyList<AutomationRule> orderedEnabledCandidates, AutomationContextCache? cache,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(occurrence);
+        var firing = new List<AutomationRule>(orderedEnabledCandidates.Count);
+        for (var i = 0; i < orderedEnabledCandidates.Count; i++)
+        {
+            var rule = orderedEnabledCandidates[i];
+            if (rule.Enabled && occurrence.Event.Fires(rule.Trigger) && (!occurrence.CausedByAutomation || rule.RunOnAutomationEvents))
+                firing.Add(rule);
+        }
+        return RunFiringAsync(occurrence, firing, cache, cancellationToken);
+    }
+
+    private async Task<AutomationRunResult> RunFiringAsync(AutomationOccurrence occurrence, List<AutomationRule> firing, AutomationContextCache? cache,
+        CancellationToken cancellationToken)
+    {
+        if (firing.Count == 0)
+            return new AutomationRunResult(0, 0, 0);
         int executed = 0, suppressed = 0, skipped = 0;
         var actor = Principal(occurrence.Scope);
         var depth = occurrence.CausedByAutomation ? (occurrence.Cause?.Depth ?? options.MaximumChainDepth) + 1 : 1;
-        var firing = Order(rules)
-            .Where(rule => rule.Enabled && occurrence.Event.Fires(rule.Trigger) && (!occurrence.CausedByAutomation || rule.RunOnAutomationEvents))
-            .ToList();
-        if (firing.Count == 0)
-            return new AutomationRunResult(0, 0, 0);
+        var ids = new AutomationRuleId[firing.Count];
+        var combinedNeeds = AutomationContextNeeds.None;
+        for (var i = 0; i < firing.Count; i++)
+        {
+            ids[i] = firing[i].Id;
+            combinedNeeds |= AutomationContextNeedsHelper.ForRule(firing[i]);
+        }
         // One query for every firing rule's execution record and one context per occurrence (rebuilt only after a rule ran actions).
-        var records = await executions.FindManyAsync(occurrence.Scope, occurrence.Conversation, occurrence.TriggerKey, [.. firing.Select(rule => rule.Id)], cancellationToken)
+        var records = await executions.FindManyAsync(occurrence.Scope, occurrence.Conversation, occurrence.TriggerKey, ids, cancellationToken)
             .ConfigureAwait(false);
         AutomationContext? context = null;
-        foreach (var rule in firing)
+        for (var i = 0; i < firing.Count; i++)
         {
+            var rule = firing[i];
             cancellationToken.ThrowIfCancellationRequested();
             var existing = records.GetValueOrDefault(rule.Id);
             if (existing is { Execution.Status: not AutomationExecutionStatus.Running })
@@ -96,16 +126,18 @@ public sealed class AutomationRunner
             }
             if (context is null)
             {
-                var (built, failure) = await contexts.BuildAsync(actor, occurrence.Conversation, occurrence.Event, occurrence.Message, cancellationToken).ConfigureAwait(false);
+                var (built, failure) = await contexts.BuildInternalAsync(actor, occurrence.Conversation, occurrence.Event, occurrence.Message, combinedNeeds, cache, cancellationToken)
+                    .ConfigureAwait(false);
                 if (built is null)
                     return new AutomationRunResult(executed, suppressed, skipped + (failure is null ? 0 : 1));
                 context = built;
             }
             StoredAutomationExecution record;
+            var resumed = existing is not null;
             if (existing is not null)
             {
                 // A record left Running (crash, or a lost race): take it over compare-and-set so only one runner resumes it.
-                var claimed = await SaveAsync(occurrence.Scope, existing.Execution, existing.Revision, cancellationToken).ConfigureAwait(false);
+                var claimed = await SaveProgressAsync(occurrence.Scope, existing.Execution, existing.Revision, [], cancellationToken).ConfigureAwait(false);
                 if (claimed is null)
                 {
                     skipped++;
@@ -146,7 +178,7 @@ public sealed class AutomationRunner
                     continue;
                 }
             }
-            if (await ExecuteAsync(actor, rule, record, context, cancellationToken).ConfigureAwait(false))
+            if (await ExecuteAsync(actor, rule, record, context, resumed, cancellationToken).ConfigureAwait(false))
                 executed++;
             context = null;
             if (rule.StopProcessing)
@@ -156,56 +188,75 @@ public sealed class AutomationRunner
     }
 
     /// <summary>Runs the remaining actions of a running record; false when a concurrent runner owns the record.</summary>
-    private async Task<bool> ExecuteAsync(PrincipalRef actor, AutomationRule rule, StoredAutomationExecution record, AutomationContext context, CancellationToken cancellationToken)
+    private async Task<bool> ExecuteAsync(PrincipalRef actor, AutomationRule rule, StoredAutomationExecution record, AutomationContext context, bool resumed,
+        CancellationToken cancellationToken)
     {
         var scope = record.Scope;
         var execution = record.Execution;
         var revision = record.Revision;
-        var outcomes = execution.Outcomes.ToList();
-        var agentName = context.Conversation.Assignee is { } assignee && agents is not null
+        var outcomes = new List<AutomationActionOutcome>(rule.Actions.Count);
+        for (var i = 0; i < execution.Outcomes.Count; i++)
+            outcomes.Add(execution.Outcomes[i]);
+        var actionNeeds = AutomationContextNeedsHelper.ForActions(rule.Actions);
+        var agentName = (actionNeeds & AutomationContextNeeds.AgentName) != 0 && context.Conversation.Assignee is { } assignee && agents is not null
             ? await agents.GetDisplayNameAsync(scope, assignee, cancellationToken).ConfigureAwait(false)
             : null;
+        var conversationDirty = false;
         for (var index = outcomes.Count; index < rule.Actions.Count && index < execution.ActionCount; index++)
         {
-            if (index > 0)
+            var action = rule.Actions[index];
+            if (conversationDirty && AutomationContextNeedsHelper.ActionReadsMutableConversationState(action))
             {
-                var (refreshed, _) = await contexts.BuildAsync(actor, context.Conversation.Id, context.Event, context.Message, cancellationToken).ConfigureAwait(false);
-                if (refreshed is not null)
+                if (await contexts.RefreshConversationAsync(actor, context, cancellationToken).ConfigureAwait(false) is { } refreshed)
                     context = refreshed;
+                conversationDirty = false;
             }
-            var outcome = await executor.ExecuteAsync(actor, new AutomationActionRequest(rule.Actions[index], context, $"{execution.Id:N}-{index}", agentName, rule.Id),
+            var outcome = await executor.ExecuteAsync(actor, new AutomationActionRequest(action, context, $"{execution.Id:N}-{index}", agentName, rule.Id),
                 cancellationToken).ConfigureAwait(false);
             outcomes.Add(outcome);
             execution = execution.WithProgress(outcomes);
-            var saved = await SaveAsync(scope, execution, revision, cancellationToken).ConfigureAwait(false);
+            IReadOnlyList<long> newSequences = outcome.Value is AutomationActionApplied applied ? applied.Sequences : [];
+            if (newSequences.Count > 0)
+                conversationDirty = true;
+            var saved = await SaveProgressAsync(scope, execution, revision, newSequences, cancellationToken).ConfigureAwait(false);
             if (saved is null)
                 return false;
             revision = saved.Value;
         }
         long? marker = null;
         if (options.AppendMarkers)
-            marker = await AppendMarkerAsync(actor, context.Conversation.Id, execution, outcomes, cancellationToken).ConfigureAwait(false);
+            marker = await AppendMarkerAsync(actor, context.Conversation.Id, execution, outcomes, resumed, cancellationToken).ConfigureAwait(false);
         execution = execution.Complete(time.GetUtcNow(), marker);
-        return await SaveAsync(scope, execution, revision, cancellationToken).ConfigureAwait(false) is not null;
+        IReadOnlyList<long> markerSequences = marker is { } seq ? [seq] : [];
+        return await SaveProgressAsync(scope, execution, revision, markerSequences, cancellationToken).ConfigureAwait(false) is not null;
     }
 
-    private async Task<long?> SaveAsync(TicketScope scope, AutomationExecution execution, long revision, CancellationToken cancellationToken) =>
-        await executions.UpdateAsync(scope, execution, revision, cancellationToken).ConfigureAwait(false) switch
+    private async Task<long?> SaveProgressAsync(TicketScope scope, AutomationExecution execution, long revision, IReadOnlyList<long> newSequences,
+        CancellationToken cancellationToken)
+    {
+        var result = executions is IIncrementalAutomationExecutionStore incremental
+            ? await incremental.UpdateProgressAsync(scope, execution, revision, newSequences, cancellationToken).ConfigureAwait(false)
+            : await executions.UpdateAsync(scope, execution, revision, cancellationToken).ConfigureAwait(false);
+        return result switch
         {
             AutomationWriteApplied<StoredAutomationExecution> applied => applied.Value.Revision,
             AutomationWriteNotFound or AutomationWriteConflict => null,
             AutomationWriteRejected rejected => throw new InvalidOperationException($"The execution store rejected the write: {rejected.Reason}."),
         };
+    }
 
     private async Task<long?> AppendMarkerAsync(PrincipalRef actor, ConversationId conversation, AutomationExecution execution, IReadOnlyList<AutomationActionOutcome> outcomes,
-        CancellationToken cancellationToken)
+        bool resumed, CancellationToken cancellationToken)
     {
-        // A crash between appending the marker and completing the record must not duplicate it on resume.
-        var head = (await store.GetAsync(actor.Scope, conversation, cancellationToken).ConfigureAwait(false))?.Conversation.LastSequence ?? 0;
-        var recent = await store.ReadTimelineAsync(actor.Scope, conversation, Math.Max(0, head - MarkerScan), MarkerScan, includeNotes: false, cancellationToken).ConfigureAwait(false);
-        foreach (var item in recent)
-            if (item.Event.Value is ExtensionEvent extension && AutomationEventCodec.TryDecodeApplied(extension, out _, out var id, out _) && id == execution.Id)
-                return item.Sequence;
+        // Only crash-resumed executions could have already appended a marker before completing the record.
+        if (resumed)
+        {
+            var head = (await store.GetAsync(actor.Scope, conversation, cancellationToken).ConfigureAwait(false))?.Conversation.LastSequence ?? 0;
+            var recent = await store.ReadTimelineAsync(actor.Scope, conversation, Math.Max(0, head - MarkerScan), MarkerScan, includeNotes: false, cancellationToken).ConfigureAwait(false);
+            for (var i = 0; i < recent.Count; i++)
+                if (recent[i].Event.Value is ExtensionEvent extension && AutomationEventCodec.TryDecodeApplied(extension, out _, out var id, out _) && id == execution.Id)
+                    return recent[i].Sequence;
+        }
         var result = await conversations.AppendExtensionAsync(actor, conversation, AutomationEventCodec.Applied(execution, outcomes), cancellationToken: cancellationToken).ConfigureAwait(false);
         return result.Value is ConversationApplied { Events.Count: > 0 } applied ? applied.Events[0].Sequence : null;
     }

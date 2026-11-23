@@ -16,7 +16,7 @@ internal static class ContactEndpoints
 {
     public const string AuditEventHeader = "X-TicketFlow-Audit-Event";
 
-    private static readonly ReadOnlyMemory<byte> NewLine = "\n"u8.ToArray();
+    private const int NdjsonFlushThresholdBytes = 32_768;
 
     public static RouteGroupBuilder Map(RouteGroupBuilder group)
     {
@@ -121,15 +121,37 @@ internal static class ContactEndpoints
         http.Response.Headers[AuditEventHeader] = started.AuditEventId.ToString("D");
         http.Response.Headers.CacheControl = "no-store";
         var json = http.RequestServices.GetService<IOptions<Microsoft.AspNetCore.Http.Json.JsonOptions>>()?.Value.SerializerOptions ?? JsonSerializerOptions.Web;
-        return Results.Stream(async stream =>
+        return new NdjsonContactExportResult(started.Contacts, json);
+    }
+
+    private sealed class NdjsonContactExportResult(IAsyncEnumerable<ContactView> contacts, JsonSerializerOptions options) : IResult
+    {
+        public async Task ExecuteAsync(HttpContext httpContext)
         {
-            await foreach (var contact in started.Contacts.WithCancellation(http.RequestAborted).ConfigureAwait(false))
+            httpContext.Response.ContentType = "application/x-ndjson";
+            var pipe = httpContext.Response.BodyWriter;
+            var typeInfo = options.GetTypeInfo(typeof(ContactResponse));
+            var cancellationToken = httpContext.RequestAborted;
+            using var writer = new Utf8JsonWriter(pipe);
+            long buffered = 0;
+            await foreach (var contact in contacts.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
-                await JsonSerializer.SerializeAsync(stream, Dto(contact), json, http.RequestAborted).ConfigureAwait(false);
-                await stream.WriteAsync(NewLine, http.RequestAborted).ConfigureAwait(false);
-                await stream.FlushAsync(http.RequestAborted).ConfigureAwait(false);
+                writer.Reset(pipe);
+                JsonSerializer.Serialize(writer, Dto(contact), typeInfo);
+                writer.Flush();
+                var span = pipe.GetSpan(1);
+                span[0] = (byte)'\n';
+                pipe.Advance(1);
+                buffered += writer.BytesCommitted + 1;
+                if (buffered >= NdjsonFlushThresholdBytes)
+                {
+                    await pipe.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    buffered = 0;
+                }
             }
-        }, "application/x-ndjson");
+            if (buffered > 0)
+                await pipe.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 
     internal static IResult Map<T>(HttpContext http, ContactResult<T> result, Func<T, IResult> success) => result switch

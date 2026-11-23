@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Globalization;
+using System.Text;
 using TicketFlow.Conversations;
 
 namespace TicketFlow.UI.Blazor.Infrastructure;
@@ -41,7 +43,22 @@ public static class UiFormat
 
     public static string Percent(double? value) => value is { } percent ? percent.ToString("0.#", CultureInfo.InvariantCulture) + "%" : "—";
 
-    public static string Token(Enum value) => string.Concat(value.ToString().Select((character, index) => index > 0 && char.IsUpper(character) ? " " + char.ToLowerInvariant(character) : character.ToString()));
+    private static readonly ConcurrentDictionary<Enum, string> TokenCache = new();
+
+    public static string Token(Enum value) => TokenCache.GetOrAdd(value, static item =>
+    {
+        var name = item.ToString();
+        var sb = new StringBuilder(name.Length + 4);
+        for (var i = 0; i < name.Length; i++)
+        {
+            var c = name[i];
+            if (i > 0 && char.IsUpper(c))
+                sb.Append(' ').Append(char.ToLowerInvariant(c));
+            else
+                sb.Append(c);
+        }
+        return sb.ToString();
+    });
 
     public static string Status(ConversationStatusKind kind) => kind switch
     {

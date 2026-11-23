@@ -322,11 +322,8 @@ public sealed class HelpCenterService : IHelpCenterService
         return Fence(existing?.Revision, expectedRevision) is { } fenced ? (null, fenced) : (existing, null);
     }
 
-    private async Task<int> NextRevisionAsync(TicketScope scope, ArticleId id, CancellationToken cancellationToken)
-    {
-        var latest = await store.ListRevisionsAsync(scope, id, 1, null, cancellationToken).ConfigureAwait(false);
-        return latest.Items.Count == 0 ? 1 : latest.Items[0].Number + 1;
-    }
+    private async Task<int> NextRevisionAsync(TicketScope scope, ArticleId id, CancellationToken cancellationToken) =>
+        await store.GetLatestRevisionNumberAsync(scope, id, cancellationToken).ConfigureAwait(false) + 1;
 
     private async Task<HelpCenterRefused?> ValidateCollectionAsync(TicketScope scope, HelpCollection collection, CancellationToken cancellationToken)
     {

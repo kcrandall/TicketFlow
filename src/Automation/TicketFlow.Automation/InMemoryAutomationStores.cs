@@ -2,48 +2,65 @@ using TicketFlow.Core;
 
 namespace TicketFlow.Automation;
 
-/// <summary>Shared revisioned, scope-confined dictionary for the in-memory automation stores (callers hold <see cref="Gate"/>).</summary>
+/// <summary>Shared revisioned, scope-partitioned dictionary for the in-memory automation stores (callers hold <see cref="Gate"/>).</summary>
 internal sealed class InMemoryRevisioned<TValue>(int capacityPerScope)
 {
     public Lock Gate { get; } = new();
 
-    public Dictionary<(TicketScope Scope, string Id), (TValue Value, long Revision)> Entries { get; } = [];
+    private readonly Dictionary<TicketScope, Dictionary<string, (TValue Value, long Revision)>> buckets = [];
 
-    public IEnumerable<(string Id, TValue Value, long Revision)> InScope(TicketScope scope) =>
-        Entries.Where(pair => pair.Key.Scope == scope).Select(pair => (pair.Key.Id, pair.Value.Value, pair.Value.Revision));
+    public bool TryGet(TicketScope scope, string id, out (TValue Value, long Revision) entry)
+    {
+        if (buckets.TryGetValue(scope, out var bucket))
+            return bucket.TryGetValue(id, out entry);
+        entry = default;
+        return false;
+    }
+
+    public IEnumerable<(string Id, TValue Value, long Revision)> InScope(TicketScope scope)
+    {
+        if (!buckets.TryGetValue(scope, out var bucket))
+            yield break;
+        foreach (var pair in bucket)
+            yield return (pair.Key, pair.Value.Value, pair.Value.Revision);
+    }
 
     public AutomationWriteResult<TStored> Create<TStored>(TicketScope scope, string id, TValue value, Func<TValue, long, TStored> wrap, Func<AutomationWriteRejection?>? check = null)
     {
-        if (Entries.TryGetValue((scope, id), out var existing))
+        if (!buckets.TryGetValue(scope, out var bucket))
+            buckets[scope] = bucket = new Dictionary<string, (TValue, long)>(StringComparer.Ordinal);
+        if (bucket.TryGetValue(id, out var existing))
             return new AutomationWriteConflict(existing.Revision);
-        if (Entries.Keys.Count(key => key.Scope == scope) >= capacityPerScope)
+        if (bucket.Count >= capacityPerScope)
             return new AutomationWriteRejected(AutomationWriteRejection.CapacityExceeded);
         if (check?.Invoke() is { } rejection)
             return new AutomationWriteRejected(rejection);
-        Entries[(scope, id)] = (value, 1);
+        bucket[id] = (value, 1);
         return new AutomationWriteApplied<TStored>(wrap(value, 1));
     }
 
     public AutomationWriteResult<TStored> Update<TStored>(TicketScope scope, string id, TValue value, long expectedRevision, Func<TValue, long, TStored> wrap,
         Func<AutomationWriteRejection?>? check = null)
     {
-        if (!Entries.TryGetValue((scope, id), out var existing))
+        if (!buckets.TryGetValue(scope, out var bucket) || !bucket.TryGetValue(id, out var existing))
             return AutomationWriteNotFound.Instance;
         if (existing.Revision != expectedRevision)
             return new AutomationWriteConflict(existing.Revision);
         if (check?.Invoke() is { } rejection)
             return new AutomationWriteRejected(rejection);
-        Entries[(scope, id)] = (value, existing.Revision + 1);
+        bucket[id] = (value, existing.Revision + 1);
         return new AutomationWriteApplied<TStored>(wrap(value, existing.Revision + 1));
     }
 
     public AutomationWriteResult<TStored> Delete<TStored>(TicketScope scope, string id, long expectedRevision, Func<TValue, long, TStored> wrap)
     {
-        if (!Entries.TryGetValue((scope, id), out var existing))
+        if (!buckets.TryGetValue(scope, out var bucket) || !bucket.TryGetValue(id, out var existing))
             return AutomationWriteNotFound.Instance;
         if (existing.Revision != expectedRevision)
             return new AutomationWriteConflict(existing.Revision);
-        Entries.Remove((scope, id));
+        bucket.Remove(id);
+        if (bucket.Count == 0)
+            buckets.Remove(scope);
         return new AutomationWriteApplied<TStored>(wrap(existing.Value, existing.Revision));
     }
 }
@@ -69,7 +86,7 @@ public sealed class InMemoryAutomationRuleStore(TimeProvider? time = null) : IAu
         ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
         lock (rules.Gate)
-            return Task.FromResult(rules.Entries.TryGetValue((scope, id.Value), out var entry) ? new StoredAutomationRule(scope, entry.Value, entry.Revision) : null);
+            return Task.FromResult(rules.TryGet(scope, id.Value, out var entry) ? new StoredAutomationRule(scope, entry.Value, entry.Revision) : null);
     }
 
     public Task<IReadOnlyList<StoredAutomationRule>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default)
@@ -144,12 +161,13 @@ public sealed class InMemoryAutomationRuleStore(TimeProvider? time = null) : IAu
         {
             var due = timers.Where(pair => pair.Value.DueAt <= now && (pair.Value.LeaseUntil is null || pair.Value.LeaseUntil <= now))
                 .OrderBy(pair => pair.Value.DueAt).ThenBy(pair => pair.Key.Id, StringComparer.Ordinal).Take(limit).ToList();
-            var claims = new List<AutomationScheduleClaim>();
+            var claims = new List<AutomationScheduleClaim>(due.Count);
             foreach (var (key, timer) in due)
             {
                 var fence = timer.Fence + 1;
                 timers[key] = (timer.DueAt, now + lease, fence);
-                claims.Add(new AutomationScheduleClaim(key.Scope, new AutomationRuleId(key.Id), timer.DueAt!.Value, fence, now + lease));
+                var snapshot = rules.TryGet(key.Scope, key.Id, out var entry) ? new StoredAutomationRule(key.Scope, entry.Value, entry.Revision) : null;
+                claims.Add(new AutomationScheduleClaim(key.Scope, new AutomationRuleId(key.Id), timer.DueAt!.Value, fence, now + lease) { Snapshot = snapshot });
             }
             return Task.FromResult<IReadOnlyList<AutomationScheduleClaim>>(claims);
         }
@@ -189,10 +207,16 @@ internal static class AutomationTextInstant
 }
 
 /// <summary>Development-only, process-local execution log (bounded per scope, oldest finished records evicted first). Not durable.</summary>
-public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerScope = 100_000) : IAutomationExecutionStore
+public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerScope = 100_000) : IAutomationExecutionStore, IIncrementalAutomationExecutionStore
 {
+    private sealed class ScopeBucket
+    {
+        public Dictionary<Guid, StoredAutomationExecution> Executions { get; } = [];
+        public PriorityQueue<Guid, DateTimeOffset> FinishedByAge { get; } = new();
+    }
+
     private readonly Lock gate = new();
-    private readonly Dictionary<(TicketScope Scope, Guid Id), StoredAutomationExecution> executions = [];
+    private readonly Dictionary<TicketScope, ScopeBucket> scopes = [];
     private readonly Dictionary<(TicketScope Scope, string Rule, string Conversation, string Trigger), Guid> keys = [];
     private readonly Dictionary<(TicketScope Scope, string Conversation, long Sequence), AutomationCause> causes = [];
     private readonly Dictionary<(TicketScope Scope, string Name), long> checkpoints = [];
@@ -204,37 +228,52 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
+            if (!scopes.TryGetValue(scope, out var bucket))
+                scopes[scope] = bucket = new ScopeBucket();
             var key = Key(scope, execution.Rule, execution.Conversation, execution.TriggerKey);
             if (keys.TryGetValue(key, out var existing))
-                return Task.FromResult<AutomationBeginResult>(new AutomationExecutionExists(executions[(scope, existing)]));
-            if (executions.ContainsKey((scope, execution.Id)))
+                return Task.FromResult<AutomationBeginResult>(new AutomationExecutionExists(bucket.Executions[existing]));
+            if (bucket.Executions.ContainsKey(execution.Id))
                 throw new InvalidOperationException("The execution identifier is already used.");
-            Evict(scope);
+            Evict(bucket);
             var stored = new StoredAutomationExecution(scope, execution, 1);
-            executions[(scope, execution.Id)] = stored;
+            bucket.Executions[execution.Id] = stored;
+            if (execution.Status != AutomationExecutionStatus.Running)
+                bucket.FinishedByAge.Enqueue(execution.Id, execution.StartedAt);
             keys[key] = execution.Id;
-            Index(scope, execution);
+            Index(scope, execution, execution.ProducedSequences);
             return Task.FromResult<AutomationBeginResult>(new AutomationExecutionStarted(stored));
         }
     }
 
     public Task<AutomationWriteResult<StoredAutomationExecution>> UpdateAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        UpdateCore(scope, execution, expectedRevision, execution?.ProducedSequences, cancellationToken);
+
+    public Task<AutomationWriteResult<StoredAutomationExecution>> UpdateProgressAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
+        IReadOnlyList<long> newSequences, CancellationToken cancellationToken = default) =>
+        UpdateCore(scope, execution, expectedRevision, newSequences ?? throw new ArgumentNullException(nameof(newSequences)), cancellationToken);
+
+    private Task<AutomationWriteResult<StoredAutomationExecution>> UpdateCore(TicketScope scope, AutomationExecution execution, long expectedRevision,
+        IReadOnlyList<long>? sequences, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(execution);
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
-            if (!executions.TryGetValue((scope, execution.Id), out var existing))
+            if (!scopes.TryGetValue(scope, out var bucket) || !bucket.Executions.TryGetValue(execution.Id, out var existing))
                 return Task.FromResult<AutomationWriteResult<StoredAutomationExecution>>(AutomationWriteNotFound.Instance);
             if (existing.Revision != expectedRevision)
                 return Task.FromResult<AutomationWriteResult<StoredAutomationExecution>>(new AutomationWriteConflict(existing.Revision));
             if (existing.Execution.Rule != execution.Rule || existing.Execution.Conversation != execution.Conversation || existing.Execution.TriggerKey != execution.TriggerKey)
                 throw new ArgumentException("An execution's rule, conversation and trigger key are immutable.", nameof(execution));
             var stored = new StoredAutomationExecution(scope, execution, existing.Revision + 1);
-            executions[(scope, execution.Id)] = stored;
-            Index(scope, execution);
+            bucket.Executions[execution.Id] = stored;
+            if (existing.Execution.Status == AutomationExecutionStatus.Running && execution.Status != AutomationExecutionStatus.Running)
+                bucket.FinishedByAge.Enqueue(execution.Id, execution.StartedAt);
+            if (sequences is { Count: > 0 })
+                Index(scope, execution, sequences);
             return Task.FromResult<AutomationWriteResult<StoredAutomationExecution>>(new AutomationWriteApplied<StoredAutomationExecution>(stored));
         }
     }
@@ -244,7 +283,7 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
         ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
-            return Task.FromResult(executions.GetValueOrDefault((scope, execution)));
+            return Task.FromResult(scopes.TryGetValue(scope, out var bucket) ? bucket.Executions.GetValueOrDefault(execution) : null);
     }
 
     public Task<StoredAutomationExecution?> FindAsync(TicketScope scope, AutomationRuleId rule, ConversationId? conversation, string triggerKey, CancellationToken cancellationToken = default)
@@ -252,7 +291,9 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
         ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
-            return Task.FromResult(keys.TryGetValue(Key(scope, rule, conversation, triggerKey), out var id) ? executions[(scope, id)] : null);
+            return Task.FromResult(keys.TryGetValue(Key(scope, rule, conversation, triggerKey), out var id) && scopes.TryGetValue(scope, out var bucket)
+                ? bucket.Executions.GetValueOrDefault(id)
+                : null);
     }
 
     public Task<IReadOnlyDictionary<AutomationRuleId, StoredAutomationExecution>> FindManyAsync(TicketScope scope, ConversationId? conversation, string triggerKey,
@@ -266,9 +307,10 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
         lock (gate)
         {
             var found = new Dictionary<AutomationRuleId, StoredAutomationExecution>();
-            foreach (var rule in rules)
-                if (keys.TryGetValue(Key(scope, rule, conversation, triggerKey), out var id))
-                    found[rule] = executions[(scope, id)];
+            if (scopes.TryGetValue(scope, out var bucket))
+                foreach (var rule in rules)
+                    if (keys.TryGetValue(Key(scope, rule, conversation, triggerKey), out var id) && bucket.Executions.TryGetValue(id, out var stored))
+                        found[rule] = stored;
             return Task.FromResult<IReadOnlyDictionary<AutomationRuleId, StoredAutomationExecution>>(found);
         }
     }
@@ -280,11 +322,16 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
-            var victims = executions.Values.Where(stored => stored.Execution.Status != AutomationExecutionStatus.Running && stored.Execution.StartedAt < before)
-                .OrderBy(stored => stored.Execution.StartedAt).Take(limit).ToList();
-            foreach (var stored in victims)
-                Remove(stored);
-            return Task.FromResult(victims.Count);
+            var victims = new List<(ScopeBucket Bucket, StoredAutomationExecution Stored)>();
+            foreach (var bucket in scopes.Values)
+                foreach (var stored in bucket.Executions.Values)
+                    if (stored.Execution.Status != AutomationExecutionStatus.Running && stored.Execution.StartedAt < before)
+                        victims.Add((bucket, stored));
+            victims.Sort(static (a, b) => a.Stored.Execution.StartedAt.CompareTo(b.Stored.Execution.StartedAt));
+            var count = Math.Min(victims.Count, limit);
+            for (var i = 0; i < count; i++)
+                Remove(victims[i].Bucket, victims[i].Stored);
+            return Task.FromResult(count);
         }
     }
 
@@ -302,8 +349,17 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
-            return Task.FromResult(executions.Values.Where(stored => stored.Scope == scope && stored.Execution.Conversation == conversation && stored.Execution.StartedAt >= since)
-                .Take(limit).Count());
+        {
+            if (!scopes.TryGetValue(scope, out var bucket))
+                return Task.FromResult(0);
+            var count = 0;
+            foreach (var stored in bucket.Executions.Values)
+            {
+                if (stored.Execution.Conversation == conversation && stored.Execution.StartedAt >= since && ++count >= limit)
+                    break;
+            }
+            return Task.FromResult(count);
+        }
     }
 
     public Task<AutomationExecutionPage> ListAsync(TicketScope scope, AutomationExecutionQuery query, CancellationToken cancellationToken = default)
@@ -313,11 +369,20 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
-            var rows = executions.Values.Where(stored => stored.Scope == scope && query.Matches(stored.Execution))
-                .OrderByDescending(stored => stored.Execution.StartedAt).ThenByDescending(stored => stored.Execution.Id).Take(query.Limit + 1).ToList();
+            if (!scopes.TryGetValue(scope, out var bucket))
+                return Task.FromResult(new AutomationExecutionPage([], null));
+            var rows = new List<StoredAutomationExecution>();
+            foreach (var stored in bucket.Executions.Values)
+                if (query.Matches(stored.Execution))
+                    rows.Add(stored);
+            rows.Sort(static (a, b) =>
+            {
+                var cmp = b.Execution.StartedAt.CompareTo(a.Execution.StartedAt);
+                return cmp != 0 ? cmp : b.Execution.Id.CompareTo(a.Execution.Id);
+            });
             if (rows.Count <= query.Limit)
                 return Task.FromResult(new AutomationExecutionPage(rows, null));
-            var page = rows[..query.Limit];
+            var page = rows.GetRange(0, query.Limit);
             return Task.FromResult(new AutomationExecutionPage(page, new AutomationExecutionCursor(page[^1].Execution.StartedAt, page[^1].Id)));
         }
     }
@@ -354,27 +419,33 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
             throw new ArgumentException("Checkpoint names are lowercase tokens of at most 64 characters.", nameof(name));
     }
 
-    private void Index(TicketScope scope, AutomationExecution execution)
+    private void Index(TicketScope scope, AutomationExecution execution, IReadOnlyList<long> sequences)
     {
-        if (execution.Conversation is not { } conversation)
+        if (execution.Conversation is not { } conversation || sequences.Count == 0)
             return;
-        foreach (var sequence in execution.ProducedSequences)
-            causes[(scope, conversation.Value, sequence)] = new AutomationCause(execution.Id, execution.Rule, execution.Depth);
+        var cause = new AutomationCause(execution.Id, execution.Rule, execution.Depth);
+        for (var i = 0; i < sequences.Count; i++)
+            causes[(scope, conversation.Value, sequences[i])] = cause;
     }
 
-    private void Evict(TicketScope scope)
+    private void Evict(ScopeBucket bucket)
     {
-        var inScope = executions.Values.Where(stored => stored.Scope == scope).ToList();
-        if (inScope.Count < maximumExecutionsPerScope)
+        if (bucket.Executions.Count < maximumExecutionsPerScope)
             return;
-        var oldest = inScope.Where(stored => stored.Execution.Status != AutomationExecutionStatus.Running).OrderBy(stored => stored.Execution.StartedAt).FirstOrDefault()
-            ?? throw new InvalidOperationException("The in-memory execution store is full.");
-        Remove(oldest);
+        while (bucket.FinishedByAge.TryDequeue(out var oldestId, out _))
+        {
+            if (bucket.Executions.TryGetValue(oldestId, out var oldest) && oldest.Execution.Status != AutomationExecutionStatus.Running)
+            {
+                Remove(bucket, oldest);
+                return;
+            }
+        }
+        throw new InvalidOperationException("The in-memory execution store is full.");
     }
 
-    private void Remove(StoredAutomationExecution stored)
+    private void Remove(ScopeBucket bucket, StoredAutomationExecution stored)
     {
-        executions.Remove((stored.Scope, stored.Id));
+        bucket.Executions.Remove(stored.Id);
         keys.Remove(Key(stored.Scope, stored.Execution.Rule, stored.Execution.Conversation, stored.Execution.TriggerKey));
         if (stored.Execution.Conversation is { } conversation)
             foreach (var sequence in stored.Execution.ProducedSequences)
@@ -396,7 +467,7 @@ public sealed class InMemoryMacroStore : IMacroStore
         ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
         lock (macros.Gate)
-            return Task.FromResult(macros.Entries.TryGetValue((scope, id.Value), out var entry) ? new StoredMacro(scope, entry.Value, entry.Revision) : null);
+            return Task.FromResult(macros.TryGet(scope, id.Value, out var entry) ? new StoredMacro(scope, entry.Value, entry.Revision) : null);
     }
 
     public Task<IReadOnlyList<StoredMacro>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default)
@@ -406,6 +477,21 @@ public sealed class InMemoryMacroStore : IMacroStore
         lock (macros.Gate)
             return Task.FromResult<IReadOnlyList<StoredMacro>>([.. macros.InScope(scope).OrderBy(entry => entry.Id, StringComparer.Ordinal)
                 .Select(entry => new StoredMacro(scope, entry.Value, entry.Revision))]);
+    }
+
+    public Task<IReadOnlyList<StoredMacro>> ListVisibleAsync(TicketScope scope, UserId? owner, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (macros.Gate)
+        {
+            var result = new List<StoredMacro>();
+            foreach (var entry in macros.InScope(scope))
+                if (entry.Value.Visibility == MacroVisibility.Shared || (owner is { } userId && entry.Value.Owner == userId))
+                    result.Add(new StoredMacro(scope, entry.Value, entry.Revision));
+            result.Sort(static (a, b) => StringComparer.Ordinal.Compare(a.Id.Value, b.Id.Value));
+            return Task.FromResult<IReadOnlyList<StoredMacro>>(result);
+        }
     }
 
     public Task<AutomationWriteResult<StoredMacro>> CreateAsync(TicketScope scope, Macro macro, CancellationToken cancellationToken = default)
@@ -445,7 +531,7 @@ public sealed class InMemoryCannedResponseStore : ICannedResponseStore
         ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
         lock (responses.Gate)
-            return Task.FromResult(responses.Entries.TryGetValue((scope, id.Value), out var entry) ? new StoredCannedResponse(scope, entry.Value, entry.Revision) : null);
+            return Task.FromResult(responses.TryGet(scope, id.Value, out var entry) ? new StoredCannedResponse(scope, entry.Value, entry.Revision) : null);
     }
 
     public Task<StoredCannedResponse?> FindByShortcutAsync(TicketScope scope, string shortcut, CancellationToken cancellationToken = default)

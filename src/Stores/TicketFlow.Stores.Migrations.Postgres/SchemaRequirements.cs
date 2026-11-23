@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text.Json;
 
 namespace TicketFlow.Stores.Migrations.Postgres;
@@ -91,9 +92,11 @@ public static class PostgresSchemaRequirements
             """;
         return new(version, sql);
     }
+    private static readonly SearchValues<char> IdentifierChars = SearchValues.Create("abcdefghijklmnopqrstuvwxyz0123456789_");
+
     private static void Identifier(string value)
     {
-        if (string.IsNullOrEmpty(value) || value.Length > 63 || value.Any(character => !(character is >= 'a' and <= 'z' or >= '0' and <= '9' or '_')))
+        if (string.IsNullOrEmpty(value) || value.Length > 63 || value.AsSpan().ContainsAnyExcept(IdentifierChars))
             throw new ArgumentException("Baseline identifiers require 1–63 lowercase ASCII letters, digits or underscores.");
     }
 }

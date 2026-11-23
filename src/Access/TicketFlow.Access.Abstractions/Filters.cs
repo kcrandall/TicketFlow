@@ -1,4 +1,5 @@
 using System.Collections.Frozen;
+using System.Collections.ObjectModel;
 using TicketFlow.Core;
 
 namespace TicketFlow.Access;
@@ -23,21 +24,22 @@ public closed record AccessFilter
 
     public int NodeCount { get; }
 
-    private protected static IReadOnlyList<AccessFilter> Items(IEnumerable<AccessFilter> items, string parameterName)
+    private protected static (IReadOnlyList<AccessFilter> List, int Nodes) Items(IEnumerable<AccessFilter> items, string parameterName)
     {
         ArgumentNullException.ThrowIfNull(items, parameterName);
-        var snapshot = new List<AccessFilter>();
+        var capacity = items.TryGetNonEnumeratedCount(out var count) ? count : 0;
+        var snapshot = capacity > 0 ? new List<AccessFilter>(capacity) : new List<AccessFilter>();
+        var nodes = 1;
         foreach (var item in items)
         {
             ArgumentNullException.ThrowIfNull(item, parameterName);
             snapshot.Add(item);
+            nodes += item.NodeCount;
         }
         if (snapshot.Count == 0)
             throw new ArgumentException("At least one operand is required.", parameterName);
-        return snapshot.AsReadOnly();
+        return (snapshot.AsReadOnly(), nodes);
     }
-
-    private protected static int Count(IReadOnlyList<AccessFilter> items) => 1 + items.Sum(item => item.NodeCount);
 }
 
 /// <summary>A filter tree would exceed <see cref="AccessFilter.MaximumNodes"/>. Planners convert this into a deny-all plan.</summary>
@@ -97,8 +99,8 @@ public sealed record AndFilter : AccessFilter
     {
     }
 
-    private AndFilter(IReadOnlyList<AccessFilter> items)
-        : base(Count(items)) => Operands = items;
+    private AndFilter((IReadOnlyList<AccessFilter> List, int Nodes) items)
+        : base(items.Nodes) => Operands = items.List;
 
     public IReadOnlyList<AccessFilter> Operands { get; }
 
@@ -114,8 +116,8 @@ public sealed record OrFilter : AccessFilter
     {
     }
 
-    private OrFilter(IReadOnlyList<AccessFilter> items)
-        : base(Count(items)) => Operands = items;
+    private OrFilter((IReadOnlyList<AccessFilter> List, int Nodes) items)
+        : base(items.Nodes) => Operands = items.List;
 
     public IReadOnlyList<AccessFilter> Operands { get; }
 
@@ -139,7 +141,20 @@ public sealed record TeamInFilter : AccessFilter
         : base(1)
     {
         ArgumentNullException.ThrowIfNull(teams);
-        Teams = teams.Select(team => team == default ? throw new ArgumentException("Team identifiers must be initialized.", nameof(teams)) : team).ToFrozenSet();
+        var capacity = teams.TryGetNonEnumeratedCount(out var count) ? count : 0;
+        if (count == 0 && teams is ICollection<TeamId> or IReadOnlyCollection<TeamId>)
+        {
+            Teams = FrozenSet<TeamId>.Empty;
+            return;
+        }
+        var snapshot = capacity > 0 ? new HashSet<TeamId>(capacity) : new HashSet<TeamId>();
+        foreach (var team in teams)
+        {
+            if (team == default)
+                throw new ArgumentException("Team identifiers must be initialized.", nameof(teams));
+            snapshot.Add(team);
+        }
+        Teams = snapshot.Count == 0 ? FrozenSet<TeamId>.Empty : new ReadOnlySet<TeamId>(snapshot);
     }
 
     public IReadOnlySet<TeamId> Teams { get; }
@@ -156,7 +171,20 @@ public sealed record InboxInFilter : AccessFilter
         : base(1)
     {
         ArgumentNullException.ThrowIfNull(inboxes);
-        Inboxes = inboxes.Select(inbox => inbox == default ? throw new ArgumentException("Inbox identifiers must be initialized.", nameof(inboxes)) : inbox).ToFrozenSet();
+        var capacity = inboxes.TryGetNonEnumeratedCount(out var count) ? count : 0;
+        if (count == 0 && inboxes is ICollection<InboxId> or IReadOnlyCollection<InboxId>)
+        {
+            Inboxes = FrozenSet<InboxId>.Empty;
+            return;
+        }
+        var snapshot = capacity > 0 ? new HashSet<InboxId>(capacity) : new HashSet<InboxId>();
+        foreach (var inbox in inboxes)
+        {
+            if (inbox == default)
+                throw new ArgumentException("Inbox identifiers must be initialized.", nameof(inboxes));
+            snapshot.Add(inbox);
+        }
+        Inboxes = snapshot.Count == 0 ? FrozenSet<InboxId>.Empty : new ReadOnlySet<InboxId>(snapshot);
     }
 
     public IReadOnlySet<InboxId> Inboxes { get; }
@@ -211,6 +239,8 @@ public sealed record AttributeEqualsFilter : AccessFilter
 /// <summary>Attribute membership in 1-64 values; unknown when the attribute is missing.</summary>
 public sealed record AttributeInFilter : AccessFilter
 {
+    private readonly string[] values;
+
     public AttributeInFilter(string key, IEnumerable<string> values)
         : base(1)
     {
@@ -221,13 +251,15 @@ public sealed record AttributeInFilter : AccessFilter
             snapshot.Add(AccessCondition.RequireValue(value, nameof(values)));
         if (snapshot.Count is 0 or > AccessCondition.MaximumValues)
             throw new ArgumentException($"Between 1 and {AccessCondition.MaximumValues} values are required.", nameof(values));
-        Values = [.. snapshot];
+        this.values = [.. snapshot];
     }
 
     public string Key { get; }
 
     /// <summary>Distinct values in ordinal order.</summary>
-    public IReadOnlyList<string> Values { get; }
+    public IReadOnlyList<string> Values => values;
+
+    public bool ContainsValue(string value) => Array.BinarySearch(values, value, StringComparer.Ordinal) >= 0;
 
     public bool Equals(AttributeInFilter? other) => other is not null && Key == other.Key && Values.SequenceEqual(other.Values);
 
@@ -245,22 +277,50 @@ public static class AccessFilterEvaluator
     {
         ArgumentNullException.ThrowIfNull(filter);
         ArgumentNullException.ThrowIfNull(resource);
-        return filter switch
+        return EvaluateCore(filter, resource);
+    }
+
+    private static bool? EvaluateCore(AccessFilter filter, AccessResource resource) => filter switch
+    {
+        AllowAllFilter => true,
+        DenyAllFilter => false,
+        UnknownFilter => null,
+        ScopeFilter scope => scope.Scope == resource.Scope,
+        AndFilter and => EvaluateAnd(and.Operands, resource),
+        OrFilter or => EvaluateOr(or.Operands, resource),
+        NotFilter not => !EvaluateCore(not.Operand, resource),
+        TeamInFilter team => resource.TeamId is { } teamId && team.Teams.Contains(teamId),
+        InboxInFilter inbox => resource.InboxId is { } inboxId && inbox.Inboxes.Contains(inboxId),
+        AssigneeIsFilter assignee => resource.AssigneeId == assignee.Assignee,
+        HasLabelFilter label => resource.Labels?.Contains(label.Label),
+        AttributeEqualsFilter equals => resource.Attributes.TryGetValue(equals.Key, out var value) ? value == equals.Value : null,
+        AttributeInFilter @in => resource.Attributes.TryGetValue(@in.Key, out var value) ? @in.ContainsValue(value) : null,
+    };
+
+    private static bool? EvaluateAnd(IReadOnlyList<AccessFilter> operands, AccessResource resource)
+    {
+        var unknown = false;
+        for (var i = 0; i < operands.Count; i++)
         {
-            AllowAllFilter => true,
-            DenyAllFilter => false,
-            UnknownFilter => null,
-            ScopeFilter scope => scope.Scope == resource.Scope,
-            AndFilter and => Kleene.And(and.Operands, operand => Evaluate(operand, resource)),
-            OrFilter or => Kleene.Or(or.Operands, operand => Evaluate(operand, resource)),
-            NotFilter not => !Evaluate(not.Operand, resource),
-            TeamInFilter team => resource.TeamId is { } teamId && team.Teams.Contains(teamId),
-            InboxInFilter inbox => resource.InboxId is { } inboxId && inbox.Inboxes.Contains(inboxId),
-            AssigneeIsFilter assignee => resource.AssigneeId == assignee.Assignee,
-            HasLabelFilter label => resource.Labels?.Contains(label.Label),
-            AttributeEqualsFilter equals => resource.Attributes.TryGetValue(equals.Key, out var value) ? value == equals.Value : null,
-            AttributeInFilter @in => resource.Attributes.TryGetValue(@in.Key, out var value) ? @in.Values.Contains(value, StringComparer.Ordinal) : null,
-        };
+            var value = EvaluateCore(operands[i], resource);
+            if (value == false)
+                return false;
+            unknown |= value is null;
+        }
+        return unknown ? null : true;
+    }
+
+    private static bool? EvaluateOr(IReadOnlyList<AccessFilter> operands, AccessResource resource)
+    {
+        var unknown = false;
+        for (var i = 0; i < operands.Count; i++)
+        {
+            var value = EvaluateCore(operands[i], resource);
+            if (value == true)
+                return true;
+            unknown |= value is null;
+        }
+        return unknown ? null : false;
     }
 }
 

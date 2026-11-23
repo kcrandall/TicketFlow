@@ -204,20 +204,7 @@ public sealed record AccessGrant
     };
 
     /// <summary>True when <paramref name="value"/> is non-blank, at most 1024 characters, without control characters and well-formed.</summary>
-    public static bool IsValidJustification(string? value)
-    {
-        if (value is null)
-            return false;
-        try
-        {
-            AccessText.RequireText(value, MaximumJustificationLength, nameof(value));
-            return true;
-        }
-        catch (ArgumentException)
-        {
-            return false;
-        }
-    }
+    public static bool IsValidJustification(string? value) => AccessText.IsValidText(value, MaximumJustificationLength);
 
     public bool IsValidAt(DateTimeOffset instant) => (ValidFrom is null || instant >= ValidFrom) && (ValidUntil is null || instant < ValidUntil);
 

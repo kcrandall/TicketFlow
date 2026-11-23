@@ -75,9 +75,23 @@ public static class ReportMetrics
     public static IReadOnlyList<ReportMetric> Set(IEnumerable<ReportMetric> metrics, string parameterName)
     {
         ArgumentNullException.ThrowIfNull(metrics, parameterName);
-        IReadOnlyList<ReportMetric> snapshot = [.. metrics.Select(metric => Require(metric, parameterName)).Distinct().Order()];
-        if (snapshot.Count is 0 or > 16)
+        uint mask = 0;
+        foreach (var metric in metrics)
+        {
+            var value = (int)Require(metric, parameterName);
+            mask |= 1u << value;
+        }
+        var count = System.Numerics.BitOperations.PopCount(mask);
+        if (count is 0 or > 16)
             throw new ArgumentException("Between 1 and 16 distinct metrics are required.", parameterName);
-        return snapshot;
+        var result = new ReportMetric[count];
+        var index = 0;
+        while (mask != 0)
+        {
+            var bit = System.Numerics.BitOperations.TrailingZeroCount(mask);
+            result[index++] = (ReportMetric)bit;
+            mask &= mask - 1;
+        }
+        return result;
     }
 }

@@ -80,6 +80,18 @@ public interface ILiveChatSessionStore
     /// <summary>Up to <paramref name="limit"/> (1-32) sessions linked to a conversation, most recently linked first.</summary>
     Task<IReadOnlyList<VisitorSessionId>> FindSessionsAsync(TicketScope scope, ConversationId conversation, int limit, CancellationToken cancellationToken = default);
 
+    /// <summary>Up to <paramref name="limit"/> (1-32) live (not revoked, not expired at <paramref name="now"/>) sessions linked to a conversation, most recently linked first.</summary>
+    async Task<IReadOnlyList<VisitorSessionId>> FindLiveSessionsAsync(TicketScope scope, ConversationId conversation, DateTimeOffset now, int limit,
+        CancellationToken cancellationToken = default)
+    {
+        var live = new List<VisitorSessionId>();
+        var partition = AccessPartition.From(scope);
+        foreach (var id in await FindSessionsAsync(scope, conversation, limit, cancellationToken).ConfigureAwait(false))
+            if (await GetAsync(partition, id, cancellationToken).ConfigureAwait(false) is { } stored && stored.Scope == scope && stored.Session.IsLive(now))
+                live.Add(id);
+        return live;
+    }
+
     /// <summary>Moves the read cursor forward (never back); returns the stored link, or NotFound when not linked.</summary>
     Task<LiveChatWriteResult<VisitorConversationLink>> AdvanceCursorAsync(TicketScope scope, VisitorSessionId session, ConversationId conversation, long readSequence, CancellationToken cancellationToken = default);
 

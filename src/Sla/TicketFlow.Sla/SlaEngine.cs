@@ -15,11 +15,13 @@ public sealed class SlaEngine
     private readonly ConversationId conversation;
     private readonly InboxId inbox;
     private readonly Func<BusinessCalendarId?, SlaClockTime?> calendars;
-    private readonly List<Clock> clocks = [];
+    private readonly Clock?[] clocks = new Clock?[3];
     private readonly List<SlaPauseInterval> pauses = [];
     private readonly List<SlaPendingEmission> pending = [];
     private readonly SortedSet<string> labels = new(StringComparer.Ordinal);
     private SlaConversationFacts facts;
+    private SlaAppliedRule? applied;
+    private SlaClockTime? cachedTime;
 
     private SlaEngine(ConversationId conversation, InboxId inbox, SlaConversationFacts facts, Func<BusinessCalendarId?, SlaClockTime?> calendars)
     {
@@ -30,7 +32,15 @@ public sealed class SlaEngine
     }
 
     /// <summary>The rule in force, if any.</summary>
-    public SlaAppliedRule? Applied { get; private set; }
+    public SlaAppliedRule? Applied
+    {
+        get => applied;
+        private set
+        {
+            applied = value;
+            cachedTime = null;
+        }
+    }
 
     /// <summary>The policy (and inbox calendar) used when a priority or label change re-matches rules.</summary>
     public StoredSlaPolicy? Policy { get; set; }
@@ -52,7 +62,7 @@ public sealed class SlaEngine
     private bool IsPaused => pauses.Count > 0 && pauses[^1].End is null;
 
     /// <summary>The time basis of the applied rule (calendar time without a rule, calendar or a resolvable business calendar).</summary>
-    public SlaClockTime Time => Applied is not { } applied || applied.Rule.Basis == SlaClockBasis.CalendarTime || applied.Calendar is null
+    public SlaClockTime Time => cachedTime ??= applied is null || applied.Rule.Basis == SlaClockBasis.CalendarTime || applied.Calendar is null
         ? SlaClockTime.Calendar
         : calendars(applied.Calendar) ?? SlaClockTime.Calendar;
 
@@ -80,7 +90,11 @@ public sealed class SlaEngine
             EmissionCount = tracker.EmissionCount,
             FlushRetryAt = tracker.FlushRetryAt,
         };
-        engine.clocks.AddRange(tracker.Clocks.Select(Clock.From));
+        for (var i = 0; i < tracker.Clocks.Count; i++)
+        {
+            var record = tracker.Clocks[i];
+            engine.clocks[Slot(record.Metric)] = Clock.From(record);
+        }
         engine.pauses.AddRange(tracker.Pauses);
         engine.pending.AddRange(tracker.Pending);
         engine.SetLabels(tracker.Access.Labels);
@@ -102,15 +116,37 @@ public sealed class SlaEngine
         var t = Clamp(at);
         AdvanceTo(t);
         SlaAppliedRule? next = null;
-        if (Policy is { } stored && stored.Policy.Match(facts.Priority, labels.Select(label => new LabelId(label))) is { } index)
+        if (Policy is { } stored && MatchPolicy(stored.Policy, facts.Priority, labels) is { } index)
         {
             var policy = stored.Policy;
             next = new SlaAppliedRule(policy.Id, stored.Revision, index, policy.Rules[index], policy.Pause, policy.AtRiskPercent, InboxCalendar);
         }
-        if (Same(Applied, next))
+        if (Same(applied, next))
             return;
         ApplyRule(next, t);
         AdvanceTo(t);
+    }
+
+    private static int? MatchPolicy(SlaPolicy policy, ConversationPriority priority, SortedSet<string> labelValues)
+    {
+        for (var i = 0; i < policy.Rules.Count; i++)
+        {
+            var cond = policy.Rules[i].Condition;
+            if (!cond.MatchesPriority(priority))
+                continue;
+            var matched = true;
+            for (var j = 0; j < cond.Labels.Count; j++)
+            {
+                if (!labelValues.Contains(cond.Labels[j].Value))
+                {
+                    matched = false;
+                    break;
+                }
+            }
+            if (matched)
+                return i;
+        }
+        return null;
     }
 
     /// <summary>Applies one timeline event (events at or before <see cref="LastSequence"/> are ignored).</summary>
@@ -121,6 +157,7 @@ public sealed class SlaEngine
             return;
         var t = Clamp(timelineEvent.OccurredAt);
         AdvanceTo(t);
+        var mutated = true;
         switch (timelineEvent.Event)
         {
             case MessageEvent message when message.Direction == MessageDirection.Incoming:
@@ -135,19 +172,23 @@ public sealed class SlaEngine
             case PriorityChanged priority:
                 facts = new(facts.Status, facts.SnoozedUntil, priority.Current, facts.WaitingSince, facts.Replied);
                 Rematch(t);
+                mutated = false;
                 break;
             case LabelsChanged changed:
-                foreach (var label in changed.Added)
-                    labels.Add(label.Value);
-                foreach (var label in changed.Removed)
-                    labels.Remove(label.Value);
+                for (var i = 0; i < changed.Added.Count; i++)
+                    labels.Add(changed.Added[i].Value);
+                for (var i = 0; i < changed.Removed.Count; i++)
+                    labels.Remove(changed.Removed[i].Value);
                 Rematch(t);
+                mutated = false;
                 break;
             case NoteEvent or AssignmentChanged or TeamChanged or AttributeChanged or ParticipantChanged or ContactChanged or SystemEvent or ExtensionEvent:
+                mutated = false;
                 break;
         }
         LastSequence = timelineEvent.Sequence;
-        AdvanceTo(t);
+        if (mutated)
+            AdvanceTo(t);
     }
 
     /// <summary>
@@ -167,18 +208,21 @@ public sealed class SlaEngine
     public void AdvanceTo(DateTimeOffset at)
     {
         var target = SlaMath.Instant(at);
-        while (true)
+        if (applied is not null)
         {
-            // An expired snooze resumes paused clocks at its Until instant, before later thresholds are considered.
-            if (IsPaused && facts.SnoozedUntil is { } until && until <= target && Applied is { } applied && !applied.Pause.Pauses(facts.Status, facts.SnoozedUntil, until))
+            while (true)
             {
-                var resumeAt = until > EvaluatedAt ? until : EvaluatedAt;
-                FireUntil(resumeAt);
-                Resume(resumeAt);
-                continue;
+                // An expired snooze resumes paused clocks at its Until instant, before later thresholds are considered.
+                if (IsPaused && facts.SnoozedUntil is { } until && until <= target && !applied.Pause.Pauses(facts.Status, facts.SnoozedUntil, until))
+                {
+                    var resumeAt = until > EvaluatedAt ? until : EvaluatedAt;
+                    FireUntil(resumeAt);
+                    Resume(resumeAt);
+                    continue;
+                }
+                if (!FireNext(target))
+                    break;
             }
-            if (!FireNext(target))
-                break;
         }
         if (target > EvaluatedAt)
             EvaluatedAt = target;
@@ -187,8 +231,10 @@ public sealed class SlaEngine
     /// <summary>Removes flushed pending emissions.</summary>
     public void Acknowledge(IEnumerable<string> keys)
     {
-        var flushed = new HashSet<string>(keys ?? throw new ArgumentNullException(nameof(keys)), StringComparer.Ordinal);
-        pending.RemoveAll(item => flushed.Contains(item.Key));
+        ArgumentNullException.ThrowIfNull(keys);
+        var flushed = keys as HashSet<string> ?? new HashSet<string>(keys, StringComparer.Ordinal);
+        if (flushed.Count > 0)
+            pending.RemoveAll(item => flushed.Contains(item.Key));
         if (pending.Count == 0)
             FlushRetryAt = null;
     }
@@ -203,9 +249,12 @@ public sealed class SlaEngine
         var time = Time;
         DateTimeOffset? next = null, due = null, risk = null, firstBreach = null;
         var breached = false;
-        var snapshot = new List<SlaClock>(clocks.Count);
-        foreach (var clock in clocks)
+        var snapshot = new List<SlaClock>(3);
+        for (var i = 0; i < 3; i++)
         {
+            var clock = clocks[i];
+            if (clock is null)
+                continue;
             DateTimeOffset? clockDue = null;
             if (clock.State == SlaClockState.Running)
             {
@@ -213,10 +262,15 @@ public sealed class SlaEngine
                 {
                     clockDue = Crossing(clock, clock.Target, time);
                     due = Min(due, clockDue);
-                    risk = Min(risk, Crossing(clock, Percent(clock.Target, Applied!.AtRiskPercent), time));
+                    risk = Min(risk, Crossing(clock, Percent(clock.Target, applied!.AtRiskPercent), time));
                 }
-                foreach (var threshold in Thresholds(clock))
-                    next = Min(next, Crossing(clock, Percent(clock.Target, threshold), time));
+                if (FirstUnfiredThreshold(clock) is { } firstThreshold)
+                {
+                    var firstCrossing = firstThreshold == 100 && clockDue is not null
+                        ? clockDue
+                        : Crossing(clock, Percent(clock.Target, firstThreshold), time);
+                    next = Min(next, firstCrossing);
+                }
             }
             if (clock.State != SlaClockState.Completed && clock.BreachedAt is { } breachedAt)
             {
@@ -232,7 +286,7 @@ public sealed class SlaEngine
         if (risk is not null && due is null)
             risk = null;
         var schedule = new SlaSchedule(next, due, risk, breached, Min(due, firstBreach));
-        return new SlaTracker(conversation, inbox, Applied, facts, snapshot, pauses, pending, EmissionCount, access, LastSequence, EvaluatedAt, schedule,
+        return new SlaTracker(conversation, inbox, applied, facts, snapshot, pauses, pending, EmissionCount, access, LastSequence, EvaluatedAt, schedule,
             pending.Count == 0 ? null : FlushRetryAt);
     }
 
@@ -247,21 +301,35 @@ public sealed class SlaEngine
         engine.AdvanceTo(now);
         var at = engine.EvaluatedAt;
         var time = engine.Time;
-        var advanced = engine.ToTracker(tracker.Access);
-        var risk = advanced.Applied?.AtRiskPercent ?? SlaPolicy.DefaultAtRiskPercent;
-        var views = new List<SlaClockView>(advanced.Clocks.Count);
-        foreach (var clock in advanced.Clocks)
+        var risk = engine.applied?.AtRiskPercent ?? SlaPolicy.DefaultAtRiskPercent;
+        var views = new List<SlaClockView>(3);
+        DateTimeOffset? earliestDue = null;
+        var breachedAny = false;
+        var atRiskAny = false;
+        for (var i = 0; i < 3; i++)
         {
+            var clock = engine.clocks[i];
+            if (clock is null)
+                continue;
+            DateTimeOffset? clockDue = null;
+            if (clock.State == SlaClockState.Running && clock.BreachedAt is null)
+            {
+                clockDue = Crossing(clock, clock.Target, time);
+                earliestDue = Min(earliestDue, clockDue);
+            }
             var elapsed = clock.Elapsed + (clock.RunningSince is { } since ? time.Between(since, at) : TimeSpan.Zero);
             var active = clock.State != SlaClockState.Completed;
             var breached = active && (clock.BreachedAt is not null || elapsed >= clock.Target);
             var atRisk = clock.State == SlaClockState.Running && !breached && elapsed >= Percent(clock.Target, risk);
+            if (breached)
+                breachedAny = true;
+            else if (atRisk)
+                atRiskAny = true;
             views.Add(new SlaClockView(clock.Metric, clock.Cycle, clock.State, clock.Outcome, clock.Target, elapsed, clock.Target - elapsed, clock.StartedAt,
-                clock.DueAt, clock.BreachedAt, clock.CompletedAt, atRisk, breached));
+                clockDue, clock.BreachedAt, clock.CompletedAt, atRisk, breached));
         }
-        var breachedAny = views.Any(view => view.Breached);
-        return new SlaStatusView(advanced.Conversation, advanced.Inbox, advanced.Applied?.Policy, advanced.Applied?.Rule.Name, advanced.Applied?.Rule.Basis,
-            engine.IsPaused, views, !breachedAny && views.Any(view => view.AtRisk), breachedAny, advanced.Schedule.DueAt, at);
+        return new SlaStatusView(engine.conversation, engine.inbox, engine.applied?.Policy, engine.applied?.Rule.Name, engine.applied?.Rule.Basis,
+            engine.IsPaused, views, !breachedAny && atRiskAny, breachedAny, earliestDue, at);
     }
 
     private void Incoming(DateTimeOffset t)
@@ -273,8 +341,12 @@ public sealed class SlaEngine
 
     private void Outgoing(DateTimeOffset t)
     {
-        foreach (var clock in clocks.Where(clock => clock.State != SlaClockState.Completed && clock.Metric is SlaMetric.FirstResponse or SlaMetric.NextResponse).ToList())
-            Complete(clock, t, cancel: false);
+        for (var i = 0; i < 2; i++)
+        {
+            var clock = clocks[i];
+            if (clock is not null && clock.State != SlaClockState.Completed)
+                Complete(clock, t, cancel: false);
+        }
         facts = new(facts.Status, facts.SnoozedUntil, facts.Priority, null, true);
     }
 
@@ -285,10 +357,14 @@ public sealed class SlaEngine
         facts = new(current, status.SnoozedUntil, facts.Priority, current is ConversationStatusKind.Resolved or ConversationStatusKind.Closed ? null : facts.WaitingSince, facts.Replied);
         if (current is ConversationStatusKind.Resolved or ConversationStatusKind.Closed)
         {
-            foreach (var clock in clocks.Where(clock => clock.State != SlaClockState.Completed).ToList())
-                Complete(clock, t, cancel: clock.Metric != SlaMetric.Resolution);
+            for (var i = 0; i < 3; i++)
+            {
+                var clock = clocks[i];
+                if (clock is not null && clock.State != SlaClockState.Completed)
+                    Complete(clock, t, cancel: clock.Metric != SlaMetric.Resolution);
+            }
         }
-        else if (previous is ConversationStatusKind.Resolved or ConversationStatusKind.Closed && Find(SlaMetric.Resolution) is { State: SlaClockState.Completed } resolution
+        else if (previous is ConversationStatusKind.Resolved or ConversationStatusKind.Closed && clocks[Slot(SlaMetric.Resolution)] is { State: SlaClockState.Completed } resolution
             && resolution.Outcome != SlaClockOutcome.Cancelled)
         {
             resolution.State = IsPaused ? SlaClockState.Paused : SlaClockState.Running;
@@ -303,27 +379,39 @@ public sealed class SlaEngine
     private void ApplyRule(SlaAppliedRule? next, DateTimeOffset t)
     {
         var oldTime = Time;
-        foreach (var clock in clocks.Where(clock => clock.State == SlaClockState.Running))
+        for (var i = 0; i < 3; i++)
         {
-            clock.Elapsed += oldTime.Between(clock.RunningSince!.Value, t);
-            clock.RunningSince = t;
+            var clock = clocks[i];
+            if (clock is not null && clock.State == SlaClockState.Running)
+            {
+                clock.Elapsed += oldTime.Between(clock.RunningSince!.Value, t);
+                clock.RunningSince = t;
+            }
         }
         if (next is null)
         {
-            foreach (var clock in clocks.Where(clock => clock.State != SlaClockState.Completed).ToList())
-                Complete(clock, t, cancel: true);
+            for (var i = 0; i < 3; i++)
+            {
+                var clock = clocks[i];
+                if (clock is not null && clock.State != SlaClockState.Completed)
+                    Complete(clock, t, cancel: true);
+            }
             if (IsPaused)
                 pauses[^1] = new SlaPauseInterval(pauses[^1].Start, t);
             Applied = null;
             return;
         }
         Applied = next;
-        foreach (var clock in clocks.Where(clock => clock.State != SlaClockState.Completed).ToList())
+        for (var i = 0; i < 3; i++)
         {
-            if (next.Rule.Targets.For(clock.Metric) is { } target)
-                clock.Target = target;
-            else
-                Complete(clock, t, cancel: true);
+            var clock = clocks[i];
+            if (clock is not null && clock.State != SlaClockState.Completed)
+            {
+                if (next.Rule.Targets.For(clock.Metric) is { } target)
+                    clock.Target = target;
+                else
+                    Complete(clock, t, cancel: true);
+            }
         }
         Emit(new SlaAppliedEvent(NextKey(), next.Policy, next.PolicyRevision, next.RuleIndex, next.Rule.Name, next.Rule.Basis, next.Calendar, next.Rule.Targets, t));
         UpdatePause(t);
@@ -337,23 +425,22 @@ public sealed class SlaEngine
     /// </summary>
     private void EnsureClocks(DateTimeOffset t)
     {
-        if (Applied is not { } applied)
+        if (applied is null)
             return;
         var targets = applied.Rule.Targets;
         var unresolved = facts.Status is not (ConversationStatusKind.Resolved or ConversationStatusKind.Closed);
-        if (targets.FirstResponse is not null && facts.WaitingSince is { } waiting && !facts.Replied && Find(SlaMetric.FirstResponse) is null)
+        if (targets.FirstResponse is not null && facts.WaitingSince is { } waiting && !facts.Replied && clocks[0] is null)
             Start(SlaMetric.FirstResponse, waiting, cycle: 1);
-        if (targets.NextResponse is not null && facts.WaitingSince is { } waitingAgain && facts.Replied && Find(SlaMetric.NextResponse) is not { State: not SlaClockState.Completed })
-            Start(SlaMetric.NextResponse, waitingAgain, (Find(SlaMetric.NextResponse)?.Cycle ?? 0) + 1);
-        if (targets.Resolution is not null && unresolved && Find(SlaMetric.Resolution) is null)
+        if (targets.NextResponse is not null && facts.WaitingSince is { } waitingAgain && facts.Replied && clocks[1] is not { State: not SlaClockState.Completed })
+            Start(SlaMetric.NextResponse, waitingAgain, (clocks[1]?.Cycle ?? 0) + 1);
+        if (targets.Resolution is not null && unresolved && clocks[2] is null)
             Start(SlaMetric.Resolution, t, cycle: 1);
     }
 
     private void Start(SlaMetric metric, DateTimeOffset from, int cycle)
     {
-        var target = Applied!.Rule.Targets.For(metric)!.Value;
-        clocks.RemoveAll(clock => clock.Metric == metric);
-        clocks.Add(new Clock
+        var target = applied!.Rule.Targets.For(metric)!.Value;
+        clocks[Slot(metric)] = new Clock
         {
             Metric = metric,
             Cycle = cycle,
@@ -361,8 +448,7 @@ public sealed class SlaEngine
             Target = target,
             State = IsPaused ? SlaClockState.Paused : SlaClockState.Running,
             RunningSince = IsPaused ? null : from,
-        });
-        clocks.Sort((left, right) => left.Metric.CompareTo(right.Metric));
+        };
     }
 
     private void Complete(Clock clock, DateTimeOffset t, bool cancel)
@@ -375,19 +461,24 @@ public sealed class SlaEngine
         clock.Outcome = cancel ? SlaClockOutcome.Cancelled : clock.BreachedAt is null ? SlaClockOutcome.Met : SlaClockOutcome.Missed;
         clock.Completions++;
         if (!cancel)
-            Emit(new SlaMetEvent(NextKey(), Applied!.Policy, clock.Metric, clock.Cycle, clock.Target, clock.Elapsed, clock.BreachedAt is not null, t));
+            Emit(new SlaMetEvent(NextKey(), applied!.Policy, clock.Metric, clock.Cycle, clock.Target, clock.Elapsed, clock.BreachedAt is not null, t));
     }
 
     private void UpdatePause(DateTimeOffset t)
     {
-        var shouldPause = Applied is { } applied && applied.Pause.Pauses(facts.Status, facts.SnoozedUntil, t);
+        var shouldPause = applied is not null && applied.Pause.Pauses(facts.Status, facts.SnoozedUntil, t);
         if (shouldPause && !IsPaused)
         {
-            foreach (var clock in clocks.Where(clock => clock.State == SlaClockState.Running))
+            var time = Time;
+            for (var i = 0; i < 3; i++)
             {
-                clock.Elapsed += Time.Between(clock.RunningSince!.Value, t);
-                clock.RunningSince = null;
-                clock.State = SlaClockState.Paused;
+                var clock = clocks[i];
+                if (clock is not null && clock.State == SlaClockState.Running)
+                {
+                    clock.Elapsed += time.Between(clock.RunningSince!.Value, t);
+                    clock.RunningSince = null;
+                    clock.State = SlaClockState.Paused;
+                }
             }
             pauses.Add(new SlaPauseInterval(t, null));
             if (pauses.Count > SlaTracker.MaximumPauses)
@@ -399,10 +490,14 @@ public sealed class SlaEngine
 
     private void Resume(DateTimeOffset t)
     {
-        foreach (var clock in clocks.Where(clock => clock.State == SlaClockState.Paused))
+        for (var i = 0; i < 3; i++)
         {
-            clock.State = SlaClockState.Running;
-            clock.RunningSince = t;
+            var clock = clocks[i];
+            if (clock is not null && clock.State == SlaClockState.Paused)
+            {
+                clock.State = SlaClockState.Running;
+                clock.RunningSince = t;
+            }
         }
         pauses[^1] = new SlaPauseInterval(pauses[^1].Start, t);
     }
@@ -417,34 +512,61 @@ public sealed class SlaEngine
     /// <summary>Fires the earliest unfired threshold crossing at or before <paramref name="at"/>; false when none is due.</summary>
     private bool FireNext(DateTimeOffset at)
     {
-        if (Applied is not { } applied)
+        if (applied is null)
             return false;
         var time = Time;
-        (Clock Clock, int Threshold, DateTimeOffset Instant)? earliest = null;
-        foreach (var clock in clocks.Where(clock => clock.State == SlaClockState.Running))
-            foreach (var threshold in Thresholds(clock))
-                if (Crossing(clock, Percent(clock.Target, threshold), time) is { } instant && instant <= at
-                    && (earliest is not { } best || instant < best.Instant || (instant == best.Instant && (clock.Metric, threshold).CompareTo((best.Clock.Metric, best.Threshold)) < 0)))
-                    earliest = (clock, threshold, instant);
-        if (earliest is not { } fire)
-            return false;
-        var (target, percent, crossing) = fire;
-        target.Fired.Add(percent);
-        var actions = applied.Rule.ActionsAt(target.Metric, percent);
-        if (percent == 100)
+        Clock? bestClock = null;
+        var bestThreshold = 0;
+        DateTimeOffset bestInstant = default;
+        for (var i = 0; i < 3; i++)
         {
-            target.BreachedAt = crossing;
-            Emit(new SlaBreachedEvent(NextKey(), applied.Policy, target.Metric, target.Cycle, target.Target, crossing, actions));
+            var clock = clocks[i];
+            if (clock is null || clock.State != SlaClockState.Running)
+                continue;
+            // Thresholds are ascending and Crossing is monotonic in threshold, so only the first unfired threshold can be earliest for this clock.
+            if (FirstUnfiredThreshold(clock) is not { } threshold)
+                continue;
+            if (Crossing(clock, Percent(clock.Target, threshold), time) is not { } instant || instant > at)
+                continue;
+            if (bestClock is null || instant < bestInstant || (instant == bestInstant && (clock.Metric < bestClock.Metric || (clock.Metric == bestClock.Metric && threshold < bestThreshold))))
+            {
+                bestClock = clock;
+                bestThreshold = threshold;
+                bestInstant = instant;
+            }
+        }
+        if (bestClock is null)
+            return false;
+        bestClock.MarkFired(bestThreshold);
+        var actions = applied.Rule.ActionsAt(bestClock.Metric, bestThreshold);
+        if (bestThreshold == 100)
+        {
+            bestClock.BreachedAt = bestInstant;
+            Emit(new SlaBreachedEvent(NextKey(), applied.Policy, bestClock.Metric, bestClock.Cycle, bestClock.Target, bestInstant, actions));
         }
         else
-            Emit(new SlaWarningEvent(NextKey(), applied.Policy, target.Metric, target.Cycle, percent, target.Target, crossing,
-                target.BreachedAt is null ? Crossing(target, target.Target, time) : null, actions));
+            Emit(new SlaWarningEvent(NextKey(), applied.Policy, bestClock.Metric, bestClock.Cycle, bestThreshold, bestClock.Target, bestInstant,
+                bestClock.BreachedAt is null ? Crossing(bestClock, bestClock.Target, time) : null, actions));
         return true;
     }
 
-    /// <summary>Thresholds not yet fired for the clock (a breached clock only has its remaining escalations below 100 left).</summary>
-    private IEnumerable<int> Thresholds(Clock clock) =>
-        Applied is not { } applied ? [] : applied.Rule.Thresholds(clock.Metric).Where(threshold => !clock.Fired.Contains(threshold) && !(threshold < 100 && clock.BreachedAt is not null));
+    /// <summary>The earliest unfired threshold for the clock (a breached clock ignores thresholds below 100).</summary>
+    private int? FirstUnfiredThreshold(Clock clock)
+    {
+        if (applied is null)
+            return null;
+        var thresholds = applied.Rule.Thresholds(clock.Metric);
+        var breached = clock.BreachedAt is not null;
+        for (var i = 0; i < thresholds.Count; i++)
+        {
+            var threshold = thresholds[i];
+            if (breached && threshold < 100)
+                continue;
+            if (!clock.HasFired(threshold))
+                return threshold;
+        }
+        return null;
+    }
 
     /// <summary>The instant a running clock's measured time reaches <paramref name="elapsed"/>.</summary>
     private static DateTimeOffset? Crossing(Clock clock, TimeSpan elapsed, SlaClockTime time) =>
@@ -461,7 +583,7 @@ public sealed class SlaEngine
 
     private string NextKey() => $"sla-{++EmissionCount}";
 
-    private Clock? Find(SlaMetric metric) => clocks.FirstOrDefault(clock => clock.Metric == metric);
+    private static int Slot(SlaMetric metric) => (int)metric - 1;
 
     private DateTimeOffset Clamp(DateTimeOffset at)
     {
@@ -479,6 +601,8 @@ public sealed class SlaEngine
 
     private sealed class Clock
     {
+        private UInt128 firedMask;
+
         public SlaMetric Metric { get; init; }
         public int Cycle { get; init; }
         public DateTimeOffset StartedAt { get; init; }
@@ -490,7 +614,10 @@ public sealed class SlaEngine
         public DateTimeOffset? CompletedAt { get; set; }
         public SlaClockOutcome? Outcome { get; set; }
         public int Completions { get; set; }
-        public SortedSet<int> Fired { get; } = [];
+
+        public bool HasFired(int percent) => (firedMask & (UInt128.One << percent)) != 0;
+
+        public void MarkFired(int percent) => firedMask |= UInt128.One << percent;
 
         public static Clock From(SlaClock record)
         {
@@ -508,11 +635,31 @@ public sealed class SlaEngine
                 Outcome = record.Outcome,
                 Completions = record.Completions,
             };
-            clock.Fired.UnionWith(record.FiredThresholds);
+            for (var i = 0; i < record.FiredThresholds.Count; i++)
+                clock.MarkFired(record.FiredThresholds[i]);
             return clock;
         }
 
-        public SlaClock ToRecord(DateTimeOffset? due) =>
-            new(Metric, Cycle, StartedAt, Target, Elapsed, RunningSince, State, due, BreachedAt, CompletedAt, Outcome, Completions, Fired);
+        public SlaClock ToRecord(DateTimeOffset? due)
+        {
+            int[] fired;
+            if (firedMask == 0)
+                fired = [];
+            else
+            {
+                var list = new List<int>(4);
+                var mask = firedMask;
+                for (var p = 1; p <= 100 && mask != 0; p++)
+                {
+                    if ((mask & (UInt128.One << p)) != 0)
+                    {
+                        list.Add(p);
+                        mask &= ~(UInt128.One << p);
+                    }
+                }
+                fired = [.. list];
+            }
+            return new SlaClock(Metric, Cycle, StartedAt, Target, Elapsed, RunningSince, State, due, BreachedAt, CompletedAt, Outcome, Completions, fired);
+        }
     }
 }

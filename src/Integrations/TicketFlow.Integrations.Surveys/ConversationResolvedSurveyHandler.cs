@@ -30,17 +30,28 @@ public sealed class ConversationResolvedSurveyHandler(IConversationStore convers
         var change = entry.Change;
         if (change.Kind != ConversationChangeKind.EventsAppended)
             return;
-        foreach (var summary in change.Events.Where(item => item.Kind == ConversationEventKind.Status))
+        StoredConversation? stored = null;
+        SurveyLocale? locale = null;
+        var loaded = false;
+        var summaries = change.Events;
+        for (var i = 0; i < summaries.Count; i++)
         {
+            var summary = summaries[i];
+            if (summary.Kind != ConversationEventKind.Status)
+                continue;
             var events = await conversations.ReadTimelineAsync(change.Scope, change.Conversation, summary.Sequence - 1, 1, includeNotes: false, cancellationToken).ConfigureAwait(false);
             if (events.Count != 1 || events[0].Sequence != summary.Sequence || events[0].Event.Value is not StatusChanged { Current.Value: ResolvedStatus })
                 continue;
-            var stored = await conversations.GetAsync(change.Scope, change.Conversation, cancellationToken).ConfigureAwait(false);
-            if (stored is null)
-                return;
-            var conversation = stored.Conversation;
-            var contact = await contacts.GetAsync(change.Scope, conversation.Contact, cancellationToken).ConfigureAwait(false);
-            SurveyLocale? locale = contact?.Contact.Profile.Locale is { } value && SurveyLocale.TryParse(value, out var parsed) ? parsed : null;
+            if (!loaded)
+            {
+                loaded = true;
+                stored = await conversations.GetAsync(change.Scope, change.Conversation, cancellationToken).ConfigureAwait(false);
+                if (stored is null)
+                    return;
+                var contact = await contacts.GetAsync(change.Scope, stored.Conversation.Contact, cancellationToken).ConfigureAwait(false);
+                locale = contact?.Contact.Profile.Locale is { } value && SurveyLocale.TryParse(value, out var parsed) ? parsed : null;
+            }
+            var conversation = stored!.Conversation;
             await scheduler.HandleResolvedAsync(new ConversationResolvedNotification(change.Scope, conversation.Id, conversation.Contact, events[0].OccurredAt,
                 conversation.Inbox, conversation.Team, conversation.Assignee, locale), cancellationToken).ConfigureAwait(false);
         }

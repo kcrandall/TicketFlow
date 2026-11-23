@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -96,9 +97,11 @@ public sealed record PostgresMigrationOptions
 
 internal static class MigrationIdentifiers
 {
+    private static readonly SearchValues<char> AllowedChars = SearchValues.Create("abcdefghijklmnopqrstuvwxyz0123456789-._");
+
     public static void Validate(string value, string name)
     {
-        if (string.IsNullOrEmpty(value) || value.Length > 128 || value.Any(character => !(character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-' or '.' or '_')))
+        if (string.IsNullOrEmpty(value) || value.Length > 128 || value.AsSpan().ContainsAnyExcept(AllowedChars))
             throw new ArgumentException("Migration identifiers use 1–128 lowercase ASCII letters, digits, dot, underscore or hyphen.", name);
     }
 }

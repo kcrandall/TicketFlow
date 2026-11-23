@@ -22,37 +22,99 @@ public sealed class EventContentHydrator(IConversationService? conversations = n
     {
         ArgumentNullException.ThrowIfNull(events);
         ArgumentNullException.ThrowIfNull(principal);
-        var messages = await MessagesAsync(events, principal, cancellationToken).ConfigureAwait(false);
-        var contactCache = new Dictionary<ContactId, (ContactEventContent Content, IReadOnlyList<string> Masked)?>();
-        async Task<(ContactEventContent Content, IReadOnlyList<string> Masked)?> ContactAsync(ContactId id)
+        if (events.Count == 0)
+            return new Dictionary<long, EventContent>(0);
+
+        // Collect distinct contacts and survey invitations up front so messages, contacts and surveys hydrate in parallel.
+        HashSet<ContactId>? wantedContacts = null;
+        HashSet<Guid>? wantedSurveys = null;
+        for (var i = 0; i < events.Count; i++)
         {
-            if (!contactCache.TryGetValue(id, out var value))
-                contactCache[id] = value = await LoadContactAsync(principal, id, cancellationToken).ConfigureAwait(false);
-            return value;
+            var stored = events[i];
+            ContactId? own = null;
+            switch (stored.Event.Data)
+            {
+                case SurveyRespondedData responded:
+                    if (surveys is not null && Guid.TryParse(responded.Invitation, out var invitation) && invitation != Guid.Empty)
+                        (wantedSurveys ??= []).Add(invitation);
+                    break;
+                case ContactCreatedData created:
+                    own = created.Contact;
+                    break;
+                case ContactUpdatedData updated:
+                    own = updated.Contact;
+                    break;
+                case ContactMergedData merged:
+                    own = merged.Target;
+                    break;
+                case ContactUnmergedData unmerged:
+                    own = unmerged.Contact;
+                    break;
+                case ContactIdentityLinkedData linked:
+                    own = linked.Contact;
+                    break;
+                case ConversationCreatedData:
+                case ConversationStatusChangedData:
+                case ConversationAssignedData:
+                case ConversationTeamChangedData:
+                case ConversationPriorityChangedData:
+                case ConversationLabelsChangedData:
+                case ConversationMessageReceivedData:
+                case ConversationMessageSentData:
+                case ConversationNoteAddedData:
+                case ConversationResolvedData:
+                case ConversationReopenedData:
+                case ConversationDeletedData:
+                case ContactDeletedData:
+                case SlaAppliedData:
+                case SlaWarningData:
+                case SlaBreachedData:
+                case SlaMetData:
+                case RoutingAssignedData:
+                case RoutingQueuedData:
+                case RoutingOverflowedData:
+                case RoutingQueueWaitExceededData:
+                case ChannelDeliveryStatusData:
+                    break;
+            }
+            if (own is { } ownContact)
+            {
+                if (contacts is not null)
+                    (wantedContacts ??= []).Add(ownContact);
+            }
+            else if (contacts is not null && stored.Resource.Conversation is not null && stored.Resource.Contact is { } conversationContact)
+                (wantedContacts ??= []).Add(conversationContact);
         }
 
-        var result = new Dictionary<long, EventContent>();
-        foreach (var stored in events)
+        var messagesTask = MessagesAsync(events, principal, cancellationToken);
+        var contactsTask = wantedContacts is not null ? LoadContactsAsync(principal, wantedContacts, cancellationToken) : Task.FromResult<Dictionary<ContactId, (ContactEventContent Content, IReadOnlyList<string> Masked)?>>(EmptyContacts);
+        var surveysTask = wantedSurveys is not null ? LoadSurveysAsync(principal, wantedSurveys, cancellationToken) : Task.FromResult<Dictionary<Guid, SurveyResponseView>>(EmptySurveys);
+        await Task.WhenAll(messagesTask, contactsTask, surveysTask).ConfigureAwait(false);
+        var messages = messagesTask.Result;
+        var contactCache = contactsTask.Result;
+        var surveyCache = surveysTask.Result;
+
+        var result = new Dictionary<long, EventContent>(events.Count);
+        for (var i = 0; i < events.Count; i++)
         {
+            var stored = events[i];
             EventContentValue? value = null;
-            var masked = new SortedSet<string>(StringComparer.Ordinal);
+            SortedSet<string>? masked = null;
             ContactId? own = null;
             switch (stored.Event.Data)
             {
                 case ConversationMessageReceivedData received:
-                    value = Message(messages, received.Conversation, received.TimelineSequence, masked);
+                    value = Message(messages, received.Conversation, received.TimelineSequence, ref masked);
                     break;
                 case ConversationMessageSentData sent:
-                    value = Message(messages, sent.Conversation, sent.TimelineSequence, masked);
+                    value = Message(messages, sent.Conversation, sent.TimelineSequence, ref masked);
                     break;
                 case SurveyRespondedData responded:
-                    if (surveys is not null && Guid.TryParse(responded.Invitation, out var invitation) && invitation != Guid.Empty
-                        && (await surveys.GetResponseAsync(principal, new SurveyInvitationId(invitation), cancellationToken).ConfigureAwait(false)).Value
-                            is SurveySucceeded<SurveyResponseView> response)
+                    if (Guid.TryParse(responded.Invitation, out var invitation) && surveyCache.TryGetValue(invitation, out var response))
                     {
-                        value = new SurveyCommentContent(response.Value.Comment);
-                        if (response.Value.CommentMasked)
-                            masked.Add(SurveyFieldPaths.Comment.Value);
+                        value = new SurveyCommentContent(response.Comment);
+                        if (response.CommentMasked)
+                            (masked ??= new(StringComparer.Ordinal)).Add(SurveyFieldPaths.Comment.Value);
                     }
                     break;
                 case ContactCreatedData created:
@@ -95,62 +157,172 @@ public sealed class EventContentHydrator(IConversationService? conversations = n
             ContactEventContent? related = null;
             if (own is { } ownContact)
             {
-                if (await ContactAsync(ownContact).ConfigureAwait(false) is { } contact)
+                if (contactCache.TryGetValue(ownContact, out var contact) && contact is { } found)
                 {
-                    value = contact.Content;
-                    masked.UnionWith(contact.Masked);
+                    value = found.Content;
+                    if (found.Masked.Count > 0)
+                        (masked ??= new(StringComparer.Ordinal)).UnionWith(found.Masked);
                 }
             }
             else if (stored.Resource.Conversation is not null && stored.Resource.Contact is { } conversationContact
-                && await ContactAsync(conversationContact).ConfigureAwait(false) is { } contact)
+                && contactCache.TryGetValue(conversationContact, out var contact) && contact is { } found)
             {
-                related = contact.Content;
-                masked.UnionWith(contact.Masked);
+                related = found.Content;
+                if (found.Masked.Count > 0)
+                    (masked ??= new(StringComparer.Ordinal)).UnionWith(found.Masked);
             }
-            if (value is not null || related is not null || masked.Count > 0)
-                result[stored.Sequence] = new EventContent(value, [.. masked], related);
+            if (value is not null || related is not null || masked is { Count: > 0 })
+                result[stored.Sequence] = new EventContent(value, masked is { Count: > 0 } ? [.. masked] : [], related);
         }
         return result;
     }
 
+    private static readonly Dictionary<ContactId, (ContactEventContent Content, IReadOnlyList<string> Masked)?> EmptyContacts = [];
+    private static readonly Dictionary<Guid, SurveyResponseView> EmptySurveys = [];
+
+    private async Task<Dictionary<ContactId, (ContactEventContent Content, IReadOnlyList<string> Masked)?>> LoadContactsAsync(ApiClientPrincipal principal,
+        HashSet<ContactId> ids, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<ContactId, (ContactEventContent Content, IReadOnlyList<string> Masked)?>(ids.Count);
+        if (ids.Count == 1)
+        {
+            foreach (var id in ids)
+                result[id] = await LoadContactAsync(principal, id, cancellationToken).ConfigureAwait(false);
+            return result;
+        }
+        using var gate = new SemaphoreSlim(8);
+        var tasks = new List<Task<(ContactId Id, (ContactEventContent Content, IReadOnlyList<string> Masked)? Value)>>(ids.Count);
+        foreach (var id in ids)
+            tasks.Add(LoadOneContactAsync(id, principal, gate, cancellationToken));
+        var loaded = await Task.WhenAll(tasks).ConfigureAwait(false);
+        for (var i = 0; i < loaded.Length; i++)
+            result[loaded[i].Id] = loaded[i].Value;
+        return result;
+    }
+
+    private async Task<(ContactId Id, (ContactEventContent Content, IReadOnlyList<string> Masked)? Value)> LoadOneContactAsync(ContactId id, ApiClientPrincipal principal,
+        SemaphoreSlim gate, CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return (id, await LoadContactAsync(principal, id, cancellationToken).ConfigureAwait(false));
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task<Dictionary<Guid, SurveyResponseView>> LoadSurveysAsync(ApiClientPrincipal principal, HashSet<Guid> ids, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<Guid, SurveyResponseView>(ids.Count);
+        using var gate = new SemaphoreSlim(8);
+        var tasks = new List<Task<(Guid Id, SurveyResponseView? View)>>(ids.Count);
+        foreach (var id in ids)
+            tasks.Add(LoadOneSurveyAsync(id, principal, gate, cancellationToken));
+        var loaded = await Task.WhenAll(tasks).ConfigureAwait(false);
+        for (var i = 0; i < loaded.Length; i++)
+            if (loaded[i].View is { } view)
+                result[loaded[i].Id] = view;
+        return result;
+    }
+
+    private async Task<(Guid Id, SurveyResponseView? View)> LoadOneSurveyAsync(Guid id, ApiClientPrincipal principal, SemaphoreSlim gate, CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var res = await surveys!.GetResponseAsync(principal, new SurveyInvitationId(id), cancellationToken).ConfigureAwait(false);
+            return (id, res.Value is SurveySucceeded<SurveyResponseView> ok ? ok.Value : null);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
     private static EventContentValue? Message(IReadOnlyDictionary<(ConversationId, long), TimelineEventView> messages, ConversationId conversation, long sequence,
-        SortedSet<string> masked)
+        ref SortedSet<string>? masked)
     {
         if (!messages.TryGetValue((conversation, sequence), out var view) || view.Event.Event.Value is not MessageEvent message)
             return null;
-        masked.UnionWith(view.MaskedFields.Select(field => field.Field.Value));
-        return new MessageEventContent(message.Body, EventMapping.ContentType(message.ContentType),
-            [.. message.Attachments.Select(attachment => new EventAttachment(attachment.FileName, attachment.MediaType, attachment.SizeBytes))], message.ExternalId);
+        if (view.MaskedFields.Count > 0)
+        {
+            masked ??= new(StringComparer.Ordinal);
+            for (var i = 0; i < view.MaskedFields.Count; i++)
+                masked.Add(view.MaskedFields[i].Field.Value);
+        }
+        var attachments = message.Attachments.Count == 0
+            ? []
+            : new EventAttachment[message.Attachments.Count];
+        for (var i = 0; i < message.Attachments.Count; i++)
+        {
+            var a = message.Attachments[i];
+            attachments[i] = new EventAttachment(a.FileName, a.MediaType, a.SizeBytes);
+        }
+        return new MessageEventContent(message.Body, EventMapping.ContentType(message.ContentType), attachments, message.ExternalId);
     }
 
-    /// <summary>One timeline range read (paged by the service maximum) per conversation covering the batch's message sequences.</summary>
+    /// <summary>Timeline range reads per conversation, splitting sparse sequence gaps wider than one page.</summary>
     private async Task<IReadOnlyDictionary<(ConversationId, long), TimelineEventView>> MessagesAsync(IReadOnlyList<StoredIntegrationEvent> events, ApiClientPrincipal principal,
         CancellationToken cancellationToken)
     {
         var views = new Dictionary<(ConversationId, long), TimelineEventView>();
         if (conversations is null)
             return views;
-        var wanted = events.Select(stored => stored.Event.Data.Value switch
+        Dictionary<ConversationId, List<long>>? byConversation = null;
+        for (var i = 0; i < events.Count; i++)
+        {
+            (ConversationId Conv, long Seq)? entry = events[i].Event.Data.Value switch
             {
                 ConversationMessageReceivedData received => (received.Conversation, received.TimelineSequence),
                 ConversationMessageSentData sent => (sent.Conversation, sent.TimelineSequence),
-                _ => ((ConversationId, long)?)null,
-            }).OfType<(ConversationId Conversation, long Sequence)>().ToList();
-        foreach (var group in wanted.GroupBy(item => item.Conversation))
-        {
-            var sequences = group.Select(item => item.Sequence).ToHashSet();
-            var after = sequences.Min() - 1;
-            var last = sequences.Max();
-            while (after < last)
+                _ => null,
+            };
+            if (entry is { } e)
             {
-                var limit = (int)Math.Min(last - after, IConversationStore.MaximumTimelineRead);
-                if ((await conversations.ReadTimelineAsync(principal, group.Key, after, limit, cancellationToken).ConfigureAwait(false)).Value is not TimelinePage page)
-                    break;
-                foreach (var view in page.Events.Where(view => sequences.Contains(view.Event.Sequence)))
-                    views[(group.Key, view.Event.Sequence)] = view;
-                if (page.NextAfterSequence is not { } next || next <= after)
-                    break;
-                after = next;
+                byConversation ??= [];
+                if (!byConversation.TryGetValue(e.Conv, out var list))
+                    byConversation[e.Conv] = list = [];
+                list.Add(e.Seq);
+            }
+        }
+        if (byConversation is null)
+            return views;
+        foreach (var (conversation, seqList) in byConversation)
+        {
+            seqList.Sort();
+            var wanted = new HashSet<long>(seqList);
+            // Split into contiguous clusters where consecutive wanted sequences are within one page of each other.
+            var startIndex = 0;
+            while (startIndex < seqList.Count)
+            {
+                var clusterStart = seqList[startIndex];
+                var clusterEnd = clusterStart;
+                var nextIndex = startIndex + 1;
+                while (nextIndex < seqList.Count && seqList[nextIndex] - clusterEnd <= IConversationStore.MaximumTimelineRead)
+                {
+                    clusterEnd = seqList[nextIndex];
+                    nextIndex++;
+                }
+                var after = clusterStart - 1;
+                while (after < clusterEnd)
+                {
+                    var limit = (int)Math.Min(clusterEnd - after, IConversationStore.MaximumTimelineRead);
+                    if ((await conversations.ReadTimelineAsync(principal, conversation, after, limit, cancellationToken).ConfigureAwait(false)).Value is not TimelinePage page)
+                        break;
+                    for (var i = 0; i < page.Events.Count; i++)
+                    {
+                        var view = page.Events[i];
+                        if (wanted.Contains(view.Event.Sequence))
+                            views[(conversation, view.Event.Sequence)] = view;
+                    }
+                    if (page.NextAfterSequence is not { } next || next <= after)
+                        break;
+                    after = next;
+                }
+                startIndex = nextIndex;
             }
         }
         return views;

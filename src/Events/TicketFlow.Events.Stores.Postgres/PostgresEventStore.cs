@@ -1,3 +1,6 @@
+using System.Buffers;
+using System.Data;
+using System.Text;
 using System.Text.Json;
 using Npgsql;
 using NpgsqlTypes;
@@ -27,7 +30,85 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
     private const string EventColumns = "sequence, event_id, type, occurred_at, recorded_at, actor_kind, actor_id, conversation_id, inbox_id, team_id, assignee_id, contact_id, data, format_version";
     private const string SubscriptionColumns = "tenant_id, project_id, environment_id, app_id, workspace_id, subscription_id, format_version, name, sink_kind, sink_target, filter, principal_id, "
         + "privacy, enabled, batch_size, revision, created_at, delivery_cursor, attempts, available_at, last_error, last_delivered_at, fence, lease_until, generation, suspended";
+    private const string SubscriptionColumnsS = "s.tenant_id, s.project_id, s.environment_id, s.app_id, s.workspace_id, s.subscription_id, s.format_version, s.name, s.sink_kind, s.sink_target, s.filter, s.principal_id, "
+        + "s.privacy, s.enabled, s.batch_size, s.revision, s.created_at, s.delivery_cursor, s.attempts, s.available_at, s.last_error, s.last_delivered_at, s.fence, s.lease_until, s.generation, s.suspended";
     private const string LetterColumns = "subscription_id, sequence, event_id, type, attempts, error, dead_lettered_at, format_version";
+
+    private const string DeleteSubscriptionSql = $"""
+        WITH removed AS (
+            DELETE FROM tf_event_subscriptions WHERE {SubscriptionWhere} AND revision=@expected
+            RETURNING {SubscriptionColumns}
+        ),
+        cleared AS (
+            DELETE FROM tf_event_dead_letters d
+            USING removed r
+            WHERE d.subscription_key = tf_key_v1(r.tenant_id, r.project_id, r.environment_id, r.app_id, r.workspace_id, r.subscription_id)
+        )
+        SELECT {SubscriptionColumns} FROM removed
+        """;
+
+    private const string ReplaySubscriptionSql = $"""
+        WITH updated AS (
+            UPDATE tf_event_subscriptions SET delivery_cursor=@after, attempts=0, available_at=@now, last_error=NULL, fence=fence+1, lease_until=NULL, generation=generation+1,
+                suspended=false WHERE {SubscriptionWhere}
+            RETURNING 1
+        ),
+        cleared AS (
+            DELETE FROM tf_event_dead_letters
+            WHERE subscription_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@subscription) AND sequence > @after
+              AND EXISTS (SELECT 1 FROM updated)
+        )
+        SELECT count(*) FROM updated
+        """;
+
+    private const string DeadLetterWithLettersSql = $"""
+        WITH updated AS (
+            UPDATE tf_event_subscriptions SET delivery_cursor=GREATEST(delivery_cursor, @cursor), attempts=0, last_error=@error, available_at=@available, lease_until=NULL
+            WHERE {SubscriptionWhere} AND fence=@fence AND lease_until > @now
+            RETURNING 1
+        ),
+        inserted AS (
+            INSERT INTO tf_event_dead_letters({ScopeColumns}, {LetterColumns})
+            SELECT {ScopeParameters}, @subscription, t.sequence, t.event_id, t.type, t.attempts, t.error, t.dead_lettered_at, 1
+            FROM updated CROSS JOIN unnest(@sequences, @ids, @types, @attempts, @errors, @times) AS t(sequence, event_id, type, attempts, error, dead_lettered_at)
+            ON CONFLICT (subscription_key, sequence) DO UPDATE SET event_id=excluded.event_id, type=excluded.type, attempts=excluded.attempts, error=excluded.error,
+                dead_lettered_at=excluded.dead_lettered_at
+        )
+        SELECT count(*) FROM updated
+        """;
+
+    private const string DeadLetterEmptySql = $"""
+        UPDATE tf_event_subscriptions SET delivery_cursor=GREATEST(delivery_cursor, @cursor), attempts=0, last_error=@error, available_at=@available, lease_until=NULL
+        WHERE {SubscriptionWhere} AND fence=@fence AND lease_until > @now
+        """;
+
+    private const string AppendEventsCteSql = $"""
+        WITH input AS (
+            SELECT ord, event_id, type, occurred_at, actor_kind, actor_id, conversation_id, inbox_id, team_id, assignee_id, contact_id, data
+            FROM unnest(@ids, @types, @occurred, @actor_kinds, @actor_ids, @conversations, @inboxes, @teams, @assignees, @contacts, @data) WITH ORDINALITY
+                AS t(event_id, type, occurred_at, actor_kind, actor_id, conversation_id, inbox_id, team_id, assignee_id, contact_id, data, ord)
+        ),
+        novel AS (
+            SELECT i.*, @head + row_number() OVER (ORDER BY i.ord) AS sequence
+            FROM input i
+            WHERE NOT EXISTS (
+                SELECT 1 FROM tf_events e
+                WHERE e.scope_key = tf_key_v1(@tenant,@project,@environment,@app,@workspace) AND e.event_id = i.event_id
+            )
+        ),
+        inserted AS (
+            INSERT INTO tf_events({ScopeColumns}, {EventColumns})
+            SELECT {ScopeParameters}, n.sequence, n.event_id, n.type, n.occurred_at, @recorded, n.actor_kind, n.actor_id, n.conversation_id, n.inbox_id, n.team_id,
+                n.assignee_id, n.contact_id, n.data, 1
+            FROM novel n
+            RETURNING sequence, event_id
+        ),
+        updated_head AS (
+            UPDATE tf_event_heads SET last_sequence = @head + (SELECT count(*) FROM novel)
+            WHERE {ScopeKeyWhere} AND EXISTS (SELECT 1 FROM novel)
+        )
+        SELECT sequence, event_id FROM inserted ORDER BY sequence
+        """;
 
     private readonly NpgsqlDataSource source;
     private readonly TimeProvider time;
@@ -47,69 +128,88 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         ArgumentNullException.ThrowIfNull(scope);
         IEventLog.RequireDrafts(drafts);
         recordedAt = EventText.Instant(recordedAt);
-        var encoded = drafts.Select(draft => (Draft: draft, Data: IntegrationEventCodec.EncodeData(draft.Event.Data))).ToList();
+
+        // Deduplicate drafts in memory before opening a connection or taking the head lock.
+        var uniqueDrafts = new List<IntegrationEventDraft>(drafts.Count);
+        var byId = new Dictionary<Guid, IntegrationEventDraft>(drafts.Count);
+        var inBatchDuplicates = 0;
+        for (var i = 0; i < drafts.Count; i++)
+        {
+            var draft = drafts[i];
+            if (byId.TryAdd(draft.Event.Id, draft))
+                uniqueDrafts.Add(draft);
+            else
+                inBatchDuplicates++;
+        }
+
+        var count = uniqueDrafts.Count;
+        var ids = new Guid[count];
+        var types = new string[count];
+        var occurred = new DateTimeOffset[count];
+        var actorKinds = new string?[count];
+        var actorIds = new string?[count];
+        var conversations = new string?[count];
+        var inboxes = new string?[count];
+        var teams = new string?[count];
+        var assignees = new string?[count];
+        var contacts = new string?[count];
+        var data = new string[count];
+        for (var i = 0; i < count; i++)
+        {
+            var draft = uniqueDrafts[i];
+            ids[i] = draft.Event.Id;
+            types[i] = draft.Event.Type;
+            occurred[i] = draft.Event.Time;
+            actorKinds[i] = draft.Event.Actor?.Kind;
+            actorIds[i] = draft.Event.Actor?.Id;
+            conversations[i] = draft.Resource.Conversation?.Value;
+            inboxes[i] = draft.Resource.Inbox?.Value;
+            teams[i] = draft.Resource.Team?.Value;
+            assignees[i] = draft.Resource.Assignee?.Value;
+            contacts[i] = draft.Resource.Contact?.Value;
+            data[i] = IntegrationEventCodec.EncodeData(draft.Event.Data);
+        }
+
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         long head;
-        await using (var command = new NpgsqlCommand($"""
+        await using (var lockCommand = new NpgsqlCommand($"""
             INSERT INTO tf_event_heads({ScopeColumns}, last_sequence) VALUES({ScopeParameters}, 0) ON CONFLICT (scope_key) DO NOTHING;
             SELECT last_sequence FROM tf_event_heads WHERE {ScopeKeyWhere} FOR UPDATE;
             """, connection, transaction))
         {
-            AddScope(command, scope);
-            head = (long)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+            AddScope(lockCommand, scope);
+            head = (long)(await lockCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
         }
-        var existing = new HashSet<Guid>();
-        await using (var command = new NpgsqlCommand($"SELECT event_id FROM tf_events WHERE {ScopeKeyWhere} AND event_id = ANY(@ids)", connection, transaction))
+
+        var appended = new List<StoredIntegrationEvent>(count);
+        await using (var command = new NpgsqlCommand(AppendEventsCteSql, connection, transaction))
         {
             AddScope(command, scope);
-            command.Parameters.Add(new NpgsqlParameter("ids", NpgsqlDbType.Array | NpgsqlDbType.Uuid) { Value = encoded.Select(item => item.Draft.Event.Id).Distinct().ToArray() });
+            AddLong(command, "head", head);
+            AddTime(command, "recorded", recordedAt);
+            command.Parameters.Add(new NpgsqlParameter<Guid[]>("ids", NpgsqlDbType.Array | NpgsqlDbType.Uuid) { TypedValue = ids });
+            command.Parameters.Add(new NpgsqlParameter<string[]>("types", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = types });
+            command.Parameters.Add(new NpgsqlParameter<DateTimeOffset[]>("occurred", NpgsqlDbType.Array | NpgsqlDbType.TimestampTz) { TypedValue = occurred });
+            AddNullableTextArray(command, "actor_kinds", actorKinds);
+            AddNullableTextArray(command, "actor_ids", actorIds);
+            AddNullableTextArray(command, "conversations", conversations);
+            AddNullableTextArray(command, "inboxes", inboxes);
+            AddNullableTextArray(command, "teams", teams);
+            AddNullableTextArray(command, "assignees", assignees);
+            AddNullableTextArray(command, "contacts", contacts);
+            command.Parameters.Add(new NpgsqlParameter<string[]>("data", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = data });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                existing.Add(reader.GetGuid(0));
-        }
-        var appended = new List<StoredIntegrationEvent>();
-        var rows = new List<(StoredIntegrationEvent Stored, string Data)>();
-        var duplicates = 0;
-        foreach (var (draft, data) in encoded)
-        {
-            if (!existing.Add(draft.Event.Id))
             {
-                duplicates++;
-                continue;
+                var seq = reader.GetInt64(0);
+                var eventId = reader.GetGuid(1);
+                var draft = byId[eventId];
+                appended.Add(new StoredIntegrationEvent(scope, seq, draft.Event, draft.Resource, recordedAt));
             }
-            var stored = new StoredIntegrationEvent(scope, head + rows.Count + 1, draft.Event, draft.Resource, recordedAt);
-            rows.Add((stored, data));
-            appended.Add(stored);
-        }
-        if (rows.Count > 0)
-        {
-            await using var command = new NpgsqlCommand($"""
-                INSERT INTO tf_events({ScopeColumns}, {EventColumns})
-                SELECT {ScopeParameters}, t.sequence, t.event_id, t.type, t.occurred_at, @recorded, t.actor_kind, t.actor_id, t.conversation_id, t.inbox_id, t.team_id,
-                    t.assignee_id, t.contact_id, t.data, 1
-                FROM unnest(@sequences, @ids, @types, @occurred, @actor_kinds, @actor_ids, @conversations, @inboxes, @teams, @assignees, @contacts, @data)
-                    AS t(sequence, event_id, type, occurred_at, actor_kind, actor_id, conversation_id, inbox_id, team_id, assignee_id, contact_id, data);
-                UPDATE tf_event_heads SET last_sequence=@head WHERE {ScopeKeyWhere};
-                """, connection, transaction);
-            AddScope(command, scope);
-            AddTime(command, "recorded", recordedAt);
-            command.Parameters.Add(new NpgsqlParameter("sequences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { Value = rows.Select(row => row.Stored.Sequence).ToArray() });
-            command.Parameters.Add(new NpgsqlParameter("ids", NpgsqlDbType.Array | NpgsqlDbType.Uuid) { Value = rows.Select(row => row.Stored.Event.Id).ToArray() });
-            AddTextArray(command, "types", rows.Select(row => row.Stored.Event.Type));
-            command.Parameters.Add(new NpgsqlParameter("occurred", NpgsqlDbType.Array | NpgsqlDbType.TimestampTz) { Value = rows.Select(row => row.Stored.Event.Time).ToArray() });
-            AddTextArray(command, "actor_kinds", rows.Select(row => row.Stored.Event.Actor?.Kind));
-            AddTextArray(command, "actor_ids", rows.Select(row => row.Stored.Event.Actor?.Id));
-            AddTextArray(command, "conversations", rows.Select(row => row.Stored.Resource.Conversation?.Value));
-            AddTextArray(command, "inboxes", rows.Select(row => row.Stored.Resource.Inbox?.Value));
-            AddTextArray(command, "teams", rows.Select(row => row.Stored.Resource.Team?.Value));
-            AddTextArray(command, "assignees", rows.Select(row => row.Stored.Resource.Assignee?.Value));
-            AddTextArray(command, "contacts", rows.Select(row => row.Stored.Resource.Contact?.Value));
-            AddTextArray(command, "data", rows.Select(row => row.Data));
-            command.Parameters.AddWithValue("head", head + rows.Count);
-            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        var duplicates = inBatchDuplicates + (count - appended.Count);
         return new EventAppendResult(appended, duplicates);
     }
 
@@ -121,9 +221,9 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IEventLog.MaximumRead);
         await using var command = source.CreateCommand($"SELECT {EventColumns} FROM tf_events WHERE {ScopeKeyWhere} AND sequence > @after ORDER BY sequence LIMIT @limit");
         AddScope(command, scope);
-        command.Parameters.AddWithValue("after", afterSequence);
-        command.Parameters.AddWithValue("limit", limit);
-        var events = new List<StoredIntegrationEvent>();
+        AddLong(command, "after", afterSequence);
+        AddInt(command, "limit", limit);
+        var events = new List<StoredIntegrationEvent>(Math.Min(limit, 64));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             events.Add(ReadEvent(reader, scope));
@@ -137,7 +237,7 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
             SELECT (SELECT last_sequence FROM tf_event_heads WHERE {ScopeKeyWhere}), (SELECT min(sequence) FROM tf_events WHERE {ScopeKeyWhere})
             """);
         AddScope(command, scope);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
         return new EventLogHead(reader.IsDBNull(1) ? null : reader.GetInt64(1), reader.IsDBNull(0) ? 0 : reader.GetInt64(0));
     }
@@ -150,7 +250,7 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
             DELETE FROM tf_events WHERE ctid IN (SELECT ctid FROM tf_events WHERE recorded_at < @before LIMIT @limit FOR UPDATE SKIP LOCKED)
             """);
         AddTime(command, "before", olderThan);
-        command.Parameters.AddWithValue("limit", limit);
+        AddInt(command, "limit", limit);
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -173,14 +273,17 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
             : $"UPDATE tf_event_checkpoints SET value=@value WHERE {ScopeKeyWhere} AND name=@name AND value=@expected");
         AddScope(command, scope);
         AddText(command, "name", name);
-        command.Parameters.AddWithValue("value", value);
+        AddLong(command, "value", value);
         if (expected is { } current)
-            command.Parameters.AddWithValue("expected", current);
+            AddLong(command, "expected", current);
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
     }
 
     public async Task<StoredEventSubscription?> GetAsync(TicketScope scope, EventSubscriptionId id, CancellationToken cancellationToken = default) =>
         (await GetRowAsync(scope, id, cancellationToken).ConfigureAwait(false))?.Subscription;
+
+    public async Task<(StoredEventSubscription Subscription, EventDeliveryState State)?> GetWithStateAsync(TicketScope scope, EventSubscriptionId id, CancellationToken cancellationToken = default) =>
+        await GetRowAsync(scope, id, cancellationToken).ConfigureAwait(false) is { } row ? (row.Subscription, row.State) : null;
 
     public async Task<IReadOnlyList<StoredEventSubscription>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default)
     {
@@ -191,6 +294,21 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             list.Add(ReadSubscription(reader).Subscription);
+        return list;
+    }
+
+    public async Task<IReadOnlyList<(StoredEventSubscription Subscription, EventDeliveryState State)>> ListWithStateAsync(TicketScope scope, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        await using var command = source.CreateCommand($"SELECT {SubscriptionColumns} FROM tf_event_subscriptions WHERE {ScopeKeyWhere} ORDER BY subscription_id COLLATE \"C\"");
+        AddScope(command, scope);
+        var list = new List<(StoredEventSubscription, EventDeliveryState)>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var row = ReadSubscription(reader);
+            list.Add((row.Subscription, row.State));
+        }
         return list;
     }
 
@@ -205,48 +323,62 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var lockCommand = new NpgsqlCommand("SELECT pg_advisory_xact_lock(hashtextextended(array_to_string(@parts, chr(31)), 0))", connection, transaction))
         {
-            lockCommand.Parameters.Add(new NpgsqlParameter("parts", NpgsqlDbType.Array | NpgsqlDbType.Text)
-                { Value = (string[])["ticketflow.events", scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value] });
+            lockCommand.Parameters.Add(new NpgsqlParameter<string[]>("parts", NpgsqlDbType.Array | NpgsqlDbType.Text)
+                { TypedValue = ["ticketflow.events", scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value] });
             await lockCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
-        await using (var count = new NpgsqlCommand($"SELECT count(*) FROM tf_event_subscriptions WHERE {ScopeKeyWhere}", connection, transaction))
-        {
-            AddScope(count, scope);
-            if ((long)(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))! >= IEventSubscriptionStore.MaximumSubscriptionsPerWorkspace)
-                return new EventWriteRejected(EventWriteRejection.LimitReached);
-        }
-        await using (var insert = new NpgsqlCommand($"""
-            INSERT INTO tf_event_subscriptions({ScopeColumns}, subscription_id, format_version, name, sink_kind, sink_target, filter, principal_id, privacy, enabled, batch_size,
-                revision, created_at, delivery_cursor, attempts, available_at, last_error, last_delivered_at, fence, lease_until)
-            VALUES({ScopeParameters}, @subscription, 1, @name, @sink_kind, @sink_target, @filter, @principal, @privacy, @enabled, @batch, 1, @created, @cursor, 0, @created, NULL, NULL, 0, NULL)
-            ON CONFLICT (subscription_key) DO NOTHING
+        bool inserted;
+        bool atLimit;
+        await using (var create = new NpgsqlCommand($"""
+            WITH cnt AS (
+                SELECT count(*) AS n FROM tf_event_subscriptions WHERE {ScopeKeyWhere}
+            ),
+            ins AS (
+                INSERT INTO tf_event_subscriptions({ScopeColumns}, subscription_id, format_version, name, sink_kind, sink_target, filter, principal_id, privacy, enabled, batch_size,
+                    revision, created_at, delivery_cursor, attempts, available_at, last_error, last_delivered_at, fence, lease_until)
+                SELECT {ScopeParameters}, @subscription, 1, @name, @sink_kind, @sink_target, @filter, @principal, @privacy, @enabled, @batch, 1, @created, @cursor, 0, @created, NULL, NULL, 0, NULL
+                WHERE (SELECT n FROM cnt) < @max
+                ON CONFLICT (subscription_key) DO NOTHING
+                RETURNING 1
+            )
+            SELECT EXISTS(SELECT 1 FROM ins), ((SELECT n FROM cnt) >= @max)
             """, connection, transaction))
         {
-            BindSubscription(insert, scope, subscription);
-            AddTime(insert, "created", createdAt);
-            insert.Parameters.AddWithValue("cursor", cursor);
-            if (await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 0)
-                return new EventWriteRejected(EventWriteRejection.Duplicate);
+            BindSubscription(create, scope, subscription);
+            AddTime(create, "created", createdAt);
+            AddLong(create, "cursor", cursor);
+            AddLong(create, "max", IEventSubscriptionStore.MaximumSubscriptionsPerWorkspace);
+            await using var reader = await create.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+            await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            inserted = reader.GetBoolean(0);
+            atLimit = reader.GetBoolean(1);
         }
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new EventWriteApplied<StoredEventSubscription>(new StoredEventSubscription(scope, subscription, 1, createdAt));
+        if (inserted)
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new EventWriteApplied<StoredEventSubscription>(new StoredEventSubscription(scope, subscription, 1, createdAt));
+        }
+        return new EventWriteRejected(atLimit ? EventWriteRejection.LimitReached : EventWriteRejection.Duplicate);
     }
 
     public async Task<EventWriteResult<StoredEventSubscription>> UpdateAsync(TicketScope scope, EventSubscription subscription, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(subscription);
-        await using var command = source.CreateCommand($"""
+        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var command = new NpgsqlCommand($"""
             UPDATE tf_event_subscriptions SET name=@name, sink_kind=@sink_kind, sink_target=@sink_target, filter=@filter, principal_id=@principal, privacy=@privacy,
                 enabled=@enabled, batch_size=@batch, revision=revision+1, attempts=0, suspended=false
             WHERE {SubscriptionWhere} AND revision=@expected RETURNING created_at
-            """);
-        BindSubscription(command, scope, subscription);
-        command.Parameters.AddWithValue("expected", expectedRevision);
-        if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is DateTime created)
-            return new EventWriteApplied<StoredEventSubscription>(new StoredEventSubscription(scope, subscription, expectedRevision + 1, Instant(created)));
-        return await GetAsync(scope, subscription.Id, cancellationToken).ConfigureAwait(false) is { } current
-            ? new EventWriteConflict(current.Revision)
+            """, connection))
+        {
+            BindSubscription(command, scope, subscription);
+            AddLong(command, "expected", expectedRevision);
+            if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is DateTime created)
+                return new EventWriteApplied<StoredEventSubscription>(new StoredEventSubscription(scope, subscription, expectedRevision + 1, Instant(created)));
+        }
+        return await SubscriptionRevisionAsync(connection, scope, subscription.Id, cancellationToken).ConfigureAwait(false) is { } current
+            ? new EventWriteConflict(current)
             : EventWriteNotFound.Instance;
     }
 
@@ -255,31 +387,18 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         ArgumentNullException.ThrowIfNull(scope);
         Require(id);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        StoredEventSubscription? removed = null;
-        await using (var command = new NpgsqlCommand($"DELETE FROM tf_event_subscriptions WHERE {SubscriptionWhere} AND revision=@expected RETURNING {SubscriptionColumns}", connection, transaction))
+        await using (var command = new NpgsqlCommand(DeleteSubscriptionSql, connection))
         {
             AddScope(command, scope);
             AddText(command, "subscription", id.Value);
-            command.Parameters.AddWithValue("expected", expectedRevision);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            AddLong(command, "expected", expectedRevision);
+            await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                removed = ReadSubscription(reader).Subscription;
+                return new EventWriteApplied<StoredEventSubscription>(ReadSubscription(reader).Subscription);
         }
-        if (removed is null)
-        {
-            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-            return await GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is { } current ? new EventWriteConflict(current.Revision) : EventWriteNotFound.Instance;
-        }
-        await using (var letters = new NpgsqlCommand("DELETE FROM tf_event_dead_letters WHERE subscription_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@subscription)",
-            connection, transaction))
-        {
-            AddScope(letters, scope);
-            AddText(letters, "subscription", id.Value);
-            await letters.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new EventWriteApplied<StoredEventSubscription>(removed);
+        return await SubscriptionRevisionAsync(connection, scope, id, cancellationToken).ConfigureAwait(false) is { } current
+            ? new EventWriteConflict(current)
+            : EventWriteNotFound.Instance;
     }
 
     public async Task<EventDeliveryState?> GetStateAsync(TicketScope scope, EventSubscriptionId id, CancellationToken cancellationToken = default) =>
@@ -293,54 +412,90 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
             throw new ArgumentOutOfRangeException(nameof(lease));
         await using var command = source.CreateCommand($"""
             WITH due AS (
-                SELECT s.subscription_key FROM tf_event_subscriptions s
+                SELECT s.subscription_key, h.last_sequence FROM tf_event_subscriptions s
                 JOIN tf_event_heads h ON h.scope_key = s.scope_key
                 WHERE s.enabled AND NOT s.suspended AND s.available_at <= @now AND (s.lease_until IS NULL OR s.lease_until <= @now) AND h.last_sequence > s.delivery_cursor
                 ORDER BY s.available_at
                 LIMIT @limit
                 FOR UPDATE OF s SKIP LOCKED)
             UPDATE tf_event_subscriptions s SET fence = s.fence + 1, lease_until = @until FROM due WHERE s.subscription_key = due.subscription_key
-            RETURNING {string.Join(", ", SubscriptionColumns.Split(", ").Select(column => "s." + column))}
+            RETURNING {SubscriptionColumnsS}, due.last_sequence
             """);
         AddTime(command, "now", now);
         AddTime(command, "until", EventText.Instant(now + lease));
-        command.Parameters.AddWithValue("limit", limit);
-        var claims = new List<EventDeliveryClaim>();
+        AddInt(command, "limit", limit);
+        var claims = new List<EventDeliveryClaim>(Math.Min(limit, 32));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             var row = ReadSubscription(reader);
-            claims.Add(new EventDeliveryClaim(row.Subscription, row.State, row.Fence, row.LeaseUntil!.Value));
+            var headSequence = reader.GetInt64(26);
+            claims.Add(new EventDeliveryClaim(row.Subscription, row.State, row.Fence, row.LeaseUntil!.Value) { HeadSequence = headSequence });
         }
-        return [.. claims.OrderBy(claim => claim.State.AvailableAt)];
+        if (claims.Count > 1)
+            claims.Sort(static (a, b) => a.State.AvailableAt.CompareTo(b.State.AvailableAt));
+        return claims;
     }
 
-    public Task<bool> CompleteAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, DateTimeOffset? deliveredAt, DateTimeOffset availableAt, string? note = null,
-        CancellationToken cancellationToken = default) =>
-        FencedAsync(scope, id, fence, """
-            delivery_cursor=GREATEST(delivery_cursor, @cursor), attempts=0, last_error=@note, last_delivered_at=COALESCE(@delivered, last_delivered_at), available_at=@available,
-                lease_until=NULL
-            """, command =>
-        {
-            ArgumentOutOfRangeException.ThrowIfNegative(cursor);
-            command.Parameters.AddWithValue("cursor", cursor);
-            AddTime(command, "delivered", EventText.Instant(deliveredAt));
-            AddTime(command, "available", EventText.Instant(availableAt));
-            AddText(command, "note", note is null ? null : IEventSubscriptionStore.RequireError(note));
-        }, cancellationToken);
+    public async Task<bool> CompleteAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, DateTimeOffset? deliveredAt, DateTimeOffset availableAt, string? note = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        Require(id);
+        ArgumentOutOfRangeException.ThrowIfNegative(cursor);
+        var validNote = note is null ? null : IEventSubscriptionStore.RequireError(note);
+        await using var command = source.CreateCommand($"""
+            UPDATE tf_event_subscriptions SET delivery_cursor=GREATEST(delivery_cursor, @cursor), attempts=0, last_error=@note,
+                last_delivered_at=COALESCE(@delivered, last_delivered_at), available_at=@available, lease_until=NULL
+            WHERE {SubscriptionWhere} AND fence=@fence AND lease_until > @now
+            """);
+        AddScope(command, scope);
+        AddText(command, "subscription", id.Value);
+        AddLong(command, "fence", fence);
+        AddTime(command, "now", time.GetUtcNow());
+        AddLong(command, "cursor", cursor);
+        AddTime(command, "delivered", EventText.Instant(deliveredAt));
+        AddTime(command, "available", EventText.Instant(availableAt));
+        AddText(command, "note", validNote);
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+    }
 
-    public Task<bool> SuspendAsync(TicketScope scope, EventSubscriptionId id, long fence, string error, CancellationToken cancellationToken = default) =>
-        FencedAsync(scope, id, fence, "attempts=0, last_error=@error, suspended=true, lease_until=NULL",
-            command => AddText(command, "error", IEventSubscriptionStore.RequireError(error)), cancellationToken);
+    public async Task<bool> SuspendAsync(TicketScope scope, EventSubscriptionId id, long fence, string error, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        Require(id);
+        var validError = IEventSubscriptionStore.RequireError(error);
+        await using var command = source.CreateCommand($"""
+            UPDATE tf_event_subscriptions SET attempts=0, last_error=@error, suspended=true, lease_until=NULL
+            WHERE {SubscriptionWhere} AND fence=@fence AND lease_until > @now
+            """);
+        AddScope(command, scope);
+        AddText(command, "subscription", id.Value);
+        AddLong(command, "fence", fence);
+        AddTime(command, "now", time.GetUtcNow());
+        AddText(command, "error", validError);
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+    }
 
-    public Task<bool> FailAsync(TicketScope scope, EventSubscriptionId id, long fence, int attempts, DateTimeOffset retryAt, string error, CancellationToken cancellationToken = default) =>
-        FencedAsync(scope, id, fence, "attempts=@attempts, available_at=@retry, last_error=@error, lease_until=NULL", command =>
-        {
-            ArgumentOutOfRangeException.ThrowIfLessThan(attempts, 1);
-            command.Parameters.AddWithValue("attempts", attempts);
-            AddTime(command, "retry", EventText.Instant(retryAt));
-            AddText(command, "error", IEventSubscriptionStore.RequireError(error));
-        }, cancellationToken);
+    public async Task<bool> FailAsync(TicketScope scope, EventSubscriptionId id, long fence, int attempts, DateTimeOffset retryAt, string error, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        Require(id);
+        ArgumentOutOfRangeException.ThrowIfLessThan(attempts, 1);
+        var validError = IEventSubscriptionStore.RequireError(error);
+        await using var command = source.CreateCommand($"""
+            UPDATE tf_event_subscriptions SET attempts=@attempts, available_at=@retry, last_error=@error, lease_until=NULL
+            WHERE {SubscriptionWhere} AND fence=@fence AND lease_until > @now
+            """);
+        AddScope(command, scope);
+        AddText(command, "subscription", id.Value);
+        AddLong(command, "fence", fence);
+        AddTime(command, "now", time.GetUtcNow());
+        AddInt(command, "attempts", attempts);
+        AddTime(command, "retry", EventText.Instant(retryAt));
+        AddText(command, "error", validError);
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+    }
 
     public async Task<bool> DeadLetterAsync(TicketScope scope, EventSubscriptionId id, long fence, long cursor, IReadOnlyList<EventDeadLetter> letters, DateTimeOffset availableAt,
         CancellationToken cancellationToken = default)
@@ -349,47 +504,52 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         Require(id);
         ArgumentNullException.ThrowIfNull(letters);
         ArgumentOutOfRangeException.ThrowIfNegative(cursor);
-        foreach (var letter in letters)
-            IEventSubscriptionStore.RequireError(letter.Error);
-        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        await using (var command = new NpgsqlCommand($"""
-            UPDATE tf_event_subscriptions SET delivery_cursor=GREATEST(delivery_cursor, @cursor), attempts=0, last_error=@error, available_at=@available, lease_until=NULL
-            WHERE {SubscriptionWhere} AND fence=@fence AND lease_until > @now
-            """, connection, transaction))
+        for (var i = 0; i < letters.Count; i++)
+            IEventSubscriptionStore.RequireError(letters[i].Error);
+        if (letters.Count == 0)
         {
-            AddScope(command, scope);
-            AddText(command, "subscription", id.Value);
-            command.Parameters.AddWithValue("cursor", cursor);
-            command.Parameters.AddWithValue("fence", fence);
-            AddText(command, "error", letters.Count > 0 ? letters[0].Error : null);
-            AddTime(command, "now", time.GetUtcNow());
-            AddTime(command, "available", EventText.Instant(availableAt));
-            if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 0)
-                return false;
+            await using var cmd = source.CreateCommand(DeadLetterEmptySql);
+            AddScope(cmd, scope);
+            AddText(cmd, "subscription", id.Value);
+            AddLong(cmd, "cursor", cursor);
+            AddLong(cmd, "fence", fence);
+            AddText(cmd, "error", null);
+            AddTime(cmd, "now", time.GetUtcNow());
+            AddTime(cmd, "available", EventText.Instant(availableAt));
+            return await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
         }
-        if (letters.Count > 0)
+        var count = letters.Count;
+        var sequences = new long[count];
+        var ids = new Guid[count];
+        var types = new string[count];
+        var attempts = new int[count];
+        var errors = new string[count];
+        var times = new DateTimeOffset[count];
+        for (var i = 0; i < count; i++)
         {
-            await using var insert = new NpgsqlCommand($"""
-                INSERT INTO tf_event_dead_letters({ScopeColumns}, {LetterColumns})
-                SELECT {ScopeParameters}, @subscription, t.sequence, t.event_id, t.type, t.attempts, t.error, t.dead_lettered_at, 1
-                FROM unnest(@sequences, @ids, @types, @attempts, @errors, @times) AS t(sequence, event_id, type, attempts, error, dead_lettered_at)
-                ON CONFLICT (subscription_key, sequence) DO UPDATE SET event_id=excluded.event_id, type=excluded.type, attempts=excluded.attempts, error=excluded.error,
-                    dead_lettered_at=excluded.dead_lettered_at
-                """, connection, transaction);
-            AddScope(insert, scope);
-            AddText(insert, "subscription", id.Value);
-            insert.Parameters.Add(new NpgsqlParameter("sequences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { Value = letters.Select(letter => letter.Sequence).ToArray() });
-            insert.Parameters.Add(new NpgsqlParameter("ids", NpgsqlDbType.Array | NpgsqlDbType.Uuid) { Value = letters.Select(letter => letter.EventId).ToArray() });
-            AddTextArray(insert, "types", letters.Select(letter => letter.Type));
-            insert.Parameters.Add(new NpgsqlParameter("attempts", NpgsqlDbType.Array | NpgsqlDbType.Integer) { Value = letters.Select(letter => letter.Attempts).ToArray() });
-            AddTextArray(insert, "errors", letters.Select(letter => letter.Error));
-            insert.Parameters.Add(new NpgsqlParameter("times", NpgsqlDbType.Array | NpgsqlDbType.TimestampTz)
-                { Value = letters.Select(letter => EventText.Instant(letter.DeadLetteredAt)).ToArray() });
-            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            var letter = letters[i];
+            sequences[i] = letter.Sequence;
+            ids[i] = letter.EventId;
+            types[i] = letter.Type;
+            attempts[i] = letter.Attempts;
+            errors[i] = letter.Error;
+            times[i] = EventText.Instant(letter.DeadLetteredAt);
         }
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return true;
+        await using var command = source.CreateCommand(DeadLetterWithLettersSql);
+        AddScope(command, scope);
+        AddText(command, "subscription", id.Value);
+        AddLong(command, "cursor", cursor);
+        AddLong(command, "fence", fence);
+        AddText(command, "error", letters[0].Error);
+        AddTime(command, "now", time.GetUtcNow());
+        AddTime(command, "available", EventText.Instant(availableAt));
+        command.Parameters.Add(new NpgsqlParameter<long[]>("sequences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { TypedValue = sequences });
+        command.Parameters.Add(new NpgsqlParameter<Guid[]>("ids", NpgsqlDbType.Array | NpgsqlDbType.Uuid) { TypedValue = ids });
+        command.Parameters.Add(new NpgsqlParameter<string[]>("types", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = types });
+        command.Parameters.Add(new NpgsqlParameter<int[]>("attempts", NpgsqlDbType.Array | NpgsqlDbType.Integer) { TypedValue = attempts });
+        command.Parameters.Add(new NpgsqlParameter<string[]>("errors", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = errors });
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset[]>("times", NpgsqlDbType.Array | NpgsqlDbType.TimestampTz) { TypedValue = times });
+        return (long)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))! == 1;
     }
 
     public async Task<bool> ReplayAsync(TicketScope scope, EventSubscriptionId id, long afterSequence, DateTimeOffset now, CancellationToken cancellationToken = default)
@@ -397,31 +557,12 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         ArgumentNullException.ThrowIfNull(scope);
         Require(id);
         ArgumentOutOfRangeException.ThrowIfNegative(afterSequence);
-        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        await using (var command = new NpgsqlCommand($"""
-            UPDATE tf_event_subscriptions SET delivery_cursor=@after, attempts=0, available_at=@now, last_error=NULL, fence=fence+1, lease_until=NULL, generation=generation+1,
-                suspended=false WHERE {SubscriptionWhere}
-            """, connection, transaction))
-        {
-            AddScope(command, scope);
-            AddText(command, "subscription", id.Value);
-            command.Parameters.AddWithValue("after", afterSequence);
-            AddTime(command, "now", EventText.Instant(now));
-            if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 0)
-                return false;
-        }
-        await using (var letters = new NpgsqlCommand("""
-            DELETE FROM tf_event_dead_letters WHERE subscription_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@subscription) AND sequence > @after
-            """, connection, transaction))
-        {
-            AddScope(letters, scope);
-            AddText(letters, "subscription", id.Value);
-            letters.Parameters.AddWithValue("after", afterSequence);
-            await letters.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return true;
+        await using var command = source.CreateCommand(ReplaySubscriptionSql);
+        AddScope(command, scope);
+        AddText(command, "subscription", id.Value);
+        AddLong(command, "after", afterSequence);
+        AddTime(command, "now", EventText.Instant(now));
+        return (long)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))! == 1;
     }
 
     public async Task<IReadOnlyList<EventDeadLetter>> ListDeadLettersAsync(TicketScope scope, EventSubscriptionId id, long afterSequence, int limit, CancellationToken cancellationToken = default)
@@ -437,9 +578,9 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
             """);
         AddScope(command, scope);
         AddText(command, "subscription", id.Value);
-        command.Parameters.AddWithValue("after", afterSequence);
-        command.Parameters.AddWithValue("limit", limit);
-        var letters = new List<EventDeadLetter>();
+        AddLong(command, "after", afterSequence);
+        AddInt(command, "limit", limit);
+        var letters = new List<EventDeadLetter>(Math.Min(limit, 32));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -460,24 +601,19 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
                 SELECT ctid FROM tf_event_dead_letters WHERE dead_lettered_at < @before ORDER BY dead_lettered_at LIMIT @limit FOR UPDATE SKIP LOCKED)
             """);
         AddTime(command, "before", olderThan);
-        command.Parameters.AddWithValue("limit", limit);
+        AddInt(command, "limit", limit);
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<bool> FencedAsync(TicketScope scope, EventSubscriptionId id, long fence, string set, Action<NpgsqlCommand> bind, CancellationToken cancellationToken)
+    private sealed record SubscriptionRow(StoredEventSubscription Subscription, EventDeliveryState State, long Fence, DateTimeOffset? LeaseUntil);
+
+    private static async Task<long?> SubscriptionRevisionAsync(NpgsqlConnection connection, TicketScope scope, EventSubscriptionId id, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(scope);
-        Require(id);
-        await using var command = source.CreateCommand($"UPDATE tf_event_subscriptions SET {set} WHERE {SubscriptionWhere} AND fence=@fence AND lease_until > @now");
+        await using var command = new NpgsqlCommand($"SELECT revision FROM tf_event_subscriptions WHERE {SubscriptionWhere}", connection);
         AddScope(command, scope);
         AddText(command, "subscription", id.Value);
-        command.Parameters.AddWithValue("fence", fence);
-        AddTime(command, "now", time.GetUtcNow());
-        bind(command);
-        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as long?;
     }
-
-    private sealed record SubscriptionRow(StoredEventSubscription Subscription, EventDeliveryState State, long Fence, DateTimeOffset? LeaseUntil);
 
     private async Task<SubscriptionRow?> GetRowAsync(TicketScope scope, EventSubscriptionId id, CancellationToken cancellationToken)
     {
@@ -486,7 +622,7 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         await using var command = source.CreateCommand($"SELECT {SubscriptionColumns} FROM tf_event_subscriptions WHERE {SubscriptionWhere}");
         AddScope(command, scope);
         AddText(command, "subscription", id.Value);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadSubscription(reader) : null;
     }
 
@@ -519,9 +655,12 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
             var type = reader.GetString(2);
             var actor = reader.IsDBNull(5) ? null : new EventActor(reader.GetString(5), reader.GetString(6));
             var data = IntegrationEventCodec.DecodeData(type, reader.GetString(12));
-            string? Text(int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
-            var resource = new EventResource(Text(7) is { } conversation ? new ConversationId(conversation) : null, Text(8) is { } inbox ? new InboxId(inbox) : null,
-                Text(9) is { } team ? new TeamId(team) : null, Text(10) is { } assignee ? new UserId(assignee) : null, Text(11) is { } contact ? new ContactId(contact) : null);
+            var resource = new EventResource(
+                reader.IsDBNull(7) ? null : new ConversationId(reader.GetString(7)),
+                reader.IsDBNull(8) ? null : new InboxId(reader.GetString(8)),
+                reader.IsDBNull(9) ? null : new TeamId(reader.GetString(9)),
+                reader.IsDBNull(10) ? null : new UserId(reader.GetString(10)),
+                reader.IsDBNull(11) ? null : new ContactId(reader.GetString(11)));
             return new StoredIntegrationEvent(scope, reader.GetInt64(0), new IntegrationEvent(reader.GetGuid(1), Instant(reader.GetDateTime(3)), actor, data), resource,
                 Instant(reader.GetDateTime(4)));
         }
@@ -540,45 +679,63 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         AddText(command, "sink_target", subscription.Sink.Target);
         AddText(command, "filter", EncodeFilter(subscription.Filter));
         AddText(command, "principal", subscription.Principal.Value);
-        command.Parameters.AddWithValue("privacy", (short)subscription.Privacy);
-        command.Parameters.AddWithValue("enabled", subscription.Enabled);
-        command.Parameters.AddWithValue("batch", subscription.BatchSize);
+        AddShort(command, "privacy", (short)subscription.Privacy);
+        AddBool(command, "enabled", subscription.Enabled);
+        AddInt(command, "batch", subscription.BatchSize);
     }
 
     /// <summary>The persisted filter: <c>{"v":1,"types":[…],"inboxes":[…],"teams":[…]}</c>.</summary>
     internal static string EncodeFilter(EventSubscriptionFilter filter)
     {
-        using var buffer = new MemoryStream();
+        var buffer = new ArrayBufferWriter<byte>(256);
         using (var writer = new Utf8JsonWriter(buffer))
         {
             writer.WriteStartObject();
-            writer.WriteNumber("v", 1);
-            writer.WriteStartArray("types");
-            foreach (var pattern in filter.Types)
-                writer.WriteStringValue(pattern.Value);
+            writer.WriteNumber("v"u8, 1);
+            writer.WriteStartArray("types"u8);
+            for (var i = 0; i < filter.Types.Count; i++)
+                writer.WriteStringValue(filter.Types[i].Value);
             writer.WriteEndArray();
-            writer.WriteStartArray("inboxes");
-            foreach (var inbox in filter.Inboxes)
-                writer.WriteStringValue(inbox.Value);
+            writer.WriteStartArray("inboxes"u8);
+            for (var i = 0; i < filter.Inboxes.Count; i++)
+                writer.WriteStringValue(filter.Inboxes[i].Value);
             writer.WriteEndArray();
-            writer.WriteStartArray("teams");
-            foreach (var team in filter.Teams)
-                writer.WriteStringValue(team.Value);
+            writer.WriteStartArray("teams"u8);
+            for (var i = 0; i < filter.Teams.Count; i++)
+                writer.WriteStringValue(filter.Teams[i].Value);
             writer.WriteEndArray();
             writer.WriteEndObject();
         }
-        return System.Text.Encoding.UTF8.GetString(buffer.ToArray());
+        return Encoding.UTF8.GetString(buffer.WrittenSpan);
     }
 
     internal static EventSubscriptionFilter DecodeFilter(string json)
     {
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
-        if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Count() != 4 || root.GetProperty("v").GetInt32() != 1)
+        if (root.ValueKind != JsonValueKind.Object)
             throw new FormatException("Unsupported filter format.");
-        static IEnumerable<string> Strings(JsonElement array) => array.EnumerateArray().Select(item => item.GetString() ?? throw new FormatException("Expected a string."));
-        return new EventSubscriptionFilter(Strings(root.GetProperty("types")).Select(value => new EventTypePattern(value)).ToList(),
-            Strings(root.GetProperty("inboxes")).Select(value => new InboxId(value)).ToList(), Strings(root.GetProperty("teams")).Select(value => new TeamId(value)).ToList());
+        var propCount = 0;
+        foreach (var _ in root.EnumerateObject())
+            propCount++;
+        if (propCount != 4 || root.GetProperty("v"u8).GetInt32() != 1)
+            throw new FormatException("Unsupported filter format.");
+        var typesEl = root.GetProperty("types"u8);
+        var types = new EventTypePattern[typesEl.GetArrayLength()];
+        var idx = 0;
+        foreach (var item in typesEl.EnumerateArray())
+            types[idx++] = new EventTypePattern(item.GetString() ?? throw new FormatException("Expected a string."));
+        var inboxesEl = root.GetProperty("inboxes"u8);
+        var inboxes = new InboxId[inboxesEl.GetArrayLength()];
+        idx = 0;
+        foreach (var item in inboxesEl.EnumerateArray())
+            inboxes[idx++] = new InboxId(item.GetString() ?? throw new FormatException("Expected a string."));
+        var teamsEl = root.GetProperty("teams"u8);
+        var teams = new TeamId[teamsEl.GetArrayLength()];
+        idx = 0;
+        foreach (var item in teamsEl.EnumerateArray())
+            teams[idx++] = new TeamId(item.GetString() ?? throw new FormatException("Expected a string."));
+        return new EventSubscriptionFilter(types, inboxes, teams);
     }
 
     private static DateTimeOffset Instant(DateTime value) => new(DateTime.SpecifyKind(value, DateTimeKind.Utc));
@@ -595,11 +752,27 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
     }
 
     private static void AddText(NpgsqlCommand command, string name, string? value) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = (object?)value ?? DBNull.Value });
+        command.Parameters.Add(value is not null
+            ? new NpgsqlParameter<string>(name, NpgsqlDbType.Text) { TypedValue = value }
+            : new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = DBNull.Value });
 
-    private static void AddTextArray(NpgsqlCommand command, string name, IEnumerable<string?> values) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { Value = values.Select(value => (object?)value ?? DBNull.Value).ToArray() });
+    private static void AddNullableTextArray(NpgsqlCommand command, string name, string?[] values) =>
+        command.Parameters.Add(new NpgsqlParameter<string?[]>(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = values });
 
     private static void AddTime(NpgsqlCommand command, string name, DateTimeOffset? value) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = value is { } instant ? instant : DBNull.Value });
+        command.Parameters.Add(value is { } instant
+            ? new NpgsqlParameter<DateTimeOffset>(name, NpgsqlDbType.TimestampTz) { TypedValue = instant }
+            : new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = DBNull.Value });
+
+    private static void AddInt(NpgsqlCommand command, string name, int value) =>
+        command.Parameters.Add(new NpgsqlParameter<int>(name, NpgsqlDbType.Integer) { TypedValue = value });
+
+    private static void AddLong(NpgsqlCommand command, string name, long value) =>
+        command.Parameters.Add(new NpgsqlParameter<long>(name, NpgsqlDbType.Bigint) { TypedValue = value });
+
+    private static void AddShort(NpgsqlCommand command, string name, short value) =>
+        command.Parameters.Add(new NpgsqlParameter<short>(name, NpgsqlDbType.Smallint) { TypedValue = value });
+
+    private static void AddBool(NpgsqlCommand command, string name, bool value) =>
+        command.Parameters.Add(new NpgsqlParameter<bool>(name, NpgsqlDbType.Boolean) { TypedValue = value });
 }

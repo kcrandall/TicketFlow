@@ -56,6 +56,18 @@ public interface ITeamStore
     /// <summary>Teams in <paramref name="scope"/> that contain <paramref name="user"/>, ordered by identifier (ordinal).</summary>
     Task<IReadOnlyList<TeamId>> ListTeamsForUserAsync(TicketScope scope, UserId user, CancellationToken cancellationToken = default);
 
+    /// <summary>Teams in <paramref name="scope"/> for each user in <paramref name="users"/>, ordered by team identifier (ordinal).</summary>
+    async Task<IReadOnlyDictionary<UserId, IReadOnlyList<TeamId>>> ListTeamsForUsersAsync(TicketScope scope, IReadOnlyCollection<UserId> users, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(users);
+        var result = new Dictionary<UserId, IReadOnlyList<TeamId>>(users.Count);
+        foreach (var user in users)
+            if (!result.ContainsKey(user))
+                result[user] = await ListTeamsForUserAsync(scope, user, cancellationToken).ConfigureAwait(false);
+        return result;
+    }
+
     Task<WorkspaceWriteResult<StoredTeam>> CreateAsync(TicketScope scope, Team team, CancellationToken cancellationToken = default);
 
     Task<WorkspaceWriteResult<StoredTeam>> UpdateAsync(TicketScope scope, Team team, long expectedRevision, CancellationToken cancellationToken = default);

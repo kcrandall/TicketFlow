@@ -1,5 +1,7 @@
+using System.Buffers;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.AI;
 
 namespace TicketFlow.Assist;
 
@@ -89,6 +91,11 @@ internal static class AssistPrompts
     public const string ToneSchema = """
         {"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}
         """;
+
+    public static ChatResponseFormatJson SummaryFormat { get; } = ChatResponseFormat.ForJsonSchema(Element(SummarySchema), "summary");
+    public static ChatResponseFormatJson DraftFormat { get; } = ChatResponseFormat.ForJsonSchema(Element(DraftSchema), "reply_draft");
+    public static ChatResponseFormatJson TranslateFormat { get; } = ChatResponseFormat.ForJsonSchema(Element(TranslateSchema), "translation");
+    public static ChatResponseFormatJson ToneFormat { get; } = ChatResponseFormat.ForJsonSchema(Element(ToneSchema), "tone_rewrite");
 
     public static readonly string[] Priorities = ["none", "low", "medium", "high", "urgent", "unknown"];
     public static readonly string[] Sentiments = ["negative", "neutral", "positive", "mixed"];
@@ -183,13 +190,13 @@ internal static class AssistPrompts
 
     private static string Json(Action<Utf8JsonWriter> body)
     {
-        using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(stream))
+        var buffer = new ArrayBufferWriter<byte>(512);
+        using (var writer = new Utf8JsonWriter(buffer))
         {
             writer.WriteStartObject();
             body(writer);
             writer.WriteEndObject();
         }
-        return Encoding.UTF8.GetString(stream.ToArray());
+        return Encoding.UTF8.GetString(buffer.WrittenSpan);
     }
 }

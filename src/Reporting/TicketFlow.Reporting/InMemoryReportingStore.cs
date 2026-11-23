@@ -88,7 +88,9 @@ public sealed class InMemoryReportingStore : IReportingStore
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(filter);
         cancellationToken.ThrowIfCancellationRequested();
-        var metrics = query.Metrics.ToHashSet();
+        uint metricMask = 0;
+        for (var i = 0; i < query.Metrics.Count; i++)
+            metricMask |= 1u << (int)query.Metrics[i];
         var labelRows = query.UsesLabelRows;
         var restriction = query.Filter;
         var decisions = new Dictionary<(InboxId, TeamId?, UserId?), bool>();
@@ -105,13 +107,14 @@ public sealed class InMemoryReportingStore : IReportingStore
             return allowed;
         }
 
-        void Accumulate(DateTimeOffset cell, string? group, ReportMetric metric, int cellBin, Action<CellValue> add)
+        CellValue GetGroup(DateTimeOffset cell, string? group, ReportMetric metric, int cellBin)
         {
             var bin = query.Histograms && ReportMetrics.IsDuration(metric) ? cellBin : 0;
-            var groupKey = (ReportBuckets.IndexOf(query.Boundaries, cell), group, metric, bin);
+            var bucket = query.Boundaries.Count == 2 ? 0 : ReportBuckets.IndexOf(query.Boundaries, cell);
+            var groupKey = (bucket, group, metric, bin);
             if (!groups.TryGetValue(groupKey, out var total))
                 groups[groupKey] = total = new CellValue();
-            add(total);
+            return total;
         }
 
         lock (gate)
@@ -122,24 +125,32 @@ public sealed class InMemoryReportingStore : IReportingStore
                 // same rollup Access resource (labels unknown).
                 foreach (var ((factScope, _, _), fact) in facts)
                 {
-                    var cell = fact.CellStart;
-                    var d = fact.Dimensions;
-                    if (factScope != scope || !metrics.Contains(fact.Metric) || cell < query.From || cell >= query.To || !Admit(d.Inbox, d.Team, d.Agent, d.Channel, d.Priority))
+                    if ((metricMask & (1u << (int)fact.Metric)) == 0 || factScope != scope)
                         continue;
-                    foreach (var label in d.Labels)
+                    var cell = fact.CellStart;
+                    if (cell < query.From || cell >= query.To)
+                        continue;
+                    var d = fact.Dimensions;
+                    if (!Admit(d.Inbox, d.Team, d.Agent, d.Channel, d.Priority))
+                        continue;
+                    var factLabels = d.Labels;
+                    for (var i = 0; i < factLabels.Count; i++)
+                    {
+                        var label = factLabels[i];
                         if (restriction.Label is not { } only || label == only)
-                            Accumulate(cell, ReportGroups.Key(query.GroupBy, d.Inbox, d.Team, d.Agent, d.Channel, d.Priority, label), fact.Metric, fact.Bin,
-                                total => total.Add(fact.Value));
+                            GetGroup(cell, ReportGroups.Key(query.GroupBy, d.Inbox, d.Team, d.Agent, d.Channel, d.Priority, label), fact.Metric, fact.Bin)
+                                .Add(fact.Value);
+                    }
                 }
             }
             else
                 foreach (var (key, value) in cells)
                 {
-                    if (key.Scope != scope || !metrics.Contains(key.Metric) || key.Start < query.From || key.Start >= query.To
+                    if ((metricMask & (1u << (int)key.Metric)) == 0 || key.Scope != scope || key.Start < query.From || key.Start >= query.To
                         || !Admit(key.Inbox, key.Team, key.Agent, key.Channel, key.Priority))
                         continue;
-                    Accumulate(key.Start, ReportGroups.Key(query.GroupBy, key.Inbox, key.Team, key.Agent, key.Channel, key.Priority, null), key.Metric, key.Bin,
-                        total => total.Add(value));
+                    GetGroup(key.Start, ReportGroups.Key(query.GroupBy, key.Inbox, key.Team, key.Agent, key.Channel, key.Priority, null), key.Metric, key.Bin)
+                        .Add(value);
                 }
         }
         var rows = groups
@@ -160,9 +171,13 @@ public sealed class InMemoryReportingStore : IReportingStore
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(filter);
         cancellationToken.ThrowIfCancellationRequested();
+        long count = 0;
         lock (gate)
-            return Task.FromResult((long)states.Values.Count(stored => stored.Scope == scope && stored.State.IsOpen && query.Matches(stored.State.Dimensions())
-                && AccessFilterEvaluator.Matches(filter, ReportResources.Conversation(scope, stored.State))));
+            foreach (var stored in states.Values)
+                if (stored.Scope == scope && stored.State.IsOpen && query.Matches(stored.State.Dimensions())
+                    && AccessFilterEvaluator.Matches(filter, ReportResources.Conversation(scope, stored.State)))
+                    count++;
+        return Task.FromResult(count);
     }
 
     public Task<ReportFactPage> ListFactsAsync(TicketScope scope, ReportFactQuery query, AccessFilter filter, CancellationToken cancellationToken = default)
@@ -174,13 +189,20 @@ public sealed class InMemoryReportingStore : IReportingStore
         List<ReportFact> page;
         lock (gate)
         {
-            var matches = facts.Where(pair => pair.Key.Scope == scope).Select(pair => pair.Value)
-                .Where(fact => fact.OccurredAt >= query.From && fact.OccurredAt < query.To && query.Filter.Matches(fact.Dimensions))
-                .Where(fact => query.After is not { } after || ReportFactQuery.Compare(fact.OccurredAt, fact.SourceId, fact.Metric, after.OccurredAt, after.SourceId, after.Metric) > 0)
-                .Where(fact => AccessFilterEvaluator.Matches(filter, ReportResources.Fact(scope, fact)))
-                .ToList();
+            var matches = new List<ReportFact>();
+            var after = query.After;
+            foreach (var (key, fact) in facts)
+            {
+                if (key.Scope != scope || fact.OccurredAt < query.From || fact.OccurredAt >= query.To || !query.Filter.Matches(fact.Dimensions))
+                    continue;
+                if (after is not null && ReportFactQuery.Compare(fact.OccurredAt, fact.SourceId, fact.Metric, after.OccurredAt, after.SourceId, after.Metric) <= 0)
+                    continue;
+                if (AccessFilterEvaluator.Matches(filter, ReportResources.Fact(scope, fact)))
+                    matches.Add(fact);
+            }
             matches.Sort(ReportFactQuery.Compare);
-            page = [.. matches.Take(query.Limit + 1)];
+            var take = Math.Min(matches.Count, query.Limit + 1);
+            page = matches.GetRange(0, take);
         }
         var more = page.Count > query.Limit;
         if (more)

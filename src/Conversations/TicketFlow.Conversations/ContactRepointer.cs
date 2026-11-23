@@ -35,16 +35,30 @@ internal sealed class ContactRepointer(IConversationStore store, IContactStore c
     /// Follows the merge chain of one conversation's contact: while the contact is a merge tombstone, finds the (still recorded) merge in
     /// the contact change log and re-points the conversation to its target. Returns the final stored conversation.
     /// </summary>
-    public async Task<StoredConversation?> RepairAsync(TicketScope scope, ConversationId id, CancellationToken cancellationToken)
+    public async Task<StoredConversation?> RepairAsync(TicketScope scope, ConversationId id, CancellationToken cancellationToken,
+        StoredConversation? initial = null, ContactId? initialTarget = null)
     {
+        var current = initial;
+        var knownTarget = initialTarget;
         for (var hop = 0; hop < MaximumChain; hop++)
         {
-            var stored = await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
+            var stored = current ?? await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
+            current = null;
             if (stored is null)
                 return null;
-            var contact = await contacts.GetAsync(scope, stored.Conversation.Contact, cancellationToken).ConfigureAwait(false);
-            if (contact?.Contact.MergedInto is not { } target)
-                return stored;
+            ContactId target;
+            if (knownTarget is { } t)
+            {
+                target = t;
+                knownTarget = null;
+            }
+            else
+            {
+                var contact = await contacts.GetAsync(scope, stored.Conversation.Contact, cancellationToken).ConfigureAwait(false);
+                if (contact?.Contact.MergedInto is not { } mergedInto)
+                    return stored;
+                target = mergedInto;
+            }
             if (await FindMergeAsync(scope, stored.Conversation.Contact, target, cancellationToken).ConfigureAwait(false) is not { } merge)
                 return stored;
             await RepointOneAsync(stored, stored.Conversation.Contact, conversation => Merged(conversation, target, merge), cancellationToken).ConfigureAwait(false);

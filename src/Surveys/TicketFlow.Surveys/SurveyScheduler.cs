@@ -12,19 +12,43 @@ public sealed class SurveyScheduler(ISurveyStore store) : ISurveyScheduler
     public async Task<SurveySchedulingResult> HandleResolvedAsync(ConversationResolvedNotification notification, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(notification);
-        var surveys = await store.ListSurveysAsync(notification.Scope, cancellationToken).ConfigureAwait(false);
-        var selected = surveys
-            .Select(stored => stored.Survey)
-            .Where(survey => survey.Enabled && survey.Policy.Trigger == SurveyTrigger.ConversationResolved && (survey.Inbox is null || survey.Inbox == notification.Inbox))
-            .GroupBy(survey => survey.Kind)
-            .Select(kind => kind.OrderBy(survey => survey.Inbox is null ? 1 : 0).ThenBy(survey => survey.Id).First())
-            .OrderBy(survey => survey.Kind);
-
-        var created = new List<StoredInvitation>();
-        var skipped = new List<SurveySkip>();
-        foreach (var survey in selected)
+        var surveys = await store.ListEnabledSurveysAsync(notification.Scope, SurveyTrigger.ConversationResolved, notification.Inbox, cancellationToken).ConfigureAwait(false);
+        SurveyDefinition? csat = null;
+        SurveyDefinition? nps = null;
+        for (var i = 0; i < surveys.Count; i++)
         {
-            var locale = notification.Locale is { } wanted && survey.Questions.Any(question => question.Locale == wanted) ? wanted : survey.DefaultLocale;
+            var s = surveys[i].Survey;
+            if (!s.Enabled || s.Policy.Trigger != SurveyTrigger.ConversationResolved || (s.Inbox is not null && s.Inbox != notification.Inbox))
+                continue;
+            if (s.Kind == SurveyKind.Csat)
+            {
+                if (csat is null || IsBetter(s, csat))
+                    csat = s;
+            }
+            else if (s.Kind == SurveyKind.Nps)
+            {
+                if (nps is null || IsBetter(s, nps))
+                    nps = s;
+            }
+        }
+        var selectedCount = (csat is not null ? 1 : 0) + (nps is not null ? 1 : 0);
+        if (selectedCount == 0)
+            return new SurveySchedulingResult([], []);
+        var selected = selectedCount == 2 ? new[] { csat!, nps! } : [csat ?? nps!];
+
+        var created = new List<StoredInvitation>(selected.Length);
+        var skipped = new List<SurveySkip>();
+        for (var i = 0; i < selected.Length; i++)
+        {
+            var survey = selected[i];
+            var locale = survey.DefaultLocale;
+            if (notification.Locale is { } wanted)
+                for (var q = 0; q < survey.Questions.Count; q++)
+                    if (survey.Questions[q].Locale == wanted)
+                    {
+                        locale = wanted;
+                        break;
+                    }
             var invitation = new SurveyInvitation(SurveyInvitationId.New(), survey.Id, survey.Kind, notification.Conversation, notification.Contact,
                 notification.Inbox, notification.Team, notification.Agent, locale, notification.ResolvedAt, notification.ResolvedAt + survey.Policy.Delay);
             var result = await store.CreateInvitationAsync(notification.Scope, invitation, survey.Policy.ContactCooldown, cancellationToken).ConfigureAwait(false);
@@ -45,5 +69,12 @@ public sealed class SurveyScheduler(ISurveyStore store) : ISurveyScheduler
             }
         }
         return new SurveySchedulingResult(created, skipped);
+    }
+
+    private static bool IsBetter(SurveyDefinition candidate, SurveyDefinition current)
+    {
+        var candRank = candidate.Inbox is null ? 1 : 0;
+        var currRank = current.Inbox is null ? 1 : 0;
+        return candRank != currRank ? candRank < currRank : candidate.Id.CompareTo(current.Id) < 0;
     }
 }

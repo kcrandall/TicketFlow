@@ -84,19 +84,19 @@ public sealed class ConversationOutboxDispatcher
         foreach (var handler in handlers)
         {
             var claims = await outbox.ClaimAsync(handler.Consumer, options.BatchSize, options.Lease, cancellationToken).ConfigureAwait(false);
+            if (claims.Count == 0)
+                continue;
             if (handler is IConversationOutboxBatchHandler batchHandler)
             {
                 var eligible = new List<ConversationOutboxClaim>(claims.Count);
+                List<(long Sequence, long Fence)>? poison = null;
                 HashSet<ConversationId>? blocked = null;
                 foreach (var claim in claims)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     if (claim.Attempt > options.MaximumAttempts)
                     {
-                        if (await outbox.DeadLetterAsync(handler.Consumer, claim.Entry.Sequence, claim.Fence, cancellationToken).ConfigureAwait(false))
-                            deadLettered++;
-                        else
-                            lost++;
+                        (poison ??= []).Add((claim.Entry.Sequence, claim.Fence));
                         continue;
                     }
                     if (blocked is not null && blocked.Contains(claim.Entry.Change.Conversation))
@@ -112,63 +112,22 @@ public sealed class ConversationOutboxDispatcher
                     }
                     eligible.Add(claim);
                 }
+                if (poison is not null)
+                {
+                    var parked = await outbox.DeadLetterBatchAsync(handler.Consumer, poison, cancellationToken).ConfigureAwait(false);
+                    deadLettered += parked;
+                    lost += poison.Count - parked;
+                }
                 if (eligible.Count == 0)
                     continue;
                 bool succeeded;
                 TimeSpan? retryAfter = null;
                 try
                 {
-                    await batchHandler.HandleBatchAsync([.. eligible.Select(claim => claim.Entry)], cancellationToken).ConfigureAwait(false);
-                    succeeded = true;
-                }
-                catch (Exception error) when (!cancellationToken.IsCancellationRequested)
-                {
-                    succeeded = false;
-                    retryAfter = (error as ConversationOutboxRetryException)?.RetryAfter;
-                }
-                foreach (var claim in eligible)
-                    if (succeeded)
-                    {
-                        if (await outbox.AcknowledgeAsync(handler.Consumer, claim.Entry.Sequence, claim.Fence, cancellationToken).ConfigureAwait(false))
-                            handled++;
-                        else
-                            lost++;
-                    }
-                    else if (claim.Attempt >= options.MaximumAttempts)
-                    {
-                        if (await outbox.DeadLetterAsync(handler.Consumer, claim.Entry.Sequence, claim.Fence, cancellationToken).ConfigureAwait(false))
-                            deadLettered++;
-                        else
-                            lost++;
-                    }
-                    else if (await outbox.ReleaseAsync(handler.Consumer, claim.Entry.Sequence, claim.Fence, time.GetUtcNow() + Max(Backoff(claim.Attempt), retryAfter), cancellationToken).ConfigureAwait(false))
-                        retried++;
-                    else
-                        lost++;
-                continue;
-            }
-            foreach (var claim in claims)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (claim.Attempt > options.MaximumAttempts)
-                {
-                    // Poison entry: earlier attempts never completed (hang or crash), so it is parked before running it again.
-                    if (await outbox.DeadLetterAsync(handler.Consumer, claim.Entry.Sequence, claim.Fence, cancellationToken).ConfigureAwait(false))
-                        deadLettered++;
-                    else
-                        lost++;
-                    continue;
-                }
-                if (claim.LeaseUntil <= time.GetUtcNow() + options.LeaseSafetyMargin)
-                {
-                    skipped++;
-                    continue;
-                }
-                bool succeeded;
-                TimeSpan? retryAfter = null;
-                try
-                {
-                    await handler.HandleAsync(claim.Entry, cancellationToken).ConfigureAwait(false);
+                    var entries = new ConversationOutboxEntry[eligible.Count];
+                    for (var i = 0; i < eligible.Count; i++)
+                        entries[i] = eligible[i].Entry;
+                    await batchHandler.HandleBatchAsync(entries, cancellationToken).ConfigureAwait(false);
                     succeeded = true;
                 }
                 catch (Exception error) when (!cancellationToken.IsCancellationRequested)
@@ -178,22 +137,105 @@ public sealed class ConversationOutboxDispatcher
                 }
                 if (succeeded)
                 {
-                    if (await outbox.AcknowledgeAsync(handler.Consumer, claim.Entry.Sequence, claim.Fence, cancellationToken).ConfigureAwait(false))
-                        handled++;
-                    else
-                        lost++;
+                    var toAck = new (long Sequence, long Fence)[eligible.Count];
+                    for (var i = 0; i < eligible.Count; i++)
+                        toAck[i] = (eligible[i].Entry.Sequence, eligible[i].Fence);
+                    var acked = await outbox.AcknowledgeBatchAsync(handler.Consumer, toAck, cancellationToken).ConfigureAwait(false);
+                    handled += acked;
+                    lost += eligible.Count - acked;
                 }
-                else if (claim.Attempt >= options.MaximumAttempts)
-                {
-                    if (await outbox.DeadLetterAsync(handler.Consumer, claim.Entry.Sequence, claim.Fence, cancellationToken).ConfigureAwait(false))
-                        deadLettered++;
-                    else
-                        lost++;
-                }
-                else if (await outbox.ReleaseAsync(handler.Consumer, claim.Entry.Sequence, claim.Fence, time.GetUtcNow() + Max(Backoff(claim.Attempt), retryAfter), cancellationToken).ConfigureAwait(false))
-                    retried++;
                 else
-                    lost++;
+                {
+                    var now = time.GetUtcNow();
+                    List<(long Sequence, long Fence)>? toDeadLetter = null;
+                    List<(long Sequence, long Fence, DateTimeOffset RetryAt)>? toRelease = null;
+                    foreach (var claim in eligible)
+                    {
+                        if (claim.Attempt >= options.MaximumAttempts)
+                            (toDeadLetter ??= []).Add((claim.Entry.Sequence, claim.Fence));
+                        else
+                            (toRelease ??= []).Add((claim.Entry.Sequence, claim.Fence, now + Max(Backoff(claim.Attempt), retryAfter)));
+                    }
+                    if (toDeadLetter is not null)
+                    {
+                        var parked = await outbox.DeadLetterBatchAsync(handler.Consumer, toDeadLetter, cancellationToken).ConfigureAwait(false);
+                        deadLettered += parked;
+                        lost += toDeadLetter.Count - parked;
+                    }
+                    if (toRelease is not null)
+                    {
+                        var released = await outbox.ReleaseBatchAsync(handler.Consumer, toRelease, cancellationToken).ConfigureAwait(false);
+                        retried += released;
+                        lost += toRelease.Count - released;
+                    }
+                }
+                continue;
+            }
+            List<(long Sequence, long Fence)>? toAckSingle = null;
+            List<(long Sequence, long Fence)>? toDeadSingle = null;
+            List<(long Sequence, long Fence, DateTimeOffset RetryAt)>? toReleaseSingle = null;
+            try
+            {
+                foreach (var claim in claims)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (claim.Attempt > options.MaximumAttempts)
+                    {
+                        // Poison entry: earlier attempts never completed (hang or crash), so it is parked before running it again.
+                        (toDeadSingle ??= []).Add((claim.Entry.Sequence, claim.Fence));
+                        continue;
+                    }
+                    if (claim.LeaseUntil <= time.GetUtcNow() + options.LeaseSafetyMargin)
+                    {
+                        skipped++;
+                        continue;
+                    }
+                    bool succeeded;
+                    TimeSpan? retryAfter = null;
+                    try
+                    {
+                        await handler.HandleAsync(claim.Entry, cancellationToken).ConfigureAwait(false);
+                        succeeded = true;
+                    }
+                    catch (Exception error) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        succeeded = false;
+                        retryAfter = (error as ConversationOutboxRetryException)?.RetryAfter;
+                    }
+                    if (succeeded)
+                        (toAckSingle ??= []).Add((claim.Entry.Sequence, claim.Fence));
+                    else if (claim.Attempt >= options.MaximumAttempts)
+                        (toDeadSingle ??= []).Add((claim.Entry.Sequence, claim.Fence));
+                    else
+                        (toReleaseSingle ??= []).Add((claim.Entry.Sequence, claim.Fence, time.GetUtcNow() + Max(Backoff(claim.Attempt), retryAfter)));
+                }
+            }
+            finally
+            {
+                if (toAckSingle is not null)
+                {
+                    var acked = toAckSingle.Count == 1
+                        ? (await outbox.AcknowledgeAsync(handler.Consumer, toAckSingle[0].Sequence, toAckSingle[0].Fence, CancellationToken.None).ConfigureAwait(false) ? 1 : 0)
+                        : await outbox.AcknowledgeBatchAsync(handler.Consumer, toAckSingle, CancellationToken.None).ConfigureAwait(false);
+                    handled += acked;
+                    lost += toAckSingle.Count - acked;
+                }
+                if (toDeadSingle is not null)
+                {
+                    var parked = toDeadSingle.Count == 1
+                        ? (await outbox.DeadLetterAsync(handler.Consumer, toDeadSingle[0].Sequence, toDeadSingle[0].Fence, CancellationToken.None).ConfigureAwait(false) ? 1 : 0)
+                        : await outbox.DeadLetterBatchAsync(handler.Consumer, toDeadSingle, CancellationToken.None).ConfigureAwait(false);
+                    deadLettered += parked;
+                    lost += toDeadSingle.Count - parked;
+                }
+                if (toReleaseSingle is not null)
+                {
+                    var released = toReleaseSingle.Count == 1
+                        ? (await outbox.ReleaseAsync(handler.Consumer, toReleaseSingle[0].Sequence, toReleaseSingle[0].Fence, toReleaseSingle[0].RetryAt, CancellationToken.None).ConfigureAwait(false) ? 1 : 0)
+                        : await outbox.ReleaseBatchAsync(handler.Consumer, toReleaseSingle, CancellationToken.None).ConfigureAwait(false);
+                    retried += released;
+                    lost += toReleaseSingle.Count - released;
+                }
             }
         }
         return new ConversationOutboxDispatchResult(handled, retried, deadLettered, lost, skipped);

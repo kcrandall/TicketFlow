@@ -86,21 +86,25 @@
 
     protected override async Task OnInitializedAsync()
     {
-        await LoadWorkspaceAsync();
-        if (await AccessListAsync(administrator => administrator.ListRolesAsync(Actor, Aborted)) is not { } roles)
+        var workspaceTask = LoadWorkspaceAsync();
+        var rolesTask = AccessListAsync(administrator => administrator.ListRolesAsync(Actor, Aborted));
+        await Task.WhenAll(workspaceTask, rolesTask);
+        if (await rolesTask is not { } roles)
             return;
         foreach (var role in roles)
             roleNames[role.Role.Id.Value] = role.Role.Name;
-        var targets = new List<GrantScope> { new WorkspaceGrantScope(Session.Scope.WorkspaceId) };
-        targets.AddRange(Teams.Select(team => (GrantScope)new TeamGrantScope(Session.Scope.WorkspaceId, team.Id)));
-        targets.AddRange(Inboxes.Select(inbox => (GrantScope)new InboxGrantScope(Session.Scope.WorkspaceId, inbox.Inbox.Id)));
-        foreach (var target in targets)
-        {
-            // Team and inbox targets are listed only where the viewer manages access (a refusal there is not a page-level denial).
-            var administrator = Service<IAccessAdministrator>()!;
-            if (await administrator.ListGrantsAsync(Actor, target, 200, null, Aborted) is AccessListed<IReadOnlyList<StoredAccessGrant>> listed)
+        var targets = new List<GrantScope>(1 + Teams.Count + Inboxes.Count) { new WorkspaceGrantScope(Session.Scope.WorkspaceId) };
+        foreach (var team in Teams)
+            targets.Add(new TeamGrantScope(Session.Scope.WorkspaceId, team.Id));
+        foreach (var inbox in Inboxes)
+            targets.Add(new InboxGrantScope(Session.Scope.WorkspaceId, inbox.Inbox.Id));
+        var administrator = Service<IAccessAdministrator>()!;
+        var tasks = new Task<AccessListResult<IReadOnlyList<StoredAccessGrant>>>[targets.Count];
+        for (var i = 0; i < targets.Count; i++)
+            tasks[i] = administrator.ListGrantsAsync(Actor, targets[i], 200, null, Aborted);
+        foreach (var result in await Task.WhenAll(tasks))
+            if (result is AccessListed<IReadOnlyList<StoredAccessGrant>> listed)
                 grants.AddRange(listed.Value);
-        }
         await Session.LoadUsersAsync(grants.Select(grant => grant.Grant.Subject.Value is UserId user ? (UserId?)user : null));
     }
 }

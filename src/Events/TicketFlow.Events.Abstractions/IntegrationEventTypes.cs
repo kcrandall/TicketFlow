@@ -1,3 +1,5 @@
+using System.Collections.Frozen;
+
 namespace TicketFlow.Events;
 
 /// <summary>
@@ -47,7 +49,7 @@ public static class IntegrationEventTypes
         SlaApplied, SlaWarning, SlaBreached, SlaMet, RoutingAssigned, RoutingQueued, RoutingOverflowed, RoutingQueueWaitExceeded, SurveyResponded, ChannelDeliveryStatus,
     }.Order(StringComparer.Ordinal)];
 
-    private static readonly HashSet<string> Known = new(All, StringComparer.Ordinal);
+    private static readonly System.Collections.Frozen.FrozenSet<string> Known = All.ToFrozenSet(StringComparer.Ordinal);
 
     public static bool IsKnown(string? type) => type is not null && Known.Contains(type);
 
@@ -56,11 +58,29 @@ public static class IntegrationEventTypes
     {
         if (type is null || type.Length > MaximumLength || !type.StartsWith(Prefix, StringComparison.Ordinal))
             return false;
-        var segments = type[Prefix.Length..].Split('.');
-        if (segments.Length is < 2 or > 6 || segments.Any(segment => !EventText.IsToken(segment, 64) || segment.Contains('.')))
+        var rest = type.AsSpan(Prefix.Length);
+        var count = 0;
+        ReadOnlySpan<char> last = default;
+        while (true)
+        {
+            var dot = rest.IndexOf('.');
+            var segment = dot < 0 ? rest : rest[..dot];
+            if (!EventText.IsToken(segment, 64))
+                return false;
+            count++;
+            if (count > 6)
+                return false;
+            last = segment;
+            if (dot < 0)
+                break;
+            rest = rest[(dot + 1)..];
+        }
+        if (count < 2 || last.Length is < 2 or > 4 || last[0] != 'v' || last[1] == '0')
             return false;
-        var version = segments[^1];
-        return version.Length is >= 2 and <= 4 && version[0] == 'v' && version[1] != '0' && version[1..].All(char.IsAsciiDigit);
+        for (var i = 1; i < last.Length; i++)
+            if (!char.IsAsciiDigit(last[i]))
+                return false;
+        return true;
     }
 }
 
@@ -92,8 +112,9 @@ public readonly record struct EventTypePattern
         var pattern = Value;
         if (pattern == "*")
             return true;
-        return pattern.EndsWith(".*", StringComparison.Ordinal)
-            ? type.StartsWith(pattern[..^1], StringComparison.Ordinal)
+        var span = pattern.AsSpan();
+        return span.Length >= 2 && span[^1] == '*' && span[^2] == '.'
+            ? type.AsSpan().StartsWith(span[..^1], StringComparison.Ordinal)
             : string.Equals(type, pattern, StringComparison.Ordinal);
     }
 
@@ -105,11 +126,26 @@ public readonly record struct EventTypePattern
             return true;
         if (value.Length > IntegrationEventTypes.MaximumLength)
             return false;
-        if (value.EndsWith(".*", StringComparison.Ordinal))
+        var span = value.AsSpan();
+        if (span.EndsWith(".*", StringComparison.Ordinal))
         {
-            var prefix = value[..^2];
-            return prefix == "ticketflow" || prefix.StartsWith(IntegrationEventTypes.Prefix, StringComparison.Ordinal)
-                && prefix[IntegrationEventTypes.Prefix.Length..].Split('.').All(segment => EventText.IsToken(segment, 64) && !segment.Contains('.'));
+            var prefix = span[..^2];
+            if (prefix.SequenceEqual("ticketflow"))
+                return true;
+            if (!prefix.StartsWith(IntegrationEventTypes.Prefix, StringComparison.Ordinal))
+                return false;
+            var rest = prefix[IntegrationEventTypes.Prefix.Length..];
+            while (true)
+            {
+                var dot = rest.IndexOf('.');
+                var segment = dot < 0 ? rest : rest[..dot];
+                if (!EventText.IsToken(segment, 64))
+                    return false;
+                if (dot < 0)
+                    break;
+                rest = rest[(dot + 1)..];
+            }
+            return true;
         }
         return IntegrationEventTypes.IsWellFormed(value);
     }

@@ -92,9 +92,13 @@ public sealed class InboxService : IInboxService
             && TeamGrantPolicy.Refuse(await administrator.CheckCanRevokeAsync(actor, [.. agentGrants.Select(entry => entry.Grant)], cancellationToken).ConfigureAwait(false)) is { } forbidden)
             return forbidden;
         var result = await inboxes.DeleteAsync(actor.Scope, id, expectedRevision, cancellationToken).ConfigureAwait(false);
-        if (result.Value is WorkspaceWriteApplied<StoredInbox>)
-            foreach (var entry in agentGrants)
-                await administrator.RevokeGrantAsync(actor, entry.Grant.Id, entry.Revision, cancellationToken).ConfigureAwait(false);
+        if (result.Value is WorkspaceWriteApplied<StoredInbox> && agentGrants.Count > 0)
+        {
+            var targets = new (GrantId Id, long ExpectedRevision)[agentGrants.Count];
+            for (var i = 0; i < agentGrants.Count; i++)
+                targets[i] = (agentGrants[i].Grant.Id, agentGrants[i].Revision);
+            await administrator.RevokeGrantsAsync(actor, targets, cancellationToken).ConfigureAwait(false);
+        }
         return Map(result);
     }
 

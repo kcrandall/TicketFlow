@@ -84,10 +84,13 @@ public sealed class AutomationRuleService(IAutomationRuleStore rules, IAutomatio
         var message = request.MessageBody is { } body
             ? new AutomationMessageFacts(request.Event.Kind == AutomationEventKind.MessageSent ? MessageDirection.Outgoing : MessageDirection.Incoming, body)
             : null;
-        var (context, failure) = await contexts.BuildAsync(actor, request.Conversation, request.Event, message, cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<AutomationRule> candidates = request.Draft is { } draft ? [draft] : await SelectAsync(scope, request.Rules, cancellationToken).ConfigureAwait(false);
+        var needs = AutomationContextNeeds.None;
+        for (var i = 0; i < candidates.Count; i++)
+            needs |= AutomationContextNeedsHelper.ForRule(candidates[i]);
+        var (context, failure) = await contexts.BuildInternalAsync(actor, request.Conversation, request.Event, message, needs, cache: null, cancellationToken).ConfigureAwait(false);
         if (context is null)
             return failure == AutomationContextFailure.Forbidden ? AutomationRefused.Forbidden : AutomationNotFound.Instance;
-        IReadOnlyList<AutomationRule> candidates = request.Draft is { } draft ? [draft] : await SelectAsync(scope, request.Rules, cancellationToken).ConfigureAwait(false);
         var (previews, stopped) = await PreviewAsync(scope, candidates, context, includeDisabledDraft: request.Draft is not null, cancellationToken).ConfigureAwait(false);
         return new AutomationValue<AutomationDryRunResult>(new AutomationDryRunResult(request.Conversation, previews, stopped, context.Now));
     }
@@ -99,6 +102,14 @@ public sealed class AutomationRuleService(IAutomationRuleStore rules, IAutomatio
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.Read, cancellationToken).ConfigureAwait(false))
             return AutomationRefused.Forbidden;
         var candidates = await SelectAsync(scope, request.Rules, cancellationToken).ConfigureAwait(false);
+        var candidateIds = new AutomationRuleId[candidates.Count];
+        var needs = AutomationContextNeeds.None;
+        for (var i = 0; i < candidates.Count; i++)
+        {
+            candidateIds[i] = candidates[i].Id;
+            needs |= AutomationContextNeedsHelper.ForRule(candidates[i]);
+        }
+        AutomationContext? baseContext = null;
         var items = new List<AutomationReplayItem>();
         var scanned = 0;
         var truncated = false;
@@ -113,14 +124,14 @@ public sealed class AutomationRuleService(IAutomationRuleStore rules, IAutomatio
             };
             if (timeline is null)
                 return page.Value is ConversationRefused ? AutomationRefused.Forbidden : AutomationNotFound.Instance;
-            foreach (var view in timeline.Events)
+            for (var v = 0; v < timeline.Events.Count; v++)
             {
                 if (++scanned > AutomationReplayRequest.MaximumEvents)
                 {
                     truncated = true;
                     break;
                 }
-                var timelineEvent = view.Event;
+                var timelineEvent = timeline.Events[v].Event;
                 if (timelineEvent.OccurredAt < request.From || timelineEvent.OccurredAt >= request.To)
                     continue;
                 var (derived, message) = AutomationEventDerivation.Derive(timelineEvent, options.SlaWorkerClientId);
@@ -129,18 +140,44 @@ public sealed class AutomationRuleService(IAutomationRuleStore rules, IAutomatio
                 var cause = AutomationEventDerivation.IsAutomationActor(timelineEvent.Actor, options.ClientId)
                     ? await executions.FindCauseAsync(scope, request.Conversation, timelineEvent.Sequence, cancellationToken).ConfigureAwait(false)
                     : null;
-                var recorded = new List<StoredAutomationExecution>();
-                foreach (var rule in candidates)
-                    if (await executions.FindAsync(scope, rule.Id, request.Conversation, AutomationTriggerKeys.TimelineEvent(timelineEvent.Sequence), cancellationToken).ConfigureAwait(false) is { } execution)
-                        recorded.Add(execution);
-                foreach (var automationEvent in derived)
+                IReadOnlyList<StoredAutomationExecution> recorded;
+                if (candidateIds.Length == 0)
                 {
-                    var (context, failure) = await contexts.BuildAsync(actor, request.Conversation, automationEvent, message, cancellationToken).ConfigureAwait(false);
-                    if (context is null)
-                        return failure == AutomationContextFailure.Forbidden ? AutomationRefused.Forbidden : AutomationNotFound.Instance;
+                    recorded = [];
+                }
+                else
+                {
+                    var foundMap = await executions.FindManyAsync(scope, request.Conversation, AutomationTriggerKeys.TimelineEvent(timelineEvent.Sequence), candidateIds, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (foundMap.Count == 0)
+                        recorded = [];
+                    else
+                    {
+                        var list = new List<StoredAutomationExecution>(foundMap.Count);
+                        for (var i = 0; i < candidates.Count; i++)
+                            if (foundMap.TryGetValue(candidates[i].Id, out var execution))
+                                list.Add(execution);
+                        recorded = list;
+                    }
+                }
+                for (var d = 0; d < derived.Count; d++)
+                {
+                    var automationEvent = derived[d];
+                    if (baseContext is null)
+                    {
+                        var (built, failure) = await contexts.BuildInternalAsync(actor, request.Conversation, automationEvent, message, needs, cache: null, cancellationToken)
+                            .ConfigureAwait(false);
+                        if (built is null)
+                            return failure == AutomationContextFailure.Forbidden ? AutomationRefused.Forbidden : AutomationNotFound.Instance;
+                        baseContext = built;
+                    }
+                    var context = baseContext with { Event = automationEvent, Message = message, Now = time.GetUtcNow() };
                     var (previews, _) = await PreviewAsync(scope, candidates, context, includeDisabledDraft: false, cancellationToken).ConfigureAwait(false);
-                    items.Add(new AutomationReplayItem(timelineEvent.Sequence, timelineEvent.OccurredAt, automationEvent, cause,
-                        [.. previews.Where(preview => preview.Match != AutomationMatch.NotTriggered)], recorded));
+                    var matchedPreviews = new List<AutomationRulePreview>(previews.Count);
+                    for (var p = 0; p < previews.Count; p++)
+                        if (previews[p].Match != AutomationMatch.NotTriggered)
+                            matchedPreviews.Add(previews[p]);
+                    items.Add(new AutomationReplayItem(timelineEvent.Sequence, timelineEvent.OccurredAt, automationEvent, cause, matchedPreviews, recorded));
                 }
             }
             if (truncated || timeline.NextAfterSequence is not { } next)
@@ -161,10 +198,21 @@ public sealed class AutomationRuleService(IAutomationRuleStore rules, IAutomatio
 
     private async Task<IReadOnlyList<AutomationRule>> SelectAsync(TicketScope scope, IReadOnlyList<AutomationRuleId>? ids, CancellationToken cancellationToken)
     {
-        var all = (await rules.ListAsync(scope, cancellationToken).ConfigureAwait(false)).Select(stored => stored.Rule);
-        if (ids is not null)
-            all = all.Where(rule => ids.Contains(rule.Id));
-        return [.. AutomationRunner.Order(all)];
+        var stored = await rules.ListAsync(scope, cancellationToken).ConfigureAwait(false);
+        HashSet<AutomationRuleId>? filter = ids is null ? null : new HashSet<AutomationRuleId>(ids);
+        var selected = new List<AutomationRule>(filter?.Count ?? stored.Count);
+        for (var i = 0; i < stored.Count; i++)
+        {
+            var rule = stored[i].Rule;
+            if (filter is null || filter.Contains(rule.Id))
+                selected.Add(rule);
+        }
+        selected.Sort(static (a, b) =>
+        {
+            var cmp = a.Priority.CompareTo(b.Priority);
+            return cmp != 0 ? cmp : StringComparer.Ordinal.Compare(a.Id.Value, b.Id.Value);
+        });
+        return selected;
     }
 
     private async Task<(IReadOnlyList<AutomationRulePreview> Previews, AutomationRuleId? Stopped)> PreviewAsync(TicketScope scope, IReadOnlyList<AutomationRule> candidates,

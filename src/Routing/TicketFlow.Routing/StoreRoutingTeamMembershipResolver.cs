@@ -6,9 +6,9 @@ namespace TicketFlow.Routing;
 
 /// <summary>
 /// Default <see cref="IRoutingTeamMembershipResolver"/>. Small batches (≤ <see cref="PerAgentThreshold"/> agents) use
-/// <see cref="ITeamMembershipResolver"/> per agent; larger batches read the workspace's teams once (≤ 1000 teams, paged) and invert their
-/// member lists, so resolving N principals costs at most one read per team instead of one per agent. Applications that replace
-/// <see cref="ITeamMembershipResolver"/> with a non-store source should replace this resolver too.
+/// <see cref="ITeamMembershipResolver"/> per agent; larger batches resolve team memberships in a single batch query through
+/// <see cref="ITeamStore.ListTeamsForUsersAsync"/>. Applications that replace <see cref="ITeamMembershipResolver"/> with a
+/// non-store source should replace this resolver too.
 /// </summary>
 public sealed class StoreRoutingTeamMembershipResolver(ITeamStore teams, ITeamMembershipResolver single) : IRoutingTeamMembershipResolver
 {
@@ -18,33 +18,41 @@ public sealed class StoreRoutingTeamMembershipResolver(ITeamStore teams, ITeamMe
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(agents);
-        var result = new Dictionary<UserId, IReadOnlyList<TeamId>>();
-        if (agents.Count <= PerAgentThreshold)
+        if (agents.Count == 0)
+            return EmptyMemberships;
+        var distinct = new List<UserId>(agents.Count);
+        var seen = new HashSet<UserId>(agents.Count);
+        foreach (var agent in agents)
+            if (seen.Add(agent))
+                distinct.Add(agent);
+        if (distinct.Count <= PerAgentThreshold)
         {
-            foreach (var agent in agents.Distinct())
-                result[agent] = await single.GetTeamsAsync(scope, agent, cancellationToken).ConfigureAwait(false);
+            if (distinct.Count == 1)
+                return new Dictionary<UserId, IReadOnlyList<TeamId>>(1)
+                {
+                    [distinct[0]] = await single.GetTeamsAsync(scope, distinct[0], cancellationToken).ConfigureAwait(false),
+                };
+            var tasks = new Task<IReadOnlyList<TeamId>>[distinct.Count];
+            for (var i = 0; i < distinct.Count; i++)
+                tasks[i] = single.GetTeamsAsync(scope, distinct[i], cancellationToken);
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+            var result = new Dictionary<UserId, IReadOnlyList<TeamId>>(distinct.Count);
+            for (var i = 0; i < distinct.Count; i++)
+                result[distinct[i]] = tasks[i].Result;
             return result;
         }
-        var wanted = agents.ToHashSet();
-        var memberships = wanted.ToDictionary(agent => agent, _ => new SortedSet<string>(StringComparer.Ordinal));
-        string? after = null;
-        while (true)
+        var batched = await teams.ListTeamsForUsersAsync(scope, distinct, cancellationToken).ConfigureAwait(false);
+        var output = new Dictionary<UserId, IReadOnlyList<TeamId>>(distinct.Count);
+        for (var i = 0; i < distinct.Count; i++)
         {
-            var page = await teams.ListAsync(scope, AllowAllFilter.Instance, new WorkspacePageRequest(WorkspaceLimits.MaximumPageSize, after), cancellationToken).ConfigureAwait(false);
-            foreach (var summary in page.Items)
-            {
-                if (summary.MemberCount == 0 || await teams.GetAsync(scope, summary.Id, cancellationToken).ConfigureAwait(false) is not { } team)
-                    continue;
-                foreach (var member in team.Team.Members)
-                    if (memberships.TryGetValue(member, out var set) && set.Count < UserPrincipal.MaximumTeamMemberships)
-                        set.Add(summary.Id.Value);
-            }
-            if (!page.HasMore || page.Items.Count == 0)
-                break;
-            after = page.Items[^1].Id.Value;
+            var agent = distinct[i];
+            if (batched.TryGetValue(agent, out var list))
+                output[agent] = list.Count <= UserPrincipal.MaximumTeamMemberships ? list : [.. list.Take(UserPrincipal.MaximumTeamMemberships)];
+            else
+                output[agent] = [];
         }
-        foreach (var (agent, set) in memberships)
-            result[agent] = [.. set.Select(team => new TeamId(team))];
-        return result;
+        return output;
     }
+
+    private static readonly Dictionary<UserId, IReadOnlyList<TeamId>> EmptyMemberships = [];
 }

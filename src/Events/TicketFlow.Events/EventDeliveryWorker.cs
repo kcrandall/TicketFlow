@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 using TicketFlow.Access;
 using TicketFlow.Core;
@@ -36,6 +37,10 @@ public sealed record EventDeliveryRunResult(int Delivered, int EventsDelivered, 
 public sealed class EventDeliveryWorker
 {
     private const string EngineError = "engine-error";
+    private const int DeliveryConcurrency = 8;
+
+    private static readonly Permission[] BasePermissions = [EventPermissions.Read, AccessPermissions.ConversationRead, AccessPermissions.ContactRead];
+    private static readonly Permission[] ContentPermissions = [EventPermissions.Read, AccessPermissions.ConversationRead, AccessPermissions.ContactRead, EventPermissions.Content];
 
     private readonly IEventSubscriptionStore subscriptions;
     private readonly IEventLog log;
@@ -63,32 +68,85 @@ public sealed class EventDeliveryWorker
 
     public async Task<EventDeliveryRunResult> RunOnceAsync(CancellationToken cancellationToken = default)
     {
-        var counts = new int[Enum.GetValues<Outcome>().Length];
+        var counts = new int[6];
         int events = 0, skipped = 0;
         var claims = await subscriptions.ClaimAsync(time.GetUtcNow(), options.DeliveryClaimLimit, options.DeliveryLease, cancellationToken).ConfigureAwait(false);
-        foreach (var claim in claims)
+        if (claims.Count == 0)
+            return new EventDeliveryRunResult(0, 0, 0, 0, 0, 0, 0, 0);
+        if (claims.Count == 1)
         {
+            var claim = claims[0];
             cancellationToken.ThrowIfCancellationRequested();
             if (claim.LeaseUntil <= time.GetUtcNow() + options.LeaseSafetyMargin)
-            {
                 skipped++;
-                continue;
-            }
-            (Outcome Kind, int Events) outcome;
-            try
+            else
             {
-                outcome = await DeliverAsync(claim, cancellationToken).ConfigureAwait(false);
+                var outcome = await ExecuteClaimAsync(claim, logCache: null, renderCache: null, cancellationToken).ConfigureAwait(false);
+                counts[(int)outcome.Kind]++;
+                events += outcome.Events;
             }
-            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            return new EventDeliveryRunResult(counts[(int)Outcome.Delivered], events, counts[(int)Outcome.Advanced], counts[(int)Outcome.Retried], counts[(int)Outcome.DeadLettered],
+                counts[(int)Outcome.Lost], skipped, counts[(int)Outcome.Suspended]);
+        }
+
+        // Share log reads and non-content CloudEvent renders across claims in the same run, with bounded delivery concurrency.
+        var logCache = new ConcurrentDictionary<(TicketScope Scope, long Cursor), Lazy<Task<IReadOnlyList<StoredIntegrationEvent>>>>();
+        var renderCache = new ConcurrentDictionary<(TicketScope Scope, long Sequence, EventPrivacy Privacy), string>();
+        using var gate = new SemaphoreSlim(Math.Min(DeliveryConcurrency, claims.Count));
+        var tasks = new Task<(Outcome Kind, int Events, bool Skipped)>[claims.Count];
+        for (var i = 0; i < claims.Count; i++)
+        {
+            var claim = claims[i];
+            tasks[i] = RunClaimBoundedAsync(claim, gate, logCache, renderCache, cancellationToken);
+        }
+        var results = await Task.WhenAll(tasks).ConfigureAwait(false);
+        for (var i = 0; i < results.Length; i++)
+        {
+            var r = results[i];
+            if (r.Skipped)
+                skipped++;
+            else
             {
-                // Store or Access failures: back off this subscription and keep serving the others. Details are not recorded.
-                outcome = await FailAsync(claim, [], claim.State.Cursor, new EventSinkFailed(EngineError), cancellationToken).ConfigureAwait(false);
+                counts[(int)r.Kind]++;
+                events += r.Events;
             }
-            counts[(int)outcome.Kind]++;
-            events += outcome.Events;
         }
         return new EventDeliveryRunResult(counts[(int)Outcome.Delivered], events, counts[(int)Outcome.Advanced], counts[(int)Outcome.Retried], counts[(int)Outcome.DeadLettered],
             counts[(int)Outcome.Lost], skipped, counts[(int)Outcome.Suspended]);
+    }
+
+    private async Task<(Outcome Kind, int Events, bool Skipped)> RunClaimBoundedAsync(EventDeliveryClaim claim, SemaphoreSlim gate,
+        ConcurrentDictionary<(TicketScope Scope, long Cursor), Lazy<Task<IReadOnlyList<StoredIntegrationEvent>>>> logCache,
+        ConcurrentDictionary<(TicketScope Scope, long Sequence, EventPrivacy Privacy), string> renderCache, CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (claim.LeaseUntil <= time.GetUtcNow() + options.LeaseSafetyMargin)
+                return (default, 0, true);
+            var outcome = await ExecuteClaimAsync(claim, logCache, renderCache, cancellationToken).ConfigureAwait(false);
+            return (outcome.Kind, outcome.Events, false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task<(Outcome Kind, int Events)> ExecuteClaimAsync(EventDeliveryClaim claim,
+        ConcurrentDictionary<(TicketScope Scope, long Cursor), Lazy<Task<IReadOnlyList<StoredIntegrationEvent>>>>? logCache,
+        ConcurrentDictionary<(TicketScope Scope, long Sequence, EventPrivacy Privacy), string>? renderCache, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await DeliverAsync(claim, logCache, renderCache, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Store or Access failures: back off this subscription and keep serving the others. Details are not recorded.
+            return await FailAsync(claim, [], claim.State.Cursor, new EventSinkFailed(EngineError), cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private enum Outcome
@@ -101,7 +159,9 @@ public sealed class EventDeliveryWorker
         Suspended,
     }
 
-    private async Task<(Outcome Kind, int Events)> DeliverAsync(EventDeliveryClaim claim, CancellationToken cancellationToken)
+    private async Task<(Outcome Kind, int Events)> DeliverAsync(EventDeliveryClaim claim,
+        ConcurrentDictionary<(TicketScope Scope, long Cursor), Lazy<Task<IReadOnlyList<StoredIntegrationEvent>>>>? logCache,
+        ConcurrentDictionary<(TicketScope Scope, long Sequence, EventPrivacy Privacy), string>? renderCache, CancellationToken cancellationToken)
     {
         var stored = claim.Subscription;
         var subscription = stored.Subscription;
@@ -110,9 +170,7 @@ public sealed class EventDeliveryWorker
             return await FailAsync(claim, [], claim.State.Cursor, new EventSinkFailed("sink-missing"), cancellationToken).ConfigureAwait(false);
 
         var principal = stored.PrincipalRef;
-        List<Permission> permissions = [EventPermissions.Read, AccessPermissions.ConversationRead, AccessPermissions.ContactRead];
-        if (subscription.Privacy == EventPrivacy.Content)
-            permissions.Add(EventPermissions.Content);
+        var permissions = subscription.Privacy == EventPrivacy.Content ? ContentPermissions : BasePermissions;
         var context = await access.LoadDecisionContextAsync(principal, scope, permissions, cancellationToken).ConfigureAwait(false);
         var workspace = EventPermissions.Workspace(scope);
         if (!(await context.DecideAsync(EventPermissions.Read, workspace, cancellationToken).ConfigureAwait(false)).IsPermitted)
@@ -120,24 +178,43 @@ public sealed class EventDeliveryWorker
         if (subscription.Privacy == EventPrivacy.Content && !(await context.DecideAsync(EventPermissions.Content, workspace, cancellationToken).ConfigureAwait(false)).IsPermitted)
             return await FailAsync(claim, [], claim.State.Cursor, new EventSinkFailed("content-forbidden"), cancellationToken).ConfigureAwait(false);
 
-        var head = (await log.GetHeadAsync(scope, cancellationToken).ConfigureAwait(false)).Last;
+        var head = claim.HeadSequence ?? (await log.GetHeadAsync(scope, cancellationToken).ConfigureAwait(false)).Last;
         var limit = Math.Min(subscription.BatchSize, sink.MaximumBatchSize);
         var start = claim.State.Cursor;
-        var page = await log.ReadAsync(scope, start, options.MaximumScan, cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<StoredIntegrationEvent> page;
+        if (logCache is not null)
+        {
+            var lazy = logCache.GetOrAdd((scope, start), key => new Lazy<Task<IReadOnlyList<StoredIntegrationEvent>>>(() => log.ReadAsync(key.Scope, key.Cursor, options.MaximumScan, CancellationToken.None)));
+            page = await lazy.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+            page = await log.ReadAsync(scope, start, options.MaximumScan, cancellationToken).ConfigureAwait(false);
         if (page.Count == 0)
             // Everything after the cursor was pruned by retention: record the gap and move to the head.
             return await CompleteAsync(claim, Math.Max(start, head), null, head, head > start ? Gap(start + 1, head) : null, Outcome.Advanced, 0, cancellationToken).ConfigureAwait(false);
         var gap = page[0].Sequence > start + 1 ? Gap(start + 1, page[0].Sequence - 1) : null;
         var cursor = start;
-        var selected = new List<StoredIntegrationEvent>();
-        foreach (var item in page)
+        var selected = new List<StoredIntegrationEvent>(Math.Min(limit, page.Count));
+        Dictionary<(Permission Permission, AccessResource Resource), bool>? decisionMemo = null;
+        for (var i = 0; i < page.Count; i++)
         {
+            var item = page[i];
             cursor = item.Sequence;
             if (!subscription.Filter.Matches(item))
                 continue;
             var (permission, resource) = item.Resource.AccessCheck(scope);
-            if (permission != EventPermissions.Read && !(await context.DecideAsync(permission, resource, cancellationToken).ConfigureAwait(false)).IsPermitted)
-                continue;
+            if (permission != EventPermissions.Read)
+            {
+                decisionMemo ??= [];
+                var key = (permission, resource);
+                if (!decisionMemo.TryGetValue(key, out var permitted))
+                {
+                    permitted = (await context.DecideAsync(permission, resource, cancellationToken).ConfigureAwait(false)).IsPermitted;
+                    decisionMemo[key] = permitted;
+                }
+                if (!permitted)
+                    continue;
+            }
             selected.Add(item);
             if (selected.Count == limit)
                 break;
@@ -145,7 +222,7 @@ public sealed class EventDeliveryWorker
         if (selected.Count == 0)
             return await CompleteAsync(claim, cursor, null, head, gap, Outcome.Advanced, 0, cancellationToken).ConfigureAwait(false);
 
-        var (rendered, poison) = await RenderAsync(selected, subscription.Privacy, principal, cancellationToken).ConfigureAwait(false);
+        var (rendered, poison) = await RenderAsync(selected, subscription.Privacy, principal, renderCache, cancellationToken).ConfigureAwait(false);
         if (rendered.Count == 0)
             // The first selected event cannot be rendered: it fails alone and is dead-lettered after the maximum attempts.
             return await FailAsync(claim, [poison!], poison!.Sequence, new EventSinkFailed("render-error"), cancellationToken).ConfigureAwait(false);
@@ -169,12 +246,15 @@ public sealed class EventDeliveryWorker
                 case EventSinkDelivered:
                     return await CompleteAsync(claim, cursor, time.GetUtcNow(), head, gap, Outcome.Delivered, rendered.Count, cancellationToken).ConfigureAwait(false);
                 case EventSinkFailed failed:
-                    return await FailAsync(claim, [.. rendered.Select(item => item.Event)], cursor, failed, cancellationToken).ConfigureAwait(false);
+                    var failedEvents = new StoredIntegrationEvent[rendered.Count];
+                    for (var i = 0; i < rendered.Count; i++)
+                        failedEvents[i] = rendered[i].Event;
+                    return await FailAsync(claim, failedEvents, cursor, failed, cancellationToken).ConfigureAwait(false);
                 case EventSinkSplit:
                     if (rendered.Count == 1)
                         return await FailAsync(claim, [rendered[0].Event], rendered[0].Event.Sequence, new EventSinkFailed("payload-too-large", permanent: true), cancellationToken)
                             .ConfigureAwait(false);
-                    rendered = [.. rendered.Take(rendered.Count / 2)];
+                    rendered = rendered.GetRange(0, rendered.Count / 2);
                     cursor = rendered[^1].Event.Sequence;
                     break;
             }
@@ -183,7 +263,7 @@ public sealed class EventDeliveryWorker
 
     /// <summary>Renders the batch; when hydration or rendering fails for an event, returns the events before it and that event as poison.</summary>
     private async Task<(List<RenderedEvent> Rendered, StoredIntegrationEvent? Poison)> RenderAsync(IReadOnlyList<StoredIntegrationEvent> selected, EventPrivacy privacy,
-        ApiClientPrincipal principal, CancellationToken cancellationToken)
+        ApiClientPrincipal principal, ConcurrentDictionary<(TicketScope Scope, long Sequence, EventPrivacy Privacy), string>? renderCache, CancellationToken cancellationToken)
     {
         IReadOnlyDictionary<long, EventContent>? contents = null;
         if (privacy == EventPrivacy.Content)
@@ -198,17 +278,32 @@ public sealed class EventDeliveryWorker
             }
         }
         var rendered = new List<RenderedEvent>(selected.Count);
-        foreach (var item in selected)
+        for (var i = 0; i < selected.Count; i++)
         {
+            var item = selected[i];
             try
             {
-                EventContent? content = null;
+                string json;
                 if (privacy == EventPrivacy.Content)
                 {
                     var single = contents ?? await hydrator.HydrateAsync([item], principal, cancellationToken).ConfigureAwait(false);
-                    content = single.GetValueOrDefault(item.Sequence);
+                    var content = single.GetValueOrDefault(item.Sequence);
+                    json = IntegrationEventCodec.Render(item, privacy, content, render);
                 }
-                rendered.Add(new RenderedEvent(item, IntegrationEventCodec.Render(item, privacy, content, render)));
+                else if (renderCache is not null)
+                {
+                    var cacheKey = (item.Scope, item.Sequence, privacy);
+                    if (!renderCache.TryGetValue(cacheKey, out json!))
+                    {
+                        json = IntegrationEventCodec.Render(item, privacy, null, render);
+                        renderCache.TryAdd(cacheKey, json);
+                    }
+                }
+                else
+                {
+                    json = IntegrationEventCodec.Render(item, privacy, null, render);
+                }
+                rendered.Add(new RenderedEvent(item, json));
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {

@@ -44,7 +44,8 @@ public sealed class AssistService : IAssistService
         ArgumentNullException.ThrowIfNull(request);
         return await RunAsync(actor, request.Conversation, new AssistContextRequest(), new Call<AssistSummary>(
             AssistFeature.ConversationSummary, "summary", AssistPrompts.SummarySchema, 4096, null,
-            _ => "Summarize the conversation in <support_data> for the agent.", null, (root, _) => ParseSummary(root)), cancellationToken).ConfigureAwait(false);
+            _ => "Summarize the conversation in <support_data> for the agent.", null, (root, _) => ParseSummary(root),
+            CachedFormat: AssistPrompts.SummaryFormat), cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<AssistResult<AssistDraft>> DraftReplyAsync(PrincipalRef actor, AssistDraftRequest request, CancellationToken cancellationToken = default)
@@ -60,14 +61,18 @@ public sealed class AssistService : IAssistService
                 if (request.Instructions is { } instructions)
                     task.Append("\n<agent_instructions>").Append(AssistContextBuilder.Escape(instructions)).Append("</agent_instructions>");
                 return task.ToString();
-            }, null, ParseDraft), cancellationToken).ConfigureAwait(false);
+            }, null, ParseDraft, CachedFormat: AssistPrompts.DraftFormat), cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<AssistResult<AssistTriage>> TriageAsync(PrincipalRef actor, AssistTriageRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var labels = request.Labels.Select(option => option.Label.Value).ToList();
-        var teams = request.Teams.Select(option => option.Team.Value).ToList();
+        var labels = new string[request.Labels.Count];
+        for (var i = 0; i < labels.Length; i++)
+            labels[i] = request.Labels[i].Label.Value;
+        var teams = new string[request.Teams.Count];
+        for (var i = 0; i < teams.Length; i++)
+            teams[i] = request.Teams[i].Team.Value;
         return await RunAsync(actor, request.Conversation, new AssistContextRequest(IncludeContact: false), new Call<AssistTriage>(
             AssistFeature.Triage, "triage", AssistPrompts.TriageSchema(labels, teams), 2048, AssistThinkingLevel.Low,
             _ =>
@@ -97,7 +102,8 @@ public sealed class AssistService : IAssistService
     public async Task<AssistResult<AssistTranslation>> TranslateAsync(PrincipalRef actor, AssistTranslateRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return await RunAsync(actor, request.Conversation, new AssistContextRequest(IncludeTimeline: request.Message is not null, IncludeContact: false), new Call<AssistTranslation>(
+        var hasMessage = request.Message is not null;
+        return await RunAsync(actor, request.Conversation, new AssistContextRequest(IncludeTimeline: hasMessage, IncludeContact: false, BuildSupportData: hasMessage), new Call<AssistTranslation>(
             AssistFeature.Translate, "translation", AssistPrompts.TranslateSchema, 16_000, AssistThinkingLevel.Low,
             _ => "Translate the text into the target locale \"" + request.TargetLocale.Value + "\".",
             context =>
@@ -111,18 +117,18 @@ public sealed class AssistService : IAssistService
                         _ => null,
                     }).LastOrDefault(body => body is not null);
                 return source is null ? null : "<text_to_translate>" + AssistContextBuilder.Escape(source) + "</text_to_translate>\n";
-            }, (root, _) => ParseTranslation(root, request.TargetLocale), SupportDataIncluded: request.Message is not null), cancellationToken).ConfigureAwait(false);
+            }, (root, _) => ParseTranslation(root, request.TargetLocale), SupportDataIncluded: hasMessage, CachedFormat: AssistPrompts.TranslateFormat), cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<AssistResult<AssistToneRewrite>> RewriteToneAsync(PrincipalRef actor, AssistToneRewriteRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return await RunAsync(actor, request.Conversation, new AssistContextRequest(IncludeTimeline: false, IncludeContact: false), new Call<AssistToneRewrite>(
+        return await RunAsync(actor, request.Conversation, new AssistContextRequest(IncludeTimeline: false, IncludeContact: false, BuildSupportData: false), new Call<AssistToneRewrite>(
             AssistFeature.ToneRewrite, "tone_rewrite", AssistPrompts.ToneSchema, 8192, AssistThinkingLevel.Low,
             _ => "Rewrite the text in a " + request.Tone.ToString().ToLowerInvariant() + " tone.",
             _ => "<text_to_rewrite>" + AssistContextBuilder.Escape(request.Text) + "</text_to_rewrite>\n",
             (root, _) => ParseText(root, AssistDraft.MaximumBodyLength) is { } text ? (new AssistToneRewrite(text, request.Tone), []) : null,
-            SupportDataIncluded: false), cancellationToken).ConfigureAwait(false);
+            SupportDataIncluded: false, CachedFormat: AssistPrompts.ToneFormat), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -138,7 +144,8 @@ public sealed class AssistService : IAssistService
         Func<AssistConversationContext, string> Task,
         Func<AssistConversationContext, string?>? Extra,
         Func<JsonElement, AssistConversationContext, (T Value, IReadOnlyList<ArticleId> Citations)?> Parse,
-        bool SupportDataIncluded = true);
+        bool SupportDataIncluded = true,
+        ChatResponseFormatJson? CachedFormat = null);
 
     private async Task<AssistResult<T>> RunAsync<T>(PrincipalRef actor, ConversationId conversation, AssistContextRequest contextRequest, Call<T> call, CancellationToken cancellationToken)
     {
@@ -168,9 +175,11 @@ public sealed class AssistService : IAssistService
                 return new AssistRefused(AssistRefusal.NotFound, ["The message does not exist or is not visible."]);
         }
         var system = AssistPrompts.System(call.Feature);
-        var user = new StringBuilder()
-            .Append("<task>\n").Append(call.Task(context)).Append("\n</task>\n<support_data>\n")
-            .Append(call.SupportDataIncluded ? context.SupportData : "")
+        var taskText = call.Task(context);
+        var supportData = call.SupportDataIncluded ? context.SupportData : "";
+        var user = new StringBuilder(taskText.Length + supportData.Length + (extra?.Length ?? 0) + 64)
+            .Append("<task>\n").Append(taskText).Append("\n</task>\n<support_data>\n")
+            .Append(supportData)
             .Append(extra)
             .Append("</support_data>")
             .ToString();
@@ -215,7 +224,7 @@ public sealed class AssistService : IAssistService
             {
                 Instructions = system,
                 MaxOutputTokens = call.MaxOutputTokens,
-                ResponseFormat = ChatResponseFormat.ForJsonSchema(AssistPrompts.Element(call.Schema), call.SchemaName),
+                ResponseFormat = call.CachedFormat ?? ChatResponseFormat.ForJsonSchema(AssistPrompts.Element(call.Schema), call.SchemaName),
             };
             response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, user)], chatOptions, cancellationToken).ConfigureAwait(false);
         }

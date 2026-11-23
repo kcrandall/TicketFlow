@@ -1,3 +1,4 @@
+using System.Data;
 using Npgsql;
 using TicketFlow.Core;
 
@@ -7,7 +8,6 @@ public sealed partial class PostgresWorkspaceStore
 {
     private const string CalendarColumns = "calendar_id, format_version, name, time_zone, schedule, revision";
     private const string CalendarKey = "calendar_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@calendar) AND " + WorkspaceWhere + " AND calendar_id=@calendar";
-    private const string CalendarRevision = $"SELECT revision FROM tf_workspace_calendars WHERE {CalendarKey}";
 
     public async Task<StoredBusinessCalendar?> GetAsync(TicketScope scope, BusinessCalendarId id, CancellationToken cancellationToken = default)
     {
@@ -15,7 +15,7 @@ public sealed partial class PostgresWorkspaceStore
         RequireCalendar(id);
         await using var command = source.CreateCommand($"SELECT {CalendarColumns} FROM tf_workspace_calendars WHERE {CalendarKey}");
         BindCalendarKey(command, scope, id);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadCalendar(reader, scope) : null;
     }
 
@@ -42,10 +42,19 @@ public sealed partial class PostgresWorkspaceStore
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await LockAsync(connection, transaction, "calendars", scope, cancellationToken).ConfigureAwait(false);
-        if (await RevisionAsync(connection, transaction, CalendarRevision, command => BindCalendarKey(command, scope, calendar.Id), cancellationToken).ConfigureAwait(false) is { } existing)
-            return new WorkspaceWriteConflict(existing);
-        if (await CountAsync(connection, transaction, "tf_workspace_calendars", scope, cancellationToken).ConfigureAwait(false) >= WorkspaceLimits.MaximumCalendarsPerWorkspace)
-            return new WorkspaceWriteRejected(WorkspaceWriteRejection.CapacityExceeded);
+        await using (var check = new NpgsqlCommand($"""
+            SELECT (SELECT revision FROM tf_workspace_calendars WHERE {CalendarKey}),
+                   (SELECT count(*) FROM tf_workspace_calendars WHERE {ScopeKeyWhere})
+            """, connection, transaction))
+        {
+            BindCalendarKey(check, scope, calendar.Id);
+            await using var reader = await check.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+            await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (!reader.IsDBNull(0))
+                return new WorkspaceWriteConflict(reader.GetInt64(0));
+            if (reader.GetInt64(1) >= WorkspaceLimits.MaximumCalendarsPerWorkspace)
+                return new WorkspaceWriteRejected(WorkspaceWriteRejection.CapacityExceeded);
+        }
         await using (var insert = new NpgsqlCommand("""
             INSERT INTO tf_workspace_calendars(tenant_id, project_id, environment_id, app_id, workspace_id, calendar_id, format_version, name, time_zone, schedule, revision)
             VALUES(@tenant, @project, @environment, @app, @workspace, @calendar, 1, @name, @zone, @schedule, 1)
@@ -64,18 +73,21 @@ public sealed partial class PostgresWorkspaceStore
         ArgumentNullException.ThrowIfNull(calendar);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        await using (var update = new NpgsqlCommand($"UPDATE tf_workspace_calendars SET name=@name, time_zone=@zone, schedule=@schedule, revision=revision+1 WHERE {CalendarKey} AND revision=@expected RETURNING revision", connection, transaction))
+        await using (var update = new NpgsqlCommand($"""
+            UPDATE tf_workspace_calendars SET name=@name, time_zone=@zone, schedule=@schedule, revision=revision+1
+            WHERE {CalendarKey} AND revision=@expected RETURNING revision
+            """, connection))
         {
             BindCalendar(update, scope, calendar);
-            update.Parameters.AddWithValue("expected", expectedRevision);
+            AddLong(update, "expected", expectedRevision);
             if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-            {
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
                 return new WorkspaceWriteApplied<StoredBusinessCalendar>(new(scope, calendar, revision));
-            }
         }
-        return await MissAsync<StoredBusinessCalendar>(connection, transaction, CalendarRevision, command => BindCalendarKey(command, scope, calendar.Id), cancellationToken).ConfigureAwait(false);
+        await using var current = new NpgsqlCommand($"SELECT revision FROM tf_workspace_calendars WHERE {CalendarKey}", connection);
+        BindCalendarKey(current, scope, calendar.Id);
+        return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
+            ? new WorkspaceWriteConflict(existing)
+            : WorkspaceWriteNotFound.Instance;
     }
 
     public async Task<WorkspaceWriteResult<StoredBusinessCalendar>> DeleteAsync(TicketScope scope, BusinessCalendarId id, long expectedRevision, CancellationToken cancellationToken = default)
@@ -84,20 +96,19 @@ public sealed partial class PostgresWorkspaceStore
         RequireCalendar(id);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        StoredBusinessCalendar? removed = null;
-        await using (var delete = new NpgsqlCommand($"DELETE FROM tf_workspace_calendars WHERE {CalendarKey} AND revision=@expected RETURNING {CalendarColumns}", connection, transaction))
+        await using (var delete = new NpgsqlCommand($"DELETE FROM tf_workspace_calendars WHERE {CalendarKey} AND revision=@expected RETURNING {CalendarColumns}", connection))
         {
             BindCalendarKey(delete, scope, id);
-            delete.Parameters.AddWithValue("expected", expectedRevision);
-            await using var reader = await delete.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            AddLong(delete, "expected", expectedRevision);
+            await using var reader = await delete.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                removed = ReadCalendar(reader, scope);
+                return new WorkspaceWriteApplied<StoredBusinessCalendar>(ReadCalendar(reader, scope));
         }
-        if (removed is null)
-            return await MissAsync<StoredBusinessCalendar>(connection, transaction, CalendarRevision, command => BindCalendarKey(command, scope, id), cancellationToken).ConfigureAwait(false);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new WorkspaceWriteApplied<StoredBusinessCalendar>(removed);
+        await using var current = new NpgsqlCommand($"SELECT revision FROM tf_workspace_calendars WHERE {CalendarKey}", connection);
+        BindCalendarKey(current, scope, id);
+        return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
+            ? new WorkspaceWriteConflict(existing)
+            : WorkspaceWriteNotFound.Instance;
     }
 
     private static void RequireCalendar(BusinessCalendarId id)
@@ -120,11 +131,18 @@ public sealed partial class PostgresWorkspaceStore
         AddText(command, "schedule", BusinessCalendarCodec.EncodeSchedule(calendar));
     }
 
-    private static StoredBusinessCalendar ReadCalendar(NpgsqlDataReader reader, TicketScope scope) => Decode(() =>
+    private static StoredBusinessCalendar ReadCalendar(NpgsqlDataReader reader, TicketScope scope, int offset = 0)
     {
-        if (reader.GetInt16(1) != 1)
-            throw new FormatException("Unsupported calendar format version.");
-        var calendar = BusinessCalendarCodec.DecodeSchedule(new BusinessCalendarId(reader.GetString(0)), reader.GetString(2), reader.GetString(3), reader.GetString(4));
-        return new StoredBusinessCalendar(scope, calendar, reader.GetInt64(5));
-    }, "business calendar");
+        try
+        {
+            if (reader.GetInt16(offset + 1) != 1)
+                throw new FormatException("Unsupported calendar format version.");
+            var calendar = BusinessCalendarCodec.DecodeSchedule(new BusinessCalendarId(reader.GetString(offset)), reader.GetString(offset + 2), reader.GetString(offset + 3), reader.GetString(offset + 4));
+            return new StoredBusinessCalendar(scope, calendar, reader.GetInt64(offset + 5));
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw StoredDataError(error, "business calendar");
+        }
+    }
 }

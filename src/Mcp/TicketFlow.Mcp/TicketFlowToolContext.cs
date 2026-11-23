@@ -16,18 +16,25 @@ namespace TicketFlow.Mcp;
 /// tool body as that principal, maps <see cref="TicketFlowToolError"/>s and TicketFlow validation exceptions to MCP error results,
 /// bounds the result size and logs the tool name and outcome code only (never arguments, bodies or addresses).
 /// </summary>
-public sealed class TicketFlowToolContext
+public sealed partial class TicketFlowToolContext
 {
     private readonly TicketFlowMcpOptions options;
     private readonly ILogger logger;
 
     public TicketFlowToolContext(IServiceProvider services, ClaimsPrincipal? user, TicketFlowToolDescriptor tool)
+        : this(services, user, tool,
+            (services ?? throw new ArgumentNullException(nameof(services))).GetService<IOptions<TicketFlowMcpOptions>>()?.Value ?? new TicketFlowMcpOptions(),
+            services.GetService<ILoggerFactory>()?.CreateLogger("TicketFlow.Mcp") ?? NullLogger.Instance)
+    {
+    }
+
+    internal TicketFlowToolContext(IServiceProvider services, ClaimsPrincipal? user, TicketFlowToolDescriptor tool, TicketFlowMcpOptions options, ILogger logger)
     {
         Services = services ?? throw new ArgumentNullException(nameof(services));
         User = user;
         Tool = tool ?? throw new ArgumentNullException(nameof(tool));
-        options = services.GetService<IOptions<TicketFlowMcpOptions>>()?.Value ?? new TicketFlowMcpOptions();
-        logger = services.GetService<ILoggerFactory>()?.CreateLogger("TicketFlow.Mcp") ?? NullLogger.Instance;
+        this.options = options;
+        this.logger = logger;
     }
 
     /// <summary>The request services (an MCP request scope when the SDK scopes requests).</summary>
@@ -82,7 +89,8 @@ public sealed class TicketFlowToolContext
     public async Task<CallToolResult> RunAsync(string? workspace, Func<PrincipalRef, Task<object>> body, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(body);
-        var started = Stopwatch.GetTimestamp();
+        var debug = logger.IsEnabled(LogLevel.Debug);
+        var started = debug ? Stopwatch.GetTimestamp() : 0;
         CallToolResult result;
         try
         {
@@ -92,7 +100,8 @@ public sealed class TicketFlowToolContext
         {
             result = Fail(TicketFlowToolError.Invalid([SafeMessage(error)]));
         }
-        Log(result, Stopwatch.GetElapsedTime(started));
+        if (debug)
+            Log(result, Stopwatch.GetElapsedTime(started));
         return result;
     }
 
@@ -129,13 +138,14 @@ public sealed class TicketFlowToolContext
 
     private void Log(CallToolResult result, TimeSpan elapsed)
     {
-        if (!logger.IsEnabled(LogLevel.Debug))
-            return;
         var code = result.IsError == true && result.StructuredContent is { } content && content.TryGetProperty("error", out var error) && error.TryGetProperty("code", out var value)
-            ? value.GetString()
+            ? value.GetString() ?? "error"
             : "ok";
-        logger.LogDebug("TicketFlow MCP tool {Tool} completed with {Outcome} in {ElapsedMs} ms.", Tool.Name, code, (long)elapsed.TotalMilliseconds);
+        LogCompleted(logger, Tool.Name, code, (long)elapsed.TotalMilliseconds);
     }
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "TicketFlow MCP tool {Tool} completed with {Outcome} in {ElapsedMs} ms.")]
+    private static partial void LogCompleted(ILogger logger, string tool, string outcome, long elapsedMs);
 
     /// <summary>Validation messages are returned only when TicketFlow code produced them (they never carry input values).</summary>
     private static string SafeMessage(Exception error)

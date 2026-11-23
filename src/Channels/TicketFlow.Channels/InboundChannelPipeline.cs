@@ -181,11 +181,22 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
         };
     }
 
+    private static readonly string[] SubjectPrefixes = ["re:", "fw:", "fwd:", "aw:", "sv:"];
+
     private async Task<InboundResult> RecordedAsync(TicketScope scope, InboxId inbox, ConversationApplied applied, bool started, InboundChannelMessage message,
         DateTimeOffset receivedAt, ChannelRecipient recipient, ContactId contact, CancellationToken cancellationToken)
     {
-        var incoming = applied.Events.Select(item => item.Event.Value).OfType<MessageEvent>().FirstOrDefault(item => item.Direction == MessageDirection.Incoming)
-            ?? throw new InvalidOperationException("The conversation service returned no incoming message event.");
+        MessageEvent? incoming = null;
+        for (var i = 0; i < applied.Events.Count; i++)
+        {
+            if (applied.Events[i].Event.Value is MessageEvent candidate && candidate.Direction == MessageDirection.Incoming)
+            {
+                incoming = candidate;
+                break;
+            }
+        }
+        if (incoming is null)
+            throw new InvalidOperationException("The conversation service returned no incoming message event.");
         await RecordStateAsync(scope, inbox, applied.Conversation, incoming.Id, message, receivedAt, recipient, contact, applied.Replayed, cancellationToken).ConfigureAwait(false);
         return new InboundRecorded(applied.Conversation, incoming.Id, started, applied.Replayed);
     }
@@ -193,11 +204,29 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
     /// <summary>Reference chain first (In-Reply-To, then References newest first), then the channel thread; same contact, not closed.</summary>
     private async Task<ConversationId?> CorrelateAsync(PrincipalRef actor, TicketScope scope, InboxId inbox, ContactId contact, InboundChannelMessage message, CancellationToken cancellationToken)
     {
-        var references = new List<string>();
-        foreach (var candidate in new[] { message.InReplyTo }.Concat(message.References.Reverse()))
-            if (ChannelText.NormalizeReference(candidate) is { } reference && !references.Contains(reference, StringComparer.Ordinal) && references.Count < IChannelThreadStore.MaximumReferencesPerCall)
-                references.Add(reference);
-        if (references.Count > 0
+        List<string>? references = null;
+        HashSet<string>? seenRefs = null;
+        void AddCandidate(string? candidate)
+        {
+            if (ChannelText.NormalizeReference(candidate) is not { } reference)
+                return;
+            references ??= new List<string>(Math.Min(message.References.Count + 1, IChannelThreadStore.MaximumReferencesPerCall));
+            if (references.Count >= IChannelThreadStore.MaximumReferencesPerCall)
+                return;
+            if (references.Count >= 4)
+            {
+                seenRefs ??= new HashSet<string>(references, StringComparer.Ordinal);
+                if (!seenRefs.Add(reference))
+                    return;
+            }
+            else if (references.Contains(reference, StringComparer.Ordinal))
+                return;
+            references.Add(reference);
+        }
+        AddCandidate(message.InReplyTo);
+        for (var i = message.References.Count - 1; i >= 0; i--)
+            AddCandidate(message.References[i]);
+        if (references is { Count: > 0 }
             && await threads.FindConversationAsync(scope, inbox, references, cancellationToken).ConfigureAwait(false) is { } referenced
             && await conversationStore.GetAsync(scope, referenced, cancellationToken).ConfigureAwait(false) is { } stored
             && stored.Conversation.Contact == contact && stored.Conversation.Status.Value is not ClosedStatus)
@@ -215,14 +244,28 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
             return null;
         }
         // Per-contact lookup first: a shared thread (a Slack thread with several speakers) keeps one conversation per contact.
-        StoredConversation? newest = null;
-        foreach (var candidate in await states.FindByThreadAsync(scope, inbox, message.Channel, threadId, contact, cancellationToken).ConfigureAwait(false))
-            if (await conversationStore.GetAsync(scope, candidate, cancellationToken).ConfigureAwait(false) is { } owned
-                && owned.Conversation.Contact == contact && owned.Conversation.Status.Value is not ClosedStatus
-                && (newest is null || owned.Conversation.CreatedAt > newest.Conversation.CreatedAt))
-                newest = owned;
-        if (newest is not null)
-            return newest.Id;
+        var candidates = await states.FindByThreadAsync(scope, inbox, message.Channel, threadId, contact, cancellationToken).ConfigureAwait(false);
+        if (candidates.Count > 0)
+        {
+            StoredConversation? newest = null;
+            if (candidates.Count == 1)
+            {
+                if (await conversationStore.GetAsync(scope, candidates[0], cancellationToken).ConfigureAwait(false) is { } owned
+                    && owned.Conversation.Contact == contact && owned.Conversation.Status.Value is not ClosedStatus)
+                    newest = owned;
+            }
+            else
+            {
+                var loaded = await conversationStore.GetManyAsync(scope, candidates, cancellationToken).ConfigureAwait(false);
+                for (var i = 0; i < candidates.Count; i++)
+                    if (loaded.TryGetValue(candidates[i], out var owned)
+                        && owned.Conversation.Contact == contact && owned.Conversation.Status.Value is not ClosedStatus
+                        && (newest is null || owned.Conversation.CreatedAt > newest.Conversation.CreatedAt))
+                        newest = owned;
+            }
+            if (newest is not null)
+                return newest.Id;
+        }
         var found = await conversations.FindByThreadAsync(actor, inbox, thread, cancellationToken).ConfigureAwait(false);
         return found.Value is ConversationView view && view.Contact == contact ? view.Id : null;
     }
@@ -255,13 +298,36 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
                 break;
         }
 
-        var references = new List<ChannelMessageReference>();
+        var references = new List<ChannelMessageReference>(Math.Min(message.References.Count + 2, IChannelThreadStore.MaximumReferencesPerCall));
+        HashSet<string>? seen = null;
         if (ownReference is not null)
             references.Add(new ChannelMessageReference(ownReference, MessageDirection.Incoming, messageId));
-        foreach (var candidate in message.References.Append(message.InReplyTo))
-            if (ChannelText.NormalizeReference(candidate) is { } reference && references.All(item => item.Reference != reference)
-                && references.Count < IChannelThreadStore.MaximumReferencesPerCall)
-                references.Add(new ChannelMessageReference(reference, MessageDirection.Incoming));
+        void AddReference(string? candidate)
+        {
+            if (references.Count >= IChannelThreadStore.MaximumReferencesPerCall || ChannelText.NormalizeReference(candidate) is not { } reference)
+                return;
+            if (references.Count >= 4)
+            {
+                if (seen is null)
+                {
+                    seen = new HashSet<string>(references.Count + 4, StringComparer.Ordinal);
+                    for (var j = 0; j < references.Count; j++)
+                        seen.Add(references[j].Reference);
+                }
+                if (!seen.Add(reference))
+                    return;
+            }
+            else
+            {
+                for (var j = 0; j < references.Count; j++)
+                    if (string.Equals(references[j].Reference, reference, StringComparison.Ordinal))
+                        return;
+            }
+            references.Add(new ChannelMessageReference(reference, MessageDirection.Incoming));
+        }
+        for (var i = 0; i < message.References.Count; i++)
+            AddReference(message.References[i]);
+        AddReference(message.InReplyTo);
         if (references.Count > 0)
             await threads.AddAsync(scope, inbox, conversation, references, time.GetUtcNow(), cancellationToken).ConfigureAwait(false);
     }
@@ -312,7 +378,7 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
         while (true)
         {
             var stripped = false;
-            foreach (var prefix in new[] { "re:", "fw:", "fwd:", "aw:", "sv:" })
+            foreach (var prefix in SubjectPrefixes)
                 if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                 {
                     value = value[prefix.Length..].TrimStart();

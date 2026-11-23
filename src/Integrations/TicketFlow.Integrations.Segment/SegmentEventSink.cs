@@ -94,15 +94,22 @@ public sealed class SegmentEventSink : IEventSink, IDisposable
 {
     public const string SinkKind = "segment";
 
+    private static readonly MediaTypeHeaderValue JsonContentType = new("application/json") { CharSet = "utf-8" };
+
     private readonly SegmentOptions options;
     private readonly HttpClient client;
+    private readonly Dictionary<string, (SegmentSource Source, Uri BatchUri, AuthenticationHeaderValue Auth)> sources;
 
     public SegmentEventSink(IOptions<SegmentOptions> options, HttpMessageHandler? handler = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         this.options = options.Value;
         this.options.Validate();
-        client = new HttpClient(handler ?? new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false }) { Timeout = this.options.Timeout };
+        sources = new Dictionary<string, (SegmentSource, Uri, AuthenticationHeaderValue)>(this.options.Sources.Count, StringComparer.Ordinal);
+        foreach (var pair in this.options.Sources)
+            sources[pair.Key] = (pair.Value, new Uri(pair.Value.Host, "v1/batch"),
+                new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes(pair.Value.WriteKey + ":"))));
+        client = new HttpClient(handler ?? new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false, PooledConnectionLifetime = TimeSpan.FromMinutes(5) }) { Timeout = this.options.Timeout };
     }
 
     public string Kind => SinkKind;
@@ -110,20 +117,20 @@ public sealed class SegmentEventSink : IEventSink, IDisposable
     public int MaximumBatchSize => EventSubscription.MaximumBatchSize;
 
     public bool IsValidTarget(Core.TicketScope scope, string target) =>
-        scope is not null && target is not null && options.Sources.TryGetValue(target, out var source) && EventScopeRule.Allows(source.AllowedScopes, scope);
+        scope is not null && target is not null && sources.TryGetValue(target, out var entry) && EventScopeRule.Allows(entry.Source.AllowedScopes, scope);
 
     public async Task<EventSinkResult> DeliverAsync(EventDelivery delivery, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(delivery);
-        if (!options.Sources.TryGetValue(delivery.Subscription.Subscription.Sink.Target, out var source) || !EventScopeRule.Allows(source.AllowedScopes, delivery.Scope))
+        if (!sources.TryGetValue(delivery.Subscription.Subscription.Sink.Target, out var entry) || !EventScopeRule.Allows(entry.Source.AllowedScopes, delivery.Scope))
             return new EventSinkFailed("source-missing", permanent: true);
-        var payload = Body(delivery);
-        if (payload.Length > options.MaximumPayloadBytes)
+        var payload = TryBody(delivery, options.MaximumPayloadBytes);
+        if (payload is null)
             return delivery.Events.Count > 1 ? EventSinkSplit.Instance : new EventSinkFailed("payload-too-large", permanent: true);
-        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(source.Host, "v1/batch"));
-        request.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.ASCII.GetBytes(source.WriteKey + ":")));
+        using var request = new HttpRequestMessage(HttpMethod.Post, entry.BatchUri);
+        request.Headers.Authorization = entry.Auth;
         request.Content = new ByteArrayContent(payload);
-        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
+        request.Content.Headers.ContentType = JsonContentType;
         try
         {
             using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
@@ -149,16 +156,27 @@ public sealed class SegmentEventSink : IEventSink, IDisposable
     public byte[] Body(EventDelivery delivery)
     {
         ArgumentNullException.ThrowIfNull(delivery);
-        var buffer = new ArrayBufferWriter<byte>();
+        return TryBody(delivery, int.MaxValue)!;
+    }
+
+    private byte[]? TryBody(EventDelivery delivery, int maxBytes)
+    {
+        var buffer = new ArrayBufferWriter<byte>(Math.Min(delivery.Events.Count * 512, 65_536));
         using (var writer = new Utf8JsonWriter(buffer))
         {
             writer.WriteStartObject();
-            writer.WriteStartArray("batch");
+            writer.WriteStartArray("batch"u8);
             foreach (var rendered in delivery.Events)
+            {
                 WriteEvent(writer, rendered);
+                if (maxBytes < int.MaxValue && buffer.WrittenCount + writer.BytesPending > maxBytes)
+                    return null;
+            }
             writer.WriteEndArray();
             writer.WriteEndObject();
         }
+        if (buffer.WrittenCount > maxBytes)
+            return null;
         return buffer.WrittenSpan.ToArray();
     }
 

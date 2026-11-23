@@ -57,17 +57,21 @@ public sealed class RoutingMaintenanceWorker
 
     public async Task<RoutingMaintenanceResult> RunOnceAsync(CancellationToken cancellationToken = default)
     {
+        var runCache = new RunPolicyCache();
         var expired = await agents.ExpirePresenceAsync(options.MaintenanceBatchSize, cancellationToken).ConfigureAwait(false);
-        foreach (var agent in expired)
-            await events.PublishAsync(new AgentStatusChanged(agent.Scope, agent.Agent, AgentStatus.Offline, agent.At), cancellationToken).ConfigureAwait(false);
+        for (var i = 0; i < expired.Count; i++)
+            await events.PublishAsync(new AgentStatusChanged(expired[i].Scope, expired[i].Agent, AgentStatus.Offline, expired[i].At), cancellationToken).ConfigureAwait(false);
 
         var reassigned = 0;
-        foreach (var claim in await agents.ClaimReassignmentsAsync(options.MaintenanceBatchSize, options.MaintenanceLease, cancellationToken).ConfigureAwait(false))
-            reassigned += await ReassignAsync(claim, cancellationToken).ConfigureAwait(false);
+        var reassignClaims = await agents.ClaimReassignmentsAsync(options.MaintenanceBatchSize, options.MaintenanceLease, cancellationToken).ConfigureAwait(false);
+        for (var i = 0; i < reassignClaims.Count; i++)
+            reassigned += await ReassignAsync(reassignClaims[i], runCache, cancellationToken).ConfigureAwait(false);
 
         int routed = 0, queued = 0, overflowed = 0, waitExceeded = 0;
-        foreach (var claim in await queue.ClaimDueAsync(options.MaintenanceBatchSize, options.MaintenanceLease, cancellationToken).ConfigureAwait(false))
+        var queueClaims = await queue.ClaimDueAsync(options.MaintenanceBatchSize, options.MaintenanceLease, cancellationToken).ConfigureAwait(false);
+        for (var i = 0; i < queueClaims.Count; i++)
         {
+            var claim = queueClaims[i];
             var outcome = await engine.RouteAsync(claim.Scope, claim.Entry.Conversation, cancellationToken).ConfigureAwait(false);
             if (outcome.Value is not RoutingQueued)
             {
@@ -75,7 +79,7 @@ public sealed class RoutingMaintenanceWorker
                 continue;
             }
             queued++;
-            var (moved, exceeded) = await AdvanceAsync(claim, cancellationToken).ConfigureAwait(false);
+            var (moved, exceeded) = await AdvanceAsync(claim, runCache, cancellationToken).ConfigureAwait(false);
             overflowed += moved ? 1 : 0;
             waitExceeded += exceeded ? 1 : 0;
         }
@@ -85,7 +89,7 @@ public sealed class RoutingMaintenanceWorker
     }
 
     /// <summary>Applies at most one due overflow rule and the max-wait notice, then schedules the next attempt.</summary>
-    private async Task<(bool Overflowed, bool WaitExceeded)> AdvanceAsync(RoutingQueueClaim claim, CancellationToken cancellationToken)
+    private async Task<(bool Overflowed, bool WaitExceeded)> AdvanceAsync(RoutingQueueClaim claim, RunPolicyCache cache, CancellationToken cancellationToken)
     {
         // Re-read: the engine may have refreshed the snapshot (the claim fence still guards the update).
         var entry = (await queue.GetAsync(claim.Scope, claim.Entry.Conversation, cancellationToken).ConfigureAwait(false))?.Entry ?? claim.Entry;
@@ -97,7 +101,7 @@ public sealed class RoutingMaintenanceWorker
         var exceeded = entry.WaitExceeded;
         var overflowed = false;
         var raisedWait = false;
-        var policy = await PolicyAsync(claim.Scope, target, cancellationToken).ConfigureAwait(false);
+        var policy = await PolicyAsync(claim.Scope, target, cache, cancellationToken).ConfigureAwait(false);
         if (policy is not null)
         {
             if (stage < policy.Overflow.Count && stage < RoutingPolicy.MaximumOverflowRules)
@@ -139,14 +143,24 @@ public sealed class RoutingMaintenanceWorker
         return (overflowed, raisedWait);
     }
 
-    private async Task<RoutingPolicy?> PolicyAsync(TicketScope scope, InboxId inbox, CancellationToken cancellationToken)
+    private async Task<RoutingPolicy?> PolicyAsync(TicketScope scope, InboxId inbox, RunPolicyCache cache, CancellationToken cancellationToken)
     {
-        if ((await inboxes.GetAsync(scope, inbox, cancellationToken).ConfigureAwait(false))?.Inbox.RoutingPolicy is not { } id)
-            return null;
-        return (await policies.GetAsync(scope, id, cancellationToken).ConfigureAwait(false))?.Policy;
+        if (cache.InboxPolicies.TryGetValue((scope, inbox), out var cachedPolicy))
+            return cachedPolicy;
+        RoutingPolicy? resolved = null;
+        if ((await inboxes.GetAsync(scope, inbox, cancellationToken).ConfigureAwait(false))?.Inbox.RoutingPolicy is { } id)
+        {
+            if (!cache.Policies.TryGetValue((scope, id), out resolved))
+            {
+                resolved = (await policies.GetAsync(scope, id, cancellationToken).ConfigureAwait(false))?.Policy;
+                cache.Policies[(scope, id)] = resolved;
+            }
+        }
+        cache.InboxPolicies[(scope, inbox)] = resolved;
+        return resolved;
     }
 
-    private async Task<int> ReassignAsync(AgentReassignmentClaim claim, CancellationToken cancellationToken)
+    private async Task<int> ReassignAsync(AgentReassignmentClaim claim, RunPolicyCache cache, CancellationToken cancellationToken)
     {
         var profile = await agents.GetAsync(claim.Scope, claim.Agent, cancellationToken).ConfigureAwait(false);
         var reassigned = 0;
@@ -156,9 +170,18 @@ public sealed class RoutingMaintenanceWorker
             while (true)
             {
                 var page = await assignments.ListForAgentAsync(claim.Scope, claim.Agent, after, IRoutingAssignmentStore.MaximumList, cancellationToken).ConfigureAwait(false);
-                foreach (var row in page.Where(row => row.State == RoutingAssignmentState.Assigned))
-                    if (await ReturnToQueueAsync(claim.Scope, row.Conversation, claim.Agent, cancellationToken).ConfigureAwait(false))
+                for (var i = 0; i < page.Count; i++)
+                {
+                    var row = page[i];
+                    if (row.State != RoutingAssignmentState.Assigned)
+                        continue;
+                    // Check the inbox's offline policy before loading the conversation; Keep policies skip the conversation read entirely.
+                    var policy = await PolicyAsync(claim.Scope, row.Inbox, cache, cancellationToken).ConfigureAwait(false);
+                    if (policy?.OnAgentOffline != OfflineReassignment.ReturnToQueue)
+                        continue;
+                    if (await ReturnToQueueAsync(claim.Scope, row.Conversation, claim.Agent, cache, cancellationToken).ConfigureAwait(false))
                         reassigned++;
+                }
                 if (page.Count < IRoutingAssignmentStore.MaximumList)
                     break;
                 after = page[^1].Conversation;
@@ -168,7 +191,7 @@ public sealed class RoutingMaintenanceWorker
         return reassigned;
     }
 
-    private async Task<bool> ReturnToQueueAsync(TicketScope scope, ConversationId id, UserId agent, CancellationToken cancellationToken)
+    private async Task<bool> ReturnToQueueAsync(TicketScope scope, ConversationId id, UserId agent, RunPolicyCache cache, CancellationToken cancellationToken)
     {
         for (var attempt = 1; attempt <= options.MaximumRouteAttempts; attempt++)
         {
@@ -178,7 +201,7 @@ public sealed class RoutingMaintenanceWorker
                 await engine.RouteAsync(scope, id, cancellationToken).ConfigureAwait(false);
                 return false;
             }
-            var policy = await PolicyAsync(scope, stored.Conversation.Inbox, cancellationToken).ConfigureAwait(false);
+            var policy = await PolicyAsync(scope, stored.Conversation.Inbox, cache, cancellationToken).ConfigureAwait(false);
             if (policy?.OnAgentOffline != OfflineReassignment.ReturnToQueue)
                 return false;
             var result = await service.AssignAsync(new ApiClientPrincipal(scope, options.EngineClient), id, null, stored.Revision, cancellationToken).ConfigureAwait(false);
@@ -188,5 +211,11 @@ public sealed class RoutingMaintenanceWorker
             return result.Value is ConversationApplied;
         }
         return false;
+    }
+
+    private sealed class RunPolicyCache
+    {
+        public Dictionary<(TicketScope Scope, InboxId Inbox), RoutingPolicy?> InboxPolicies { get; } = [];
+        public Dictionary<(TicketScope Scope, RoutingPolicyId Policy), RoutingPolicy?> Policies { get; } = [];
     }
 }

@@ -27,26 +27,38 @@ public sealed class SurveyReportSatisfactionSource(ISurveyStore surveys) : IRepo
         };
         if (filter is DenyAllFilter)
             return [];
+        var csatTask = surveys.AggregateAsync(scope, new SurveyAggregateQuery(SurveyKind.Csat, from, to, SurveyTimeBucket.None, dimension), filter, cancellationToken);
+        var npsTask = surveys.AggregateAsync(scope, new SurveyAggregateQuery(SurveyKind.Nps, from, to, SurveyTimeBucket.None, dimension), filter, cancellationToken);
+        await Task.WhenAll(csatTask, npsTask).ConfigureAwait(false);
         var groups = new Dictionary<string, ReportSatisfaction>(StringComparer.Ordinal);
         ReportSatisfaction? ungrouped = null;
-        foreach (var kind in new[] { SurveyKind.Csat, SurveyKind.Nps })
+        foreach (var row in csatTask.Result.Rows)
         {
-            var result = await surveys.AggregateAsync(scope, new SurveyAggregateQuery(kind, from, to, SurveyTimeBucket.None, dimension), filter, cancellationToken).ConfigureAwait(false);
-            foreach (var row in result.Rows)
-            {
-                var counts = kind == SurveyKind.Csat
-                    ? new ReportSatisfaction(row.Responses, row.Positive, 0, 0, 0)
-                    : new ReportSatisfaction(0, 0, row.Responses, row.Positive, row.Negative);
-                if (row.Group is null)
-                    ungrouped = (ungrouped ?? ReportSatisfaction.Empty).Add(counts);
-                else
-                    groups[row.Group] = groups.GetValueOrDefault(row.Group, ReportSatisfaction.Empty).Add(counts);
-            }
+            var counts = new ReportSatisfaction(row.Responses, row.Positive, 0, 0, 0);
+            if (row.Group is null)
+                ungrouped = (ungrouped ?? ReportSatisfaction.Empty).Add(counts);
+            else
+                groups[row.Group] = groups.GetValueOrDefault(row.Group, ReportSatisfaction.Empty).Add(counts);
         }
-        var rows = new List<ReportSatisfactionRow>();
+        foreach (var row in npsTask.Result.Rows)
+        {
+            var counts = new ReportSatisfaction(0, 0, row.Responses, row.Positive, row.Negative);
+            if (row.Group is null)
+                ungrouped = (ungrouped ?? ReportSatisfaction.Empty).Add(counts);
+            else
+                groups[row.Group] = groups.GetValueOrDefault(row.Group, ReportSatisfaction.Empty).Add(counts);
+        }
+        var rows = new List<ReportSatisfactionRow>((ungrouped is not null ? 1 : 0) + groups.Count);
         if (ungrouped is not null)
             rows.Add(new(null, ungrouped));
-        rows.AddRange(groups.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => new ReportSatisfactionRow(pair.Key, pair.Value)));
+        if (groups.Count > 0)
+        {
+            var keys = new string[groups.Count];
+            groups.Keys.CopyTo(keys, 0);
+            Array.Sort(keys, StringComparer.Ordinal);
+            for (var i = 0; i < keys.Length; i++)
+                rows.Add(new(keys[i], groups[keys[i]]));
+        }
         return rows;
     }
 }

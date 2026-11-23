@@ -67,12 +67,13 @@ export class ChatClient {
   private readonly hub: HubLike;
   private readonly tokens: TokenStore;
   private readonly listeners = new Set<(event: ChatEvent) => void>();
+  private readonly lastMarkedRead = new Map<string, number>();
 
   constructor(private readonly options: ChatClientOptions) {
     this.tokens = options.tokens ?? tokenStore(options.widgetKey, options.tokenStorage === "memory" ? undefined : globalThis.localStorage);
     this.hub = (options.connect ?? defaultConnect)(options.hubUrl);
     this.hub.on(EVENT_METHOD, (payload: never) => this.onEvent(payload as WireEvent));
-    this.hub.onreconnected(() => void this.handshake().then(() => this.catchUp()).catch((error) => this.emit({ type: "error", error: code(error) })));
+    this.hub.onreconnected(() => void this.handshake().then((data) => this.catchUp(data)).catch((error) => this.emit({ type: "error", error: code(error) })));
   }
 
   subscribe(listener: (event: ChatEvent) => void): () => void {
@@ -83,7 +84,7 @@ export class ChatClient {
   async start(): Promise<ConnectData> {
     await this.hub.start();
     const data = await this.handshake();
-    await this.catchUp();
+    await this.catchUp(data);
     return data;
   }
 
@@ -117,7 +118,12 @@ export class ChatClient {
   async markRead(): Promise<void> {
     if (!this.conversation) return;
     const cursor = this.transcript.cursor(this.conversation);
-    if (cursor > 0) await this.call("MarkRead", this.conversation, cursor).catch(() => undefined);
+    if (cursor > 0 && (this.lastMarkedRead.get(this.conversation) ?? 0) < cursor) {
+      this.lastMarkedRead.set(this.conversation, cursor);
+      await this.call("MarkRead", this.conversation, cursor).catch(() => {
+        if (this.lastMarkedRead.get(this.conversation!) === cursor) this.lastMarkedRead.delete(this.conversation!);
+      });
+    }
   }
 
   async search(text: string): Promise<ArticleHit[]> {
@@ -159,18 +165,24 @@ export class ChatClient {
   }
 
   /** Fetches every message after the highest sequence seen, for the current and known conversations. */
-  private async catchUp(): Promise<void> {
+  private async catchUp(data?: ConnectData): Promise<void> {
+    const serverSeqs = new Map<string, number>();
+    if (data) for (const item of data.conversations) serverSeqs.set(item.conversation, item.lastSequence);
     const conversations = new Set(this.transcript.conversations());
     if (this.conversation) conversations.add(this.conversation);
     for (const conversation of conversations) {
       let after = this.transcript.cursor(conversation);
+      const serverSeq = serverSeqs.get(conversation);
+      if (after === 0 && serverSeq === 0) continue;
+      let changed = false;
       for (let page = 0; page < 20; page++) {
         const result = await this.call<MessagePage>("FetchMessages", conversation, after, 100);
-        this.transcript.merge(result.messages.map((message) => ({ ...message, conversation })));
+        if (result.messages.length > 0 && this.transcript.merge(result.messages.map((message) => ({ ...message, conversation }))))
+          changed = true;
         if (result.next == null) break;
         after = result.next;
       }
-      this.emit({ type: "messages", conversation });
+      if (changed) this.emit({ type: "messages", conversation });
     }
   }
 
@@ -223,9 +235,16 @@ function code(error: unknown): string {
 }
 
 function defaultConnect(url: string): HubLike {
+  const baseDelays = [0, 2000, 5000, 10000, 30000];
   const connection = new HubConnectionBuilder()
     .withUrl(url, { transport: HttpTransportType.WebSockets | HttpTransportType.ServerSentEvents | HttpTransportType.LongPolling })
-    .withAutomaticReconnect([0, 2000, 5000, 10000, 30000])
+    .withAutomaticReconnect({
+      nextRetryDelayInMilliseconds(context) {
+        if (context.previousRetryCount >= baseDelays.length) return null;
+        const base = baseDelays[context.previousRetryCount]!;
+        return base === 0 ? 0 : Math.round(base * (0.75 + Math.random() * 0.5));
+      },
+    })
     .configureLogging(LogLevel.Warning)
     .build();
   return connection as unknown as HubLike;

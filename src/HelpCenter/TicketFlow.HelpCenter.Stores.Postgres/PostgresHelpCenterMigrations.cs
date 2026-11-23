@@ -102,5 +102,9 @@ public static class PostgresHelpCenterMigrations
             visitor_hash bytea NOT NULL CHECK (length(visitor_hash) = 32), day date NOT NULL, scope_key bytea NOT NULL,
             PRIMARY KEY (article_key, visitor_hash, day));
         CREATE INDEX tf_helpcenter_views_purge ON tf_helpcenter_views (scope_key, day);
+        """),
+        new(2, "perf-indexes", """
+        CREATE INDEX tf_helpcenter_published_collection_order ON tf_helpcenter_published (portal_key, locale, collection_id, position, article_id COLLATE "C");
+        CREATE INDEX tf_helpcenter_articles_portal_state ON tf_helpcenter_articles (portal_key, state, article_id COLLATE "C");
         """)]);
 }

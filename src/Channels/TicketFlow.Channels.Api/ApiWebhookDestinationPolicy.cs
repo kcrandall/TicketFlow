@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Net;
 using System.Net.Sockets;
 
@@ -17,23 +18,25 @@ public sealed class ApiWebhookDestinationPolicy
 {
     public const int MaximumUriLength = 2048;
 
-    private readonly HashSet<string> hosts;
-    private readonly HashSet<int> ports;
+    private readonly FrozenSet<string> hosts;
+    private readonly FrozenSet<int> ports;
 
     public ApiWebhookDestinationPolicy(IEnumerable<string>? allowedHosts = null, IEnumerable<int>? allowedPorts = null)
     {
-        hosts = new(StringComparer.OrdinalIgnoreCase);
+        var hostSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var host in allowedHosts ?? [])
         {
             if (string.IsNullOrWhiteSpace(host) || host.Length > 253 || host.Any(char.IsControl) || host.Contains('*') || host.Contains('/') || host.EndsWith('.')
                 || !Uri.TryCreate("https://" + host, UriKind.Absolute, out var parsed) || parsed.HostNameType != UriHostNameType.Dns
                 || !string.Equals(parsed.Host, host, StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("Allowed hosts must be exact DNS host names.", nameof(allowedHosts));
-            hosts.Add(parsed.IdnHost);
+            hostSet.Add(parsed.IdnHost);
         }
-        ports = [.. allowedPorts ?? [443]];
-        if (ports.Count == 0 || ports.Any(port => port is < 1 or > 65535))
+        hosts = hostSet.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+        var portSet = new HashSet<int>(allowedPorts ?? [443]);
+        if (portSet.Count == 0 || portSet.Any(port => port is < 1 or > 65535))
             throw new ArgumentException("Allowed ports must be 1-65535.", nameof(allowedPorts));
+        ports = portSet.ToFrozenSet();
     }
 
     public IReadOnlyCollection<string> AllowedHosts => hosts;
@@ -53,10 +56,29 @@ public sealed class ApiWebhookDestinationPolicy
                 return hosts.Count == 0 || hosts.Contains(destination.IdnHost);
             case UriHostNameType.IPv4:
             case UriHostNameType.IPv6:
-                return hosts.Count == 0 && IPAddress.TryParse(destination.Host.Trim('[', ']'), out var literal) && IsPublicAddress(literal);
+                return hosts.Count == 0 && IPAddress.TryParse(destination.Host.AsSpan().Trim(['[', ']']), out var literal) && IsPublicAddress(literal);
             default:
                 return false;
         }
+    }
+
+    internal bool AllowsHostPort(string host, int port, out IPAddress? literalAddress)
+    {
+        literalAddress = null;
+        if (string.IsNullOrEmpty(host) || host.Length > MaximumUriLength || !ports.Contains(port))
+            return false;
+        var hostSpan = host.AsSpan().Trim(['[', ']']);
+        if (IPAddress.TryParse(hostSpan, out var parsed))
+        {
+            literalAddress = parsed;
+            return hosts.Count == 0 && IsPublicAddress(parsed);
+        }
+        if (host.EndsWith('.') || host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (hosts.Count == 0)
+            return Uri.CheckHostName(host) == UriHostNameType.Dns;
+        return hosts.Contains(host) || (Uri.TryCreate($"https://{host}:{port}", UriKind.Absolute, out var uri) && Allows(uri));
     }
 
     /// <summary>True for globally routable unicast addresses.</summary>
@@ -65,8 +87,10 @@ public sealed class ApiWebhookDestinationPolicy
         ArgumentNullException.ThrowIfNull(address);
         if (address.IsIPv4MappedToIPv6)
             address = address.MapToIPv4();
-        var bytes = address.GetAddressBytes();
-        if (address.AddressFamily == AddressFamily.InterNetwork)
+        Span<byte> bytes = stackalloc byte[16];
+        if (!address.TryWriteBytes(bytes, out var length))
+            return false;
+        if (address.AddressFamily == AddressFamily.InterNetwork && length == 4)
         {
             var a = bytes[0];
             var b = bytes[1];
@@ -77,9 +101,9 @@ public sealed class ApiWebhookDestinationPolicy
                 && !(a == 192 && (b == 168 || b == 0 && bytes[2] is 0 or 2 || b == 88 && bytes[2] == 99))
                 && !(a == 198 && (b is 18 or 19 || b == 51 && bytes[2] == 100))
                 && !(a == 203 && b == 0 && bytes[2] == 113)
-                && !address.Equals(IPAddress.Parse("168.63.129.16"));
+                && !(a == 168 && b == 63 && bytes[2] == 129 && bytes[3] == 16);
         }
-        if (address.AddressFamily != AddressFamily.InterNetworkV6 || address.ScopeId != 0 || (bytes[0] & 0xe0) != 0x20)
+        if (address.AddressFamily != AddressFamily.InterNetworkV6 || length != 16 || address.ScopeId != 0 || (bytes[0] & 0xe0) != 0x20)
             return false;
         return !(bytes[0] == 0x20 && bytes[1] == 0x02)
             && !(bytes[0] == 0x20 && bytes[1] == 0x01 && (bytes[2] == 0 && bytes[3] <= 0x2f || bytes[2] == 0x0d && bytes[3] == 0xb8))
@@ -125,15 +149,18 @@ public static class ApiWebhookHttp
         Func<string, CancellationToken, Task<IPAddress[]>>? resolve, Func<IPAddress, int, CancellationToken, ValueTask<Stream>>? dial, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!policy.Allows(new UriBuilder(Uri.UriSchemeHttps, destination.Host, destination.Port).Uri))
+        if (!policy.AllowsHostPort(destination.Host, destination.Port, out var literal))
             throw new ApiWebhookBlockedException("The webhook destination is blocked.");
         IPAddress[] addresses;
-        if (IPAddress.TryParse(destination.Host, out var literal))
+        if (literal is not null)
             addresses = [literal];
         else
             addresses = await (resolve is null ? Dns.GetHostAddressesAsync(destination.Host, cancellationToken) : resolve(destination.Host, cancellationToken)).ConfigureAwait(false);
-        if (addresses.Length is 0 or > 64 || addresses.Any(address => !ApiWebhookDestinationPolicy.IsPublicAddress(address)))
+        if (addresses.Length is 0 or > 64)
             throw new ApiWebhookBlockedException("The webhook destination resolved to a prohibited network.");
+        for (var i = 0; i < addresses.Length; i++)
+            if (!ApiWebhookDestinationPolicy.IsPublicAddress(addresses[i]))
+                throw new ApiWebhookBlockedException("The webhook destination resolved to a prohibited network.");
         foreach (var address in addresses.Distinct())
         {
             try

@@ -1,3 +1,4 @@
+using System.Data;
 using Npgsql;
 using TicketFlow.Core;
 
@@ -6,14 +7,13 @@ namespace TicketFlow.Workspaces.Stores.Postgres;
 public sealed partial class PostgresWorkspaceStore
 {
     private const string SettingsColumns = "format_version, name, default_locale, time_zone, enabled_features, disabled_features, revision";
-    private const string SettingsRevision = $"SELECT revision FROM tf_workspace_settings WHERE {ScopeKeyWhere}";
 
     public async Task<StoredWorkspaceSettings?> GetAsync(TicketScope scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         await using var command = source.CreateCommand($"SELECT {SettingsColumns} FROM tf_workspace_settings WHERE {ScopeKeyWhere}");
         AddScope(command, scope);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadSettings(reader, scope) : null;
     }
 
@@ -22,19 +22,21 @@ public sealed partial class PostgresWorkspaceStore
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(settings);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var insert = new NpgsqlCommand("""
             INSERT INTO tf_workspace_settings(tenant_id, project_id, environment_id, app_id, workspace_id, format_version, name, default_locale, time_zone, enabled_features, disabled_features, revision)
             VALUES(@tenant, @project, @environment, @app, @workspace, 1, @name, @locale, @zone, @enabled, @disabled, 1)
             ON CONFLICT DO NOTHING RETURNING revision
-            """, connection, transaction))
+            """, connection))
         {
             BindSettings(insert, scope, settings);
-            if (await insert.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not long)
-                return await MissAsync<StoredWorkspaceSettings>(connection, transaction, SettingsRevision, command => AddScope(command, scope), cancellationToken).ConfigureAwait(false);
+            if (await insert.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
+                return new WorkspaceWriteApplied<StoredWorkspaceSettings>(new(scope, settings, revision));
         }
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new WorkspaceWriteApplied<StoredWorkspaceSettings>(new(scope, settings, 1));
+        await using var current = new NpgsqlCommand($"SELECT revision FROM tf_workspace_settings WHERE {ScopeKeyWhere}", connection);
+        AddScope(current, scope);
+        return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
+            ? new WorkspaceWriteConflict(existing)
+            : WorkspaceWriteNotFound.Instance;
     }
 
     public async Task<WorkspaceWriteResult<StoredWorkspaceSettings>> UpdateAsync(TicketScope scope, WorkspaceSettings settings, long expectedRevision, CancellationToken cancellationToken = default)
@@ -43,21 +45,21 @@ public sealed partial class PostgresWorkspaceStore
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var update = new NpgsqlCommand($"""
             UPDATE tf_workspace_settings SET name=@name, default_locale=@locale, time_zone=@zone, enabled_features=@enabled, disabled_features=@disabled, revision=revision+1
             WHERE {ScopeKeyWhere} AND revision=@expected RETURNING revision
-            """, connection, transaction))
+            """, connection))
         {
             BindSettings(update, scope, settings);
-            update.Parameters.AddWithValue("expected", expectedRevision);
+            AddLong(update, "expected", expectedRevision);
             if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-            {
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
                 return new WorkspaceWriteApplied<StoredWorkspaceSettings>(new(scope, settings, revision));
-            }
         }
-        return await MissAsync<StoredWorkspaceSettings>(connection, transaction, SettingsRevision, command => AddScope(command, scope), cancellationToken).ConfigureAwait(false);
+        await using var current = new NpgsqlCommand($"SELECT revision FROM tf_workspace_settings WHERE {ScopeKeyWhere}", connection);
+        AddScope(current, scope);
+        return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
+            ? new WorkspaceWriteConflict(existing)
+            : WorkspaceWriteNotFound.Instance;
     }
 
     private static void BindSettings(NpgsqlCommand command, TicketScope scope, WorkspaceSettings settings)
@@ -66,16 +68,64 @@ public sealed partial class PostgresWorkspaceStore
         AddText(command, "name", settings.Name);
         AddText(command, "locale", settings.DefaultLocale);
         AddText(command, "zone", settings.TimeZoneId);
-        AddTextArray(command, "enabled", settings.FeatureToggles.Where(pair => pair.Value).Select(pair => pair.Key).Order(StringComparer.Ordinal));
-        AddTextArray(command, "disabled", settings.FeatureToggles.Where(pair => !pair.Value).Select(pair => pair.Key).Order(StringComparer.Ordinal));
+        if (settings.FeatureToggles.Count == 0)
+        {
+            AddTextArray(command, "enabled", Array.Empty<string>());
+            AddTextArray(command, "disabled", Array.Empty<string>());
+            return;
+        }
+        List<string>? enabled = null;
+        List<string>? disabled = null;
+        foreach (var pair in settings.FeatureToggles)
+        {
+            if (pair.Value)
+                (enabled ??= []).Add(pair.Key);
+            else
+                (disabled ??= []).Add(pair.Key);
+        }
+        string[] enabledArr;
+        if (enabled is null)
+            enabledArr = [];
+        else
+        {
+            enabled.Sort(StringComparer.Ordinal);
+            enabledArr = [.. enabled];
+        }
+        string[] disabledArr;
+        if (disabled is null)
+            disabledArr = [];
+        else
+        {
+            disabled.Sort(StringComparer.Ordinal);
+            disabledArr = [.. disabled];
+        }
+        AddTextArray(command, "enabled", enabledArr);
+        AddTextArray(command, "disabled", disabledArr);
     }
 
-    private static StoredWorkspaceSettings ReadSettings(NpgsqlDataReader reader, TicketScope scope) => Decode(() =>
+    private static StoredWorkspaceSettings ReadSettings(NpgsqlDataReader reader, TicketScope scope)
     {
-        if (reader.GetInt16(0) != 1)
-            throw new FormatException("Unsupported workspace settings format version.");
-        var toggles = reader.GetFieldValue<string[]>(4).Select(key => new KeyValuePair<string, bool>(key, true))
-            .Concat(reader.GetFieldValue<string[]>(5).Select(key => new KeyValuePair<string, bool>(key, false)));
-        return new StoredWorkspaceSettings(scope, new WorkspaceSettings(reader.GetString(1), reader.GetString(2), reader.GetString(3), toggles), reader.GetInt64(6));
-    }, "workspace settings");
+        try
+        {
+            if (reader.GetInt16(0) != 1)
+                throw new FormatException("Unsupported workspace settings format version.");
+            var enabled = reader.GetFieldValue<string[]>(4);
+            var disabled = reader.GetFieldValue<string[]>(5);
+            KeyValuePair<string, bool>[]? toggles = null;
+            if (enabled.Length + disabled.Length > 0)
+            {
+                toggles = new KeyValuePair<string, bool>[enabled.Length + disabled.Length];
+                var idx = 0;
+                for (var i = 0; i < enabled.Length; i++)
+                    toggles[idx++] = new(enabled[i], true);
+                for (var i = 0; i < disabled.Length; i++)
+                    toggles[idx++] = new(disabled[i], false);
+            }
+            return new StoredWorkspaceSettings(scope, new WorkspaceSettings(reader.GetString(1), reader.GetString(2), reader.GetString(3), toggles), reader.GetInt64(6));
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw StoredDataError(error, "workspace settings");
+        }
+    }
 }

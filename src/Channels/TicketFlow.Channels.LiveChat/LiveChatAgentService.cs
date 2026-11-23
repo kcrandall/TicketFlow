@@ -31,56 +31,109 @@ public sealed class LiveChatAgentService(IConversationStore conversations, ICont
             return LiveChatRefused.Of(LiveChatRefusal.NotFound);
         var session = found.Session;
 
-        var contact = await contacts.GetAsync(scope, stored.Conversation.Contact, cancellationToken).ConfigureAwait(false);
+        var hasPrechat = session.Prechat.Count > 0;
+        var contactTask = contacts.GetAsync(scope, stored.Conversation.Contact, cancellationToken);
+        Task<IReadOnlyList<StoredAccessFieldPolicy>>? policiesTask = hasPrechat ? policies.ListAsync(scope, cancellationToken) : null;
+        Task<StoredLiveChatWidget?>? widgetTask = hasPrechat ? widgets.GetAsync(scope, session.ConfigurationId, cancellationToken) : null;
+        if (hasPrechat)
+            await Task.WhenAll(contactTask, policiesTask!, widgetTask!).ConfigureAwait(false);
+        var contact = await contactTask.ConfigureAwait(false);
         AccessDecision decision = contact is null
             ? new AccessDenied(ContactPermissions.Read, AccessDenialReason.NoMatchingGrant)
             : await evaluator.AuthorizeAsync(new AccessRequest(actor, ContactPermissions.Read, ContactAccess.Resource(contact)), cancellationToken).ConfigureAwait(false);
-        var masked = new SortedDictionary<FieldPath, bool>();
-        var decided = new Dictionary<FieldPath, bool>();
+        Dictionary<FieldPath, bool>? masked = null;
+        Dictionary<FieldPath, bool>? decided = null;
         var maskAll = false;
         switch (decision)
         {
             case AccessAllowed:
                 break;
             case AccessMasked partial:
-                foreach (var field in partial.Fields)
-                    decided[field.Field] = field.Revealable;
+                if (partial.Fields.Count > 0)
+                {
+                    decided = new Dictionary<FieldPath, bool>(partial.Fields.Count);
+                    for (var i = 0; i < partial.Fields.Count; i++)
+                        decided[partial.Fields[i].Field] = partial.Fields[i].Revealable;
+                }
                 break;
             case AccessDenied:
                 maskAll = true;
                 break;
         }
-        var policyFields = (await policies.ListAsync(scope, cancellationToken).ConfigureAwait(false))
-            .Where(policy => policy.Policy.AppliesTo.Contains(ContactPermissions.Read)).Select(policy => policy.Policy.Field).ToHashSet();
         bool IsMasked(FieldPath field, bool failClosed)
         {
-            if (decided.TryGetValue(field, out var revealable))
+            if (decided is not null && decided.TryGetValue(field, out var revealable))
             {
+                masked ??= [];
                 masked[field] = revealable;
                 return true;
             }
             if (!maskAll && !failClosed)
                 return false;
+            masked ??= [];
             masked[field] = false;
             return true;
         }
 
-        var widget = (await widgets.GetAsync(scope, session.ConfigurationId, cancellationToken).ConfigureAwait(false))?.Widget;
-        var answers = new List<LiveChatPrechatAnswerView>();
-        foreach (var (key, value) in session.Prechat)
+        IReadOnlyList<LiveChatPrechatAnswerView> answers;
+        if (!hasPrechat)
+            answers = [];
+        else
         {
-            var field = widget?.PrechatFields.FirstOrDefault(item => item.Key == key);
-            var hide = field?.Kind switch
+            var policyList = policiesTask!.Result;
+            HashSet<FieldPath>? policyFields = null;
+            for (var i = 0; i < policyList.Count; i++)
             {
-                PrechatFieldKind.Email => IsMasked(ContactFieldPaths.Email, failClosed: false),
-                PrechatFieldKind.Name => maskAll,
-                _ => field is null || IsMasked(ContactFieldPaths.Attribute(key), failClosed: field.Sensitive && !policyFields.Contains(ContactFieldPaths.Attribute(key))),
-            };
-            answers.Add(new LiveChatPrechatAnswerView(key, field?.Label ?? key, hide ? null : value, hide));
+                if (policyList[i].Policy.AppliesTo.Contains(ContactPermissions.Read))
+                {
+                    policyFields ??= [];
+                    policyFields.Add(policyList[i].Policy.Field);
+                }
+            }
+            var widget = widgetTask!.Result?.Widget;
+            Dictionary<string, LiveChatPrechatField>? fieldByKey = null;
+            if (widget is not null && widget.PrechatFields.Count > 0)
+            {
+                fieldByKey = new Dictionary<string, LiveChatPrechatField>(widget.PrechatFields.Count, StringComparer.Ordinal);
+                for (var i = 0; i < widget.PrechatFields.Count; i++)
+                    fieldByKey[widget.PrechatFields[i].Key] = widget.PrechatFields[i];
+            }
+            var answerList = new List<LiveChatPrechatAnswerView>(session.Prechat.Count);
+            foreach (var (key, value) in session.Prechat)
+            {
+                LiveChatPrechatField? field = null;
+                fieldByKey?.TryGetValue(key, out field);
+                bool hide;
+                if (field?.Kind == PrechatFieldKind.Email)
+                    hide = IsMasked(ContactFieldPaths.Email, failClosed: false);
+                else if (field?.Kind == PrechatFieldKind.Name)
+                    hide = maskAll;
+                else if (field is null)
+                    hide = true;
+                else
+                {
+                    var attrField = ContactFieldPaths.Attribute(key);
+                    hide = IsMasked(attrField, failClosed: field.Sensitive && (policyFields is null || !policyFields.Contains(attrField)));
+                }
+                answerList.Add(new LiveChatPrechatAnswerView(key, field?.Label ?? key, hide ? null : value, hide));
+            }
+            answers = answerList;
         }
         var identityHidden = session.Identity is not null && IsMasked(ContactFieldPaths.ExternalId, failClosed: false);
+        IReadOnlyList<MaskedField> maskedFields;
+        if (masked is null || masked.Count == 0)
+            maskedFields = [];
+        else
+        {
+            var arr = new MaskedField[masked.Count];
+            var idx = 0;
+            foreach (var pair in masked)
+                arr[idx++] = new MaskedField(pair.Key, pair.Value);
+            if (arr.Length > 1)
+                Array.Sort(arr, static (a, b) => a.Field.CompareTo(b.Field));
+            maskedFields = arr;
+        }
         return new LiveChatValue<LiveChatVisitorView>(new LiveChatVisitorView(session.VisitorId, session.Identity is not null, session.Identity?.Namespace,
-            identityHidden ? null : session.Identity?.Value, maskAll ? null : session.DisplayName, answers, session.CreatedAt,
-            [.. masked.Select(pair => new MaskedField(pair.Key, pair.Value))]));
+            identityHidden ? null : session.Identity?.Value, maskAll ? null : session.DisplayName, answers, session.CreatedAt, maskedFields));
     }
 }

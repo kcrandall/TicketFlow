@@ -27,6 +27,11 @@ public static class TicketFlowEndpointExtensions
         if (configure is not null)
             services.Configure(configure);
         services.AddProblemDetails();
+        services.ConfigureHttpJsonOptions(options =>
+        {
+            if (!options.SerializerOptions.TypeInfoResolverChain.Contains(TicketFlowHttpJsonContext.Default))
+                options.SerializerOptions.TypeInfoResolverChain.Insert(0, TicketFlowHttpJsonContext.Default);
+        });
         services.TryAddScoped<ITicketFlowPartitionResolver, OptionsTicketFlowPartitionResolver>();
         services.TryAddScoped<ITicketFlowPrincipalResolver, OptionsTicketFlowPrincipalResolver>();
         return builder;
@@ -136,7 +141,7 @@ public static class TicketFlowEndpointExtensions
             .WithTags(tag)
             .WithGroupName(options.OpenApiDocumentName)
             .WithMetadata(new TicketFlowRequestSizeLimit(options.MaximumRequestBodyBytes))
-            .AddEndpointFilter<TicketFlowEndpointFilter>()
+            .AddEndpointFilterFactory(TicketFlowEndpointFilter.Create(options.MaximumRequestBodyBytes))
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
             .ProducesProblem(StatusCodes.Status403Forbidden)
@@ -164,7 +169,7 @@ public static class TicketFlowEndpointExtensions
             .WithTags(tag)
             .WithGroupName(options.OpenApiDocumentName)
             .WithMetadata(new TicketFlowRequestSizeLimit(options.MaximumRequestBodyBytes))
-            .AddEndpointFilter<TicketFlowEndpointFilter>()
+            .AddEndpointFilterFactory(TicketFlowEndpointFilter.Create(options.MaximumRequestBodyBytes))
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status413PayloadTooLarge)

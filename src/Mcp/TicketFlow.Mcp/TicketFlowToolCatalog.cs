@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using System.ComponentModel;
 using System.Reflection;
 using ModelContextProtocol.Server;
@@ -31,11 +33,13 @@ public sealed record TicketFlowToolDescriptor(
     MethodInfo Method,
     Type OutputType)
 {
+    private IReadOnlyList<string>? grantedByBuiltInRoles;
+
     /// <summary>The toolset name (<c>self</c> for the self-awareness tools).</summary>
     public string ToolsetName => TicketFlowToolsetCatalog.NameOf(Toolset);
 
     /// <summary>Built-in roles that hold every required permission (any one of them when <see cref="AnyOf"/>).</summary>
-    public IReadOnlyList<string> GrantedByBuiltInRoles => TicketFlowToolCatalog.RolesGranting(Permissions, AnyOf);
+    public IReadOnlyList<string> GrantedByBuiltInRoles => grantedByBuiltInRoles ??= TicketFlowToolCatalog.RolesGranting(Permissions, AnyOf);
 }
 
 /// <summary>
@@ -45,8 +49,10 @@ public sealed record TicketFlowToolDescriptor(
 public static class TicketFlowToolCatalog
 {
     private static readonly Lazy<IReadOnlyList<TicketFlowToolDescriptor>> Lazy = new(Build);
-    private static readonly Lazy<IReadOnlyDictionary<string, TicketFlowToolDescriptor>> ByName =
-        new(() => Lazy.Value.ToDictionary(tool => tool.Name, StringComparer.Ordinal));
+    private static readonly Lazy<FrozenDictionary<string, TicketFlowToolDescriptor>> ByName =
+        new(() => Lazy.Value.ToFrozenDictionary(tool => tool.Name, StringComparer.Ordinal));
+    private static readonly IReadOnlyList<string> AllBuiltInRoleIds = [.. BuiltInRoles.All.Select(role => role.Id.Value)];
+    private static readonly ConcurrentDictionary<string, IReadOnlyList<string>> SinglePermissionRoles = new(StringComparer.Ordinal);
 
     /// <summary>Every tool, ordered by toolset (self first) then name.</summary>
     public static IReadOnlyList<TicketFlowToolDescriptor> Tools => Lazy.Value;
@@ -73,27 +79,68 @@ public static class TicketFlowToolCatalog
             .OrderBy(definition => definition.Permission),
     ];
 
+    private static readonly FrozenDictionary<string, PermissionDefinition> KnownPermissionsByName =
+        KnownPermissions.ToFrozenDictionary(definition => definition.Permission.Value, StringComparer.Ordinal);
+
     /// <summary>The known definition of <paramref name="permission"/>, or <see langword="null"/>.</summary>
     public static PermissionDefinition? FindPermission(string permission) =>
-        KnownPermissions.FirstOrDefault(definition => definition.Permission.Value == permission);
+        KnownPermissionsByName.GetValueOrDefault(permission);
+
+    /// <summary>Cached built-in role identifiers holding a single permission.</summary>
+    internal static IReadOnlyList<string> RolesGranting(string permission) =>
+        SinglePermissionRoles.GetOrAdd(permission, static value =>
+        {
+            var parsed = new Permission(value);
+            var roles = new List<string>(BuiltInRoles.All.Count);
+            foreach (var role in BuiltInRoles.All)
+                if (role.Includes(parsed))
+                    roles.Add(role.Id.Value);
+            return roles;
+        });
 
     /// <summary>Built-in role identifiers holding <paramref name="permissions"/> (Owner holds every registered permission).</summary>
     public static IReadOnlyList<string> RolesGranting(IReadOnlyList<string> permissions, bool anyOf = false)
     {
         ArgumentNullException.ThrowIfNull(permissions);
         if (permissions.Count == 0)
-            return [.. BuiltInRoles.All.Select(role => role.Id.Value)];
-        var parsed = permissions.Select(value => new Permission(value)).ToList();
-        return
-        [
-            .. BuiltInRoles.All
-                .Where(role => anyOf ? parsed.Any(role.Includes) : parsed.All(role.Includes))
-                .Select(role => role.Id.Value),
-        ];
+            return AllBuiltInRoleIds;
+        if (permissions.Count == 1)
+            return RolesGranting(permissions[0]);
+        var parsed = new Permission[permissions.Count];
+        for (var i = 0; i < permissions.Count; i++)
+            parsed[i] = new Permission(permissions[i]);
+        var roles = new List<string>(BuiltInRoles.All.Count);
+        foreach (var role in BuiltInRoles.All)
+        {
+            var match = anyOf ? AnyIncluded(role, parsed) : AllIncluded(role, parsed);
+            if (match)
+                roles.Add(role.Id.Value);
+        }
+        return roles;
+    }
+
+    private static bool AnyIncluded(AccessRole role, Permission[] parsed)
+    {
+        for (var i = 0; i < parsed.Length; i++)
+            if (role.Includes(parsed[i]))
+                return true;
+        return false;
+    }
+
+    private static bool AllIncluded(AccessRole role, Permission[] parsed)
+    {
+        for (var i = 0; i < parsed.Length; i++)
+            if (!role.Includes(parsed[i]))
+                return false;
+        return true;
     }
 
     private static IReadOnlyList<TicketFlowToolDescriptor> Build()
     {
+        var toolsetOrder = new Dictionary<TicketFlowToolsets, int>(TicketFlowToolsetCatalog.All.Count + 1) { [TicketFlowToolsets.None] = -1 };
+        for (var i = 0; i < TicketFlowToolsetCatalog.All.Count; i++)
+            toolsetOrder[TicketFlowToolsetCatalog.All[i].Toolset] = i;
+
         var tools = new List<TicketFlowToolDescriptor>();
         foreach (var type in typeof(TicketFlowToolCatalog).Assembly.GetTypes())
         {
@@ -130,7 +177,7 @@ public static class TicketFlowToolCatalog
         }
         return
         [
-            .. tools.OrderBy(tool => tool.Toolset == TicketFlowToolsets.None ? -1 : TicketFlowToolsetCatalog.All.ToList().FindIndex(info => info.Toolset == tool.Toolset))
+            .. tools.OrderBy(tool => toolsetOrder.GetValueOrDefault(tool.Toolset, int.MaxValue))
                 .ThenBy(tool => tool.Name, StringComparer.Ordinal),
         ];
     }

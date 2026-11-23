@@ -62,10 +62,15 @@ public sealed class EnvelopeFlowInboundEventHandler : IInboundEventHandler
             logger.LogWarning("Dropped an EnvelopeFlow event from an unmapped provider.");
             return;
         }
-        var local = inboundEvent.Kind == InboundEventKind.Message ? inboundEvent.To : inboundEvent.From;
-        var endpoint = await FindEndpointAsync(inboundEvent, kind, local, cancellationToken).ConfigureAwait(false);
-        if (endpoint is null && inboundEvent.Kind == InboundEventKind.DeliveryReceipt)
-            endpoint = await FindEndpointAsync(inboundEvent, kind, inboundEvent.To, cancellationToken).ConfigureAwait(false);
+        StoredChannelEndpoint? endpoint;
+        if (inboundEvent.Kind == InboundEventKind.Message)
+            endpoint = await FindEndpointAsync(inboundEvent, kind, inboundEvent.To, includeAccountFallback: true, cancellationToken).ConfigureAwait(false);
+        else
+        {
+            // Delivery receipts check From, then To, and fall back to Account only once.
+            endpoint = await FindEndpointAsync(inboundEvent, kind, inboundEvent.From, includeAccountFallback: false, cancellationToken).ConfigureAwait(false)
+                ?? await FindEndpointAsync(inboundEvent, kind, inboundEvent.To, includeAccountFallback: true, cancellationToken).ConfigureAwait(false);
+        }
         if (endpoint is null)
         {
             logger.LogWarning("Dropped an EnvelopeFlow {Kind} event without a matching channel endpoint.", inboundEvent.Kind);
@@ -85,13 +90,15 @@ public sealed class EnvelopeFlowInboundEventHandler : IInboundEventHandler
         }
     }
 
-    private async Task<StoredChannelEndpoint?> FindEndpointAsync(InboundEvent inboundEvent, ChannelKind kind, string? local, CancellationToken cancellationToken)
+    private async Task<StoredChannelEndpoint?> FindEndpointAsync(InboundEvent inboundEvent, ChannelKind kind, string? local, bool includeAccountFallback, CancellationToken cancellationToken)
     {
         var partition = EnvelopeFlowScopes.ToPartition(inboundEvent.Scope);
         if (!string.IsNullOrWhiteSpace(local) && local.Length <= 256 && !local.Any(char.IsControl)
             && await endpoints.FindByAddressAsync(partition, kind, EnvelopeFlowEndpointAddresses.Local(inboundEvent.Provider, inboundEvent.ProviderAccountId, local), cancellationToken)
                 .ConfigureAwait(false) is { } narrow)
             return narrow;
+        if (!includeAccountFallback)
+            return null;
         return await endpoints.FindByAddressAsync(partition, kind, EnvelopeFlowEndpointAddresses.Account(inboundEvent.Provider, inboundEvent.ProviderAccountId), cancellationToken)
             .ConfigureAwait(false);
     }

@@ -145,10 +145,36 @@ public sealed record CannedResponseVariant
     public static string RequireLocale(string locale, string parameterName)
     {
         ArgumentNullException.ThrowIfNull(locale, parameterName);
-        var parts = locale.Split('-');
-        if (locale.Length > MaximumLocaleLength || parts[0].Length is < 2 or > 8 || !parts[0].All(char.IsAsciiLetter)
-            || parts.Skip(1).Any(part => part.Length is < 1 or > 8 || !part.All(char.IsAsciiLetterOrDigit)))
+        var span = locale.AsSpan();
+        if (span.Length is 0 or > MaximumLocaleLength)
             throw new ArgumentException("Locales are BCP 47-style tags such as 'en' or 'pt-BR'.", parameterName);
+        var partIndex = 0;
+        var pos = 0;
+        while (true)
+        {
+            var dash = span[pos..].IndexOf('-');
+            var part = dash < 0 ? span[pos..] : span.Slice(pos, dash);
+            if (partIndex == 0)
+            {
+                if (part.Length is < 2 or > 8)
+                    throw new ArgumentException("Locales are BCP 47-style tags such as 'en' or 'pt-BR'.", parameterName);
+                for (var i = 0; i < part.Length; i++)
+                    if (!char.IsAsciiLetter(part[i]))
+                        throw new ArgumentException("Locales are BCP 47-style tags such as 'en' or 'pt-BR'.", parameterName);
+            }
+            else
+            {
+                if (part.Length is < 1 or > 8)
+                    throw new ArgumentException("Locales are BCP 47-style tags such as 'en' or 'pt-BR'.", parameterName);
+                for (var i = 0; i < part.Length; i++)
+                    if (!char.IsAsciiLetterOrDigit(part[i]))
+                        throw new ArgumentException("Locales are BCP 47-style tags such as 'en' or 'pt-BR'.", parameterName);
+            }
+            if (dash < 0)
+                break;
+            pos += dash + 1;
+            partIndex++;
+        }
         return locale;
     }
 }
@@ -162,6 +188,7 @@ public sealed record CannedResponse
     public const int MaximumShortcutLength = 64;
     public const int MaximumTitleLength = 128;
     public const int MaximumVariants = 16;
+    private readonly CannedResponseVariant defaultVariant;
 
     public CannedResponse(CannedResponseId id, string shortcut, string title, string defaultLocale, IEnumerable<CannedResponseVariant> variants,
         MessageContentType contentType = MessageContentType.PlainText)
@@ -177,8 +204,16 @@ public sealed record CannedResponse
         if (Variants.Count is < 1 or > MaximumVariants || Variants.Any(variant => variant is null)
             || Variants.Select(variant => variant.Locale).Distinct(StringComparer.OrdinalIgnoreCase).Count() != Variants.Count)
             throw new ArgumentException($"Canned responses have 1-{MaximumVariants} variants with distinct locales.", nameof(variants));
-        if (!Variants.Any(variant => string.Equals(variant.Locale, defaultLocale, StringComparison.OrdinalIgnoreCase)))
-            throw new ArgumentException("The default locale must have a variant.", nameof(defaultLocale));
+        CannedResponseVariant? foundDefault = null;
+        for (var i = 0; i < Variants.Count; i++)
+        {
+            if (string.Equals(Variants[i].Locale, defaultLocale, StringComparison.OrdinalIgnoreCase))
+            {
+                foundDefault = Variants[i];
+                break;
+            }
+        }
+        defaultVariant = foundDefault ?? throw new ArgumentException("The default locale must have a variant.", nameof(defaultLocale));
         ContentType = AutomationText.Defined(contentType, nameof(contentType));
     }
 
@@ -203,13 +238,22 @@ public sealed record CannedResponse
     {
         if (!string.IsNullOrEmpty(locale))
         {
-            if (Variants.FirstOrDefault(variant => string.Equals(variant.Locale, locale, StringComparison.OrdinalIgnoreCase)) is { } exact)
-                return exact;
-            var language = locale.Split('-')[0];
-            if (Variants.FirstOrDefault(variant => string.Equals(variant.Locale.Split('-')[0], language, StringComparison.OrdinalIgnoreCase)) is { } sameLanguage)
-                return sameLanguage;
+            for (var i = 0; i < Variants.Count; i++)
+                if (string.Equals(Variants[i].Locale, locale, StringComparison.OrdinalIgnoreCase))
+                    return Variants[i];
+            var localeSpan = locale.AsSpan();
+            var dash = localeSpan.IndexOf('-');
+            var language = dash < 0 ? localeSpan : localeSpan[..dash];
+            for (var i = 0; i < Variants.Count; i++)
+            {
+                var vSpan = Variants[i].Locale.AsSpan();
+                var vDash = vSpan.IndexOf('-');
+                var vLang = vDash < 0 ? vSpan : vSpan[..vDash];
+                if (vLang.Equals(language, StringComparison.OrdinalIgnoreCase))
+                    return Variants[i];
+            }
         }
-        return Variants.First(variant => string.Equals(variant.Locale, DefaultLocale, StringComparison.OrdinalIgnoreCase));
+        return defaultVariant;
     }
 
     public bool Equals(CannedResponse? other) =>

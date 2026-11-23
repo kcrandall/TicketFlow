@@ -26,8 +26,9 @@ public sealed class AccessQueryPlanner : IAccessQueryPlanner
     {
         ArgumentNullException.ThrowIfNull(query);
         var permission = query.Permission;
-        var sensitive = engine.Catalog.Find(permission)?.IsSensitive == true;
-        if (engine.Precheck(query.Principal, permission, query.Scope) is { } reason)
+        var definition = engine.Catalog.Find(permission);
+        var sensitive = definition?.IsSensitive == true;
+        if (AccessEngine.Precheck(query.Principal, definition is not null, query.Scope) is { } reason)
         {
             if (sensitive)
                 await RecordAsync(query, DenyAllFilter.Instance, false, reason, engine.Now, cancellationToken).ConfigureAwait(false);
@@ -47,8 +48,9 @@ public sealed class AccessQueryPlanner : IAccessQueryPlanner
         foreach (var permission in loaded)
         {
             var query = new AccessQuery(principal, permission, scope);
-            var sensitive = engine.Catalog.Find(permission)?.IsSensitive == true;
-            if (engine.Precheck(principal, permission, scope) is { } reason)
+            var definition = engine.Catalog.Find(permission);
+            var sensitive = definition?.IsSensitive == true;
+            if (AccessEngine.Precheck(principal, definition is not null, scope) is { } reason)
             {
                 if (sensitive)
                     await RecordAsync(query, DenyAllFilter.Instance, false, reason, engine.Now, cancellationToken).ConfigureAwait(false);
@@ -120,8 +122,8 @@ public sealed class AccessQueryPlanner : IAccessQueryPlanner
     private static AccessFilter Translate(AccessCondition? condition, AccessContext context) => condition switch
     {
         null => AllowAllFilter.Instance,
-        AndCondition and => AccessFilters.And(and.Operands.Select(operand => Translate(operand, context))),
-        OrCondition or => AccessFilters.Or(or.Operands.Select(operand => Translate(operand, context))),
+        AndCondition and => AccessFilters.And(TranslateAll(and.Operands, context)),
+        OrCondition or => AccessFilters.Or(TranslateAll(or.Operands, context)),
         NotCondition not => AccessFilters.Not(Translate(not.Operand, context)),
         AssigneeIsSelfCondition => context.User is { } user ? new AssigneeIsFilter(user.UserId) : UnknownFilter.Instance,
         TeamInPrincipalTeamsCondition => context.User is { } user
@@ -132,6 +134,14 @@ public sealed class AccessQueryPlanner : IAccessQueryPlanner
         HasLabelCondition label => new HasLabelFilter(label.Label),
         TimeWindowCondition window => window.Contains(context.Now) ? AllowAllFilter.Instance : DenyAllFilter.Instance,
     };
+
+    private static AccessFilter[] TranslateAll(IReadOnlyList<AccessCondition> operands, AccessContext context)
+    {
+        var result = new AccessFilter[operands.Count];
+        for (var i = 0; i < operands.Count; i++)
+            result[i] = Translate(operands[i], context);
+        return result;
+    }
 
     private Task RecordAsync(AccessQuery query, AccessFilter filter, bool usedBreakGlass, AccessDenialReason? reason, DateTimeOffset now, CancellationToken cancellationToken) =>
         audit.RecordAsync(AccessEngine.AuditEvent(now, query.Principal, AccessAuditKind.FilterPlanned,

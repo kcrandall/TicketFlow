@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using ModelContextProtocol;
@@ -17,6 +18,8 @@ namespace TicketFlow.Mcp;
 /// </summary>
 internal static class TicketFlowToolListFilter
 {
+    private static readonly ConcurrentDictionary<Tool, (Tool Permitted, Tool Denied)> MarkedCache = new(ReferenceEqualityComparer.Instance);
+
     public static McpRequestHandler<ListToolsRequestParams, ListToolsResult> Create(McpRequestHandler<ListToolsRequestParams, ListToolsResult> next) =>
         async (request, cancellationToken) =>
         {
@@ -25,14 +28,27 @@ internal static class TicketFlowToolListFilter
             if (services?.GetService<TicketFlowMcpRegistry>() is not { } registry)
                 return result;
             var options = services.GetService<IOptions<TicketFlowMcpOptions>>()?.Value ?? new TicketFlowMcpOptions();
-            var tools = result.Tools.Select(tool => (Tool: tool, Descriptor: TicketFlowToolCatalog.Find(tool.Name)))
-                .Where(item => item.Descriptor is null || registry.IsEnabled(item.Descriptor))
-                .ToList();
-            var decisions = await DecideAsync(services, request.User, options, tools.Where(item => item.Descriptor is not null).Select(item => item.Descriptor!), cancellationToken)
-                .ConfigureAwait(false);
-            var listed = new List<Tool>(tools.Count);
-            foreach (var (tool, descriptor) in tools)
+            var tools = new List<(Tool Tool, TicketFlowToolDescriptor? Descriptor)>(result.Tools.Count);
+            List<string>? permissions = null;
+            for (var i = 0; i < result.Tools.Count; i++)
             {
+                var tool = result.Tools[i];
+                var descriptor = TicketFlowToolCatalog.Find(tool.Name);
+                if (descriptor is not null && !registry.IsEnabled(descriptor))
+                    continue;
+                tools.Add((tool, descriptor));
+                if (descriptor is not null && descriptor.Permissions.Count > 0)
+                {
+                    permissions ??= [];
+                    for (var j = 0; j < descriptor.Permissions.Count; j++)
+                        permissions.Add(descriptor.Permissions[j]);
+                }
+            }
+            var decisions = await DecideAsync(services, request.User, options, permissions, cancellationToken).ConfigureAwait(false);
+            var listed = new List<Tool>(tools.Count);
+            for (var i = 0; i < tools.Count; i++)
+            {
+                var (tool, descriptor) = tools[i];
                 if (descriptor is null || decisions is null)
                 {
                     listed.Add(tool);
@@ -48,7 +64,7 @@ internal static class TicketFlowToolListFilter
         };
 
     private static async Task<IReadOnlyDictionary<string, bool?>?> DecideAsync(IServiceProvider services, System.Security.Claims.ClaimsPrincipal? user, TicketFlowMcpOptions options,
-        IEnumerable<TicketFlowToolDescriptor> tools, CancellationToken cancellationToken)
+        List<string>? permissions, CancellationToken cancellationToken)
     {
         if (options.DefaultWorkspace is null || services.GetService<ITicketFlowMcpPrincipalResolver>() is not { } resolver)
             return null;
@@ -56,18 +72,26 @@ internal static class TicketFlowToolListFilter
         if (await resolver.ResolveAsync(new TicketFlowMcpCaller(user, services), workspace, cancellationToken).ConfigureAwait(false) is not { } principal
             || principal.Value is null || principal.Scope.WorkspaceId != workspace)
             return null;
-        return await TicketFlowPermissionProbe.ProbeAsync(services, principal, tools.SelectMany(tool => tool.Permissions), options.ProbeSensitivePermissions, cancellationToken)
-            .ConfigureAwait(false);
+        if (permissions is null || permissions.Count == 0)
+            return new Dictionary<string, bool?>(StringComparer.Ordinal);
+        return await TicketFlowPermissionProbe.ProbeAsync(services, principal, permissions, options.ProbeSensitivePermissions, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>A deep clone of <paramref name="tool"/> (through the SDK's own serializer) that differs only in <see cref="Tool.Meta"/>.</summary>
+    /// <summary>A cached immutable clone of <paramref name="tool"/> that differs only in <c>_meta["ticketflow/permitted"]</c>.</summary>
     private static Tool Mark(Tool tool, bool? permitted)
+    {
+        if (permitted is not { } value)
+            return tool;
+        var pair = MarkedCache.GetOrAdd(tool, static original => (CloneWith(original, true), CloneWith(original, false)));
+        return value ? pair.Permitted : pair.Denied;
+    }
+
+    private static Tool CloneWith(Tool tool, bool permitted)
     {
         var info = (JsonTypeInfo<Tool>)McpJsonUtilities.DefaultOptions.GetTypeInfo(typeof(Tool));
         var clone = JsonSerializer.Deserialize(JsonSerializer.SerializeToUtf8Bytes(tool, info), info)!;
         var meta = clone.Meta ?? [];
-        if (permitted is { } value)
-            meta["ticketflow/permitted"] = value;
+        meta["ticketflow/permitted"] = permitted;
         clone.Meta = meta;
         return clone;
     }

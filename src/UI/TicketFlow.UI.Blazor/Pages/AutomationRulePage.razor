@@ -119,16 +119,27 @@ else
         ("assignment-changed", "Assignment changed"), ("contact-updated", "Contact updated"),
     ];
 
+    private static readonly string NewRuleJson = DefinitionEditor.Pretty(AutomationCodec.SerializeRule(new AutomationRule(new AutomationRuleId("new"), "New rule", MessageReceivedTrigger.Instance,
+        new MessageContentCondition(MessageTextOperator.Contains, "urgent"), [new SetPriorityAction(ConversationPriority.High)])));
+
     protected override async Task OnInitializedAsync()
     {
         if (Service<IAutomationRuleService>() is not { } service || Id is null)
             return;
-        if (Id != "new" && await service.GetAsync(Actor, new AutomationRuleId(Id), Aborted) is AutomationValue<StoredAutomationRule> found)
+        var ruleTask = Id != "new" ? service.GetAsync(Actor, new AutomationRuleId(Id), Aborted) : null;
+        var listTask = Service<IConversationService>()?.ListAsync(Actor, new ConversationListQuery(limit: 15), null, Aborted);
+        if (ruleTask is not null && listTask is not null)
+            await Task.WhenAll(ruleTask, listTask);
+        else if (ruleTask is not null)
+            await ruleTask;
+        else if (listTask is not null)
+            await listTask;
+
+        if (ruleTask is not null && await ruleTask is AutomationValue<StoredAutomationRule> found)
             stored = found.Value;
-        json = DefinitionEditor.Pretty(AutomationCodec.SerializeRule(stored?.Rule ?? new AutomationRule(new AutomationRuleId("new"), "New rule", MessageReceivedTrigger.Instance,
-            new MessageContentCondition(MessageTextOperator.Contains, "urgent"), [new SetPriorityAction(ConversationPriority.High)])));
+        json = stored is null ? NewRuleJson : DefinitionEditor.Pretty(AutomationCodec.SerializeRule(stored.Rule));
         result = Session.PageStateAs<AutomationDryRunResult>();
-        if (Service<IConversationService>() is { } conversationService && await conversationService.ListAsync(Actor, new ConversationListQuery(limit: 15), null, Aborted) is ConversationListPage page)
+        if (listTask is not null && await listTask is ConversationListPage page)
         {
             await LoadContactsAsync(page.Conversations.Select(conversation => conversation.Contact));
             foreach (var conversation in page.Conversations)

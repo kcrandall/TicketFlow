@@ -33,6 +33,20 @@ public interface ISurveyStore
     /// <summary>Every survey in the scope (bounded), ordered by identifier (ordinal).</summary>
     Task<IReadOnlyList<StoredSurvey>> ListSurveysAsync(TicketScope scope, CancellationToken cancellationToken = default);
 
+    /// <summary>Enabled surveys matching <paramref name="trigger"/> and workspace or <paramref name="inbox"/>.</summary>
+    async Task<IReadOnlyList<StoredSurvey>> ListEnabledSurveysAsync(TicketScope scope, SurveyTrigger trigger, InboxId? inbox, CancellationToken cancellationToken = default)
+    {
+        var all = await ListSurveysAsync(scope, cancellationToken).ConfigureAwait(false);
+        var result = new List<StoredSurvey>(all.Count);
+        for (var i = 0; i < all.Count; i++)
+        {
+            var s = all[i].Survey;
+            if (s.Enabled && s.Policy.Trigger == trigger && (s.Inbox is null || s.Inbox == inbox))
+                result.Add(all[i]);
+        }
+        return result;
+    }
+
     Task<SurveyWriteResult<StoredSurvey>> CreateSurveyAsync(TicketScope scope, SurveyDefinition survey, CancellationToken cancellationToken = default);
 
     Task<SurveyWriteResult<StoredSurvey>> UpdateSurveyAsync(TicketScope scope, SurveyDefinition survey, long expectedRevision, CancellationToken cancellationToken = default);

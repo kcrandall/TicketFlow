@@ -45,11 +45,21 @@ public sealed record AutomationEvent
     public IReadOnlyList<SlaAction> SlaActions { get; }
     public long? Sequence { get; }
 
-    public static AutomationEvent ConversationCreated(long? sequence = null) => new(AutomationEventKind.ConversationCreated, null, null, null, null, null, sequence);
+    private static readonly AutomationEvent ConversationCreatedSingleton = new(AutomationEventKind.ConversationCreated, null, null, null, null, null, null);
+    private static readonly AutomationEvent MessageReceivedSingleton = new(AutomationEventKind.MessageReceived, null, null, null, null, null, null);
+    private static readonly AutomationEvent MessageSentSingleton = new(AutomationEventKind.MessageSent, null, null, null, null, null, null);
+    private static readonly AutomationEvent AssignmentChangedSingleton = new(AutomationEventKind.AssignmentChanged, null, null, null, null, null, null);
+    private static readonly AutomationEvent ScheduledSingleton = new(AutomationEventKind.Scheduled, null, null, null, null, null, null);
+    private static readonly AutomationEvent ContactUpdatedSingleton = new(AutomationEventKind.ContactUpdated, null, null, null, null, null, null);
 
-    public static AutomationEvent MessageReceived(long? sequence = null) => new(AutomationEventKind.MessageReceived, null, null, null, null, null, sequence);
+    public static AutomationEvent ConversationCreated(long? sequence = null) =>
+        sequence is null ? ConversationCreatedSingleton : new(AutomationEventKind.ConversationCreated, null, null, null, null, null, sequence);
 
-    public static AutomationEvent MessageSent(long? sequence = null) => new(AutomationEventKind.MessageSent, null, null, null, null, null, sequence);
+    public static AutomationEvent MessageReceived(long? sequence = null) =>
+        sequence is null ? MessageReceivedSingleton : new(AutomationEventKind.MessageReceived, null, null, null, null, null, sequence);
+
+    public static AutomationEvent MessageSent(long? sequence = null) =>
+        sequence is null ? MessageSentSingleton : new(AutomationEventKind.MessageSent, null, null, null, null, null, sequence);
 
     public static AutomationEvent ConversationUpdated(ConversationUpdateField field, long? sequence = null) =>
         new(AutomationEventKind.ConversationUpdated, AutomationText.Defined(field, nameof(field)), null, null, null, null, sequence);
@@ -57,15 +67,16 @@ public sealed record AutomationEvent
     public static AutomationEvent StatusChanged(ConversationStatusKind status, long? sequence = null) =>
         new(AutomationEventKind.StatusChanged, ConversationUpdateField.Status, AutomationText.Defined(status, nameof(status)), null, null, null, sequence);
 
-    public static AutomationEvent AssignmentChanged(long? sequence = null) => new(AutomationEventKind.AssignmentChanged, null, null, null, null, null, sequence);
+    public static AutomationEvent AssignmentChanged(long? sequence = null) =>
+        sequence is null ? AssignmentChangedSingleton : new(AutomationEventKind.AssignmentChanged, null, null, null, null, null, sequence);
 
     public static AutomationEvent SlaEvent(SlaEventKind kind, SlaMetric metric, IEnumerable<SlaAction> actions, long? sequence = null) =>
         new(AutomationEventKind.SlaEvent, null, null, AutomationText.Defined(kind, nameof(kind)), AutomationText.Defined(metric, nameof(metric)),
             [.. actions ?? throw new ArgumentNullException(nameof(actions))], sequence);
 
-    public static AutomationEvent Scheduled() => new(AutomationEventKind.Scheduled, null, null, null, null, null, null);
+    public static AutomationEvent Scheduled() => ScheduledSingleton;
 
-    public static AutomationEvent ContactUpdated() => new(AutomationEventKind.ContactUpdated, null, null, null, null, null, null);
+    public static AutomationEvent ContactUpdated() => ContactUpdatedSingleton;
 
     /// <summary>True when <paramref name="trigger"/> fires for this event.</summary>
     public bool Fires(AutomationTrigger trigger) => trigger switch

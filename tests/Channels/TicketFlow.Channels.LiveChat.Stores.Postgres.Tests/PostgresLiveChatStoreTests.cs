@@ -64,7 +64,7 @@ public sealed class PostgresLiveChatStoreTests
         await using var database = await Database.CreateAsync();
         await database.Store.InitializeAsync();
         var inspection = await new PostgresMigrationRunner(database.Storage.First, PostgresLiveChatMigrations.Catalog).InspectAsync();
-        Assert.AreEqual(1, inspection.CurrentVersion);
+        Assert.AreEqual(2, inspection.CurrentVersion);
 
         var scope = TestScopes.Create(workspaceId: "livechat-hash");
         var token = VisitorSessionTokens.Issue(new VisitorSessionId("vs_hash"));

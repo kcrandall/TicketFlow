@@ -27,12 +27,15 @@ internal sealed class PrincipalAuthorization(PrincipalRef principal)
 
     public DateTimeOffset LoadedAt => loadedAt;
 
-    public async ValueTask<bool> PermittedAsync(Permission permission, StoredConversation conversation, IAccessEvaluator evaluator, TimeProvider time, TimeSpan lifetime,
+    public ValueTask<bool> PermittedAsync(Permission permission, StoredConversation conversation, IAccessEvaluator evaluator, TimeProvider time, TimeSpan lifetime,
+        CancellationToken cancellationToken) =>
+        PermittedAsync(permission, conversation.Scope, ConversationAccess.Resource(conversation), evaluator, time, lifetime, cancellationToken);
+
+    public async ValueTask<bool> PermittedAsync(Permission permission, TicketScope scope, AccessResource resource, IAccessEvaluator evaluator, TimeProvider time, TimeSpan lifetime,
         CancellationToken cancellationToken)
     {
-        var resource = ConversationAccess.Resource(conversation);
-        if (context is null || context.Scope != conversation.Scope || time.GetUtcNow() - loadedAt >= lifetime)
-            await LoadAsync(conversation.Scope, evaluator, time, cancellationToken).ConfigureAwait(false);
+        if (context is null || context.Scope != scope || time.GetUtcNow() - loadedAt >= lifetime)
+            await LoadAsync(scope, evaluator, time, cancellationToken).ConfigureAwait(false);
         try
         {
             return (await context!.DecideAsync(permission, resource, cancellationToken).ConfigureAwait(false)).IsPermitted;
@@ -40,7 +43,7 @@ internal sealed class PrincipalAuthorization(PrincipalRef principal)
         catch (Exception) when (!cancellationToken.IsCancellationRequested)
         {
             // A cached context may hold services of a finished scope (for example an audit sink); reload once in the current scope.
-            await LoadAsync(conversation.Scope, evaluator, time, cancellationToken).ConfigureAwait(false);
+            await LoadAsync(scope, evaluator, time, cancellationToken).ConfigureAwait(false);
             return (await context!.DecideAsync(permission, resource, cancellationToken).ConfigureAwait(false)).IsPermitted;
         }
     }
@@ -147,17 +150,35 @@ internal static class RealtimeDeliveryPolicy
         return (true, null);
     }
 
+    public static bool HasNotes(RealtimeEvent realtimeEvent)
+    {
+        if (realtimeEvent.Value is not ConversationChangedEvent changed)
+            return false;
+        var events = changed.Events;
+        for (var i = 0; i < events.Count; i++)
+            if (events[i].Kind == ConversationEventKind.Note)
+                return true;
+        return false;
+    }
+
+    public static RealtimeEvent? StripNotes(ConversationChangedEvent changed)
+    {
+        var events = changed.Events;
+        var visible = new List<ConversationEventSummary>(events.Count);
+        for (var i = 0; i < events.Count; i++)
+            if (events[i].Kind != ConversationEventKind.Note)
+                visible.Add(events[i]);
+        if (visible.Count == 0 && changed.Kind == ConversationChangeKind.EventsAppended)
+            return null;
+        return changed.WithEvents(visible);
+    }
+
     /// <summary>The event after note stripping for a principal already allowed to read the conversation.</summary>
     public static async ValueTask<RealtimeEvent?> StripNotesAsync(RealtimeEvent realtimeEvent, Func<ValueTask<bool>> noteReadable)
     {
-        if (realtimeEvent.Value is ConversationChangedEvent changed && changed.Events.Any(summary => summary.Kind == ConversationEventKind.Note)
+        if (realtimeEvent.Value is ConversationChangedEvent changed && HasNotes(realtimeEvent)
             && !await noteReadable().ConfigureAwait(false))
-        {
-            var visible = changed.Events.Where(summary => summary.Kind != ConversationEventKind.Note).ToList();
-            if (visible.Count == 0 && changed.Kind == ConversationChangeKind.EventsAppended)
-                return null;
-            return changed.WithEvents(visible);
-        }
+            return StripNotes(changed);
         return realtimeEvent;
     }
 

@@ -1,4 +1,6 @@
+using System.Data;
 using Npgsql;
+using NpgsqlTypes;
 using TicketFlow.Core;
 
 namespace TicketFlow.Automation.Stores.Postgres;
@@ -6,64 +8,137 @@ namespace TicketFlow.Automation.Stores.Postgres;
 public sealed partial class PostgresAutomationStore
 {
     private const string ExecutionColumns = "execution_id, format_version, state, revision";
+    private const string ExecutionColumnsE = "e.execution_id, e.format_version, e.state, e.revision";
+
+    private const string BeginNoCausesSql = $"""
+        INSERT INTO tf_automation_executions({ScopeColumns}, execution_id, rule_id, conversation_id, trigger_key, started_at, format_version, state, revision, finished)
+        VALUES({ScopeValues}, @execution, @rule, @conversation, @trigger, @started, 1, @state, 1, @finished)
+        ON CONFLICT (natural_key) DO NOTHING
+        """;
+
+    private const string BeginWithCausesSql = $"""
+        WITH inserted AS (
+            INSERT INTO tf_automation_executions({ScopeColumns}, execution_id, rule_id, conversation_id, trigger_key, started_at, format_version, state, revision, finished)
+            VALUES({ScopeValues}, @execution, @rule, @conversation, @trigger, @started, 1, @state, 1, @finished)
+            ON CONFLICT (natural_key) DO NOTHING
+            RETURNING 1
+        ),
+        causes AS (
+            INSERT INTO tf_automation_causes({ScopeColumns}, conversation_id, sequence, execution_id, rule_id, depth)
+            SELECT {ScopeValues}, @conversation, s, @execution, @rule, @depth
+            FROM inserted CROSS JOIN unnest(@sequences) AS s
+            ON CONFLICT (cause_key) DO NOTHING
+        )
+        SELECT count(*) FROM inserted
+        """;
+
+    private const string UpdateNoCausesSql = $"""
+        UPDATE tf_automation_executions SET state=@state, finished=@finished, revision=revision+1
+        WHERE {ExecutionWhere} AND revision=@expected AND rule_id=@rule AND conversation_id IS NOT DISTINCT FROM @conversation AND trigger_key=@trigger
+        RETURNING revision
+        """;
+
+    private const string UpdateWithCausesSql = $"""
+        WITH updated AS (
+            UPDATE tf_automation_executions SET state=@state, finished=@finished, revision=revision+1
+            WHERE {ExecutionWhere} AND revision=@expected AND rule_id=@rule AND conversation_id IS NOT DISTINCT FROM @conversation AND trigger_key=@trigger
+            RETURNING revision
+        ),
+        causes AS (
+            INSERT INTO tf_automation_causes({ScopeColumns}, conversation_id, sequence, execution_id, rule_id, depth)
+            SELECT {ScopeValues}, @conversation, s, @execution, @rule, @depth
+            FROM updated CROSS JOIN unnest(@sequences) AS s
+            ON CONFLICT (cause_key) DO NOTHING
+        )
+        SELECT revision FROM updated
+        """;
+
+    private const string FindByNaturalKeySql = $"""
+        SELECT {ExecutionColumns} FROM tf_automation_executions
+        WHERE natural_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@rule,COALESCE(@conversation,''),@trigger)
+          AND {ScopeWhere} AND rule_id=@rule AND conversation_id IS NOT DISTINCT FROM @conversation AND trigger_key=@trigger
+        """;
 
     public async Task<AutomationBeginResult> BeginAsync(TicketScope scope, AutomationExecution execution, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(execution);
+        var sequences = execution.Conversation is not null ? execution.ProducedSequences : [];
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using (var insert = new NpgsqlCommand($"""
-            INSERT INTO tf_automation_executions({ScopeColumns}, execution_id, rule_id, conversation_id, trigger_key, started_at, format_version, state, revision, finished)
-            VALUES({ScopeValues}, @execution, @rule, @conversation, @trigger, @started, 1, @state, 1, @finished)
-            ON CONFLICT (natural_key) DO NOTHING
-            """, connection))
+        var started = false;
+        if (sequences.Count == 0)
         {
+            await using var insert = new NpgsqlCommand(BeginNoCausesSql, connection);
             AddScope(insert, scope);
             AddExecution(insert, execution);
-            if (await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1)
-            {
-                if (execution.Conversation is { } conversation)
-                    await IndexCausesAsync(connection, null, scope, conversation, execution, cancellationToken).ConfigureAwait(false);
-                return new AutomationExecutionStarted(new StoredAutomationExecution(scope, execution, 1));
-            }
+            started = await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
         }
-        var existing = await FindAsync(scope, execution.Rule, execution.Conversation, execution.TriggerKey, cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException("A conflicting execution record disappeared.");
+        else
+        {
+            await using var insert = new NpgsqlCommand(BeginWithCausesSql, connection);
+            AddScope(insert, scope);
+            AddExecution(insert, execution);
+            AddInt(insert, "depth", execution.Depth);
+            insert.Parameters.Add(new NpgsqlParameter<long[]>("sequences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { TypedValue = ToArray(sequences) });
+            started = (long)(await insert.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))! == 1;
+        }
+        if (started)
+            return new AutomationExecutionStarted(new StoredAutomationExecution(scope, execution, 1));
+        await using var lookup = new NpgsqlCommand(FindByNaturalKeySql, connection);
+        AddScope(lookup, scope);
+        AddText(lookup, "rule", execution.Rule.Value);
+        AddText(lookup, "conversation", execution.Conversation?.Value);
+        AddText(lookup, "trigger", execution.TriggerKey);
+        await using var reader = await lookup.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+        var existing = await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ? ReadExecution(reader, scope)
+            : throw new InvalidOperationException("A conflicting execution record disappeared.");
         return new AutomationExecutionExists(existing);
     }
 
-    public async Task<AutomationWriteResult<StoredAutomationExecution>> UpdateAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
+    public Task<AutomationWriteResult<StoredAutomationExecution>> UpdateAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(execution);
+        return UpdateCoreAsync(scope, execution, expectedRevision, execution.Conversation is not null ? execution.ProducedSequences : [], cancellationToken);
+    }
+
+    public Task<AutomationWriteResult<StoredAutomationExecution>> UpdateProgressAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
+        IReadOnlyList<long> newSequences, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(execution);
+        ArgumentNullException.ThrowIfNull(newSequences);
+        return UpdateCoreAsync(scope, execution, expectedRevision, execution.Conversation is not null ? newSequences : [], cancellationToken);
+    }
+
+    private async Task<AutomationWriteResult<StoredAutomationExecution>> UpdateCoreAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
+        IReadOnlyList<long> sequences, CancellationToken cancellationToken)
+    {
+        // Single auto-committed writable CTE updates the execution + cause index atomically in 1 RTT; fresh-snapshot SELECT only on miss.
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         long? revision;
-        await using (var update = new NpgsqlCommand($"""
-            UPDATE tf_automation_executions SET state=@state, finished=@finished, revision=revision+1
-            WHERE {ExecutionWhere} AND revision=@expected AND rule_id=@rule AND conversation_id IS NOT DISTINCT FROM @conversation AND trigger_key=@trigger
-            RETURNING revision
-            """, connection, transaction))
+        await using (var update = new NpgsqlCommand(sequences.Count == 0 ? UpdateNoCausesSql : UpdateWithCausesSql, connection))
         {
             AddScope(update, scope);
             AddExecution(update, execution);
-            update.Parameters.AddWithValue("expected", expectedRevision);
+            AddLong(update, "expected", expectedRevision);
+            if (sequences.Count > 0)
+            {
+                AddInt(update, "depth", execution.Depth);
+                update.Parameters.Add(new NpgsqlParameter<long[]>("sequences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { TypedValue = ToArray(sequences) });
+            }
             revision = await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as long?;
         }
-        if (revision is null)
-        {
-            await using var check = new NpgsqlCommand($"SELECT revision FROM tf_automation_executions WHERE {ExecutionWhere}", connection, transaction);
-            AddScope(check, scope);
-            AddUuid(check, "execution", execution.Id);
-            return await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long current
-                ? new AutomationWriteConflict(current)
-                : AutomationWriteNotFound.Instance;
-        }
-        if (execution.Conversation is { } conversation)
-            await IndexCausesAsync(connection, transaction, scope, conversation, execution, cancellationToken).ConfigureAwait(false);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new AutomationWriteApplied<StoredAutomationExecution>(new StoredAutomationExecution(scope, execution, revision.Value));
+        if (revision is { } updated)
+            return new AutomationWriteApplied<StoredAutomationExecution>(new StoredAutomationExecution(scope, execution, updated));
+        await using var check = new NpgsqlCommand($"SELECT revision FROM tf_automation_executions WHERE {ExecutionWhere}", connection);
+        AddScope(check, scope);
+        AddUuid(check, "execution", execution.Id);
+        return await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long current
+            ? new AutomationWriteConflict(current)
+            : AutomationWriteNotFound.Instance;
     }
 
     public async Task<StoredAutomationExecution?> GetAsync(TicketScope scope, Guid execution, CancellationToken cancellationToken = default)
@@ -72,7 +147,7 @@ public sealed partial class PostgresAutomationStore
         await using var command = source.CreateCommand($"SELECT {ExecutionColumns} FROM tf_automation_executions WHERE {ExecutionWhere}");
         AddScope(command, scope);
         AddUuid(command, "execution", execution);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadExecution(reader, scope) : null;
     }
 
@@ -82,16 +157,12 @@ public sealed partial class PostgresAutomationStore
         ArgumentNullException.ThrowIfNull(scope);
         RequireInitialized(rule.IsInitialized, nameof(rule));
         AutomationExecution.RequireTriggerKey(triggerKey, nameof(triggerKey));
-        await using var command = source.CreateCommand($"""
-            SELECT {ExecutionColumns} FROM tf_automation_executions
-            WHERE natural_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@rule,COALESCE(@conversation,''),@trigger)
-              AND {ScopeWhere} AND rule_id=@rule AND conversation_id IS NOT DISTINCT FROM @conversation AND trigger_key=@trigger
-            """);
+        await using var command = source.CreateCommand(FindByNaturalKeySql);
         AddScope(command, scope);
         AddText(command, "rule", rule.Value);
         AddText(command, "conversation", conversation?.Value);
         AddText(command, "trigger", triggerKey);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadExecution(reader, scope) : null;
     }
 
@@ -101,20 +172,31 @@ public sealed partial class PostgresAutomationStore
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(rules);
         AutomationExecution.RequireTriggerKey(triggerKey, nameof(triggerKey));
-        if (rules.Count > IAutomationExecutionStore.MaximumFindMany || rules.Any(rule => !rule.IsInitialized))
+        if (rules.Count > IAutomationExecutionStore.MaximumFindMany)
             throw new ArgumentException($"At most {IAutomationExecutionStore.MaximumFindMany} initialized rules.", nameof(rules));
-        var found = new Dictionary<AutomationRuleId, StoredAutomationExecution>();
         if (rules.Count == 0)
-            return found;
+            return new Dictionary<AutomationRuleId, StoredAutomationExecution>(0);
+        var unique = new HashSet<string>(rules.Count, StringComparer.Ordinal);
+        foreach (var rule in rules)
+        {
+            if (!rule.IsInitialized)
+                throw new ArgumentException($"At most {IAutomationExecutionStore.MaximumFindMany} initialized rules.", nameof(rules));
+            unique.Add(rule.Value);
+        }
+        var ruleIds = new string[unique.Count];
+        unique.CopyTo(ruleIds);
         await using var command = source.CreateCommand($"""
-            SELECT {ExecutionColumns} FROM tf_automation_executions
-            WHERE natural_key = ANY (SELECT tf_key_v1(@tenant,@project,@environment,@app,@workspace,r,COALESCE(@conversation,''),@trigger) FROM unnest(@rules) AS r)
-              AND {ScopeWhere} AND rule_id = ANY (@rules) AND conversation_id IS NOT DISTINCT FROM @conversation AND trigger_key=@trigger
+            SELECT {ExecutionColumnsE}
+            FROM unnest(@rules) AS r
+            JOIN tf_automation_executions e
+              ON e.natural_key = tf_key_v1(@tenant,@project,@environment,@app,@workspace,r,COALESCE(@conversation,''),@trigger)
+             AND {ScopeWhereE} AND e.rule_id = r AND e.conversation_id IS NOT DISTINCT FROM @conversation AND e.trigger_key = @trigger
             """);
         AddScope(command, scope);
         AddText(command, "conversation", conversation?.Value);
         AddText(command, "trigger", triggerKey);
-        command.Parameters.Add(new NpgsqlParameter("rules", NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text) { Value = rules.Select(rule => rule.Value).Distinct().ToArray() });
+        command.Parameters.Add(new NpgsqlParameter<string[]>("rules", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = ruleIds });
+        var found = new Dictionary<AutomationRuleId, StoredAutomationExecution>(ruleIds.Length);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -144,7 +226,7 @@ public sealed partial class PostgresAutomationStore
             SELECT count(*) FROM deleted
             """);
         AddInstant(command, "before", before);
-        command.Parameters.AddWithValue("limit", limit);
+        AddInt(command, "limit", limit);
         return (int)(long)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
     }
 
@@ -159,11 +241,9 @@ public sealed partial class PostgresAutomationStore
             """);
         AddScope(command, scope);
         AddText(command, "conversation", conversation.Value);
-        command.Parameters.AddWithValue("sequence", sequence);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
-            ? Decode(() => new AutomationCause(reader.GetGuid(0), new AutomationRuleId(reader.GetString(1)), reader.GetInt32(2)), "cause")
-            : null;
+        AddLong(command, "sequence", sequence);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadCause(reader) : null;
     }
 
     public async Task<int> CountSinceAsync(TicketScope scope, ConversationId conversation, DateTimeOffset since, int limit, CancellationToken cancellationToken = default)
@@ -179,7 +259,7 @@ public sealed partial class PostgresAutomationStore
         AddScope(command, scope);
         AddText(command, "conversation", conversation.Value);
         AddInstant(command, "since", since);
-        command.Parameters.AddWithValue("limit", limit);
+        AddInt(command, "limit", limit);
         return (int)(long)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
     }
 
@@ -189,7 +269,7 @@ public sealed partial class PostgresAutomationStore
         ArgumentNullException.ThrowIfNull(query);
         await using var command = source.CreateCommand();
         AddScope(command, scope);
-        var criteria = new List<string>();
+        var criteria = new List<string>(5);
         if (query.Conversation is { } conversation)
         {
             criteria.Add("conversation_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@conversation) AND conversation_id=@conversation");
@@ -220,20 +300,20 @@ public sealed partial class PostgresAutomationStore
             AddInstant(command, "after_at", after.StartedAt);
             AddUuid(command, "after_id", after.Execution);
         }
-        command.Parameters.AddWithValue("limit", query.Limit + 1);
+        AddInt(command, "limit", query.Limit + 1);
         command.CommandText = $"""
             SELECT {ExecutionColumns} FROM tf_automation_executions
-            WHERE {ScopeWhere}{string.Concat(criteria.Select(item => " AND " + item))}
+            WHERE {ScopeWhere} AND {string.Join(" AND ", criteria)}
             ORDER BY started_at DESC, execution_id DESC LIMIT @limit
             """;
-        var rows = new List<StoredAutomationExecution>();
+        var rows = new List<StoredAutomationExecution>(Math.Min(query.Limit + 1, 64));
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 rows.Add(ReadExecution(reader, scope));
         if (rows.Count <= query.Limit)
             return new AutomationExecutionPage(rows, null);
-        var page = rows[..query.Limit];
-        return new AutomationExecutionPage(page, new AutomationExecutionCursor(page[^1].Execution.StartedAt, page[^1].Id));
+        rows.RemoveAt(query.Limit);
+        return new AutomationExecutionPage(rows, new AutomationExecutionCursor(rows[^1].Execution.StartedAt, rows[^1].Id));
     }
 
     public async Task<long?> GetCheckpointAsync(TicketScope scope, string name, CancellationToken cancellationToken = default)
@@ -256,30 +336,20 @@ public sealed partial class PostgresAutomationStore
             : $"UPDATE tf_automation_checkpoints SET value=@value WHERE checkpoint_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@name) AND {ScopeWhere} AND name=@name AND value=@expected");
         AddScope(command, scope);
         AddText(command, "name", name);
-        command.Parameters.AddWithValue("value", value);
+        AddLong(command, "value", value);
         if (expected is { } current)
-            command.Parameters.AddWithValue("expected", current);
+            AddLong(command, "expected", current);
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
     }
 
-    private static async Task IndexCausesAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, TicketScope scope, ConversationId conversation, AutomationExecution execution,
-        CancellationToken cancellationToken)
+    private static long[] ToArray(IReadOnlyList<long> sequences)
     {
-        var sequences = execution.ProducedSequences;
-        if (sequences.Count == 0)
-            return;
-        await using var command = new NpgsqlCommand($"""
-            INSERT INTO tf_automation_causes({ScopeColumns}, conversation_id, sequence, execution_id, rule_id, depth)
-            SELECT {ScopeValues}, @conversation, s, @execution, @rule, @depth FROM unnest(@sequences) AS s
-            ON CONFLICT (cause_key) DO UPDATE SET execution_id=EXCLUDED.execution_id, rule_id=EXCLUDED.rule_id, depth=EXCLUDED.depth
-            """, connection, transaction);
-        AddScope(command, scope);
-        AddText(command, "conversation", conversation.Value);
-        AddUuid(command, "execution", execution.Id);
-        AddText(command, "rule", execution.Rule.Value);
-        command.Parameters.AddWithValue("depth", execution.Depth);
-        command.Parameters.Add(new NpgsqlParameter("sequences", NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Bigint) { Value = sequences.ToArray() });
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        if (sequences is long[] arr)
+            return arr;
+        var copy = new long[sequences.Count];
+        for (var i = 0; i < copy.Length; i++)
+            copy[i] = sequences[i];
+        return copy;
     }
 
     private static void AddExecution(NpgsqlCommand command, AutomationExecution execution)
@@ -290,22 +360,44 @@ public sealed partial class PostgresAutomationStore
         AddText(command, "trigger", execution.TriggerKey);
         AddInstant(command, "started", execution.StartedAt);
         AddText(command, "state", AutomationCodec.SerializeExecution(execution));
-        command.Parameters.AddWithValue("finished", execution.Status != AutomationExecutionStatus.Running);
+        AddBool(command, "finished", execution.Status != AutomationExecutionStatus.Running);
     }
 
-    private static StoredAutomationExecution ReadExecution(NpgsqlDataReader reader, TicketScope scope) => Decode(() =>
+    private static StoredAutomationExecution ReadExecution(NpgsqlDataReader reader, TicketScope scope)
     {
-        RequireFormat(reader.GetInt16(1));
-        var execution = AutomationCodec.DeserializeExecution(reader.GetString(2));
-        if (execution.Id != reader.GetGuid(0))
-            throw new FormatException("The execution state belongs to a different record.");
-        return new StoredAutomationExecution(scope, execution, reader.GetInt64(3));
-    }, "execution");
+        try
+        {
+            RequireFormat(reader.GetInt16(1));
+            var execution = AutomationCodec.DeserializeExecution(reader.GetString(2));
+            if (execution.Id != reader.GetGuid(0))
+                throw new FormatException("The execution state belongs to a different record.");
+            return new StoredAutomationExecution(scope, execution, reader.GetInt64(3));
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw new InvalidOperationException("A stored automation execution is invalid or incompatible.", error);
+        }
+    }
+
+    private static AutomationCause ReadCause(NpgsqlDataReader reader)
+    {
+        try
+        {
+            return new AutomationCause(reader.GetGuid(0), new AutomationRuleId(reader.GetString(1)), reader.GetInt32(2));
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw new InvalidOperationException("A stored automation cause is invalid or incompatible.", error);
+        }
+    }
 
     private static void RequireCheckpoint(string name)
     {
         ArgumentNullException.ThrowIfNull(name);
-        if (name.Length is 0 or > 64 || name[0] is not (>= 'a' and <= 'z') || !name.All(character => character is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-' or '_' or '.'))
+        if (name.Length is 0 or > 64 || name[0] is not (>= 'a' and <= 'z'))
             throw new ArgumentException("Checkpoint names are lowercase tokens of at most 64 characters.", nameof(name));
+        for (var i = 0; i < name.Length; i++)
+            if (name[i] is not ((>= 'a' and <= 'z') or (>= '0' and <= '9') or '-' or '_' or '.'))
+                throw new ArgumentException("Checkpoint names are lowercase tokens of at most 64 characters.", nameof(name));
     }
 }

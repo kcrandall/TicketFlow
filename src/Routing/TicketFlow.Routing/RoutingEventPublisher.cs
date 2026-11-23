@@ -3,15 +3,18 @@ namespace TicketFlow.Routing;
 /// <summary>Best-effort fan-out to <see cref="IRoutingEventObserver"/>s: failures are swallowed (realtime must never fail routing).</summary>
 internal sealed class RoutingEventPublisher(IEnumerable<IRoutingEventObserver> observers)
 {
-    private readonly IReadOnlyList<IRoutingEventObserver> observers = [.. observers];
+    private readonly IRoutingEventObserver[] observers = [.. observers];
 
-    public async Task PublishAsync(RoutingEvent routingEvent, CancellationToken cancellationToken)
+    public Task PublishAsync(RoutingEvent routingEvent, CancellationToken cancellationToken) =>
+        observers.Length == 0 ? Task.CompletedTask : PublishCoreAsync(routingEvent, cancellationToken);
+
+    private async Task PublishCoreAsync(RoutingEvent routingEvent, CancellationToken cancellationToken)
     {
-        foreach (var observer in observers)
+        for (var i = 0; i < observers.Length; i++)
         {
             try
             {
-                await observer.OnRoutingEventAsync(routingEvent, cancellationToken).ConfigureAwait(false);
+                await observers[i].OnRoutingEventAsync(routingEvent, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {

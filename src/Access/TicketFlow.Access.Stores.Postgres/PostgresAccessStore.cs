@@ -31,29 +31,68 @@ public sealed partial class PostgresAccessStore : IAccessRoleStore, IAccessGrant
 
     private static void AddPartition(NpgsqlCommand command, AccessPartition partition)
     {
-        command.Parameters.AddWithValue("tenant", partition.TenantId);
-        command.Parameters.AddWithValue("project", partition.ProjectId);
-        command.Parameters.AddWithValue("environment", partition.EnvironmentId);
-        command.Parameters.AddWithValue("app", partition.AppId);
+        AddText(command, "tenant", partition.TenantId);
+        AddText(command, "project", partition.ProjectId);
+        AddText(command, "environment", partition.EnvironmentId);
+        AddText(command, "app", partition.AppId);
     }
 
     private static void AddScope(NpgsqlCommand command, TicketScope scope)
     {
-        command.Parameters.AddWithValue("tenant", scope.TenantId);
-        command.Parameters.AddWithValue("project", scope.ProjectId);
-        command.Parameters.AddWithValue("environment", scope.EnvironmentId);
-        command.Parameters.AddWithValue("app", scope.AppId);
-        command.Parameters.AddWithValue("workspace", scope.WorkspaceId.Value);
+        AddText(command, "tenant", scope.TenantId);
+        AddText(command, "project", scope.ProjectId);
+        AddText(command, "environment", scope.EnvironmentId);
+        AddText(command, "app", scope.AppId);
+        AddText(command, "workspace", scope.WorkspaceId.Value);
     }
 
-    private static void AddText(NpgsqlCommand command, string name, string? value) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = (object?)value ?? DBNull.Value });
+    private static void AddText(NpgsqlCommand command, string name, string? value)
+    {
+        if (value is null)
+            command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = DBNull.Value });
+        else
+            command.Parameters.Add(new NpgsqlParameter<string>(name, NpgsqlDbType.Text) { TypedValue = value });
+    }
+
+    private static void AddShort(NpgsqlCommand command, string name, short value) =>
+        command.Parameters.Add(new NpgsqlParameter<short>(name, NpgsqlDbType.Smallint) { TypedValue = value });
+
+    private static void AddNullableShort(NpgsqlCommand command, string name, short? value)
+    {
+        if (value is { } v)
+            command.Parameters.Add(new NpgsqlParameter<short>(name, NpgsqlDbType.Smallint) { TypedValue = v });
+        else
+            command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Smallint) { Value = DBNull.Value });
+    }
+
+    private static void AddInt(NpgsqlCommand command, string name, int value) =>
+        command.Parameters.Add(new NpgsqlParameter<int>(name, NpgsqlDbType.Integer) { TypedValue = value });
+
+    private static void AddLong(NpgsqlCommand command, string name, long value) =>
+        command.Parameters.Add(new NpgsqlParameter<long>(name, NpgsqlDbType.Bigint) { TypedValue = value });
+
+    private static void AddBool(NpgsqlCommand command, string name, bool value) =>
+        command.Parameters.Add(new NpgsqlParameter<bool>(name, NpgsqlDbType.Boolean) { TypedValue = value });
+
+    private static void AddGuid(NpgsqlCommand command, string name, Guid value) =>
+        command.Parameters.Add(new NpgsqlParameter<Guid>(name, NpgsqlDbType.Uuid) { TypedValue = value });
 
     private static void AddTextArray(NpgsqlCommand command, string name, IEnumerable<string> values) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { Value = values.ToArray() });
+        command.Parameters.Add(new NpgsqlParameter<string[]>(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = values as string[] ?? values.ToArray() });
 
-    private static void AddInstant(NpgsqlCommand command, string name, DateTimeOffset? value) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = (object?)value ?? DBNull.Value });
+    private static void AddInstant(NpgsqlCommand command, string name, DateTimeOffset? value)
+    {
+        if (value is { } instant)
+            command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>(name, NpgsqlDbType.TimestampTz) { TypedValue = instant });
+        else
+            command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = DBNull.Value });
+    }
+
+    private static string? NullableText(NpgsqlDataReader reader, int ordinal) =>
+        reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
+
+    private static DateTimeOffset? NullableInstant(NpgsqlDataReader reader, int ordinal) =>
+        reader.IsDBNull(ordinal) ? null : reader.GetFieldValue<DateTimeOffset>(ordinal);
 
     /// <summary>Serializes writers for one scope or subject within the current transaction.</summary>
     private static async Task LockAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken, params string[] parts)
@@ -76,15 +115,6 @@ public sealed partial class PostgresAccessStore : IAccessRoleStore, IAccessGrant
         return current is long revision ? new AccessWriteConflict(revision) : AccessWriteNotFound.Instance;
     }
 
-    private static T Decode<T>(Func<T> decode, string description)
-    {
-        try
-        {
-            return decode();
-        }
-        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
-        {
-            throw new InvalidOperationException($"A stored {description} is invalid or incompatible.", error);
-        }
-    }
+    private static InvalidOperationException StoredDataError(Exception error, string description) =>
+        new($"A stored {description} is invalid or incompatible.", error);
 }

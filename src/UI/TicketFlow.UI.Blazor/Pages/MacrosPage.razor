@@ -32,11 +32,12 @@
 @if (Session.Can(AutomationPermissions.MacroManage))
 {
     <div class="tf-card"><div class="tf-card__header"><div class="tf-card__title">New macro</div></div><div class="tf-card__content">
-        <DefinitionEditor Json="@DefinitionEditor.Pretty(AutomationCodec.SerializeMacro(new Macro(new MacroId("new"), "New macro", MacroVisibility.Shared, null, [new AddLabelsAction(new LabelId("follow-up"))])))" SaveAction="automation.macro.save" />
+        <DefinitionEditor Json="@NewMacroJson" SaveAction="automation.macro.save" />
     </div></div>
 }
 
 @code {
+    private static readonly string NewMacroJson = DefinitionEditor.Pretty(AutomationCodec.SerializeMacro(new Macro(new MacroId("new"), "New macro", MacroVisibility.Shared, null, [new AddLabelsAction(new LabelId("follow-up"))])));
     private List<StoredMacro> macros = [];
 
     protected override async Task OnInitializedAsync()

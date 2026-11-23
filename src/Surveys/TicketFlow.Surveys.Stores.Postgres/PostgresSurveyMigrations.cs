@@ -68,5 +68,8 @@ public static class PostgresSurveyMigrations
             (token_hash IS NULL) = (issued_at IS NULL) AND (token_hash IS NULL) = (expires_at IS NULL) AND (state NOT IN (2, 3) OR token_hash IS NOT NULL));
         ALTER TABLE tf_survey_invitations ADD CONSTRAINT tf_survey_invitations_lease_v2 CHECK ((state = 6) = (lease_until IS NOT NULL));
         CREATE INDEX tf_survey_invitations_leases ON tf_survey_invitations (scope_key, lease_until) WHERE state = 6;
+        """),
+        new(3, "perf-indexes", """
+        CREATE INDEX tf_survey_responses_aggregate ON tf_survey_responses (scope_key, kind, responded_at DESC) INCLUDE (survey_id, score, inbox_id, team_id, agent_id);
         """)]);
 }

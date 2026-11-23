@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using MimeKit;
@@ -22,6 +23,14 @@ public sealed class MailboxMimeNormalizer(IMailboxAttachmentStore attachmentStor
     public async Task<(string MessageId, InboundChannelMessage? Message, string? SkipReason)> NormalizeAsync(
         MailboxEndpointConfig config, uint uidValidity, uint uid, byte[] rawMimeBytes, DateTimeOffset fallbackReceivedAt, CancellationToken cancellationToken = default)
     {
+        var (messageId, message, skipReason, _) = await NormalizeInternalAsync(config, uidValidity, uid, rawMimeBytes, fallbackReceivedAt, isSeen: null, cancellationToken).ConfigureAwait(false);
+        return (messageId, message, skipReason);
+    }
+
+    internal async Task<(string MessageId, InboundChannelMessage? Message, string? SkipReason, bool AlreadySeen)> NormalizeInternalAsync(
+        MailboxEndpointConfig config, uint uidValidity, uint uid, byte[] rawMimeBytes, DateTimeOffset fallbackReceivedAt,
+        Func<string, CancellationToken, Task<bool>>? isSeen, CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(rawMimeBytes);
 
@@ -30,11 +39,15 @@ public sealed class MailboxMimeNormalizer(IMailboxAttachmentStore attachmentStor
 
         var messageId = NormalizeMessageId(mime.MessageId) ?? $"uid:{uidValidity}:{uid}";
 
+        // Check seen Message-Id BEFORE uploading any attachments to blob storage so rescans/duplicates never leak blobs.
+        if (isSeen is not null && await isSeen(messageId, cancellationToken).ConfigureAwait(false))
+            return (messageId, null, null, AlreadySeen: true);
+
         // Extract sender from Reply-To (when present and valid) else From; email headers are never verified authentication.
         var senderBox = mime.ReplyTo.Mailboxes.FirstOrDefault(m => !string.IsNullOrWhiteSpace(m.Address))
             ?? mime.From.Mailboxes.FirstOrDefault(m => !string.IsNullOrWhiteSpace(m.Address));
         if (senderBox is null)
-            return (messageId, null, "missing-sender");
+            return (messageId, null, "missing-sender", AlreadySeen: false);
 
         var inReplyTo = NormalizeMessageId(mime.InReplyTo);
         var references = new List<string>();
@@ -53,43 +66,52 @@ public sealed class MailboxMimeNormalizer(IMailboxAttachmentStore attachmentStor
             references.Add(inReplyTo);
 
         var attachments = new List<AttachmentRef>();
-        foreach (var entity in mime.Attachments)
+        byte[]? chunk = null;
+        try
         {
-            if (attachments.Count >= config.MaximumAttachments)
-                break;
-            if (entity is MimePart { Content: not null } part)
+            foreach (var entity in mime.Attachments)
             {
-                await using var decoded = part.Content.Open();
-                using var buffer = new MemoryStream();
-                var chunk = new byte[8192];
-                long total = 0;
-                var oversized = false;
-                int read;
-                while ((read = await decoded.ReadAsync(chunk, cancellationToken).ConfigureAwait(false)) > 0)
+                if (attachments.Count >= config.MaximumAttachments)
+                    break;
+                if (entity is MimePart { Content: not null } part)
                 {
-                    total += read;
-                    if (total > config.MaximumAttachmentBytes)
+                    chunk ??= ArrayPool<byte>.Shared.Rent(8192);
+                    await using var decoded = part.Content.Open();
+                    using var buffer = new MemoryStream();
+                    long total = 0;
+                    var oversized = false;
+                    int read;
+                    while ((read = await decoded.ReadAsync(chunk.AsMemory(0, 8192), cancellationToken).ConfigureAwait(false)) > 0)
                     {
-                        oversized = true;
-                        break;
+                        total += read;
+                        if (total > config.MaximumAttachmentBytes)
+                        {
+                            oversized = true;
+                            break;
+                        }
+                        buffer.Write(chunk, 0, read);
                     }
-                    buffer.Write(chunk, 0, read);
+                    if (oversized || total == 0)
+                        continue;
+                    buffer.Position = 0;
+                    var fileName = SanitizeFileName(part.FileName ?? "attachment.bin");
+                    var mediaType = SanitizeMediaType(part.ContentType?.MimeType ?? "application/octet-stream");
+                    var stored = await attachmentStore.StoreAsync(config.Scope, config.ConfigurationId,
+                        new MailboxAttachmentUpload(fileName, mediaType, total, buffer), cancellationToken).ConfigureAwait(false);
+                    attachments.Add(stored);
                 }
-                if (oversized || total == 0)
-                    continue;
-                buffer.Position = 0;
-                var fileName = SanitizeFileName(part.FileName ?? "attachment.bin");
-                var mediaType = SanitizeMediaType(part.ContentType?.MimeType ?? "application/octet-stream");
-                var stored = await attachmentStore.StoreAsync(config.Scope, config.ConfigurationId,
-                    new MailboxAttachmentUpload(fileName, mediaType, total, buffer), cancellationToken).ConfigureAwait(false);
-                attachments.Add(stored);
             }
+        }
+        finally
+        {
+            if (chunk is not null)
+                ArrayPool<byte>.Shared.Return(chunk);
         }
 
         var bodyText = TruncateUtf8(mime.TextBody, ConversationMessageLimits.MaximumBodyBytes);
         var bodyHtml = TruncateUtf8(mime.HtmlBody, ConversationMessageLimits.MaximumBodyBytes * 2);
         if (string.IsNullOrWhiteSpace(bodyText) && string.IsNullOrWhiteSpace(bodyHtml) && attachments.Count == 0)
-            return (messageId, null, "empty-message");
+            return (messageId, null, "empty-message", AlreadySeen: false);
 
         var subject = string.IsNullOrWhiteSpace(mime.Subject) ? null : TruncateChars(mime.Subject.Trim(), InboundChannelMessage.MaximumSubjectLength);
         var displayName = string.IsNullOrWhiteSpace(senderBox.Name) ? null : TruncateChars(senderBox.Name.Trim(), InboundChannelMessage.MaximumDisplayNameLength);
@@ -110,7 +132,7 @@ public sealed class MailboxMimeNormalizer(IMailboxAttachmentStore attachmentStor
             references: references,
             subject: subject,
             senderDisplayName: displayName);
-        return (messageId, inbound, null);
+        return (messageId, inbound, null, AlreadySeen: false);
     }
 
     /// <summary>Normalizes a RFC 5322 Message-Id (strips surrounding angle brackets and trims whitespace; bounded to channel limits).</summary>
@@ -118,12 +140,14 @@ public sealed class MailboxMimeNormalizer(IMailboxAttachmentStore attachmentStor
     {
         if (string.IsNullOrWhiteSpace(raw))
             return null;
-        var trimmed = raw.Trim();
-        if (trimmed.StartsWith('<') && trimmed.EndsWith('>') && trimmed.Length > 2)
-            trimmed = trimmed[1..^1].Trim();
-        if (trimmed.Length == 0)
+        var span = raw.AsSpan().Trim();
+        if (span.Length > 2 && span[0] == '<' && span[^1] == '>')
+            span = span[1..^1].Trim();
+        if (span.Length == 0)
             return null;
-        return trimmed.Length <= ChannelText.MaximumExternalIdLength ? trimmed : trimmed[..ChannelText.MaximumExternalIdLength];
+        if (span.Length > ChannelText.MaximumExternalIdLength)
+            span = span[..ChannelText.MaximumExternalIdLength];
+        return span.Length == raw.Length ? raw : span.ToString();
     }
 
     private static string SanitizeFileName(string name)
@@ -136,23 +160,34 @@ public sealed class MailboxMimeNormalizer(IMailboxAttachmentStore attachmentStor
 
     private static string SanitizeMediaType(string mediaType)
     {
-        var trimmed = mediaType.Trim();
-        if (trimmed.Length == 0 || !trimmed.Contains('/') || trimmed.Any(char.IsWhiteSpace) || trimmed.Length > AttachmentRef.MaximumMediaTypeLength)
+        var trimmed = mediaType.AsSpan().Trim();
+        if (trimmed.Length == 0 || !trimmed.Contains('/') || trimmed.Length > AttachmentRef.MaximumMediaTypeLength)
             return "application/octet-stream";
-        return trimmed;
+        for (var i = 0; i < trimmed.Length; i++)
+            if (char.IsWhiteSpace(trimmed[i]))
+                return "application/octet-stream";
+        return trimmed.Length == mediaType.Length ? mediaType : trimmed.ToString();
     }
 
     private static string? TruncateUtf8(string? text, int maxBytes)
     {
         if (text is null)
             return null;
-        if (Encoding.UTF8.GetByteCount(text) <= maxBytes)
+        if (text.Length <= maxBytes / 3 || Encoding.UTF8.GetByteCount(text) <= maxBytes)
             return text;
-        var bytes = Encoding.UTF8.GetBytes(text);
-        var len = maxBytes;
-        while (len > 0 && (bytes[len] & 0xC0) == 0x80)
-            len--;
-        return Encoding.UTF8.GetString(bytes, 0, len);
+        var span = text.AsSpan();
+        var bytes = 0;
+        var index = 0;
+        while (index < span.Length)
+        {
+            var status = Rune.DecodeFromUtf16(span[index..], out var rune, out var consumed);
+            var size = status == OperationStatus.Done ? rune.Utf8SequenceLength : 3;
+            if (bytes + size > maxBytes)
+                break;
+            bytes += size;
+            index += Math.Max(consumed, 1);
+        }
+        return text[..index];
     }
 
     private static string TruncateChars(string text, int maxChars) => text.Length <= maxChars ? text : text[..maxChars];
@@ -203,9 +238,56 @@ public sealed class MailboxPoller(
         var uids = await client.ListUidsAfterAsync(lastUid, config.MaximumMessagesPerPoll, cancellationToken).ConfigureAwait(false);
         int fetched = 0, ingested = 0, deduplicated = 0, skipped = 0;
 
+        // Batch-fetch IMAP metadata summaries and seen Message-Ids when supported by the client so already-seen or oversized
+        // messages are skipped without downloading MIME bodies.
+        Dictionary<uint, MailboxMessageSummary>? summaryByUid = null;
+        IReadOnlySet<string>? batchSeen = null;
+        if (uids.Count > 0 && await client.FetchSummariesAsync(uids, cancellationToken).ConfigureAwait(false) is { } summaries)
+        {
+            summaryByUid = new Dictionary<uint, MailboxMessageSummary>(summaries.Count);
+            var candidateIds = new List<string>(summaries.Count);
+            for (var i = 0; i < summaries.Count; i++)
+            {
+                var summary = summaries[i];
+                summaryByUid[summary.Uid] = summary;
+                if (summary.SizeBytes <= config.MaximumMessageBytes)
+                    candidateIds.Add(MailboxMimeNormalizer.NormalizeMessageId(summary.MessageId) ?? $"uid:{state.UidValidity}:{summary.Uid}");
+            }
+            if (candidateIds.Count > 0)
+                batchSeen = await checkpoints.FindSeenMessageIdsAsync(config.Scope, config.ConfigurationId, config.Folder, candidateIds, cancellationToken).ConfigureAwait(false);
+        }
+
         foreach (var uid in uids)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (summaryByUid is not null)
+            {
+                if (!summaryByUid.TryGetValue(uid, out var summary))
+                {
+                    skipped++;
+                    continue;
+                }
+                if (summary.SizeBytes > config.MaximumMessageBytes)
+                {
+                    fetched++;
+                    skipped++;
+                    lastUid = uid;
+                    await checkpoints.SaveCheckpointAsync(config.Scope, config.ConfigurationId, config.Folder,
+                        new MailboxCheckpoint(state.UidValidity, lastUid, time.GetUtcNow()), cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+                var summaryMsgId = MailboxMimeNormalizer.NormalizeMessageId(summary.MessageId) ?? $"uid:{state.UidValidity}:{uid}";
+                if (batchSeen is not null && batchSeen.Contains(summaryMsgId))
+                {
+                    fetched++;
+                    deduplicated++;
+                    lastUid = uid;
+                    await checkpoints.SaveCheckpointAsync(config.Scope, config.ConfigurationId, config.Folder,
+                        new MailboxCheckpoint(state.UidValidity, lastUid, time.GetUtcNow()), cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+            }
+
             var raw = await client.FetchMessageAsync(uid, config.MaximumMessageBytes, cancellationToken).ConfigureAwait(false);
             if (raw is null)
             {
@@ -223,8 +305,13 @@ public sealed class MailboxPoller(
             }
 
             var now = time.GetUtcNow();
-            var (messageId, inbound, skipReason) = await normalizer.NormalizeAsync(config, state.UidValidity, uid, raw.RawMimeBytes, now, cancellationToken).ConfigureAwait(false);
-            if (await checkpoints.HasSeenMessageIdAsync(config.Scope, config.ConfigurationId, config.Folder, messageId, cancellationToken).ConfigureAwait(false))
+            var (messageId, inbound, skipReason, alreadySeen) = await normalizer.NormalizeInternalAsync(
+                config, state.UidValidity, uid, raw.RawMimeBytes, now,
+                (id, ct) => batchSeen is not null && batchSeen.Contains(id)
+                    ? Task.FromResult(true)
+                    : checkpoints.HasSeenMessageIdAsync(config.Scope, config.ConfigurationId, config.Folder, id, ct),
+                cancellationToken).ConfigureAwait(false);
+            if (alreadySeen)
             {
                 deduplicated++;
                 lastUid = uid;
@@ -237,9 +324,8 @@ public sealed class MailboxPoller(
             {
                 logger?.LogDebug("Skipped IMAP message UID {Uid} in {Config}/{Folder}: {Reason}.", uid, config.ConfigurationId, config.Folder, skipReason);
                 skipped++;
-                await checkpoints.TryRecordMessageIdAsync(config.Scope, config.ConfigurationId, config.Folder, messageId, now, cancellationToken).ConfigureAwait(false);
                 lastUid = uid;
-                await checkpoints.SaveCheckpointAsync(config.Scope, config.ConfigurationId, config.Folder,
+                await checkpoints.RecordAndSaveCheckpointAsync(config.Scope, config.ConfigurationId, config.Folder, messageId,
                     new MailboxCheckpoint(state.UidValidity, lastUid, now), cancellationToken).ConfigureAwait(false);
                 continue;
             }
@@ -252,9 +338,8 @@ public sealed class MailboxPoller(
                         deduplicated++;
                     else
                         ingested++;
-                    await checkpoints.TryRecordMessageIdAsync(config.Scope, config.ConfigurationId, config.Folder, messageId, now, cancellationToken).ConfigureAwait(false);
                     lastUid = uid;
-                    await checkpoints.SaveCheckpointAsync(config.Scope, config.ConfigurationId, config.Folder,
+                    await checkpoints.RecordAndSaveCheckpointAsync(config.Scope, config.ConfigurationId, config.Folder, messageId,
                         new MailboxCheckpoint(state.UidValidity, lastUid, now), cancellationToken).ConfigureAwait(false);
                     break;
                 case InboundRejected rejected:
@@ -262,9 +347,8 @@ public sealed class MailboxPoller(
                     if (rejected.Reason is InboundRejection.ContactBlocked or InboundRejection.InvalidSender or InboundRejection.Invalid)
                     {
                         skipped++;
-                        await checkpoints.TryRecordMessageIdAsync(config.Scope, config.ConfigurationId, config.Folder, messageId, now, cancellationToken).ConfigureAwait(false);
                         lastUid = uid;
-                        await checkpoints.SaveCheckpointAsync(config.Scope, config.ConfigurationId, config.Folder,
+                        await checkpoints.RecordAndSaveCheckpointAsync(config.Scope, config.ConfigurationId, config.Folder, messageId,
                             new MailboxCheckpoint(state.UidValidity, lastUid, now), cancellationToken).ConfigureAwait(false);
                     }
                     else

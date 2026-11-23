@@ -93,7 +93,7 @@ public sealed class PostgresReportingStoreTests
         await using var database = await Database.CreateAsync();
         await database.Store.InitializeAsync();
         await database.Competing.InitializeAsync();
-        Assert.AreEqual(2, Convert.ToInt32(await database.ScalarAsync("SELECT max(version) FROM tf_store_migrations WHERE component = 'ticketflow.reporting'")));
+        Assert.AreEqual(3, Convert.ToInt32(await database.ScalarAsync("SELECT max(version) FROM tf_store_migrations WHERE component = 'ticketflow.reporting'")));
     }
 
     [TestMethod]

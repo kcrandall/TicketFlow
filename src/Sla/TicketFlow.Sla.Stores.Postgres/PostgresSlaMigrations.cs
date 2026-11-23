@@ -44,5 +44,9 @@ public static class PostgresSlaMigrations
         CREATE INDEX tf_sla_timers_due ON tf_sla_timers (due_at, tracker_key) WHERE due_at IS NOT NULL;
         """), new(2, "at-risk-index", """
         CREATE INDEX tf_sla_trackers_at_risk ON tf_sla_trackers (scope_key, at_risk_at) WHERE at_risk_at IS NOT NULL AND NOT breached;
+        """), new(3, "perf-indexes", """
+        CREATE INDEX tf_sla_trackers_labels ON tf_sla_trackers USING gin (labels);
+        CREATE INDEX tf_sla_timers_due_v2 ON tf_sla_timers (due_at, tracker_key) INCLUDE (lease_until) WHERE due_at IS NOT NULL;
+        CREATE INDEX tf_sla_trackers_urgency_v2 ON tf_sla_trackers (scope_key, urgency_at, conversation_id) INCLUDE (inbox_id, team_id, assignee_id, breached, at_risk_at) WHERE urgency_at IS NOT NULL;
         """)]);
 }

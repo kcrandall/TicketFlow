@@ -7,7 +7,7 @@ using TicketFlow.Core;
 namespace TicketFlow.Events;
 
 /// <summary>Writes an event payload at a privacy level: identifiers always, metadata only when requested.</summary>
-internal sealed class EventDataWriter(Utf8JsonWriter writer, bool metadata)
+internal readonly struct EventDataWriter(Utf8JsonWriter writer, bool metadata)
 {
     public Utf8JsonWriter Raw => writer;
 
@@ -22,8 +22,8 @@ internal sealed class EventDataWriter(Utf8JsonWriter writer, bool metadata)
     public void Actor(string name, EventActor actor)
     {
         writer.WriteStartObject(name);
-        writer.WriteString("kind", actor.Kind);
-        writer.WriteString("id", actor.Id);
+        writer.WriteString("kind"u8, actor.Kind);
+        writer.WriteString("id"u8, actor.Id);
         writer.WriteEndObject();
     }
 
@@ -48,7 +48,7 @@ internal sealed class EventDataWriter(Utf8JsonWriter writer, bool metadata)
     public void Instant(string name, DateTimeOffset? value)
     {
         if (metadata && value is { } instant)
-            writer.WriteString(name, EventJson.FormatInstant(instant));
+            EventJson.WriteInstant(writer, name, instant);
     }
 
     public void Duration(string name, TimeSpan? value)
@@ -62,16 +62,16 @@ internal sealed class EventDataWriter(Utf8JsonWriter writer, bool metadata)
         if (!metadata)
             return;
         writer.WriteStartArray(name);
-        foreach (var label in labels)
-            writer.WriteStringValue(label.Value);
+        for (var i = 0; i < labels.Count; i++)
+            writer.WriteStringValue(labels[i].Value);
         writer.WriteEndArray();
     }
 }
 
 /// <summary>Reads one payload object strictly: every property must be read exactly once and known; <see cref="Done"/> enforces it.</summary>
-internal sealed class EventDataReader(JsonElement root)
+internal struct EventDataReader(JsonElement root)
 {
-    private readonly HashSet<string> known = new(StringComparer.Ordinal) { "v" };
+    private int matchedPresent;
 
     public string String(string name) => EventJson.String(Get(name));
 
@@ -101,34 +101,49 @@ internal sealed class EventDataReader(JsonElement root)
         var array = Get(name);
         if (array.ValueKind != JsonValueKind.Array)
             throw new FormatException("Expected an array.");
-        return [.. array.EnumerateArray().Select(item => new LabelId(EventJson.String(item)))];
+        var count = array.GetArrayLength();
+        if (count == 0)
+            return [];
+        var labels = new LabelId[count];
+        var index = 0;
+        foreach (var item in array.EnumerateArray())
+            labels[index++] = new LabelId(EventJson.String(item));
+        return labels;
     }
 
     public EventActor Actor(string name)
     {
         var value = Get(name);
-        if (value.ValueKind != JsonValueKind.Object || value.EnumerateObject().Count() != 2)
+        if (value.ValueKind != JsonValueKind.Object)
             throw new FormatException("Expected an actor object.");
-        return new EventActor(EventJson.String(value.GetProperty("kind")), EventJson.String(value.GetProperty("id")));
+        var count = 0;
+        foreach (var _ in value.EnumerateObject())
+            count++;
+        if (count != 2 || !value.TryGetProperty("kind"u8, out var kind) || !value.TryGetProperty("id"u8, out var id))
+            throw new FormatException("Expected an actor object.");
+        return new EventActor(EventJson.String(kind), EventJson.String(id));
     }
 
-    public void Done()
+    public readonly void Done()
     {
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var property in root.EnumerateObject())
-            if (!known.Contains(property.Name) || !seen.Add(property.Name))
-                throw new FormatException("Unknown or duplicate payload property.");
+        // Every known property is requested at most once by IntegrationEventCodec.Read, plus the required "v" property.
+        // If any unknown or duplicate property exists in root, the total enumerated property count exceeds matchedPresent + 1.
+        var total = 0;
+        foreach (var _ in root.EnumerateObject())
+            total++;
+        if (total != matchedPresent + 1)
+            throw new FormatException("Unknown or duplicate payload property.");
     }
 
     private JsonElement Get(string name) => TryGet(name, out var value) ? value : throw new FormatException("A required payload property is missing.");
 
     private bool TryGet(string name, out JsonElement value)
     {
-        known.Add(name);
         if (root.TryGetProperty(name, out value))
         {
             if (value.ValueKind == JsonValueKind.Null)
                 throw new FormatException("Payload properties are omitted, never null.");
+            matchedPresent++;
             return true;
         }
         return false;
@@ -140,12 +155,56 @@ internal static class EventJson
     public static readonly JsonReaderOptions ReaderOptions = new() { MaxDepth = 16 };
     private static readonly JsonWriterOptions WriterOptions = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Default, Indented = false };
 
+    [ThreadStatic]
+    private static ArrayBufferWriter<byte>? sharedBuffer;
+
+    [ThreadStatic]
+    private static Utf8JsonWriter? sharedWriter;
+
     public static string Write(Action<Utf8JsonWriter> write)
     {
-        var buffer = new ArrayBufferWriter<byte>();
-        using (var writer = new Utf8JsonWriter(buffer, WriterOptions))
+        var buffer = sharedBuffer;
+        var writer = sharedWriter;
+        sharedBuffer = null;
+        sharedWriter = null;
+        if (buffer is null)
+            buffer = new ArrayBufferWriter<byte>(512);
+        else
+            buffer.ResetWrittenCount();
+        if (writer is null)
+            writer = new Utf8JsonWriter(buffer, WriterOptions);
+        else
+            writer.Reset(buffer);
+        try
+        {
             write(writer);
-        return Encoding.UTF8.GetString(buffer.WrittenSpan);
+            writer.Flush();
+            return Encoding.UTF8.GetString(buffer.WrittenSpan);
+        }
+        finally
+        {
+            if (buffer.Capacity <= 65536)
+            {
+                sharedBuffer = buffer;
+                sharedWriter = writer;
+            }
+            else
+                writer.Dispose();
+        }
+    }
+
+    public static void WriteInstant(Utf8JsonWriter writer, string name, DateTimeOffset value)
+    {
+        Span<char> chars = stackalloc char[27];
+        EventText.Instant(value).UtcDateTime.TryFormat(chars, out var written, "yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture);
+        writer.WriteString(name, chars[..written]);
+    }
+
+    public static void WriteInstant(Utf8JsonWriter writer, ReadOnlySpan<byte> name, DateTimeOffset value)
+    {
+        Span<char> chars = stackalloc char[27];
+        EventText.Instant(value).UtcDateTime.TryFormat(chars, out var written, "yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture);
+        writer.WriteString(name, chars[..written]);
     }
 
     public static string FormatInstant(DateTimeOffset value) =>

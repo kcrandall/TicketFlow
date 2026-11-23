@@ -1,6 +1,15 @@
 @using TicketFlow.Conversations
-<BbBadge Variant="BadgeVariant.Outline" Class="@($"tf-status tf-status--{Kind.ToString().ToLowerInvariant()}")"><span class="tf-dot"></span>@UiFormat.Status(Kind)</BbBadge>
+<BbBadge Variant="BadgeVariant.Outline" Class="@CssClass"><span class="tf-dot"></span>@UiFormat.Status(Kind)</BbBadge>
 
 @code {
     [Parameter] public ConversationStatusKind Kind { get; set; }
+
+    private string CssClass => Kind switch
+    {
+        ConversationStatusKind.Open => "tf-status tf-status--open",
+        ConversationStatusKind.Pending => "tf-status tf-status--pending",
+        ConversationStatusKind.Snoozed => "tf-status tf-status--snoozed",
+        ConversationStatusKind.Resolved => "tf-status tf-status--resolved",
+        _ => "tf-status tf-status--closed",
+    };
 }

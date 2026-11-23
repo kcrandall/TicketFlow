@@ -119,7 +119,9 @@ public sealed class WalFlowEventSink : IEventSink
             after[property.Name] = property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString() : property.Value.Clone();
         var stored = rendered.Event;
         var type = stored.Event.Type;
-        var area = type.Split('.')[1];
+        var firstDot = type.IndexOf('.');
+        var secondDot = type.IndexOf('.', firstDot + 1);
+        var area = type[(firstDot + 1)..secondDot];
         var partitionKey = stored.Resource.Conversation?.Value ?? stored.Resource.Contact?.Value ?? stored.Scope.WorkspaceId.Value;
         var milliseconds = stored.RecordedAt.ToUnixTimeMilliseconds();
         return new DebeziumPayload

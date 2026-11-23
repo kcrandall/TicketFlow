@@ -39,8 +39,9 @@ public sealed class MacroService(IMacroStore macros, IAccessEvaluator evaluator,
         var scope = AutomationGuards.RequireActor(actor);
         if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.MacroRun, cancellationToken).ConfigureAwait(false))
             return AutomationRefused.Forbidden;
-        var all = await macros.ListAsync(scope, cancellationToken).ConfigureAwait(false);
-        return new AutomationValue<IReadOnlyList<StoredMacro>>([.. all.Where(stored => Visible(actor, stored.Macro))]);
+        UserId? owner = actor.Value is UserPrincipal user ? user.UserId : null;
+        var visible = await macros.ListVisibleAsync(scope, owner, cancellationToken).ConfigureAwait(false);
+        return new AutomationValue<IReadOnlyList<StoredMacro>>(visible);
     }
 
     public async Task<AutomationResult<StoredMacro>> CreateAsync(PrincipalRef actor, Macro macro, CancellationToken cancellationToken = default)
@@ -96,20 +97,32 @@ public sealed class MacroService(IMacroStore macros, IAccessEvaluator evaluator,
         var macro = await macros.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
         if (macro is null || !Visible(actor, macro.Macro))
             return AutomationNotFound.Instance;
-        var (context, failure) = await contexts.BuildAsync(actor, conversation, AutomationEvent.ConversationUpdated(ConversationUpdateField.Status), null, cancellationToken).ConfigureAwait(false);
+        var needs = AutomationContextNeedsHelper.ForActions(macro.Macro.Actions);
+        var (context, failure) = await contexts.BuildInternalAsync(actor, conversation, AutomationEvent.ConversationUpdated(ConversationUpdateField.Status), null, needs, cache: null, cancellationToken)
+            .ConfigureAwait(false);
         if (context is null)
             return failure == AutomationContextFailure.Forbidden ? AutomationRefused.Forbidden : AutomationNotFound.Instance;
-        var agentName = actor.Value is UserPrincipal user && agents is not null ? await agents.GetDisplayNameAsync(scope, user.UserId, cancellationToken).ConfigureAwait(false) : null;
+        var agentName = (needs & AutomationContextNeeds.AgentName) != 0 && actor.Value is UserPrincipal user && agents is not null
+            ? await agents.GetDisplayNameAsync(scope, user.UserId, cancellationToken).ConfigureAwait(false)
+            : null;
         var run = Guid.NewGuid();
-        var outcomes = new List<AutomationActionOutcome>();
+        var outcomes = new List<AutomationActionOutcome>(macro.Macro.Actions.Count);
         var completed = true;
+        var conversationDirty = false;
         for (var index = 0; index < macro.Macro.Actions.Count; index++)
         {
-            if (index > 0 && (await contexts.BuildAsync(actor, conversation, context.Event, null, cancellationToken).ConfigureAwait(false)).Context is { } refreshed)
-                context = refreshed;
-            var outcome = await executor.ExecuteAsync(actor, new AutomationActionRequest(macro.Macro.Actions[index], context, $"macro-{run:N}-{index}", agentName), cancellationToken)
+            var action = macro.Macro.Actions[index];
+            if (conversationDirty && AutomationContextNeedsHelper.ActionReadsMutableConversationState(action))
+            {
+                if (await contexts.RefreshConversationAsync(actor, context, cancellationToken).ConfigureAwait(false) is { } refreshed)
+                    context = refreshed;
+                conversationDirty = false;
+            }
+            var outcome = await executor.ExecuteAsync(actor, new AutomationActionRequest(action, context, $"macro-{run:N}-{index}", agentName), cancellationToken)
                 .ConfigureAwait(false);
             outcomes.Add(outcome);
+            if (outcome.Value is AutomationActionApplied { Sequences.Count: > 0 })
+                conversationDirty = true;
             if (outcome.Value is AutomationActionRefused or AutomationActionFailed)
             {
                 completed = false;

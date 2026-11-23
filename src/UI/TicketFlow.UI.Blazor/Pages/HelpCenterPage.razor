@@ -22,8 +22,8 @@
 else
 {
     <div class="tf-grid tf-grid--stats">
-        <StatCard Label="Published articles" Value="@articles.Count(article => article.Record.State == ArticleState.Published).ToString(CultureInfo.InvariantCulture)" Hint="@($"{portal.Portal.Name} · /{portal.Portal.Slug.Value}")" />
-        <StatCard Label="Drafts" Value="@articles.Count(article => article.Record.State == ArticleState.Draft).ToString(CultureInfo.InvariantCulture)" Hint="Not visible to customers" />
+        <StatCard Label="Published articles" Value="@publishedCount.ToString(CultureInfo.InvariantCulture)" Hint="@($"{portal.Portal.Name} · /{portal.Portal.Slug.Value}")" />
+        <StatCard Label="Drafts" Value="@draftCount.ToString(CultureInfo.InvariantCulture)" Hint="Not visible to customers" />
         <StatCard Label="Collections" Value="@collections.Count.ToString(CultureInfo.InvariantCulture)" Hint="Top-level sections of the portal" />
         <StatCard Label="Visibility" Value="@portal.Portal.Visibility.ToString()" Hint="@($"Locales: {string.Join(", ", portal.Portal.SupportedLocales.Select(locale => locale.Value))}")" />
     </div>
@@ -38,7 +38,7 @@ else
                 <table class="tf-table">
                     <thead><tr><th>Title</th><th>Collection</th><th>Status</th><th class="tf-num">Updated</th></tr></thead>
                     <tbody>
-                        @foreach (var article in Visible)
+                        @foreach (var article in visible)
                         {
                             var translation = article.Record.Article.Translations.FirstOrDefault(item => item.Locale == portal.Portal.DefaultLocale) ?? article.Record.Article.Translations[0];
                             <tr>
@@ -48,7 +48,7 @@ else
                                 <td class="tf-num tf-muted">@UiFormat.Relative(article.Record.UpdatedAt, Now)</td>
                             </tr>
                         }
-                        @if (!Visible.Any())
+                        @if (visible.Count == 0)
                         {
                             <tr><td colspan="4" class="tf-muted">No articles in this view.</td></tr>
                         }
@@ -67,7 +67,7 @@ else
                             <li>
                                 <LucideIcon Name="folder" Size="16" />
                                 <div class="tf-list__main"><span class="tf-list__title">@translation.Name</span><span class="tf-list__meta">@(translation.Description ?? "")</span></div>
-                                <span class="tf-badge">@articles.Count(article => article.Record.Article.Collection == collection.Collection.Id)</span>
+                                <span class="tf-badge">@collectionArticleCounts.GetValueOrDefault(collection.Collection.Id)</span>
                             </li>
                         }
                     </ul>
@@ -104,16 +104,13 @@ else
     private StoredPortal? portal;
     private List<StoredCollection> collections = [];
     private List<StoredArticle> articles = [];
+    private List<StoredArticle> visible = [];
+    private readonly Dictionary<CollectionId, string> collectionNames = [];
+    private readonly Dictionary<CollectionId, int> collectionArticleCounts = [];
+    private int publishedCount;
+    private int draftCount;
 
-    private IEnumerable<StoredArticle> Visible => Query("state") switch
-    {
-        "published" => articles.Where(article => article.Record.State == ArticleState.Published),
-        "draft" => articles.Where(article => article.Record.State == ArticleState.Draft),
-        "archived" => articles.Where(article => article.Record.State == ArticleState.Archived),
-        _ => articles,
-    };
-
-    private string CollectionName(CollectionId? id) => id is { } value ? collections.FirstOrDefault(item => item.Collection.Id == value)?.Collection.Translations[0].Name ?? value.Value : "—";
+    private string CollectionName(CollectionId? id) => id is { } value ? collectionNames.GetValueOrDefault(value, value.Value) : "—";
 
     protected override async Task OnInitializedAsync()
     {
@@ -124,9 +121,36 @@ else
         portal = portals.FirstOrDefault(item => item.Portal.Id.Value == Query("portal")) ?? portals.FirstOrDefault();
         if (portal is null)
             return;
-        if (await service.ListCollectionsAsync(Actor, portal.Portal.Id, Aborted) is HelpCenterSucceeded<IReadOnlyList<StoredCollection>> collectionList)
+        var collectionsTask = service.ListCollectionsAsync(Actor, portal.Portal.Id, Aborted);
+        var articlesTask = service.ListArticlesAsync(Actor, new ArticleListQuery(portal.Portal.Id, limit: 100), Aborted);
+        await Task.WhenAll(collectionsTask, articlesTask);
+
+        if (await collectionsTask is HelpCenterSucceeded<IReadOnlyList<StoredCollection>> collectionList)
+        {
             collections = [.. collectionList.Value.OrderBy(item => item.Collection.Position)];
-        if (await service.ListArticlesAsync(Actor, new ArticleListQuery(portal.Portal.Id, limit: 100), Aborted) is HelpCenterSucceeded<HelpCenterPage<StoredArticle>> page)
+            foreach (var c in collections)
+                collectionNames[c.Collection.Id] = c.Collection.Translations[0].Name;
+        }
+        if (await articlesTask is HelpCenterSucceeded<HelpCenterPage<StoredArticle>> page)
+        {
             articles = [.. page.Value.Items.OrderByDescending(article => article.Record.UpdatedAt)];
+            var stateFilter = Query("state") switch
+            {
+                "published" => (ArticleState?)ArticleState.Published,
+                "draft" => ArticleState.Draft,
+                "archived" => ArticleState.Archived,
+                _ => null,
+            };
+            visible = new List<StoredArticle>(articles.Count);
+            foreach (var article in articles)
+            {
+                if (article.Record.State == ArticleState.Published) publishedCount++;
+                else if (article.Record.State == ArticleState.Draft) draftCount++;
+                if (article.Record.Article.Collection is { } cid)
+                    collectionArticleCounts[cid] = collectionArticleCounts.GetValueOrDefault(cid) + 1;
+                if (stateFilter is null || article.Record.State == stateFilter)
+                    visible.Add(article);
+            }
+        }
     }
 }

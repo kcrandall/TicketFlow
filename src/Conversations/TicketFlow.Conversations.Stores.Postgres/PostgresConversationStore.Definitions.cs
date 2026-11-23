@@ -1,3 +1,4 @@
+using System.Data;
 using Npgsql;
 using TicketFlow.Core;
 
@@ -8,12 +9,30 @@ public sealed partial class PostgresConversationStore
     private const string DefinitionColumns = "attribute_key, format_version, attribute_type, sensitive, display_name, revision";
     private const string DefinitionKey = "definition_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@key) AND attribute_key=@key AND " + ScopeWhere;
 
+    private const string CreateDefinitionSql = $"""
+        WITH existing AS (
+            SELECT revision FROM tf_conversation_attribute_definitions WHERE {DefinitionKey}
+        ),
+        inserted AS (
+            INSERT INTO tf_conversation_attribute_definitions(tenant_id, project_id, environment_id, app_id, workspace_id, attribute_key, format_version, attribute_type,
+                sensitive, display_name, revision)
+            SELECT @tenant, @project, @environment, @app, @workspace, @key, 1, @type, @sensitive, @display_name, 1
+            WHERE NOT EXISTS (SELECT 1 FROM existing)
+              AND (SELECT count(*) FROM tf_conversation_attribute_definitions WHERE scope_key={ScopeKey} AND {ScopeWhere}) < @max
+            RETURNING revision
+        )
+        SELECT (SELECT revision FROM inserted), (SELECT revision FROM existing)
+        """;
+
     public async Task<StoredConversationAttributeDefinition?> GetAsync(TicketScope scope, string key, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ConversationAttributeDefinition.RequireKey(key, nameof(key));
-        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        return await GetDefinitionAsync(connection, null, scope, key, cancellationToken).ConfigureAwait(false);
+        await using var command = source.CreateCommand($"SELECT {DefinitionColumns} FROM tf_conversation_attribute_definitions WHERE {DefinitionKey}");
+        AddScope(command, scope);
+        AddText(command, "key", key);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadDefinition(reader, scope) : null;
     }
 
     public async Task<IReadOnlyList<StoredConversationAttributeDefinition>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default)
@@ -42,25 +61,25 @@ public sealed partial class PostgresConversationStore
             AddTextArray(lockCommand, "parts", ["conversation-definitions", scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value]);
             await lockCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
-        if (await GetDefinitionAsync(connection, transaction, scope, definition.Key, cancellationToken).ConfigureAwait(false) is { } existing)
-            return new ConversationWriteConflict(existing.Revision);
-        await using (var count = new NpgsqlCommand($"SELECT count(*) FROM tf_conversation_attribute_definitions WHERE scope_key={ScopeKey} AND {ScopeWhere}", connection, transaction))
+        long? insertedRevision;
+        long? existingRevision;
+        await using (var create = new NpgsqlCommand(CreateDefinitionSql, connection, transaction))
         {
-            AddScope(count, scope);
-            if ((long)(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))! >= IConversationAttributeDefinitionStore.MaximumDefinitionsPerWorkspace)
-                return new ConversationWriteRejected(ConversationWriteRejection.CapacityExceeded);
+            BindDefinition(create, scope, definition);
+            AddInt64(create, "max", IConversationAttributeDefinitionStore.MaximumDefinitionsPerWorkspace);
+            await using var reader = await create.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+            await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            insertedRevision = reader.IsDBNull(0) ? null : reader.GetInt64(0);
+            existingRevision = reader.IsDBNull(1) ? null : reader.GetInt64(1);
         }
-        await using (var insert = new NpgsqlCommand("""
-            INSERT INTO tf_conversation_attribute_definitions(tenant_id, project_id, environment_id, app_id, workspace_id, attribute_key, format_version, attribute_type,
-                sensitive, display_name, revision)
-            VALUES(@tenant, @project, @environment, @app, @workspace, @key, 1, @type, @sensitive, @display_name, 1)
-            """, connection, transaction))
+        if (insertedRevision is { } rev)
         {
-            BindDefinition(insert, scope, definition);
-            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new ConversationAttributeDefinitionApplied(new(scope, definition, rev));
         }
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new ConversationAttributeDefinitionApplied(new(scope, definition, 1));
+        return existingRevision is { } existing
+            ? new ConversationWriteConflict(existing)
+            : new ConversationWriteRejected(ConversationWriteRejection.CapacityExceeded);
     }
 
     public async Task<ConversationAttributeDefinitionWriteResult> UpdateAsync(TicketScope scope, ConversationAttributeDefinition definition, long expectedRevision, CancellationToken cancellationToken = default)
@@ -75,7 +94,7 @@ public sealed partial class PostgresConversationStore
             """, connection))
         {
             BindDefinition(update, scope, definition);
-            update.Parameters.AddWithValue("expected", expectedRevision);
+            AddInt64(update, "expected", expectedRevision);
             if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
                 return new ConversationAttributeDefinitionApplied(new(scope, definition, revision));
         }
@@ -97,8 +116,8 @@ public sealed partial class PostgresConversationStore
         {
             AddScope(delete, scope);
             AddText(delete, "key", key);
-            delete.Parameters.AddWithValue("expected", expectedRevision);
-            await using var reader = await delete.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            AddInt64(delete, "expected", expectedRevision);
+            await using var reader = await delete.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 return new ConversationAttributeDefinitionApplied(ReadDefinition(reader, scope));
         }
@@ -113,7 +132,7 @@ public sealed partial class PostgresConversationStore
         await using var command = new NpgsqlCommand($"SELECT {DefinitionColumns} FROM tf_conversation_attribute_definitions WHERE {DefinitionKey}", connection, transaction);
         AddScope(command, scope);
         AddText(command, "key", key);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadDefinition(reader, scope) : null;
     }
 
@@ -121,17 +140,24 @@ public sealed partial class PostgresConversationStore
     {
         AddScope(command, scope);
         AddText(command, "key", definition.Key);
-        command.Parameters.AddWithValue("type", (short)definition.Type);
-        command.Parameters.AddWithValue("sensitive", definition.Sensitive);
+        AddInt16(command, "type", (short)definition.Type);
+        AddBool(command, "sensitive", definition.Sensitive);
         AddText(command, "display_name", definition.DisplayName);
     }
 
-    private static StoredConversationAttributeDefinition ReadDefinition(NpgsqlDataReader reader, TicketScope scope) => Decode(() =>
+    private static StoredConversationAttributeDefinition ReadDefinition(NpgsqlDataReader reader, TicketScope scope)
     {
-        if (reader.GetInt16(1) != 1)
-            throw new FormatException("Unsupported attribute definition format version.");
-        return new StoredConversationAttributeDefinition(scope,
-            new ConversationAttributeDefinition(reader.GetString(0), Defined((ConversationAttributeType)reader.GetInt16(2)), reader.GetBoolean(3), NullableText(reader, 4)),
-            reader.GetInt64(5));
-    }, "attribute definition");
+        try
+        {
+            if (reader.GetInt16(1) != 1)
+                throw new FormatException("Unsupported attribute definition format version.");
+            return new StoredConversationAttributeDefinition(scope,
+                new ConversationAttributeDefinition(reader.GetString(0), Defined((ConversationAttributeType)reader.GetInt16(2)), reader.GetBoolean(3), NullableText(reader, 4)),
+                reader.GetInt64(5));
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw new InvalidOperationException("A stored conversation attribute definition is invalid or incompatible.", error);
+        }
+    }
 }

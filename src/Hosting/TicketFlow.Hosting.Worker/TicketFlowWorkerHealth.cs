@@ -26,30 +26,91 @@ public sealed record TicketFlowLoopState(string Loop, TicketFlowLoopStatus Statu
 /// <summary>Tracks every loop's state for <see cref="TicketFlowWorkerHealthCheck"/> and diagnostics.</summary>
 public sealed class TicketFlowWorkerHealth(TimeProvider time)
 {
-    private readonly ConcurrentDictionary<string, TicketFlowLoopState> loops = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, LoopSlot> loops = new(StringComparer.Ordinal);
 
-    public IReadOnlyList<TicketFlowLoopState> Loops => [.. loops.Values.OrderBy(state => state.Loop, StringComparer.Ordinal)];
+    public IReadOnlyList<TicketFlowLoopState> Loops
+    {
+        get
+        {
+            var list = new List<TicketFlowLoopState>(loops.Count);
+            foreach (var slot in loops.Values)
+                list.Add(slot.Snapshot());
+            list.Sort(static (left, right) => string.CompareOrdinal(left.Loop, right.Loop));
+            return list;
+        }
+    }
 
-    public TicketFlowLoopState? Find(string loop) => loops.GetValueOrDefault(loop);
+    public TicketFlowLoopState? Find(string loop) => loops.TryGetValue(loop, out var slot) ? slot.Snapshot() : null;
 
     internal DateTimeOffset Now => time.GetUtcNow();
 
-    internal void Register(string loop) => loops.TryAdd(loop, new TicketFlowLoopState(loop, TicketFlowLoopStatus.Pending, 0, null, null, 0));
+    internal void Register(string loop) => loops.TryAdd(loop, new LoopSlot(loop, TicketFlowLoopStatus.Pending));
 
-    internal void Set(string loop, TicketFlowLoopStatus status) =>
-        loops.AddOrUpdate(loop, name => new TicketFlowLoopState(name, status, 0, null, null, 0), (_, state) => state with { Status = status });
+    internal void Set(string loop, TicketFlowLoopStatus status) => Slot(loop, status).Set(status);
 
-    internal void Started(string loop, TimeSpan interval) =>
-        loops.AddOrUpdate(loop, name => new TicketFlowLoopState(name, TicketFlowLoopStatus.Running, 0, null, null, 0, 0, time.GetUtcNow(), interval),
-            (_, state) => state with { Status = TicketFlowLoopStatus.Running, StartedAt = time.GetUtcNow(), Interval = interval });
+    internal void Started(string loop, TimeSpan interval) => Slot(loop, TicketFlowLoopStatus.Running).Started(time.GetUtcNow(), interval);
 
-    internal void Succeeded(string loop, int items, int itemFailures = 0) =>
-        loops.AddOrUpdate(loop, name => new TicketFlowLoopState(name, TicketFlowLoopStatus.Running, 0, time.GetUtcNow(), null, items, itemFailures),
-            (_, state) => state with { ConsecutiveFailures = 0, LastSuccessAt = time.GetUtcNow(), LastItems = items, LastItemFailures = itemFailures });
+    internal void Succeeded(string loop, int items, int itemFailures = 0) => Slot(loop, TicketFlowLoopStatus.Running).Succeeded(time.GetUtcNow(), items, itemFailures);
 
-    internal void Failed(string loop, int consecutive) =>
-        loops.AddOrUpdate(loop, name => new TicketFlowLoopState(name, TicketFlowLoopStatus.Running, consecutive, null, time.GetUtcNow(), 0),
-            (_, state) => state with { ConsecutiveFailures = consecutive, LastFailureAt = time.GetUtcNow() });
+    internal void Failed(string loop, int consecutive) => Slot(loop, TicketFlowLoopStatus.Running).Failed(time.GetUtcNow(), consecutive);
+
+    private LoopSlot Slot(string loop, TicketFlowLoopStatus initialStatus) =>
+        loops.TryGetValue(loop, out var existing) ? existing : loops.GetOrAdd(loop, static (name, status) => new LoopSlot(name, status), initialStatus);
+
+    private sealed class LoopSlot(string loop, TicketFlowLoopStatus status)
+    {
+        private readonly Lock gate = new();
+        private TicketFlowLoopStatus status = status;
+        private int consecutiveFailures;
+        private DateTimeOffset? lastSuccessAt;
+        private DateTimeOffset? lastFailureAt;
+        private int lastItems;
+        private int lastItemFailures;
+        private DateTimeOffset? startedAt;
+        private TimeSpan interval;
+
+        public void Set(TicketFlowLoopStatus value)
+        {
+            lock (gate)
+                status = value;
+        }
+
+        public void Started(DateTimeOffset now, TimeSpan intervalValue)
+        {
+            lock (gate)
+            {
+                status = TicketFlowLoopStatus.Running;
+                startedAt = now;
+                interval = intervalValue;
+            }
+        }
+
+        public void Succeeded(DateTimeOffset now, int items, int itemFailures)
+        {
+            lock (gate)
+            {
+                consecutiveFailures = 0;
+                lastSuccessAt = now;
+                lastItems = items;
+                lastItemFailures = itemFailures;
+            }
+        }
+
+        public void Failed(DateTimeOffset now, int consecutive)
+        {
+            lock (gate)
+            {
+                consecutiveFailures = consecutive;
+                lastFailureAt = now;
+            }
+        }
+
+        public TicketFlowLoopState Snapshot()
+        {
+            lock (gate)
+                return new TicketFlowLoopState(loop, status, consecutiveFailures, lastSuccessAt, lastFailureAt, lastItems, lastItemFailures, startedAt, interval);
+        }
+    }
 }
 
 /// <summary>
@@ -64,15 +125,30 @@ public sealed class TicketFlowWorkerHealthCheck(TicketFlowWorkerHealth health, I
         var settings = options.Value;
         var now = health.Now;
         var loops = health.Loops;
-        var data = loops.ToDictionary(state => state.Loop, state => (object)$"{state.Status}:{state.ConsecutiveFailures}:{state.LastItemFailures}", StringComparer.Ordinal);
-        var running = loops.Where(state => state.Status == TicketFlowLoopStatus.Running).ToList();
-        if (running.Any(state => state.ConsecutiveFailures >= settings.UnhealthyAfterFailures))
+        var data = new Dictionary<string, object>(loops.Count, StringComparer.Ordinal);
+        bool unhealthy = false, anyFailed = false, anyItemFailures = false, anyStale = false;
+        for (var i = 0; i < loops.Count; i++)
+        {
+            var state = loops[i];
+            data[state.Loop] = $"{state.Status}:{state.ConsecutiveFailures}:{state.LastItemFailures}";
+            if (state.Status != TicketFlowLoopStatus.Running)
+                continue;
+            if (state.ConsecutiveFailures >= settings.UnhealthyAfterFailures)
+                unhealthy = true;
+            else if (state.ConsecutiveFailures > 0)
+                anyFailed = true;
+            if (state.LastItemFailures > 0)
+                anyItemFailures = true;
+            if (Stale(state, now, settings.StaleAfterIntervals))
+                anyStale = true;
+        }
+        if (unhealthy)
             return Task.FromResult(HealthCheckResult.Unhealthy("A TicketFlow worker loop keeps failing.", data: data));
-        if (running.Any(state => state.ConsecutiveFailures > 0))
+        if (anyFailed)
             return Task.FromResult(HealthCheckResult.Degraded("A TicketFlow worker loop failed recently.", data: data));
-        if (running.Any(state => state.LastItemFailures > 0))
+        if (anyItemFailures)
             return Task.FromResult(HealthCheckResult.Degraded("A TicketFlow worker loop skipped failing items.", data: data));
-        if (running.Any(state => Stale(state, now, settings.StaleAfterIntervals)))
+        if (anyStale)
             return Task.FromResult(HealthCheckResult.Degraded("A TicketFlow worker loop has not completed a run recently.", data: data));
         return Task.FromResult(HealthCheckResult.Healthy("TicketFlow worker loops are healthy.", data));
     }

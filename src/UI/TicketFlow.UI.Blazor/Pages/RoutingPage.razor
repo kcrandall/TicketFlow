@@ -113,7 +113,7 @@
     private AgentStatus? myStatus;
     private readonly Dictionary<ConversationId, ContactId> contacts = [];
 
-    private static string NewPolicy => DefinitionEditor.Pretty(RoutingPolicyCodec.Serialize(new RoutingPolicy(new RoutingPolicyId("new"), "New policy", RoutingStrategy.RoundRobin)));
+    private static readonly string NewPolicy = DefinitionEditor.Pretty(RoutingPolicyCodec.Serialize(new RoutingPolicy(new RoutingPolicyId("new"), "New policy", RoutingStrategy.RoundRobin)));
 
     private static string StatusColor(AgentStatus status) => status switch
     {
@@ -127,19 +127,32 @@
 
     protected override async Task OnInitializedAsync()
     {
-        await LoadWorkspaceAsync();
-        if (Service<IAgentAvailabilityService>() is { } availability && await availability.ListAsync(Actor, null, 100, Aborted) is RoutingValue<IReadOnlyList<StoredAgentProfile>> profiles)
+        var workspaceTask = LoadWorkspaceAsync();
+        var availabilityTask = Service<IAgentAvailabilityService>()?.ListAsync(Actor, null, 100, Aborted);
+        var queueTask = Service<IRoutingQueueService>()?.ListAsync(Actor, new RoutingQueueQuery(limit: 25), Aborted);
+        var policyTask = Service<IRoutingPolicyService>()?.ListAsync(Actor, Aborted);
+        var pending = new List<Task>(4) { workspaceTask };
+        if (availabilityTask is not null) pending.Add(availabilityTask);
+        if (queueTask is not null) pending.Add(queueTask);
+        if (policyTask is not null) pending.Add(policyTask);
+        await Task.WhenAll(pending);
+
+        if (availabilityTask is not null && await availabilityTask is RoutingValue<IReadOnlyList<StoredAgentProfile>> profiles)
             agents = [.. profiles.Value];
         myStatus = agents.FirstOrDefault(agent => agent.Agent == Session.UserId)?.Presence.EffectiveStatus(Now);
-        if (Service<IRoutingQueueService>() is { } queueService && await queueService.ListAsync(Actor, new RoutingQueueQuery(limit: 25), Aborted) is RoutingValue<RoutingQueueListPage> page)
+        if (queueTask is not null && await queueTask is RoutingValue<RoutingQueueListPage> page)
             queue = [.. page.Value.Items];
-        if (Service<IRoutingPolicyService>() is { } policyService && await policyService.ListAsync(Actor, Aborted) is RoutingValue<IReadOnlyList<StoredRoutingPolicy>> list)
+        if (policyTask is not null && await policyTask is RoutingValue<IReadOnlyList<StoredRoutingPolicy>> list)
             policies = [.. list.Value];
-        if (Service<TicketFlow.Conversations.IConversationService>() is { } conversations)
-            foreach (var item in queue)
-                if (await conversations.GetAsync(Actor, item.Conversation, Aborted) is TicketFlow.Conversations.ConversationView view)
-                    contacts[item.Conversation] = view.Contact;
-        await LoadContactsAsync(contacts.Values);
-        await Session.LoadUsersAsync(agents.Select(agent => (UserId?)agent.Agent));
+        if (queue.Count > 0 && Service<TicketFlow.Conversations.IConversationService>() is { } conversations)
+        {
+            var results = await Task.WhenAll(queue.Select(item => conversations.GetAsync(Actor, item.Conversation, Aborted)));
+            for (var i = 0; i < queue.Count; i++)
+                if (results[i] is TicketFlow.Conversations.ConversationView view)
+                    contacts[queue[i].Conversation] = view.Contact;
+        }
+        await Task.WhenAll(
+            LoadContactsAsync(contacts.Values),
+            Session.LoadUsersAsync(agents.Select(agent => (UserId?)agent.Agent)));
     }
 }

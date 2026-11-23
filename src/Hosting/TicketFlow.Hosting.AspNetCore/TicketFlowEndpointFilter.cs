@@ -15,6 +15,46 @@ internal sealed class TicketFlowEndpointFilter : IEndpointFilter
     /// <summary>Header that marks a body-less POST as a deliberate API call (any value).</summary>
     public const string RequestHeader = TicketFlowHttp.RequestHeader;
 
+    public static Func<EndpointFilterFactoryContext, EndpointFilterDelegate, EndpointFilterDelegate> Create(long maximumBodyBytes) =>
+        (factoryContext, next) =>
+        {
+            var parameters = factoryContext.MethodInfo.GetParameters();
+            var actorIndex = -1;
+            var scopeIndex = -1;
+            for (var i = 0; i < parameters.Length; i++)
+            {
+                var type = parameters[i].ParameterType;
+                if (type == typeof(TicketFlowActor))
+                    actorIndex = i;
+                else if (type == typeof(TicketFlowPublicScope))
+                    scopeIndex = i;
+            }
+            return async context =>
+            {
+                var http = context.HttpContext;
+                if (http.Request.ContentLength is { } length && length > maximumBodyBytes)
+                    return TicketFlowHttp.Problem(StatusCodes.Status413PayloadTooLarge, "payload-too-large");
+                if (actorIndex >= 0 && context.GetArgument<TicketFlowActor?>(actorIndex) is { } actor)
+                {
+                    if (actor.FailureStatus > 0)
+                        return TicketFlowHttp.Problem(actor.FailureStatus, actor.FailureCode ?? "unauthenticated");
+                    if (HttpMethods.IsPost(http.Request.Method) && !IsJson(http.Request) && !http.Request.Headers.ContainsKey(RequestHeader))
+                        return TicketFlowHttp.Problem(StatusCodes.Status400BadRequest, "json-or-header-required",
+                            [$"POST requests need a JSON body (Content-Type: application/json) or the {RequestHeader} header."]);
+                }
+                if (scopeIndex >= 0 && context.GetArgument<TicketFlowPublicScope?>(scopeIndex) is { FailureStatus: > 0 } scope)
+                    return TicketFlowHttp.Problem(scope.FailureStatus, scope.FailureCode ?? "not-found");
+                try
+                {
+                    return await next(context).ConfigureAwait(false);
+                }
+                catch (Exception error) when (error is ArgumentException or FormatException or JsonException && !http.RequestAborted.IsCancellationRequested)
+                {
+                    return TicketFlowHttp.Problem(StatusCodes.Status422UnprocessableEntity, "invalid", [Message(error)]);
+                }
+            };
+        };
+
     public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
     {
         var http = context.HttpContext;

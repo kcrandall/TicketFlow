@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Security.Cryptography;
 using System.Text.Json;
 using TicketFlow.Access;
@@ -121,6 +122,12 @@ public static class InboxAgentGrants
     /// <summary>Identifier prefix of inbox agent grants.</summary>
     public const string Prefix = "tf-inbox-agent-v1-";
 
+    [ThreadStatic]
+    private static ArrayBufferWriter<byte>? cachedBuffer;
+
+    [ThreadStatic]
+    private static Utf8JsonWriter? cachedWriter;
+
     /// <summary>
     /// <c>tf-inbox-agent-v1-</c> + lowercase hex SHA-256 of the JSON array [workspace, inbox, agent, role]: fixed length, unique per
     /// workspace/inbox/agent/role within an <see cref="AccessPartition"/>, and free of the raw identifiers.
@@ -129,8 +136,42 @@ public static class InboxAgentGrants
     {
         if (workspace == default || inbox == default || agent == default || !role.IsInitialized)
             throw new ArgumentException("Workspace, inbox, agent and role identifiers are required.");
-        var framed = JsonSerializer.SerializeToUtf8Bytes(new[] { workspace.Value, inbox.Value, agent.Value, role.Value });
-        return new GrantId(Prefix + Convert.ToHexStringLower(SHA256.HashData(framed)));
+        var buffer = cachedBuffer;
+        if (buffer is null)
+            cachedBuffer = buffer = new ArrayBufferWriter<byte>(256);
+        else
+            buffer.ResetWrittenCount();
+
+        var writer = cachedWriter;
+        if (writer is null)
+            cachedWriter = writer = new Utf8JsonWriter(buffer);
+        else
+            writer.Reset(buffer);
+
+        Span<byte> hash = stackalloc byte[32];
+        try
+        {
+            writer.WriteStartArray();
+            writer.WriteStringValue(workspace.Value);
+            writer.WriteStringValue(inbox.Value);
+            writer.WriteStringValue(agent.Value);
+            writer.WriteStringValue(role.Value);
+            writer.WriteEndArray();
+            writer.Flush();
+            SHA256.HashData(buffer.WrittenSpan, hash);
+        }
+        finally
+        {
+            if (buffer.Capacity > 4096)
+                cachedBuffer = null;
+            else
+                buffer.ResetWrittenCount();
+        }
+
+        Span<char> idChars = stackalloc char[Prefix.Length + 64];
+        Prefix.CopyTo(idChars);
+        Convert.TryToHexStringLower(hash, idChars[Prefix.Length..], out _);
+        return new GrantId(new string(idChars));
     }
 
     /// <summary>The grant <see cref="IInboxService.AddAgentAsync"/> creates.</summary>
@@ -141,7 +182,21 @@ public static class InboxAgentGrants
     }
 
     /// <summary>True when <paramref name="grant"/> has exactly the shape <see cref="Create"/> produces.</summary>
-    public static bool Matches(AccessGrant grant, TicketScope scope, InboxId inbox, UserId agent, RoleId role) =>
-        grant is not null && grant == Create(scope, inbox, agent, role);
+    public static bool Matches(AccessGrant grant, TicketScope scope, InboxId inbox, UserId agent, RoleId role)
+    {
+        if (grant is null || scope is null || inbox == default || agent == default || !role.IsInitialized)
+            return false;
+        return grant.Effect == GrantEffect.Allow
+            && grant.Kind == GrantKind.Standard
+            && grant.Condition is null
+            && grant.ValidFrom is null
+            && grant.ValidUntil is null
+            && grant.Justification is null
+            && grant.Role == role
+            && grant.Scope is InboxGrantScope inboxScope && inboxScope.Workspace == scope.WorkspaceId && inboxScope.Inbox == inbox
+            && grant.Subject.Value is UserId subjectUser && subjectUser == agent
+            && grant.Partition.Contains(scope)
+            && grant.Id == For(scope.WorkspaceId, inbox, agent, role);
+    }
 
 }

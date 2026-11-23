@@ -1,4 +1,5 @@
 using System.Collections.Frozen;
+using System.Collections.ObjectModel;
 using TicketFlow.Core;
 
 namespace TicketFlow.Access;
@@ -52,20 +53,30 @@ public sealed record AccessResource
     /// <summary>Supplied attributes; missing keys are unknown.</summary>
     public IReadOnlyDictionary<string, string> Attributes { get; }
 
-    public bool Equals(AccessResource? other) =>
-        other is not null && Scope == other.Scope && ResourceId == other.ResourceId && TeamId == other.TeamId && InboxId == other.InboxId
-        && AssigneeId == other.AssigneeId
-        && (Labels is null ? other.Labels is null : other.Labels is not null && Labels.SetEquals(other.Labels))
-        && Attributes.Count == other.Attributes.Count
-        && Attributes.All(pair => other.Attributes.TryGetValue(pair.Key, out var value) && value == pair.Value);
+    public bool Equals(AccessResource? other)
+    {
+        if (other is null || Scope != other.Scope || ResourceId != other.ResourceId || TeamId != other.TeamId || InboxId != other.InboxId || AssigneeId != other.AssigneeId)
+            return false;
+        if (Labels is null ? other.Labels is not null : other.Labels is null || !Labels.SetEquals(other.Labels))
+            return false;
+        if (Attributes.Count != other.Attributes.Count)
+            return false;
+        foreach (var pair in Attributes)
+            if (!other.Attributes.TryGetValue(pair.Key, out var value) || value != pair.Value)
+                return false;
+        return true;
+    }
 
     public override int GetHashCode() => HashCode.Combine(Scope, ResourceId, TeamId, InboxId, AssigneeId, Labels?.Count, Attributes.Count);
 
     public override string ToString() => "AccessResource { <redacted> }";
 
-    private static FrozenSet<LabelId> SnapshotLabels(IEnumerable<LabelId> labels)
+    private static IReadOnlySet<LabelId> SnapshotLabels(IEnumerable<LabelId> labels)
     {
-        var snapshot = new HashSet<LabelId>();
+        var capacity = labels.TryGetNonEnumeratedCount(out var count) ? Math.Min(count, MaximumLabels) : 0;
+        if (count == 0 && labels is ICollection<LabelId> or IReadOnlyCollection<LabelId>)
+            return FrozenSet<LabelId>.Empty;
+        var snapshot = capacity > 0 ? new HashSet<LabelId>(capacity) : new HashSet<LabelId>();
         foreach (var label in labels)
         {
             if (label == default)
@@ -73,14 +84,17 @@ public sealed record AccessResource
             if (snapshot.Add(label) && snapshot.Count > MaximumLabels)
                 throw new ArgumentException($"A resource can carry at most {MaximumLabels} labels.", nameof(labels));
         }
-        return snapshot.ToFrozenSet();
+        return snapshot.Count == 0 ? FrozenSet<LabelId>.Empty : new ReadOnlySet<LabelId>(snapshot);
     }
 
-    private static FrozenDictionary<string, string> SnapshotAttributes(IEnumerable<KeyValuePair<string, string>>? attributes)
+    private static IReadOnlyDictionary<string, string> SnapshotAttributes(IEnumerable<KeyValuePair<string, string>>? attributes)
     {
         if (attributes is null)
             return FrozenDictionary<string, string>.Empty;
-        var snapshot = new Dictionary<string, string>(StringComparer.Ordinal);
+        var capacity = attributes.TryGetNonEnumeratedCount(out var count) ? Math.Min(count, MaximumAttributes) : 0;
+        if (count == 0 && attributes is ICollection<KeyValuePair<string, string>> or IReadOnlyCollection<KeyValuePair<string, string>>)
+            return FrozenDictionary<string, string>.Empty;
+        var snapshot = capacity > 0 ? new Dictionary<string, string>(capacity, StringComparer.Ordinal) : new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var (key, value) in attributes)
         {
             AccessText.RequireToken(key, MaximumAttributeKeyLength, nameof(attributes), "Attribute keys");
@@ -92,7 +106,7 @@ public sealed record AccessResource
             if (snapshot.Count > MaximumAttributes)
                 throw new ArgumentException($"A resource can carry at most {MaximumAttributes} attributes.", nameof(attributes));
         }
-        return snapshot.ToFrozenDictionary(StringComparer.Ordinal);
+        return snapshot.Count == 0 ? FrozenDictionary<string, string>.Empty : snapshot.AsReadOnly();
     }
 }
 
@@ -166,12 +180,14 @@ public readonly record struct FieldPath : IComparable<FieldPath>
     {
         if (value.Length > MaximumLength)
             return false;
-        var segments = value.Split('.');
-        if (segments.Length is < 2 or > 4)
-            return false;
-        foreach (var segment in segments)
-            if (!AccessText.IsToken(segment, 64) || segment.Contains('.'))
+        var span = value.AsSpan();
+        var segments = 0;
+        foreach (var range in span.Split('.'))
+        {
+            segments++;
+            if (segments > 4 || !AccessText.IsFieldSegment(span[range], 64))
                 return false;
-        return true;
+        }
+        return segments >= 2;
     }
 }

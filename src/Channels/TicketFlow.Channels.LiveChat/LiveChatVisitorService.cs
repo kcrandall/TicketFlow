@@ -399,11 +399,21 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
     {
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
             return Refused<IReadOnlyList<VisitorConversationView>>(LiveChatRefusal.Unauthenticated);
-        var views = new List<VisitorConversationView>();
-        foreach (var link in await sessions.ListLinksAsync(session.Scope, session.Session.Id, cancellationToken).ConfigureAwait(false))
-            if (await conversations.GetAsync(session.Scope, link.Conversation, cancellationToken).ConfigureAwait(false) is { } stored)
+        var links = await sessions.ListLinksAsync(session.Scope, session.Session.Id, cancellationToken).ConfigureAwait(false);
+        if (links.Count == 0)
+            return Value<IReadOnlyList<VisitorConversationView>>([]);
+        var ids = new ConversationId[links.Count];
+        for (var i = 0; i < links.Count; i++)
+            ids[i] = links[i].Conversation;
+        var loaded = await conversations.GetManyAsync(session.Scope, ids, cancellationToken).ConfigureAwait(false);
+        var views = new List<VisitorConversationView>(loaded.Count);
+        for (var i = 0; i < links.Count; i++)
+        {
+            var link = links[i];
+            if (loaded.TryGetValue(link.Conversation, out var stored))
                 views.Add(new VisitorConversationView(link.Conversation, stored.Conversation.Status.Value is ClosedStatus or ResolvedStatus, stored.Conversation.LastSequence,
                     link.ReadSequence, link.LinkedAt, stored.Conversation.LastActivityAt));
+        }
         return Value<IReadOnlyList<VisitorConversationView>>(views);
     }
 
@@ -629,11 +639,13 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         return string.IsNullOrEmpty(value) || value.Length > 256 || !LiveChatText.IsClean(value, allowNewLines: false) ? null : value;
     }
 
+    private static readonly char[] PathSeparators = ['/', '\\'];
+
     internal static string? SafeFileName(string? fileName)
     {
         if (fileName is null)
             return null;
-        var name = fileName[(fileName.LastIndexOfAny(['/', '\\']) + 1)..].Trim();
+        var name = fileName[(fileName.LastIndexOfAny(PathSeparators) + 1)..].Trim();
         return name.Length is 0 or > AttachmentRef.MaximumFileNameLength || name is "." or ".." || !LiveChatText.IsClean(name, allowNewLines: false) ? null : name;
     }
 

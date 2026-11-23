@@ -14,6 +14,8 @@ public readonly record struct Permission : IComparable<Permission>
 
     private readonly string? value;
 
+    private Permission(string value, bool _) => this.value = value;
+
     public Permission(string value)
     {
         if (!TryValidate(value))
@@ -40,8 +42,13 @@ public readonly record struct Permission : IComparable<Permission>
 
     public static bool TryParse(string? value, out Permission permission)
     {
-        permission = TryValidate(value) ? new Permission(value!) : default;
-        return permission.IsInitialized;
+        if (TryValidate(value))
+        {
+            permission = new Permission(value!, true);
+            return true;
+        }
+        permission = default;
+        return false;
     }
 
     public int CompareTo(Permission other) => string.CompareOrdinal(value, other.value);

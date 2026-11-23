@@ -109,6 +109,8 @@ public sealed class SurveyService : ISurveyService
         return view is null ? Forbidden(SurveyPermissions.Read) : new SurveySucceeded<SurveyResponseView>(view);
     }
 
+    private static readonly Permission[] ReadPermissions = [SurveyPermissions.Read];
+
     public async Task<SurveyResult<SurveyResponseViewPage>> ListResponsesAsync(PrincipalRef actor, SurveyResponseQuery query, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
@@ -117,7 +119,9 @@ public sealed class SurveyService : ISurveyService
         if (filter is DenyAllFilter)
             return new SurveySucceeded<SurveyResponseViewPage>(new([], null));
         var page = await store.ListResponsesAsync(actor.Scope, query, filter, cancellationToken).ConfigureAwait(false);
-        var access = await evaluator.LoadDecisionContextAsync(actor, actor.Scope, [SurveyPermissions.Read], cancellationToken).ConfigureAwait(false);
+        if (page.Items.Count == 0)
+            return new SurveySucceeded<SurveyResponseViewPage>(new([], page.Next));
+        var access = await evaluator.LoadDecisionContextAsync(actor, actor.Scope, ReadPermissions, cancellationToken).ConfigureAwait(false);
         var views = new List<SurveyResponseView>(page.Items.Count);
         foreach (var stored in page.Items)
         {

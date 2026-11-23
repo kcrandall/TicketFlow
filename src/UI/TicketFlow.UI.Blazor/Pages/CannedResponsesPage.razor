@@ -37,12 +37,13 @@
             </div></div>
         }
         <div class="tf-card"><div class="tf-card__header"><div class="tf-card__title">New canned response</div></div><div class="tf-card__content">
-            <DefinitionEditor Json="@DefinitionEditor.Pretty(AutomationCodec.SerializeCannedResponse(new CannedResponse(new CannedResponseId("new"), "thanks", "Thank you", "en", [new CannedResponseVariant("en", new AutomationTemplate("Thanks {{contact.name}}!"))])))" SaveAction="automation.canned.save" />
+            <DefinitionEditor Json="@NewCannedJson" SaveAction="automation.canned.save" />
         </div></div>
     </div>
 }
 
 @code {
+    private static readonly string NewCannedJson = DefinitionEditor.Pretty(AutomationCodec.SerializeCannedResponse(new CannedResponse(new CannedResponseId("new"), "thanks", "Thank you", "en", [new CannedResponseVariant("en", new AutomationTemplate("Thanks {{contact.name}}!"))])));
     private List<StoredCannedResponse> responses = [];
 
     protected override async Task OnInitializedAsync()

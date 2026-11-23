@@ -43,17 +43,60 @@ public sealed partial class PostgresWorkspaceStore : IWorkspaceSettingsStore, II
         AddText(command, "workspace", scope.WorkspaceId.Value);
     }
 
-    private static void AddText(NpgsqlCommand command, string name, string? value) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = (object?)value ?? DBNull.Value });
+    private static void AddScope(NpgsqlBatchCommand command, TicketScope scope)
+    {
+        AddText(command, "tenant", scope.TenantId);
+        AddText(command, "project", scope.ProjectId);
+        AddText(command, "environment", scope.EnvironmentId);
+        AddText(command, "app", scope.AppId);
+        AddText(command, "workspace", scope.WorkspaceId.Value);
+    }
+
+    private static void AddText(NpgsqlCommand command, string name, string? value)
+    {
+        if (value is null)
+            command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = DBNull.Value });
+        else
+            command.Parameters.Add(new NpgsqlParameter<string>(name, NpgsqlDbType.Text) { TypedValue = value });
+    }
+
+    private static void AddText(NpgsqlBatchCommand command, string name, string? value)
+    {
+        if (value is null)
+            command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = DBNull.Value });
+        else
+            command.Parameters.Add(new NpgsqlParameter<string>(name, NpgsqlDbType.Text) { TypedValue = value });
+    }
+
+    private static void AddInt(NpgsqlCommand command, string name, int value) =>
+        command.Parameters.Add(new NpgsqlParameter<int>(name, NpgsqlDbType.Integer) { TypedValue = value });
+
+    private static void AddInt(NpgsqlBatchCommand command, string name, int value) =>
+        command.Parameters.Add(new NpgsqlParameter<int>(name, NpgsqlDbType.Integer) { TypedValue = value });
+
+    private static void AddLong(NpgsqlCommand command, string name, long value) =>
+        command.Parameters.Add(new NpgsqlParameter<long>(name, NpgsqlDbType.Bigint) { TypedValue = value });
+
+    private static void AddLong(NpgsqlBatchCommand command, string name, long value) =>
+        command.Parameters.Add(new NpgsqlParameter<long>(name, NpgsqlDbType.Bigint) { TypedValue = value });
+
+    private static void AddBool(NpgsqlCommand command, string name, bool value) =>
+        command.Parameters.Add(new NpgsqlParameter<bool>(name, NpgsqlDbType.Boolean) { TypedValue = value });
 
     private static void AddTextArray(NpgsqlCommand command, string name, IEnumerable<string> values) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { Value = values.ToArray() });
+        command.Parameters.Add(new NpgsqlParameter<string[]>(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = values as string[] ?? values.ToArray() });
+
+    private static void AddTextArray(NpgsqlBatchCommand command, string name, string[] values) =>
+        command.Parameters.Add(new NpgsqlParameter<string[]>(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = values });
+
+    private static string? NullableText(NpgsqlDataReader reader, int ordinal) =>
+        reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
 
     /// <summary>Serializes writers for one workspace and table within the current transaction.</summary>
     private static async Task LockAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string table, TicketScope scope, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand("SELECT pg_advisory_xact_lock(hashtextextended(array_to_string(@parts, chr(31)), 0))", connection, transaction);
-        AddTextArray(command, "parts", ["ticketflow.workspaces", table, scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value]);
+        AddTextArray(command, "parts", new[] { "ticketflow.workspaces", table, scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value });
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -71,29 +114,28 @@ public sealed partial class PostgresWorkspaceStore : IWorkspaceSettingsStore, II
         return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as long?;
     }
 
-    /// <summary>Distinguishes a missed compare-and-set: not found, or conflict with the current revision.</summary>
-    private static async Task<WorkspaceWriteResult<T>> MissAsync<T>(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, Action<NpgsqlCommand> bind, CancellationToken cancellationToken)
-    {
-        var current = await RevisionAsync(connection, transaction, sql, bind, cancellationToken).ConfigureAwait(false);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return current is { } revision ? new WorkspaceWriteConflict(revision) : WorkspaceWriteNotFound.Instance;
-    }
-
     /// <summary>
     /// Wraps <paramref name="table"/> rows of the bound scope in a derived table exposing the access columns a workspace
     /// resource lacks as NULL (no team/inbox/assignee, unknown labels and attributes), then applies the translated filter.
     /// </summary>
-    private static string FilteredQuery(string table, string idColumn, string columns, string missingAccessColumns, AccessFilter filter, NpgsqlCommand command)
+    private static string FilteredQuery(string table, string idColumn, string columns, string missingAccessColumns, AccessFilter filter, bool hasAfter, NpgsqlCommand command)
     {
         var translated = PostgresAccessFilterTranslator.Translate(filter, AccessColumns, "access_").OrDenyAll();
         foreach (var parameter in translated.Parameters)
             command.Parameters.Add(parameter);
-        return $"""
-            SELECT {columns} FROM (SELECT t.*, {missingAccessColumns}, NULL::text AS assignee_id, NULL::text[] AS labels, NULL::jsonb AS attributes
-                FROM {table} t WHERE {AliasedScopeKeyWhere}) AS r
-            WHERE ({translated.Sql}) AND (@after::text IS NULL OR r.{idColumn} COLLATE "C" > @after::text)
-            ORDER BY r.{idColumn} COLLATE "C" LIMIT @limit
-            """;
+        return hasAfter
+            ? $"""
+                SELECT {columns} FROM (SELECT t.*, {missingAccessColumns}, NULL::text AS assignee_id, NULL::text[] AS labels, NULL::jsonb AS attributes
+                    FROM {table} t WHERE {AliasedScopeKeyWhere}) AS r
+                WHERE ({translated.Sql}) AND r.{idColumn} COLLATE "C" > @after
+                ORDER BY r.{idColumn} COLLATE "C" LIMIT @limit
+                """
+            : $"""
+                SELECT {columns} FROM (SELECT t.*, {missingAccessColumns}, NULL::text AS assignee_id, NULL::text[] AS labels, NULL::jsonb AS attributes
+                    FROM {table} t WHERE {AliasedScopeKeyWhere}) AS r
+                WHERE ({translated.Sql})
+                ORDER BY r.{idColumn} COLLATE "C" LIMIT @limit
+                """;
     }
 
     private static readonly PostgresAccessFilterColumns AccessColumns = new()
@@ -112,22 +154,21 @@ public sealed partial class PostgresWorkspaceStore : IWorkspaceSettingsStore, II
 
     private static void AddPage(NpgsqlCommand command, WorkspacePageRequest page)
     {
-        AddText(command, "after", page.After);
-        command.Parameters.AddWithValue("limit", page.Limit + 1);
+        if (page.After is not null)
+            AddText(command, "after", page.After);
+        AddInt(command, "limit", page.Limit + 1);
     }
 
-    private static WorkspacePage<T> Page<T>(List<T> rows, WorkspacePageRequest page) =>
-        rows.Count > page.Limit ? new(rows[..page.Limit], true) : new(rows, false);
-
-    private static T Decode<T>(Func<T> decode, string description)
+    private static WorkspacePage<T> Page<T>(List<T> rows, WorkspacePageRequest page)
     {
-        try
+        if (rows.Count > page.Limit)
         {
-            return decode();
+            rows.RemoveAt(page.Limit);
+            return new(rows, true);
         }
-        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
-        {
-            throw new InvalidOperationException($"A stored {description} is invalid or incompatible.", error);
-        }
+        return new(rows, false);
     }
+
+    private static InvalidOperationException StoredDataError(Exception error, string description) =>
+        new($"A stored {description} is invalid or incompatible.", error);
 }

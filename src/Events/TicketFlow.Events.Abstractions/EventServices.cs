@@ -1,3 +1,6 @@
+using System.Buffers;
+using System.Globalization;
+using System.Text;
 using TicketFlow.Core;
 
 namespace TicketFlow.Events;
@@ -26,9 +29,50 @@ public sealed record EventDelivery(StoredEventSubscription Subscription, IReadOn
         get
         {
             var scope = Subscription.Scope;
-            var source = string.Join('\n', scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value, Subscription.Subscription.Id.Value,
-                Subscription.Revision, Generation, Events[0].Event.Sequence, Events[^1].Event.Sequence);
-            return "evt_" + EventText.EventId(source, "delivery").ToString("N");
+            var subId = Subscription.Subscription.Id.Value;
+            var maxBytes = 13 + Encoding.UTF8.GetMaxByteCount(scope.TenantId.Length + scope.ProjectId.Length + scope.EnvironmentId.Length + scope.AppId.Length + scope.WorkspaceId.Value.Length + subId.Length) + 120;
+            byte[]? rented = null;
+            Span<byte> buf = maxBytes <= 512 ? stackalloc byte[512] : (rented = ArrayPool<byte>.Shared.Rent(maxBytes));
+            try
+            {
+                var pos = 0;
+                static void WritePart(Span<byte> dst, ref int p, string value)
+                {
+                    p += Encoding.UTF8.GetBytes(value, dst[p..]);
+                    dst[p++] = (byte)'\n';
+                }
+                static void WriteLong(Span<byte> dst, ref int p, long value)
+                {
+                    value.TryFormat(dst[p..], out var written, default, CultureInfo.InvariantCulture);
+                    p += written;
+                    dst[p++] = (byte)'\n';
+                }
+                "tf-events-v1\n"u8.CopyTo(buf);
+                pos += 13;
+                WritePart(buf, ref pos, scope.TenantId);
+                WritePart(buf, ref pos, scope.ProjectId);
+                WritePart(buf, ref pos, scope.EnvironmentId);
+                WritePart(buf, ref pos, scope.AppId);
+                WritePart(buf, ref pos, scope.WorkspaceId.Value);
+                WritePart(buf, ref pos, subId);
+                WriteLong(buf, ref pos, Subscription.Revision);
+                WriteLong(buf, ref pos, Generation);
+                WriteLong(buf, ref pos, Events[0].Event.Sequence);
+                WriteLong(buf, ref pos, Events[^1].Event.Sequence);
+                "delivery"u8.CopyTo(buf[pos..]);
+                pos += 8;
+                var guid = EventText.HashToGuid(buf[..pos]);
+                return string.Create(36, guid, static (chars, id) =>
+                {
+                    "evt_".CopyTo(chars);
+                    id.TryFormat(chars[4..], out _, "N");
+                });
+            }
+            finally
+            {
+                if (rented is not null)
+                    ArrayPool<byte>.Shared.Return(rented);
+            }
         }
     }
 }

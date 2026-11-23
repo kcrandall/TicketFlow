@@ -111,7 +111,7 @@ public sealed class PostgresSurveyStoreTests
             """))
             await insert.ExecuteNonQueryAsync();
         await database.Store.InitializeAsync();
-        Assert.AreEqual(2, (await runner.InspectAsync()).CurrentVersion);
+        Assert.AreEqual(3, (await runner.InspectAsync()).CurrentVersion);
         var due = await database.Store.ListDueInvitationsAsync(scope, DateTimeOffset.UtcNow.AddDays(2), 10);
         Assert.IsEmpty(due);
         Assert.AreEqual(1L, await database.ScalarAsync("SELECT count(*) FROM tf_survey_invitations WHERE issued_at IS NOT NULL AND lease_until IS NULL"));
@@ -165,7 +165,7 @@ public sealed class PostgresSurveyStoreTests
         await database.Store.InitializeAsync();
         await database.Competing.InitializeAsync();
         var inspection = await new PostgresMigrationRunner(database.Primary, PostgresSurveyMigrations.Catalog).InspectAsync();
-        Assert.AreEqual(2, inspection.CurrentVersion);
+        Assert.AreEqual(3, inspection.CurrentVersion);
         Assert.AreEqual(PostgresSurveyMigrations.Catalog.Migrations[0].Checksum, inspection.Applied[0].Checksum);
     }
 

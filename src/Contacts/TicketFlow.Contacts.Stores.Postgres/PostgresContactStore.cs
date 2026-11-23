@@ -1,3 +1,4 @@
+using System.Data;
 using Npgsql;
 using NpgsqlTypes;
 using TicketFlow.Access;
@@ -18,6 +19,7 @@ namespace TicketFlow.Contacts.Stores.Postgres;
 public sealed partial class PostgresContactStore : IContactStore, IContactAttributeDefinitionStore, IContactAuditSink, IContactLinkingStore
 {
     private const string ScopeWhere = "tenant_id=@tenant AND project_id=@project AND environment_id=@environment AND app_id=@app AND workspace_id=@workspace";
+    private const string ContactScopeWhere = "c.tenant_id=@tenant AND c.project_id=@project AND c.environment_id=@environment AND c.app_id=@app AND c.workspace_id=@workspace";
     private const string ScopeKey = "tf_key_v1(@tenant,@project,@environment,@app,@workspace)";
     private const string ContactKey = "contact_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@contact) AND contact_id=@contact AND " + ScopeWhere;
     private const string ContactColumns = "contact_id, format_version, display_name, avatar_ref, locale, time_zone, company, attributes::text, labels, blocked, merged_into, created_at, updated_at, revision";
@@ -75,6 +77,18 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
         return contacts.GetValueOrDefault(id);
     }
 
+    public async Task<IReadOnlyDictionary<ContactId, StoredContact>> GetManyAsync(TicketScope scope, IReadOnlyCollection<ContactId> ids, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(ids);
+        foreach (var id in ids)
+            RequireId(id);
+        if (ids.Count == 0)
+            return new Dictionary<ContactId, StoredContact>();
+        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        return await LoadAsync(connection, null, scope, ids, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<ContactIdentityOwner>> FindByIdentityAsync(TicketScope scope, ContactIdentityAddress address, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -85,8 +99,17 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
         var owners = new List<ContactIdentityOwner>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            owners.Add(Decode(() => new ContactIdentityOwner(new ContactId(reader.GetString(0)),
-                ContactJsonCodec.RestoreVerification(reader.GetBoolean(1), reader.GetString(2), reader.GetFieldValue<DateTimeOffset>(3))), "identity"));
+        {
+            try
+            {
+                owners.Add(new ContactIdentityOwner(new ContactId(reader.GetString(0)),
+                    ContactJsonCodec.RestoreVerification(reader.GetBoolean(1), reader.GetString(2), reader.GetFieldValue<DateTimeOffset>(3))));
+            }
+            catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+            {
+                throw StoredDataError(error, "identity");
+            }
+        }
         return owners;
     }
 
@@ -110,37 +133,56 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
         ArgumentNullException.ThrowIfNull(search);
         ArgumentNullException.ThrowIfNull(filter);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        List<(string Key, ContactId Id, bool Visible)> examined = [];
+        var visible = new List<(string Key, ContactId Id)>(Math.Min(search.Limit, 64));
+        (string Key, ContactId Id)? tailCursor = null;
         await using (var command = SearchCommand(scope, search, filter, maximumRowsExamined))
         {
             command.Connection = connection;
             await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                examined.Add(Decode(() => (reader.GetString(0), new ContactId(reader.GetString(1)), reader.GetBoolean(2)), "search row"));
+            {
+                try
+                {
+                    var key = reader.GetString(0);
+                    var id = new ContactId(reader.GetString(1));
+                    if (reader.GetBoolean(2))
+                        visible.Add((key, id));
+                    else
+                        tailCursor = (key, id);
+                }
+                catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+                {
+                    throw StoredDataError(error, "search row");
+                }
+            }
         }
 
-        var visible = new List<(string Key, ContactId Id)>();
-        foreach (var row in examined)
+        List<ContactId> distinct;
+        if (visible.Count == 0)
+            distinct = [];
+        else
         {
-            if (!row.Visible)
-                continue;
-            visible.Add((row.Key, row.Id));
-            if (visible.Count == search.Limit)
-                break;
+            distinct = new List<ContactId>(visible.Count);
+            var seen = new HashSet<ContactId>(visible.Count);
+            foreach (var row in visible)
+                if (seen.Add(row.Id))
+                    distinct.Add(row.Id);
         }
-        var distinct = visible.Select(row => row.Id).Distinct().ToList();
         var contacts = await LoadAsync(connection, null, scope, distinct, cancellationToken).ConfigureAwait(false);
-        var page = distinct.Where(contacts.ContainsKey).Select(id => contacts[id]).Where(stored => stored.Contact.MergedInto is null).ToList();
+        var page = new List<StoredContact>(distinct.Count);
+        foreach (var id in distinct)
+            if (contacts.TryGetValue(id, out var stored) && stored.Contact.MergedInto is null)
+                page.Add(stored);
         ContactSearchCursor? next = visible.Count == search.Limit
             ? new ContactSearchCursor(visible[^1].Key, visible[^1].Id)
-            : examined.Count == maximumRowsExamined ? new ContactSearchCursor(examined[^1].Key, examined[^1].Id) : null;
+            : tailCursor is { } tail ? new ContactSearchCursor(tail.Key, tail.Id) : null;
         return new ContactPage(page, next);
     }
 
     /// <summary>
     /// The search statement (exposed internally so tests can EXPLAIN the exact SQL). An inner keyset query reads at most
     /// <paramref name="maximumRowsExamined"/> rows in index order; the translated access filter is evaluated per examined row, and the
-    /// caller keeps the first visible rows, continuing after the last examined row when the scan bound is reached.
+    /// CTE returns only up to <see cref="ContactSearch.Limit"/> visible rows (plus one tail cursor row when the scan bound is reached).
     /// </summary>
     internal static NpgsqlCommand SearchCommand(TicketScope scope, ContactSearch search, AccessFilter filter, int maximumRowsExamined)
     {
@@ -149,7 +191,8 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
         AddScope(command, scope);
         foreach (var parameter in translated.Parameters)
             command.Parameters.Add(parameter.Clone());
-        command.Parameters.AddWithValue("scan", maximumRowsExamined);
+        AddInt(command, "scan", maximumRowsExamined);
+        AddInt(command, "limit", search.Limit);
         var prefix = search.Prefix.Length == 0 ? string.Empty : " AND {0} >= @prefix COLLATE \"C\" AND {0} < @prefix_high COLLATE \"C\" AND starts_with({0}, @prefix)";
         if (search.Prefix.Length > 0)
         {
@@ -163,35 +206,51 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
             AddText(command, "after_id", cursor.Contact.Value);
         }
 
+        string inner;
         if (search.Mode == ContactSearchMode.Name)
         {
-            command.CommandText = $"""
-                SELECT c.sort_key, c.contact_id, ({translated.Sql}) IS TRUE FROM (
-                    SELECT s.name_folded AS sort_key, s.contact_id, s.tenant_id, s.project_id, s.environment_id, s.app_id, s.workspace_id, s.labels
-                    FROM tf_contacts s
-                    WHERE s.scope_key={ScopeKey} AND s.tenant_id=@tenant AND s.project_id=@project AND s.environment_id=@environment AND s.app_id=@app
-                      AND s.workspace_id=@workspace AND s.merged_into IS NULL{string.Format(prefix, "s.name_folded")}{string.Format(after, "s.name_folded", "s.contact_id")}
-                    ORDER BY s.name_folded, s.contact_id LIMIT @scan) c {FilterJoin}
-                ORDER BY c.sort_key, c.contact_id
+            inner = $"""
+                SELECT s.name_folded AS sort_key, s.contact_id, s.tenant_id, s.project_id, s.environment_id, s.app_id, s.workspace_id, s.labels
+                FROM tf_contacts s
+                WHERE s.scope_key={ScopeKey} AND s.tenant_id=@tenant AND s.project_id=@project AND s.environment_id=@environment AND s.app_id=@app
+                  AND s.workspace_id=@workspace AND s.merged_into IS NULL{string.Format(prefix, "s.name_folded")}{string.Format(after, "s.name_folded", "s.contact_id")}
+                ORDER BY s.name_folded, s.contact_id LIMIT @scan
                 """;
         }
         else
         {
-            command.Parameters.AddWithValue("kind", (short)search.Kind!.Value);
+            AddSmallInt(command, "kind", (short)search.Kind!.Value);
             var ns = search.Namespace is null ? string.Empty : " AND i.namespace=@namespace";
             if (search.Namespace is not null)
                 AddText(command, "namespace", search.Namespace);
-            command.CommandText = $"""
-                SELECT c.sort_key, c.contact_id, ({translated.Sql}) IS TRUE FROM (
-                    SELECT i.value AS sort_key, i.contact_id, s.tenant_id, s.project_id, s.environment_id, s.app_id, s.workspace_id, s.labels
-                    FROM tf_contact_identities i JOIN tf_contacts s ON s.contact_key=i.contact_key AND s.contact_id=i.contact_id
-                    WHERE i.scope_key={ScopeKey} AND i.tenant_id=@tenant AND i.project_id=@project AND i.environment_id=@environment AND i.app_id=@app
-                      AND i.workspace_id=@workspace AND i.kind=@kind{ns}{string.Format(prefix, "i.value")}{string.Format(after, "i.value", "i.contact_id")}
-                      AND s.merged_into IS NULL
-                    ORDER BY i.value, i.contact_id LIMIT @scan) c {FilterJoin}
-                ORDER BY c.sort_key, c.contact_id
+            inner = $"""
+                SELECT i.value AS sort_key, i.contact_id, s.tenant_id, s.project_id, s.environment_id, s.app_id, s.workspace_id, s.labels
+                FROM tf_contact_identities i JOIN tf_contacts s ON s.contact_key=i.contact_key AND s.contact_id=i.contact_id
+                WHERE i.scope_key={ScopeKey} AND i.tenant_id=@tenant AND i.project_id=@project AND i.environment_id=@environment AND i.app_id=@app
+                  AND i.workspace_id=@workspace AND i.kind=@kind{ns}{string.Format(prefix, "i.value")}{string.Format(after, "i.value", "i.contact_id")}
+                  AND s.merged_into IS NULL
+                ORDER BY i.value, i.contact_id LIMIT @scan
                 """;
         }
+        command.CommandText = $"""
+            WITH examined AS (
+                SELECT c.sort_key, c.contact_id, ({translated.Sql}) IS TRUE AS visible,
+                       row_number() OVER (ORDER BY c.sort_key, c.contact_id) AS rn
+                FROM ({inner}) c {FilterJoin}
+            ),
+            visible AS (
+                SELECT sort_key, contact_id, true AS visible, rn
+                FROM examined WHERE visible
+                ORDER BY rn LIMIT @limit
+            )
+            SELECT sort_key, contact_id, visible FROM (
+                SELECT sort_key, contact_id, visible, rn, 0 AS is_tail FROM visible
+                UNION ALL
+                SELECT sort_key, contact_id, false AS visible, rn, 1 AS is_tail FROM examined
+                WHERE rn = @scan AND (SELECT count(*) FROM visible) < @limit
+            ) r
+            ORDER BY is_tail, rn
+            """;
         return command;
     }
 
@@ -208,11 +267,20 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
             """);
         AddScope(command, scope);
         AddText(command, "target", target.Value);
-        command.Parameters.AddWithValue("limit", limit);
+        AddInt(command, "limit", limit);
         var ids = new List<ContactId>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            ids.Add(Decode(() => new ContactId(reader.GetString(0)), "tombstone"));
+        {
+            try
+            {
+                ids.Add(new ContactId(reader.GetString(0)));
+            }
+            catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+            {
+                throw StoredDataError(error, "tombstone");
+            }
+        }
         return ids;
     }
 
@@ -224,17 +292,21 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
             WHERE merge_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@merge::text) AND merge_id=@merge AND {ScopeWhere}
             """);
         AddScope(command, scope);
-        command.Parameters.AddWithValue("merge", mergeId);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        AddUuid(command, "merge", mergeId);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             return null;
-        return Decode(() =>
+        try
         {
             if (reader.GetInt16(6) != 1)
                 throw new FormatException("Unsupported merge format version.");
             return ContactJsonCodec.DeserializeMergeRecord(reader.GetString(5), mergeId, new ContactId(reader.GetString(0)), new ContactId(reader.GetString(1)),
                 reader.GetFieldValue<DateTimeOffset>(2), new AccessActor((AccessActorKind)reader.GetInt16(3), reader.GetString(4)));
-        }, "merge record");
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw StoredDataError(error, "merge record");
+        }
     }
 
     public async Task<IReadOnlyList<ContactChange>> ReadChangesAsync(TicketScope scope, long afterSequence, int limit, CancellationToken cancellationToken = default)
@@ -249,14 +321,20 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
         var changes = new List<ContactChange>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            changes.Add(Decode(() =>
+        {
+            try
             {
                 if (reader.GetInt16(7) != 1)
                     throw new FormatException("Unsupported change format version.");
-                return new ContactChange(scope, reader.GetInt64(0), new ContactChangeDraft(reader.GetGuid(1), (ContactChangeKind)reader.GetInt16(2),
+                changes.Add(new ContactChange(scope, reader.GetInt64(0), new ContactChangeDraft(reader.GetGuid(1), (ContactChangeKind)reader.GetInt16(2),
                     new ContactId(reader.GetString(3)), reader.GetFieldValue<DateTimeOffset>(6),
-                    reader.IsDBNull(4) ? null : new ContactId(reader.GetString(4)), reader.IsDBNull(5) ? null : reader.GetGuid(5)));
-            }, "change"));
+                    reader.IsDBNull(4) ? null : new ContactId(reader.GetString(4)), reader.IsDBNull(5) ? null : reader.GetGuid(5))));
+            }
+            catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+            {
+                throw StoredDataError(error, "change");
+            }
+        }
         return changes;
     }
 
@@ -268,8 +346,8 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
             WHERE scope_key={ScopeKey} AND {ScopeWhere} AND sequence > @after ORDER BY sequence LIMIT @limit
             """);
         AddScope(command, scope);
-        command.Parameters.AddWithValue("after", afterSequence);
-        command.Parameters.AddWithValue("limit", limit);
+        AddBigInt(command, "after", afterSequence);
+        AddInt(command, "limit", limit);
         return command;
     }
 
@@ -290,74 +368,105 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
     private static void BindAudit(NpgsqlCommand command, ContactAuditEvent auditEvent)
     {
         AddScope(command, auditEvent.Scope);
-        command.Parameters.AddWithValue("event", auditEvent.Id);
+        AddUuid(command, "event", auditEvent.Id);
         AddInstant(command, "occurred", auditEvent.OccurredAt);
-        command.Parameters.AddWithValue("kind", (short)auditEvent.Kind);
-        command.Parameters.AddWithValue("actor_kind", (short)auditEvent.Actor.Kind);
+        AddSmallInt(command, "kind", (short)auditEvent.Kind);
+        AddSmallInt(command, "actor_kind", (short)auditEvent.Actor.Kind);
         AddText(command, "actor_id", auditEvent.Actor.Id);
         AddText(command, "contact", auditEvent.Contact?.Value);
         AddText(command, "related", auditEvent.Related?.Value);
-        command.Parameters.Add(new NpgsqlParameter("merge", NpgsqlDbType.Uuid) { Value = (object?)auditEvent.Merge ?? DBNull.Value });
-        command.Parameters.Add(new NpgsqlParameter("count", NpgsqlDbType.Integer) { Value = (object?)auditEvent.Count ?? DBNull.Value });
+        AddNullableUuid(command, "merge", auditEvent.Merge);
+        AddNullableInt(command, "count", auditEvent.Count);
         AddText(command, "justification", auditEvent.Justification);
-        command.Parameters.Add(new NpgsqlParameter("suggestion", NpgsqlDbType.Uuid) { Value = (object?)auditEvent.Suggestion ?? DBNull.Value });
+        AddNullableUuid(command, "suggestion", auditEvent.Suggestion);
     }
 
-    /// <summary>Loads contacts (with identities) by identifier in one scope.</summary>
+    /// <summary>Loads contacts (with identities) by identifier in one scope in a single pipelined batch RTT.</summary>
     private static async Task<Dictionary<ContactId, StoredContact>> LoadAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, TicketScope scope,
         IReadOnlyCollection<ContactId> ids, CancellationToken cancellationToken)
     {
-        var result = new Dictionary<ContactId, StoredContact>();
+        var result = new Dictionary<ContactId, StoredContact>(ids.Count);
         if (ids.Count == 0)
             return result;
-        var keys = $"SELECT tf_key_v1(@tenant,@project,@environment,@app,@workspace,id) FROM unnest(@ids) AS id";
-        var identities = new Dictionary<string, List<ContactIdentity>>(StringComparer.Ordinal);
-        await using (var command = new NpgsqlCommand($"""
+        var idArray = new string[ids.Count];
+        var idx = 0;
+        foreach (var id in ids)
+            idArray[idx++] = id.Value;
+        const string keys = "SELECT tf_key_v1(@tenant,@project,@environment,@app,@workspace,id) FROM unnest(@ids) AS id";
+        await using var batch = new NpgsqlBatch(connection, transaction);
+        var identitiesCmd = new NpgsqlBatchCommand($"""
             SELECT contact_id, kind, namespace, value, verified, source, verified_at FROM tf_contact_identities
             WHERE contact_key IN ({keys}) AND {ScopeWhere} AND contact_id = ANY(@ids)
-            """, connection, transaction))
-        {
-            AddScope(command, scope);
-            AddTextArray(command, "ids", ids.Select(id => id.Value));
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                var identity = Decode(() => new ContactIdentity(
-                    ContactJsonCodec.RestoreAddress((ContactIdentityKind)reader.GetInt16(1), reader.GetString(2), reader.GetString(3)),
-                    ContactJsonCodec.RestoreVerification(reader.GetBoolean(4), reader.GetString(5), reader.GetFieldValue<DateTimeOffset>(6))), "identity");
-                var owner = reader.GetString(0);
-                if (!identities.TryGetValue(owner, out var list))
-                    identities[owner] = list = [];
-                list.Add(identity);
-            }
-        }
-        await using (var command = new NpgsqlCommand($"""
+            """);
+        AddScope(identitiesCmd, scope);
+        AddTextArray(identitiesCmd, "ids", idArray);
+        batch.BatchCommands.Add(identitiesCmd);
+
+        var contactsCmd = new NpgsqlBatchCommand($"""
             SELECT {ContactColumns} FROM tf_contacts WHERE contact_key IN ({keys}) AND {ScopeWhere} AND contact_id = ANY(@ids)
-            """, connection, transaction))
+            """);
+        AddScope(contactsCmd, scope);
+        AddTextArray(contactsCmd, "ids", idArray);
+        batch.BatchCommands.Add(contactsCmd);
+
+        var identities = new Dictionary<string, List<ContactIdentity>>(StringComparer.Ordinal);
+        await using var reader = await batch.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            AddScope(command, scope);
-            AddTextArray(command, "ids", ids.Select(id => id.Value));
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            ContactIdentity identity;
+            string owner;
+            try
+            {
+                identity = new ContactIdentity(
+                    ContactJsonCodec.RestoreAddress((ContactIdentityKind)reader.GetInt16(1), reader.GetString(2), reader.GetString(3)),
+                    ContactJsonCodec.RestoreVerification(reader.GetBoolean(4), reader.GetString(5), reader.GetFieldValue<DateTimeOffset>(6)));
+                owner = reader.GetString(0);
+            }
+            catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+            {
+                throw StoredDataError(error, "identity");
+            }
+            if (!identities.TryGetValue(owner, out var list))
+                identities[owner] = list = [];
+            list.Add(identity);
+        }
+
+        if (await reader.NextResultAsync(cancellationToken).ConfigureAwait(false))
+        {
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                var stored = Decode(() =>
+                try
                 {
                     if (reader.GetInt16(1) != 1)
                         throw new FormatException("Unsupported contact format version.");
                     var id = reader.GetString(0);
+                    var rawLabels = reader.GetFieldValue<string[]>(8);
+                    LabelId[] labels;
+                    if (rawLabels.Length == 0)
+                        labels = [];
+                    else
+                    {
+                        labels = new LabelId[rawLabels.Length];
+                        for (var i = 0; i < rawLabels.Length; i++)
+                            labels[i] = new LabelId(rawLabels[i]);
+                    }
                     var contact = new Contact(
                         new ContactId(id),
                         new ContactProfile(NullableText(reader, 2), NullableText(reader, 3), NullableText(reader, 4), NullableText(reader, 5), NullableText(reader, 6)),
                         identities.GetValueOrDefault(id) ?? [],
                         ContactJsonCodec.DeserializeAttributes(reader.GetString(7)),
-                        reader.GetFieldValue<string[]>(8).Select(label => new LabelId(label)),
+                        labels,
                         reader.GetBoolean(9),
                         reader.GetFieldValue<DateTimeOffset>(11),
                         reader.GetFieldValue<DateTimeOffset>(12),
                         reader.IsDBNull(10) ? null : new ContactId(reader.GetString(10)));
-                    return new StoredContact(scope, contact, reader.GetInt64(13));
-                }, "contact");
-                result[stored.Id] = stored;
+                    var stored = new StoredContact(scope, contact, reader.GetInt64(13));
+                    result[stored.Id] = stored;
+                }
+                catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+                {
+                    throw StoredDataError(error, "contact");
+                }
             }
         }
         return result;
@@ -374,21 +483,60 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
         AddText(command, "workspace", scope.WorkspaceId.Value);
     }
 
+    private static void AddScope(NpgsqlBatchCommand command, TicketScope scope)
+    {
+        AddText(command, "tenant", scope.TenantId);
+        AddText(command, "project", scope.ProjectId);
+        AddText(command, "environment", scope.EnvironmentId);
+        AddText(command, "app", scope.AppId);
+        AddText(command, "workspace", scope.WorkspaceId.Value);
+    }
+
     private static void BindAddress(NpgsqlCommand command, ContactIdentityAddress address)
     {
-        command.Parameters.AddWithValue("kind", (short)address.Kind);
+        AddSmallInt(command, "kind", (short)address.Kind);
         AddText(command, "namespace", address.Namespace);
         AddText(command, "value", address.Value);
     }
 
     private static void AddText(NpgsqlCommand command, string name, string? value) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = (object?)value ?? DBNull.Value });
+        command.Parameters.Add(value is null ? new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = DBNull.Value } : new NpgsqlParameter<string>(name, NpgsqlDbType.Text) { TypedValue = value });
 
-    private static void AddTextArray(NpgsqlCommand command, string name, IEnumerable<string> values) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { Value = values.ToArray() });
+    private static void AddText(NpgsqlBatchCommand command, string name, string? value) =>
+        command.Parameters.Add(value is null ? new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = DBNull.Value } : new NpgsqlParameter<string>(name, NpgsqlDbType.Text) { TypedValue = value });
+
+    private static void AddTextArray(NpgsqlCommand command, string name, string[] values) =>
+        command.Parameters.Add(new NpgsqlParameter<string[]>(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = values });
+
+    private static void AddTextArray(NpgsqlBatchCommand command, string name, string[] values) =>
+        command.Parameters.Add(new NpgsqlParameter<string[]>(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = values });
+
+    private static void AddSmallInt(NpgsqlCommand command, string name, short value) =>
+        command.Parameters.Add(new NpgsqlParameter<short>(name, NpgsqlDbType.Smallint) { TypedValue = value });
+
+    private static void AddInt(NpgsqlCommand command, string name, int value) =>
+        command.Parameters.Add(new NpgsqlParameter<int>(name, NpgsqlDbType.Integer) { TypedValue = value });
+
+    private static void AddBigInt(NpgsqlCommand command, string name, long value) =>
+        command.Parameters.Add(new NpgsqlParameter<long>(name, NpgsqlDbType.Bigint) { TypedValue = value });
+
+    private static void AddBool(NpgsqlCommand command, string name, bool value) =>
+        command.Parameters.Add(new NpgsqlParameter<bool>(name, NpgsqlDbType.Boolean) { TypedValue = value });
+
+    private static void AddUuid(NpgsqlCommand command, string name, Guid value) =>
+        command.Parameters.Add(new NpgsqlParameter<Guid>(name, NpgsqlDbType.Uuid) { TypedValue = value });
+
+    private static void AddNullableSmallInt(NpgsqlCommand command, string name, short? value) =>
+        command.Parameters.Add(value is { } v ? new NpgsqlParameter<short>(name, NpgsqlDbType.Smallint) { TypedValue = v } : new NpgsqlParameter(name, NpgsqlDbType.Smallint) { Value = DBNull.Value });
+
+    private static void AddNullableInt(NpgsqlCommand command, string name, int? value) =>
+        command.Parameters.Add(value is { } v ? new NpgsqlParameter<int>(name, NpgsqlDbType.Integer) { TypedValue = v } : new NpgsqlParameter(name, NpgsqlDbType.Integer) { Value = DBNull.Value });
+
+    private static void AddNullableUuid(NpgsqlCommand command, string name, Guid? value) =>
+        command.Parameters.Add(value is { } v ? new NpgsqlParameter<Guid>(name, NpgsqlDbType.Uuid) { TypedValue = v } : new NpgsqlParameter(name, NpgsqlDbType.Uuid) { Value = DBNull.Value });
 
     private static void AddInstant(NpgsqlCommand command, string name, DateTimeOffset value) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = value });
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>(name, NpgsqlDbType.TimestampTz) { TypedValue = value });
 
     private static void RequireId(ContactId id)
     {
@@ -396,15 +544,6 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
             throw new ArgumentException("A contact identifier is required.", nameof(id));
     }
 
-    private static T Decode<T>(Func<T> decode, string description)
-    {
-        try
-        {
-            return decode();
-        }
-        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
-        {
-            throw new InvalidOperationException($"A stored contact {description} is invalid or incompatible.", error);
-        }
-    }
+    private static InvalidOperationException StoredDataError(Exception error, string description) =>
+        new($"A stored contact {description} is invalid or incompatible.", error);
 }

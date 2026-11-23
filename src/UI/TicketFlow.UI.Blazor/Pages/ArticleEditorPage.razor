@@ -115,21 +115,38 @@ else
     {
         if (Service<IHelpCenterService>() is not { } service || Id is null)
             return;
-        if (Id != "new" && await service.GetArticleAsync(Actor, new ArticleId(Id), Aborted) is HelpCenterSucceeded<StoredArticle> found)
+        var articleTask = Id != "new" ? service.GetArticleAsync(Actor, new ArticleId(Id), Aborted) : null;
+        var portalsTask = service.ListPortalsAsync(Actor, Aborted);
+        if (articleTask is not null)
+            await Task.WhenAll(articleTask, portalsTask);
+        else
+            await portalsTask;
+        if (articleTask is not null && await articleTask is HelpCenterSucceeded<StoredArticle> found)
             stored = found.Value;
-        if (await service.ListPortalsAsync(Actor, Aborted) is HelpCenterSucceeded<IReadOnlyList<StoredPortal>> list)
+        if (await portalsTask is HelpCenterSucceeded<IReadOnlyList<StoredPortal>> list)
             portals = [.. list.Value];
         var portal = stored?.Record.Article.Portal ?? portals.FirstOrDefault(item => item.Portal.Id.Value == Query("portal"))?.Portal.Id ?? portals.FirstOrDefault()?.Portal.Id;
-        if (portal is { } portalId && await service.ListCollectionsAsync(Actor, portalId, Aborted) is HelpCenterSucceeded<IReadOnlyList<StoredCollection>> collectionList)
+
+        var collectionsTask = portal is { } portalId ? service.ListCollectionsAsync(Actor, portalId, Aborted) : null;
+        var previewTask = stored is not null ? service.PreviewArticleAsync(Actor, stored.Id, stored.Record.Article.Translations[0].Locale, Aborted) : null;
+        var feedbackTask = stored is not null ? service.GetFeedbackAsync(Actor, stored.Id, Aborted) : null;
+        var revisionsTask = stored is not null ? service.ListRevisionsAsync(Actor, stored.Id, 5, null, Aborted) : null;
+
+        var pending = new List<Task>(4);
+        if (collectionsTask is not null) pending.Add(collectionsTask);
+        if (previewTask is not null) pending.Add(previewTask);
+        if (feedbackTask is not null) pending.Add(feedbackTask);
+        if (revisionsTask is not null) pending.Add(revisionsTask);
+        if (pending.Count > 0)
+            await Task.WhenAll(pending);
+
+        if (collectionsTask is not null && await collectionsTask is HelpCenterSucceeded<IReadOnlyList<StoredCollection>> collectionList)
             collections = [.. collectionList.Value];
-        if (stored is null)
-            return;
-        var locale = stored.Record.Article.Translations[0].Locale;
-        if (await service.PreviewArticleAsync(Actor, stored.Id, locale, Aborted) is HelpCenterSucceeded<ArticlePreview> rendered)
+        if (previewTask is not null && await previewTask is HelpCenterSucceeded<ArticlePreview> rendered)
             preview = rendered.Value;
-        if (await service.GetFeedbackAsync(Actor, stored.Id, Aborted) is HelpCenterSucceeded<ArticleFeedbackCounts> counts)
+        if (feedbackTask is not null && await feedbackTask is HelpCenterSucceeded<ArticleFeedbackCounts> counts)
             feedback = counts.Value;
-        if (await service.ListRevisionsAsync(Actor, stored.Id, 5, null, Aborted) is HelpCenterSucceeded<HelpCenterPage<ArticleRevision>> history)
+        if (revisionsTask is not null && await revisionsTask is HelpCenterSucceeded<HelpCenterPage<ArticleRevision>> history)
             revisions = [.. history.Value.Items];
     }
 }

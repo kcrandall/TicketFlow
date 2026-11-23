@@ -47,7 +47,7 @@
     var policy = stored.Policy;
     <div class="tf-card">
         <div class="tf-card__header">
-            <div><div class="tf-card__title">@policy.Name</div><div class="tf-card__description">At risk at @policy.AtRiskPercent% of a target · pauses when @(policy.Pause.PauseWhenPending ? "pending" : "")@(policy.Pause.PauseWhenPending && policy.Pause.PauseWhenSnoozed ? " or " : "")@(policy.Pause.PauseWhenSnoozed ? "snoozed" : "") · used by @string.Join(", ", Inboxes.Where(inbox => inbox.Inbox.SlaPolicy == policy.Id).Select(inbox => inbox.Inbox.Name).DefaultIfEmpty("no inbox"))</div></div>
+            <div><div class="tf-card__title">@policy.Name</div><div class="tf-card__description">At risk at @policy.AtRiskPercent% of a target · pauses when @(policy.Pause.PauseWhenPending ? "pending" : "")@(policy.Pause.PauseWhenPending && policy.Pause.PauseWhenSnoozed ? " or " : "")@(policy.Pause.PauseWhenSnoozed ? "snoozed" : "") · used by @(policyInboxes.GetValueOrDefault(policy.Id, "no inbox"))</div></div>
             <span class="tf-small tf-muted tf-mono">rev @stored.Revision</span>
         </div>
         <div class="tf-table-wrap" style="margin-top:12px">
@@ -77,14 +77,17 @@
 @if (Session.Can(SlaPermissions.Manage))
 {
     <div class="tf-card"><div class="tf-card__header"><div class="tf-card__title">New SLA policy</div></div><div class="tf-card__content">
-        <DefinitionEditor Json="@DefinitionEditor.Pretty(SlaPolicyCodec.Serialize(new SlaPolicy(new SlaPolicyId("new"), "New policy", [new SlaRule("Default", new SlaCondition(), new SlaTargets(TimeSpan.FromHours(1), null, TimeSpan.FromHours(24)))])))" SaveAction="sla.policy.save" />
+        <DefinitionEditor Json="@NewPolicyJson" SaveAction="sla.policy.save" />
     </div></div>
 }
 
 @code {
+    private static readonly string NewPolicyJson = DefinitionEditor.Pretty(SlaPolicyCodec.Serialize(new SlaPolicy(new SlaPolicyId("new"), "New policy", [new SlaRule("Default", new SlaCondition(), new SlaTargets(TimeSpan.FromHours(1), null, TimeSpan.FromHours(24)))])));
+
     private List<StoredSlaPolicy> policies = [];
     private List<SlaStatusView> risk = [];
     private readonly Dictionary<ConversationId, ConversationView> conversations = [];
+    private readonly Dictionary<SlaPolicyId, string> policyInboxes = [];
 
     private static string Applies(SlaCondition condition)
     {
@@ -98,17 +101,40 @@
 
     protected override async Task OnInitializedAsync()
     {
-        await LoadWorkspaceAsync();
-        if (Service<ISlaPolicyService>() is { } policyService && await policyService.ListAsync(Actor, Aborted) is SlaValue<IReadOnlyList<StoredSlaPolicy>> list)
-            policies = [.. list.Value];
+        var inboxesTask = LoadInboxesAsync();
+        var policyTask = Service<ISlaPolicyService>()?.ListAsync(Actor, Aborted);
         var filter = Query("filter") switch { "at-risk" => SlaRiskFilter.AtRisk, "breached" => SlaRiskFilter.Breached, _ => SlaRiskFilter.AtRiskOrBreached };
-        if (Service<ISlaService>() is { } sla && await sla.ListAsync(Actor, new SlaRiskQuery(filter, limit: 50), null, Aborted) is SlaValue<SlaRiskPage> page)
+        var riskTask = Service<ISlaService>()?.ListAsync(Actor, new SlaRiskQuery(filter, limit: 50), null, Aborted);
+        var pending = new List<Task>(3) { inboxesTask };
+        if (policyTask is not null) pending.Add(policyTask);
+        if (riskTask is not null) pending.Add(riskTask);
+        await Task.WhenAll(pending);
+
+        var grouped = new Dictionary<SlaPolicyId, List<string>>();
+        foreach (var inbox in Inboxes)
+        {
+            if (inbox.Inbox.SlaPolicy is not { } policyId)
+                continue;
+            if (!grouped.TryGetValue(policyId, out var names))
+                grouped[policyId] = names = [];
+            names.Add(inbox.Inbox.Name);
+        }
+        foreach (var (policyId, names) in grouped)
+            policyInboxes[policyId] = string.Join(", ", names);
+
+        if (policyTask is not null && await policyTask is SlaValue<IReadOnlyList<StoredSlaPolicy>> list)
+            policies = [.. list.Value];
+        if (riskTask is not null && await riskTask is SlaValue<SlaRiskPage> page)
             risk = [.. page.Value.Items];
-        if (Service<IConversationService>() is { } service)
-            foreach (var item in risk)
-                if (await service.GetAsync(Actor, item.Conversation, Aborted) is ConversationView view)
-                    conversations[item.Conversation] = view;
-        await LoadContactsAsync(conversations.Values.Select(view => view.Contact));
-        await Session.LoadUsersAsync(conversations.Values.Select(view => view.Assignee));
+        if (risk.Count > 0 && Service<IConversationService>() is { } service)
+        {
+            var results = await Task.WhenAll(risk.Select(item => service.GetAsync(Actor, item.Conversation, Aborted)));
+            for (var i = 0; i < risk.Count; i++)
+                if (results[i] is ConversationView view)
+                    conversations[risk[i].Conversation] = view;
+        }
+        await Task.WhenAll(
+            LoadContactsAsync(conversations.Values.Select(view => view.Contact)),
+            Session.LoadUsersAsync(conversations.Values.Select(view => view.Assignee)));
     }
 }

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text.Unicode;
 using TicketFlow.Access;
 using TicketFlow.Core;
@@ -71,11 +72,11 @@ public sealed record StaffProfile
         AvatarRef = StaffText.OptionalText(avatarRef, MaximumAvatarRefLength, nameof(avatarRef));
         if (notificationEmail is not null)
         {
-            var email = notificationEmail.Trim();
+            var email = notificationEmail.AsSpan().Trim();
             var at = email.LastIndexOf('@');
-            if (email.Length is 0 or > MaximumEmailLength || at <= 0 || at == email.Length - 1 || email.Any(char.IsWhiteSpace) || !StaffText.IsClean(email))
+            if (email.Length is 0 or > MaximumEmailLength || at <= 0 || at == email.Length - 1 || StaffText.ContainsWhiteSpace(email) || !StaffText.IsClean(email))
                 throw new ArgumentException("The notification email is invalid.", nameof(notificationEmail));
-            notificationEmail = email;
+            notificationEmail = email.Length == notificationEmail.Length ? notificationEmail : new string(email);
         }
         NotificationEmail = notificationEmail;
     }
@@ -283,14 +284,28 @@ public interface IStaffIdentityResolver
 
 internal static class StaffText
 {
+    private static readonly SearchValues<char> TokenChars = SearchValues.Create("abcdefghijklmnopqrstuvwxyz0123456789-_");
+    private static readonly SearchValues<char> ControlChars = SearchValues.Create(
+        "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\u0008\u0009\u000A\u000B\u000C\u000D\u000E\u000F" +
+        "\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001A\u001B\u001C\u001D\u001E\u001F" +
+        "\u007F\u0080\u0081\u0082\u0083\u0084\u0085\u0086\u0087\u0088\u0089\u008A\u008B\u008C\u008D\u008E\u008F" +
+        "\u0090\u0091\u0092\u0093\u0094\u0095\u0096\u0097\u0098\u0099\u009A\u009B\u009C\u009D\u009E\u009F");
+
     public static bool IsClean(ReadOnlySpan<char> value) =>
-        !value.ContainsAnyInRange('\0', '\u001F') && !value.ContainsAnyInRange('\u007F', '\u009F') && Utf16.IsValid(value);
+        !value.ContainsAny(ControlChars) && (!value.ContainsAnyInRange('\uD800', '\uDFFF') || Utf16.IsValid(value));
+
+    public static bool ContainsWhiteSpace(ReadOnlySpan<char> value)
+    {
+        foreach (var ch in value)
+            if (char.IsWhiteSpace(ch))
+                return true;
+        return false;
+    }
 
     public static string RequireToken(string value, int maximumLength, string parameterName)
     {
         ArgumentNullException.ThrowIfNull(value, parameterName);
-        if (value.Length is 0 || value.Length > maximumLength || value[0] is not (>= 'a' and <= 'z')
-            || value.Any(character => character is not ((>= 'a' and <= 'z') or (>= '0' and <= '9') or '-' or '_')))
+        if (value.Length is 0 || value.Length > maximumLength || value[0] is not (>= 'a' and <= 'z') || value.AsSpan().ContainsAnyExcept(TokenChars))
             throw new ArgumentException($"Tokens are 1-{maximumLength} characters of a-z, 0-9, '-' or '_', starting with a letter.", parameterName);
         return value;
     }

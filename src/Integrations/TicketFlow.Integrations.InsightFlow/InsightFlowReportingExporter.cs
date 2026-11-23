@@ -17,11 +17,14 @@ public sealed record InsightFlowExportResult(int Exported, int Batches, bool Has
 /// </summary>
 public sealed class InsightFlowReportingExporter : IDisposable
 {
+    private static readonly MediaTypeHeaderValue JsonContentType = new("application/json") { CharSet = "utf-8" };
+
     private readonly IReportingStore reporting;
     private readonly IInsightFlowExportCheckpointStore checkpoints;
     private readonly InsightFlowExportOptions options;
     private readonly TimeProvider time;
     private readonly HttpClient client;
+    private readonly AuthenticationHeaderValue? cachedAuthorization;
 
     public InsightFlowReportingExporter(IReportingStore reporting, IInsightFlowExportCheckpointStore checkpoints, IOptions<InsightFlowExportOptions> options,
         TimeProvider time, HttpMessageHandler? handler = null)
@@ -32,7 +35,11 @@ public sealed class InsightFlowReportingExporter : IDisposable
         this.options = options.Value;
         this.options.Validate();
         this.time = time ?? throw new ArgumentNullException(nameof(time));
-        client = new HttpClient(handler ?? new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false }) { Timeout = this.options.Timeout };
+        if (this.options.ApiKey is not null
+            && string.Equals(this.options.AuthorizationHeaderName, "Authorization", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(this.options.AuthorizationScheme))
+            cachedAuthorization = new AuthenticationHeaderValue(this.options.AuthorizationScheme, this.options.ApiKey);
+        client = new HttpClient(handler ?? new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false, PooledConnectionLifetime = TimeSpan.FromMinutes(5) }) { Timeout = this.options.Timeout };
     }
 
     /// <summary>Reads up to one page of facts for <paramref name="scope"/>, exports them, and advances the checkpoint on success.</summary>
@@ -58,7 +65,7 @@ public sealed class InsightFlowReportingExporter : IDisposable
             return new InsightFlowExportResult(0, 0, to < now);
         }
 
-        var (batches, failureCode, permanent, retryAfter) = await SendWithSplitAsync(scope, page.Items, cancellationToken).ConfigureAwait(false);
+        var (batches, failureCode, permanent, retryAfter) = await SendWithSplitAsync(scope, page.Items, 0, page.Items.Count, cancellationToken).ConfigureAwait(false);
         if (failureCode is not null)
             return new InsightFlowExportResult(0, batches, true, failureCode, permanent, retryAfter);
 
@@ -72,26 +79,23 @@ public sealed class InsightFlowReportingExporter : IDisposable
     }
 
     private async Task<(int Batches, string? FailureCode, bool Permanent, TimeSpan? RetryAfter)> SendWithSplitAsync(TicketScope scope, IReadOnlyList<ReportFact> facts,
-        CancellationToken cancellationToken)
+        int offset, int count, CancellationToken cancellationToken)
     {
-        var payload = InsightFlowClientEventEncoder.EncodeBatch(scope, facts, options);
+        var payload = InsightFlowClientEventEncoder.EncodeBatch(scope, facts, offset, count, options);
         if (payload.Length > options.MaximumPayloadBytes)
         {
-            if (facts.Count == 1)
+            if (count == 1)
                 return (0, "payload-too-large", true, null);
-            return await SendHalvesAsync(scope, facts, cancellationToken).ConfigureAwait(false);
+            return await SendHalvesAsync(scope, facts, offset, count, cancellationToken).ConfigureAwait(false);
         }
 
         using var request = new HttpRequestMessage(HttpMethod.Post, options.Endpoint);
-        if (options.ApiKey is not null)
-        {
-            if (string.Equals(options.AuthorizationHeaderName, "Authorization", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(options.AuthorizationScheme))
-                request.Headers.Authorization = new AuthenticationHeaderValue(options.AuthorizationScheme, options.ApiKey);
-            else
-                request.Headers.TryAddWithoutValidation(options.AuthorizationHeaderName, options.ApiKey);
-        }
+        if (cachedAuthorization is not null)
+            request.Headers.Authorization = cachedAuthorization;
+        else if (options.ApiKey is not null)
+            request.Headers.TryAddWithoutValidation(options.AuthorizationHeaderName, options.ApiKey);
         request.Content = new ByteArrayContent(payload);
-        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
+        request.Content.Headers.ContentType = JsonContentType;
 
         try
         {
@@ -99,8 +103,8 @@ public sealed class InsightFlowReportingExporter : IDisposable
             var status = (int)response.StatusCode;
             if (status is >= 200 and < 300)
                 return (1, null, false, null);
-            if (status == 413 && facts.Count > 1)
-                return await SendHalvesAsync(scope, facts, cancellationToken).ConfigureAwait(false);
+            if (status == 413 && count > 1)
+                return await SendHalvesAsync(scope, facts, offset, count, cancellationToken).ConfigureAwait(false);
             var code = "http-" + status.ToString(CultureInfo.InvariantCulture);
             var permanent = status is not (408 or 429 or >= 500);
             return (0, code, permanent, response.Headers.RetryAfter?.Delta);
@@ -116,13 +120,13 @@ public sealed class InsightFlowReportingExporter : IDisposable
     }
 
     private async Task<(int Batches, string? FailureCode, bool Permanent, TimeSpan? RetryAfter)> SendHalvesAsync(TicketScope scope, IReadOnlyList<ReportFact> facts,
-        CancellationToken cancellationToken)
+        int offset, int count, CancellationToken cancellationToken)
     {
-        var mid = facts.Count / 2;
-        var left = await SendWithSplitAsync(scope, [.. facts.Take(mid)], cancellationToken).ConfigureAwait(false);
+        var mid = count / 2;
+        var left = await SendWithSplitAsync(scope, facts, offset, mid, cancellationToken).ConfigureAwait(false);
         if (left.FailureCode is not null)
             return left;
-        var right = await SendWithSplitAsync(scope, [.. facts.Skip(mid)], cancellationToken).ConfigureAwait(false);
+        var right = await SendWithSplitAsync(scope, facts, offset + mid, count - mid, cancellationToken).ConfigureAwait(false);
         return (left.Batches + right.Batches, right.FailureCode, right.Permanent, right.RetryAfter);
     }
 

@@ -142,7 +142,7 @@ public sealed class PostgresHelpCenterStoreTests
         await database.Store.InitializeAsync();
         await database.Competing.InitializeAsync();
         var inspection = await new PostgresMigrationRunner(database.Primary, PostgresHelpCenterMigrations.Catalog).InspectAsync();
-        Assert.AreEqual(1, inspection.CurrentVersion);
+        Assert.AreEqual(2, inspection.CurrentVersion);
         Assert.AreEqual(PostgresHelpCenterMigrations.Catalog.Migrations[0].Checksum, inspection.Applied[0].Checksum);
     }
 

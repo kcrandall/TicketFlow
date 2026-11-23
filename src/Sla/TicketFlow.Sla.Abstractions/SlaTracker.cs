@@ -194,6 +194,8 @@ public sealed record SlaConversationFacts
 /// </summary>
 public sealed record SlaAccessSnapshot
 {
+    private static readonly IReadOnlyDictionary<string, string> EmptyAttributes = new SortedDictionary<string, string>(StringComparer.Ordinal).AsReadOnly();
+
     public SlaAccessSnapshot(TeamId? team, UserId? assignee, IEnumerable<LabelId> labels, IEnumerable<KeyValuePair<string, string>> attributes)
     {
         if (team == default(TeamId) || assignee == default(UserId))
@@ -203,11 +205,20 @@ public sealed record SlaAccessSnapshot
         ArgumentNullException.ThrowIfNull(labels);
         ArgumentNullException.ThrowIfNull(attributes);
         Labels = [.. labels.Distinct().OrderBy(label => label.Value, StringComparer.Ordinal)];
-        Attributes = new SortedDictionary<string, string>(attributes.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal), StringComparer.Ordinal).AsReadOnly();
-        if (Labels.Count > Conversation.MaximumLabels || Labels.Any(label => label == default) || Attributes.Count > Conversation.MaximumAttributes)
+        if (Labels.Count > Conversation.MaximumLabels || Labels.Any(label => label == default))
             throw new ArgumentException("The access snapshot exceeds conversation limits.");
-        if (Attributes.Any(pair => pair.Key.Length is 0 or > AccessResource.MaximumAttributeKeyLength || pair.Value is null || pair.Value.Length > AccessResource.MaximumAttributeValueLength))
-            throw new ArgumentException("Attribute condition values exceed Access limits.", nameof(attributes));
+        SortedDictionary<string, string>? sorted = null;
+        foreach (var pair in attributes)
+        {
+            sorted ??= new SortedDictionary<string, string>(StringComparer.Ordinal);
+            if (!sorted.TryAdd(pair.Key, pair.Value))
+                throw new ArgumentException("Duplicate attribute key.", nameof(attributes));
+            if (sorted.Count > Conversation.MaximumAttributes)
+                throw new ArgumentException("The access snapshot exceeds conversation limits.");
+            if (pair.Key.Length is 0 or > AccessResource.MaximumAttributeKeyLength || pair.Value is null || pair.Value.Length > AccessResource.MaximumAttributeValueLength)
+                throw new ArgumentException("Attribute condition values exceed Access limits.", nameof(attributes));
+        }
+        Attributes = sorted is null ? EmptyAttributes : sorted.AsReadOnly();
     }
 
     public TeamId? Team { get; }
@@ -220,9 +231,18 @@ public sealed record SlaAccessSnapshot
     public static SlaAccessSnapshot From(Conversation conversation)
     {
         ArgumentNullException.ThrowIfNull(conversation);
-        return new(conversation.Team, conversation.Assignee, conversation.Labels, conversation.Attributes
-            .Where(pair => pair.Value.ConditionValue is not null)
-            .Select(pair => new KeyValuePair<string, string>(pair.Key, pair.Value.ConditionValue!)));
+        if (conversation.Attributes.Count == 0)
+            return new(conversation.Team, conversation.Assignee, conversation.Labels, EmptyAttributes);
+        List<KeyValuePair<string, string>>? attrs = null;
+        foreach (var pair in conversation.Attributes)
+        {
+            if (pair.Value.ConditionValue is { } cond)
+            {
+                attrs ??= new List<KeyValuePair<string, string>>(conversation.Attributes.Count);
+                attrs.Add(new KeyValuePair<string, string>(pair.Key, cond));
+            }
+        }
+        return new(conversation.Team, conversation.Assignee, conversation.Labels, attrs is null ? EmptyAttributes : attrs);
     }
 
     public AccessResource Resource(TicketScope scope, ConversationId conversation, InboxId inbox) =>

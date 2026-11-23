@@ -214,18 +214,36 @@ public sealed record ContactWriteBatch
         Guid? deleteMerge = null,
         ContactAuditEvent? audit = null)
     {
-        Puts = [.. puts ?? []];
-        Deletes = [.. deletes ?? []];
-        Changes = [.. changes ?? []];
-        if (Puts.Any(put => put is null) || Deletes.Any(delete => delete is null) || Changes.Any(change => change is null))
-            throw new ArgumentException("Batch entries cannot be null.");
-        if (Puts.Count + Deletes.Count is 0 or > MaximumContacts)
+        Puts = puts is null ? [] : [.. puts];
+        Deletes = deletes is null ? [] : [.. deletes];
+        Changes = changes is null ? [] : [.. changes];
+        for (var i = 0; i < Puts.Count; i++)
+            if (Puts[i] is null)
+                throw new ArgumentException("Batch entries cannot be null.");
+        for (var i = 0; i < Deletes.Count; i++)
+            if (Deletes[i] is null)
+                throw new ArgumentException("Batch entries cannot be null.");
+        for (var i = 0; i < Changes.Count; i++)
+            if (Changes[i] is null)
+                throw new ArgumentException("Batch entries cannot be null.");
+        var total = Puts.Count + Deletes.Count;
+        if (total is 0 or > MaximumContacts)
             throw new ArgumentException($"A batch writes 1-{MaximumContacts} contacts.");
         if (Changes.Count > MaximumChanges)
             throw new ArgumentException($"A batch appends at most {MaximumChanges} changes.");
-        var ids = Puts.Select(put => put.Contact.Id).Concat(Deletes.Select(delete => delete.Id)).ToList();
-        if (ids.Distinct().Count() != ids.Count)
-            throw new ArgumentException("A batch writes each contact at most once.");
+        if (total > 1)
+        {
+            for (var i = 0; i < total; i++)
+            {
+                var left = i < Puts.Count ? Puts[i].Contact.Id : Deletes[i - Puts.Count].Id;
+                for (var j = i + 1; j < total; j++)
+                {
+                    var right = j < Puts.Count ? Puts[j].Contact.Id : Deletes[j - Puts.Count].Id;
+                    if (left == right)
+                        throw new ArgumentException("A batch writes each contact at most once.");
+                }
+            }
+        }
         if (deleteMerge == Guid.Empty || (createMerge is not null && deleteMerge is not null))
             throw new ArgumentException("A batch creates or deletes at most one merge record.");
         CreateMerge = createMerge;
@@ -371,21 +389,53 @@ public sealed record ContactSearch
     }
 
     /// <summary>The folded form of a display name used for name ordering and prefix search: trimmed, invariant lowercase.</summary>
-    public static string FoldName(string? displayName) => (displayName ?? string.Empty).Trim().ToLowerInvariant();
+    public static string FoldName(string? displayName)
+    {
+        if (string.IsNullOrEmpty(displayName))
+            return string.Empty;
+        var span = displayName.AsSpan().Trim();
+        if (span.IsEmpty)
+            return string.Empty;
+        var needsLower = false;
+        foreach (var ch in span)
+        {
+            if (ch is >= 'A' and <= 'Z' || ch > 0x7F)
+            {
+                needsLower = true;
+                break;
+            }
+        }
+        if (!needsLower)
+            return span.Length == displayName.Length ? displayName : new string(span);
+        return span.Length == displayName.Length ? displayName.ToLowerInvariant() : new string(span).ToLowerInvariant();
+    }
 
     private static string FoldIdentityPrefix(ContactIdentityKind kind, string prefix)
     {
-        var trimmed = prefix.Trim();
+        var trimmed = prefix.AsSpan().Trim();
         switch (kind)
         {
             case ContactIdentityKind.Email:
-                return trimmed.ToLowerInvariant();
+                return trimmed.Length == prefix.Length ? prefix.ToLowerInvariant() : new string(trimmed).ToLowerInvariant();
             case ContactIdentityKind.SocialHandle:
-                return trimmed.TrimStart('@').ToLowerInvariant();
+                var stripped = trimmed.TrimStart('@');
+                return stripped.Length == prefix.Length ? prefix.ToLowerInvariant() : new string(stripped).ToLowerInvariant();
             case ContactIdentityKind.Phone:
             case ContactIdentityKind.WhatsApp:
-                var digits = new string([.. trimmed.Where(char.IsAsciiDigit)]);
-                return digits.Length == 0 ? string.Empty : "+" + (trimmed.StartsWith("00", StringComparison.Ordinal) && !trimmed.StartsWith('+') ? digits[2..] : digits);
+                Span<char> buffer = trimmed.Length < 256 ? stackalloc char[trimmed.Length + 1] : new char[trimmed.Length + 1];
+                var count = 0;
+                foreach (var ch in trimmed)
+                    if (char.IsAsciiDigit(ch))
+                        buffer[++count] = ch;
+                if (count == 0)
+                    return string.Empty;
+                if (trimmed.StartsWith("00", StringComparison.Ordinal) && !trimmed.StartsWith('+'))
+                {
+                    buffer[2] = '+';
+                    return new string(buffer[2..(count + 1)]);
+                }
+                buffer[0] = '+';
+                return new string(buffer[..(count + 1)]);
             default:
                 return prefix;
         }
@@ -419,6 +469,18 @@ public interface IContactStore
 
     /// <summary>The contact, including merge tombstones.</summary>
     Task<StoredContact?> GetAsync(TicketScope scope, ContactId id, CancellationToken cancellationToken = default);
+
+    /// <summary>Loads contacts (including merge tombstones) by identifier in one scope; missing identifiers are omitted.</summary>
+    async Task<IReadOnlyDictionary<ContactId, StoredContact>> GetManyAsync(TicketScope scope, IReadOnlyCollection<ContactId> ids, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(ids);
+        var result = new Dictionary<ContactId, StoredContact>(ids.Count);
+        foreach (var id in ids)
+            if (!result.ContainsKey(id) && await GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is { } stored)
+                result[id] = stored;
+        return result;
+    }
 
     /// <summary>Up to <see cref="MaximumIdentityOwners"/> holders of <paramref name="address"/>: the verified holder first, then claimed holders by identifier.</summary>
     Task<IReadOnlyList<ContactIdentityOwner>> FindByIdentityAsync(TicketScope scope, ContactIdentityAddress address, CancellationToken cancellationToken = default);

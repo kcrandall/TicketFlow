@@ -1,5 +1,5 @@
 @* Renders a form outcome (success, forbidden, conflict, validation) as a shadcn alert. *@
-<div class="tf-alert tf-alert--@Variant" role="@(Outcome.Succeeded ? "status" : "alert")" data-outcome="@Outcome.Kind.ToString().ToLowerInvariant()">
+<div class="@CssClass" role="@(Outcome.Succeeded ? "status" : "alert")" data-outcome="@KindToken">
     <LucideIcon Name="@Icon" Size="16" Class="tf-alert__icon" />
     <div class="tf-alert__body">
         <div class="tf-alert__title">@Outcome.Title</div>
@@ -18,12 +18,24 @@
 @code {
     [Parameter, EditorRequired] public UiOutcome Outcome { get; set; } = default!;
 
-    private string Variant => Outcome.Kind switch
+    private string CssClass => Outcome.Kind switch
+    {
+        UiOutcomeKind.Success => "tf-alert tf-alert--success",
+        UiOutcomeKind.Info => "tf-alert tf-alert--info",
+        UiOutcomeKind.Conflict or UiOutcomeKind.Rejected => "tf-alert tf-alert--warning",
+        _ => "tf-alert tf-alert--destructive",
+    };
+
+    private string KindToken => Outcome.Kind switch
     {
         UiOutcomeKind.Success => "success",
         UiOutcomeKind.Info => "info",
-        UiOutcomeKind.Conflict or UiOutcomeKind.Rejected => "warning",
-        _ => "destructive",
+        UiOutcomeKind.Forbidden => "forbidden",
+        UiOutcomeKind.NotFound => "notfound",
+        UiOutcomeKind.Conflict => "conflict",
+        UiOutcomeKind.Invalid => "invalid",
+        UiOutcomeKind.Rejected => "rejected",
+        _ => "error",
     };
 
     private string Icon => Outcome.Kind switch

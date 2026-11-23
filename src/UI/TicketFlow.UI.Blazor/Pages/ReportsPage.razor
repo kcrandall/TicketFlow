@@ -109,19 +109,24 @@ else if (overview is not null)
                 return;
         }
         var granularity = To - From > TimeSpan.FromDays(120) ? ReportGranularity.Week : ReportGranularity.Day;
-        if (await reporting.GetTrendsAsync(Actor, new ReportTrendQuery(query, [ReportMetric.ConversationCreated, ReportMetric.ConversationResolved, ReportMetric.MessageReceived], granularity), Aborted)
-            is ReportSucceeded<ReportTrend> series)
+        var trendTask = reporting.GetTrendsAsync(Actor, new ReportTrendQuery(query, [ReportMetric.ConversationCreated, ReportMetric.ConversationResolved, ReportMetric.MessageReceived], granularity), Aborted);
+        var boardTask = reporting.GetLeaderboardAsync(Actor, new ReportLeaderboardQuery(query, ReportLeaderboardSort.Resolved, 10), Aborted);
+        var channelTask = BreakdownAsync(reporting, Actor, query, ReportDimension.Channel, UiFormat.Channel, Aborted);
+        var priorityTask = BreakdownAsync(reporting, Actor, query, ReportDimension.Priority, value => string.IsNullOrEmpty(value) ? "No priority" : char.ToUpperInvariant(value[0]) + value[1..], Aborted);
+        await Task.WhenAll(trendTask, boardTask, channelTask, priorityTask);
+
+        if (await trendTask is ReportSucceeded<ReportTrend> series)
             trend = UiCharts.Daily(series.Value, [(ReportMetric.ConversationCreated, "Created"), (ReportMetric.ConversationResolved, "Resolved"), (ReportMetric.MessageReceived, "Messages received")]);
-        if (await reporting.GetLeaderboardAsync(Actor, new ReportLeaderboardQuery(query, ReportLeaderboardSort.Resolved, 10), Aborted) is ReportSucceeded<ReportLeaderboard> board)
+        if (await boardTask is ReportSucceeded<ReportLeaderboard> board)
             leaderboard = [.. board.Value.Rows];
-        byChannel = await BreakdownAsync(reporting, Actor, query, ReportDimension.Channel, UiFormat.Channel);
-        byPriority = await BreakdownAsync(reporting, Actor, query, ReportDimension.Priority, value => string.IsNullOrEmpty(value) ? "No priority" : char.ToUpperInvariant(value[0]) + value[1..]);
+        byChannel = await channelTask;
+        byPriority = await priorityTask;
         await Session.LoadUsersAsync(leaderboard.Select(row => (UserId?)row.Agent));
     }
 
-    private static async Task<List<BarList.Item>> BreakdownAsync(IReportingService reporting, PrincipalRef actor, ReportQuery query, ReportDimension dimension, Func<string, string> label)
+    private static async Task<List<BarList.Item>> BreakdownAsync(IReportingService reporting, PrincipalRef actor, ReportQuery query, ReportDimension dimension, Func<string, string> label, CancellationToken cancellationToken)
     {
-        if (await reporting.GetTrendsAsync(actor, new ReportTrendQuery(query, [ReportMetric.ConversationCreated], ReportGranularity.Month, dimension)) is not ReportSucceeded<ReportTrend> trend)
+        if (await reporting.GetTrendsAsync(actor, new ReportTrendQuery(query, [ReportMetric.ConversationCreated], ReportGranularity.Month, dimension), cancellationToken) is not ReportSucceeded<ReportTrend> trend)
             return [];
         return [.. trend.Value.Points.GroupBy(point => point.Group ?? "").Select(group => (group.Key, Count: group.Sum(point => point.Count))).OrderByDescending(pair => pair.Count).Take(6)
             .Select((pair, index) => new BarList.Item(label(pair.Key), pair.Count, pair.Count.ToString(CultureInfo.InvariantCulture), $"var(--chart-{index % 5 + 1})"))];

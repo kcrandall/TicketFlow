@@ -141,6 +141,9 @@ public sealed class WebhookEventSink : IEventSink, IDisposable
 {
     public const string SinkKind = "webhook";
 
+    private static readonly System.Net.Http.Headers.MediaTypeHeaderValue SingleContentType = new("application/cloudevents+json") { CharSet = "utf-8" };
+    private static readonly System.Net.Http.Headers.MediaTypeHeaderValue BatchContentType = new("application/cloudevents-batch+json") { CharSet = "utf-8" };
+
     private readonly IEventWebhookKeyResolver? keys;
     private readonly ApiWebhookDestinationPolicy policy;
     private readonly HttpClient client;
@@ -175,15 +178,41 @@ public sealed class WebhookEventSink : IEventSink, IDisposable
         using var resolved = await keys.ResolveAsync(delivery.Scope, delivery.Subscription.Subscription.Id, cancellationToken).ConfigureAwait(false);
         if (resolved is null)
             return new EventSinkFailed("key-missing");
-        var single = delivery.Events.Count == 1;
-        var body = Encoding.UTF8.GetBytes(single ? delivery.Events[0].Json : "[" + string.Join(",", delivery.Events.Select(item => item.Json)) + "]");
-        if (body.Length > ApiWebhookSignature.MaximumBodyBytes)
-            return single ? new EventSinkFailed("payload-too-large", permanent: true) : EventSinkSplit.Instance;
+        var events = delivery.Events;
+        var single = events.Count == 1;
+        // Precompute exact UTF-8 byte length before allocating so oversized batches reject/split at zero allocation.
+        var totalBytes = single ? Encoding.UTF8.GetByteCount(events[0].Json) : 2 + (events.Count - 1);
+        if (!single)
+        {
+            for (var i = 0; i < events.Count; i++)
+            {
+                totalBytes += Encoding.UTF8.GetByteCount(events[i].Json);
+                if (totalBytes > ApiWebhookSignature.MaximumBodyBytes)
+                    return EventSinkSplit.Instance;
+            }
+        }
+        else if (totalBytes > ApiWebhookSignature.MaximumBodyBytes)
+            return new EventSinkFailed("payload-too-large", permanent: true);
+
+        var body = new byte[totalBytes];
+        if (single)
+            Encoding.UTF8.GetBytes(events[0].Json, body);
+        else
+        {
+            var pos = 0;
+            body[pos++] = (byte)'[';
+            for (var i = 0; i < events.Count; i++)
+            {
+                if (i > 0)
+                    body[pos++] = (byte)',';
+                pos += Encoding.UTF8.GetBytes(events[i].Json, body.AsSpan(pos));
+            }
+            body[pos] = (byte)']';
+        }
         var deliveryId = delivery.DeliveryId;
         var timestamp = time.GetUtcNow().ToUnixTimeSeconds();
         using var message = new HttpRequestMessage(HttpMethod.Post, endpoint) { Content = new ByteArrayContent(body) };
-        message.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(single ? "application/cloudevents+json" : "application/cloudevents-batch+json")
-            { CharSet = "utf-8" };
+        message.Content.Headers.ContentType = single ? SingleContentType : BatchContentType;
         message.Headers.TryAddWithoutValidation(ApiWebhookHeaders.Id, deliveryId);
         message.Headers.TryAddWithoutValidation(ApiWebhookHeaders.Timestamp, timestamp.ToString(CultureInfo.InvariantCulture));
         message.Headers.TryAddWithoutValidation(ApiWebhookHeaders.Signature, ApiWebhookSignature.Create(resolved.Primary.Key, deliveryId, timestamp, body));

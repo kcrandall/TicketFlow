@@ -129,6 +129,42 @@ public sealed class InMemoryTeamStore(int maximumEntries = 10_000) : ITeamStore
         return Task.FromResult<IReadOnlyList<TeamId>>([.. table.All(scope).Where(entry => entry.Value.Members.Contains(user)).Select(entry => entry.Value.Id)]);
     }
 
+    public Task<IReadOnlyDictionary<UserId, IReadOnlyList<TeamId>>> ListTeamsForUsersAsync(TicketScope scope, IReadOnlyCollection<UserId> users, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(users);
+        var buckets = new Dictionary<UserId, List<TeamId>>(users.Count);
+        foreach (var user in users)
+        {
+            if (user == default)
+                throw new ArgumentException("User identifiers must be initialized.", nameof(users));
+            buckets.TryAdd(user, []);
+        }
+        if (buckets.Count > 0)
+        {
+            foreach (var entry in table.All(scope))
+            {
+                var team = entry.Value;
+                if (team.Members.Count <= buckets.Count)
+                {
+                    foreach (var member in team.Members)
+                        if (buckets.TryGetValue(member, out var list))
+                            list.Add(team.Id);
+                }
+                else
+                {
+                    foreach (var (user, list) in buckets)
+                        if (team.Members.Contains(user))
+                            list.Add(team.Id);
+                }
+            }
+        }
+        var result = new Dictionary<UserId, IReadOnlyList<TeamId>>(buckets.Count);
+        foreach (var (user, list) in buckets)
+            result[user] = list;
+        return Task.FromResult<IReadOnlyDictionary<UserId, IReadOnlyList<TeamId>>>(result);
+    }
+
     public Task<WorkspaceWriteResult<StoredTeam>> CreateAsync(TicketScope scope, Team team, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -156,11 +192,25 @@ public sealed class InMemoryTeamStore(int maximumEntries = 10_000) : ITeamStore
     {
         if (team.Members.Count == 0)
             return null;
-        var counts = new Dictionary<UserId, int>();
+        var counts = new Dictionary<UserId, int>(Math.Min(team.Members.Count, 64));
         foreach (var other in others)
-            foreach (var member in other.Value.Members)
-                if (team.Members.Contains(member) && (counts[member] = counts.GetValueOrDefault(member) + 1) >= WorkspaceLimits.MaximumTeamsPerUser)
-                    return WorkspaceWriteRejection.TeamMembershipLimitExceeded;
+        {
+            var otherMembers = other.Value.Members;
+            if (otherMembers.Count == 0)
+                continue;
+            if (team.Members.Count <= otherMembers.Count)
+            {
+                foreach (var member in team.Members)
+                    if (otherMembers.Contains(member) && (counts[member] = counts.GetValueOrDefault(member) + 1) >= WorkspaceLimits.MaximumTeamsPerUser)
+                        return WorkspaceWriteRejection.TeamMembershipLimitExceeded;
+            }
+            else
+            {
+                foreach (var member in otherMembers)
+                    if (team.Members.Contains(member) && (counts[member] = counts.GetValueOrDefault(member) + 1) >= WorkspaceLimits.MaximumTeamsPerUser)
+                        return WorkspaceWriteRejection.TeamMembershipLimitExceeded;
+            }
+        }
         return null;
     }
 
@@ -289,8 +339,7 @@ internal sealed class InMemoryWorkspaceTable<TValue>
     {
         lock (gate)
         {
-            var entries = Entries(scope);
-            if (!entries.TryGetValue(key, out var existing))
+            if (!scopes.TryGetValue(scope, out var entries) || !entries.TryGetValue(key, out var existing))
                 return WorkspaceWriteNotFound.Instance;
             if (existing.Revision != expectedRevision)
                 return new WorkspaceWriteConflict(existing.Revision);

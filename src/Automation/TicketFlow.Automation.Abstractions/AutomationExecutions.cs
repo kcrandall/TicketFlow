@@ -1,3 +1,4 @@
+using System.Globalization;
 using TicketFlow.Core;
 
 namespace TicketFlow.Automation;
@@ -146,10 +147,29 @@ public sealed record AutomationExecution
     public long? Marker { get; }
 
     /// <summary>Every timeline sequence this execution produced (actions and marker), ascending.</summary>
-    public IReadOnlyList<long> ProducedSequences =>
-    [
-        .. Outcomes.SelectMany(outcome => outcome.Value is AutomationActionApplied applied ? applied.Sequences : []).Concat(Marker is { } marker ? [marker] : []).Order(),
-    ];
+    public IReadOnlyList<long> ProducedSequences
+    {
+        get
+        {
+            var count = Marker is not null ? 1 : 0;
+            for (var i = 0; i < Outcomes.Count; i++)
+                if (Outcomes[i].Value is AutomationActionApplied applied)
+                    count += applied.Sequences.Count;
+            if (count == 0)
+                return [];
+            var result = new long[count];
+            var pos = 0;
+            for (var i = 0; i < Outcomes.Count; i++)
+                if (Outcomes[i].Value is AutomationActionApplied applied)
+                    for (var j = 0; j < applied.Sequences.Count; j++)
+                        result[pos++] = applied.Sequences[j];
+            if (Marker is { } marker)
+                result[pos] = marker;
+            if (result.Length > 1)
+                Array.Sort(result);
+            return result;
+        }
+    }
 
     public AutomationExecution WithProgress(IEnumerable<AutomationActionOutcome> outcomes) =>
         new(Id, Rule, Conversation, TriggerKey, EventKind, Depth, Status, Suppression, StartedAt, CompletedAt, ActionCount, outcomes, Marker);
@@ -186,14 +206,14 @@ public sealed record StoredAutomationExecution(TicketScope Scope, AutomationExec
 public static class AutomationTriggerKeys
 {
     /// <summary>A timeline event of the conversation (<c>evt:&lt;sequence&gt;</c>).</summary>
-    public static string TimelineEvent(long sequence) => FormattableString.Invariant($"evt:{sequence}");
+    public static string TimelineEvent(long sequence) => string.Create(CultureInfo.InvariantCulture, $"evt:{sequence}");
 
     /// <summary>A started conversation without a triggering timeline event.</summary>
     public const string Started = "start";
 
     /// <summary>A scheduled fire slot (<c>sched:&lt;unix seconds&gt;</c>).</summary>
-    public static string Scheduled(DateTimeOffset slot) => FormattableString.Invariant($"sched:{slot.ToUnixTimeSeconds()}");
+    public static string Scheduled(DateTimeOffset slot) => string.Create(CultureInfo.InvariantCulture, $"sched:{slot.ToUnixTimeSeconds()}");
 
     /// <summary>A contact change log entry (<c>contact:&lt;sequence&gt;</c>).</summary>
-    public static string ContactChange(long sequence) => FormattableString.Invariant($"contact:{sequence}");
+    public static string ContactChange(long sequence) => string.Create(CultureInfo.InvariantCulture, $"contact:{sequence}");
 }

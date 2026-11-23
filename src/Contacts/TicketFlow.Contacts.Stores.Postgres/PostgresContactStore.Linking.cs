@@ -1,3 +1,4 @@
+using System.Data;
 using Npgsql;
 using NpgsqlTypes;
 using TicketFlow.Access;
@@ -15,6 +16,9 @@ public sealed partial class PostgresContactStore
 {
     private const string SuggestionColumns = "suggestion_id, format_version, candidate_id, account_id, evidence_kind, evidence_namespace, evidence_value, evidence_verified, "
         + "status, created_at, updated_at, created_by_kind, created_by_id, decided_by_kind, decided_by_id, merge_id, revision";
+
+    private const string AliasedSuggestionColumns = "x.suggestion_id, x.format_version, x.candidate_id, x.account_id, x.evidence_kind, x.evidence_namespace, x.evidence_value, x.evidence_verified, "
+        + "x.status, x.created_at, x.updated_at, x.created_by_kind, x.created_by_id, x.decided_by_kind, x.decided_by_id, x.merge_id, x.revision";
 
     private const string SuggestionKey = "suggestion_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@suggestion::text) AND suggestion_id=@suggestion AND " + ScopeWhere;
 
@@ -37,15 +41,19 @@ public sealed partial class PostgresContactStore
         ArgumentNullException.ThrowIfNull(scope);
         await using var command = source.CreateCommand($"SELECT policy::text, format_version, revision FROM tf_contact_linking_policies WHERE scope_key={ScopeKey} AND {ScopeWhere}");
         AddScope(command, scope);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             return null;
-        return Decode(() =>
+        try
         {
             if (reader.GetInt16(1) != 1)
                 throw new FormatException("Unsupported linking policy format version.");
             return new StoredContactLinkingPolicy(scope, ContactLinkingCodec.DeserializePolicy(reader.GetString(0)), reader.GetInt64(2));
-        }, "linking policy");
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw StoredDataError(error, "linking policy");
+        }
     }
 
     public async Task<ContactLinkingWriteResult<StoredContactLinkingPolicy>> PutPolicyAsync(TicketScope scope, ContactLinkingPolicy policy, long? expectedRevision,
@@ -71,7 +79,7 @@ public sealed partial class PostgresContactStore
             AddScope(write, scope);
             AddText(write, "policy", json);
             if (expectedRevision is { } expected)
-                write.Parameters.AddWithValue("expected", expected);
+                AddBigInt(write, "expected", expected);
             if (await write.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
                 return new LinkingWriteApplied<StoredContactLinkingPolicy>(new(scope, policy, revision), expectedRevision is null);
         }
@@ -103,7 +111,7 @@ public sealed partial class PostgresContactStore
             await lockCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await using (var pending = new NpgsqlCommand($"""
-            SELECT suggestion_id FROM tf_contact_link_suggestions
+            SELECT {SuggestionColumns} FROM tf_contact_link_suggestions
             WHERE pair_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@candidate,@account) AND candidate_id=@candidate AND account_id=@account
               AND status=1 AND {ScopeWhere}
             """, connection, transaction))
@@ -111,32 +119,36 @@ public sealed partial class PostgresContactStore
             AddScope(pending, scope);
             AddText(pending, "candidate", suggestion.Candidate.Value);
             AddText(pending, "account", suggestion.Account.Value);
-            if (await pending.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is Guid existingId)
+            await using var reader = await pending.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                var existing = await GetSuggestionAsync(connection, transaction, scope, existingId, lockRow: false, cancellationToken).ConfigureAwait(false);
+                var existing = ReadSuggestion(reader, scope, 0);
+                await reader.CloseAsync().ConfigureAwait(false);
                 await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new LinkingWriteApplied<StoredContactLinkSuggestion>(existing!, false);
+                return new LinkingWriteApplied<StoredContactLinkSuggestion>(existing, false);
+            }
+        }
+        await using (var insert = new NpgsqlCommand($"""
+            INSERT INTO tf_contact_link_suggestions(tenant_id, project_id, environment_id, app_id, workspace_id, {SuggestionColumns})
+            SELECT @tenant, @project, @environment, @app, @workspace, @suggestion, 1, @candidate, @account, @evidence_kind, @evidence_namespace, @evidence_value,
+                @evidence_verified, @status, @created, @updated, @created_by_kind, @created_by_id, @decided_by_kind, @decided_by_id, @merge, 1
+            WHERE (SELECT count(*) FROM (
+                SELECT 1 FROM tf_contact_link_suggestions WHERE scope_key={ScopeKey} AND {ScopeWhere} AND status=1
+                LIMIT {IContactLinkingStore.MaximumPendingSuggestions}
+            ) bounded) < {IContactLinkingStore.MaximumPendingSuggestions}
+            ON CONFLICT (suggestion_key) DO NOTHING
+            """, connection, transaction))
+        {
+            BindSuggestion(insert, scope, suggestion);
+            if (await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1)
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new LinkingWriteApplied<StoredContactLinkSuggestion>(new(scope, suggestion, 1));
             }
         }
         if (await GetSuggestionAsync(connection, transaction, scope, suggestion.Id, lockRow: false, cancellationToken).ConfigureAwait(false) is { } duplicate)
             return new LinkingWriteConflict(duplicate.Revision);
-        await using (var count = new NpgsqlCommand($"SELECT count(*) FROM tf_contact_link_suggestions WHERE scope_key={ScopeKey} AND {ScopeWhere} AND status=1", connection, transaction))
-        {
-            AddScope(count, scope);
-            if ((long)(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))! >= IContactLinkingStore.MaximumPendingSuggestions)
-                return new ContactWriteRejected(ContactWriteRejection.CapacityExceeded);
-        }
-        await using (var insert = new NpgsqlCommand($"""
-            INSERT INTO tf_contact_link_suggestions(tenant_id, project_id, environment_id, app_id, workspace_id, {SuggestionColumns})
-            VALUES(@tenant, @project, @environment, @app, @workspace, @suggestion, 1, @candidate, @account, @evidence_kind, @evidence_namespace, @evidence_value,
-                @evidence_verified, @status, @created, @updated, @created_by_kind, @created_by_id, @decided_by_kind, @decided_by_id, @merge, 1)
-            """, connection, transaction))
-        {
-            BindSuggestion(insert, scope, suggestion);
-            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new LinkingWriteApplied<StoredContactLinkSuggestion>(new(scope, suggestion, 1));
+        return new ContactWriteRejected(ContactWriteRejection.CapacityExceeded);
     }
 
     public async Task<ContactLinkingWriteResult<StoredContactLinkSuggestion>> UpdateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, long expectedRevision,
@@ -179,23 +191,19 @@ public sealed partial class PostgresContactStore
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = ListSuggestionsCommand(scope, query, filter, maximumRowsExamined);
         command.Connection = connection;
-        var examined = new List<(StoredContactLinkSuggestion Stored, bool Visible)>();
+        var page = new List<StoredContactLinkSuggestion>(Math.Min(query.Limit, 64));
+        Guid? tailId = null;
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                examined.Add((ReadSuggestion(reader, scope, 1), reader.GetBoolean(0)));
+            {
+                if (reader.GetBoolean(0))
+                    page.Add(ReadSuggestion(reader, scope, 1));
+                else
+                    tailId = reader.GetGuid(1);
+            }
         }
-        var page = new List<StoredContactLinkSuggestion>();
-        foreach (var row in examined)
-        {
-            if (!row.Visible)
-                continue;
-            page.Add(row.Stored);
-            if (page.Count == query.Limit)
-                break;
-        }
-        Guid? next = page.Count == query.Limit ? page[^1].Suggestion.Id
-            : examined.Count == maximumRowsExamined ? examined[^1].Stored.Suggestion.Id : null;
+        Guid? next = page.Count == query.Limit ? page[^1].Suggestion.Id : tailId;
         return new ContactLinkSuggestionStorePage(page, next);
     }
 
@@ -218,7 +226,7 @@ public sealed partial class PostgresContactStore
                 ORDER BY updated_at LIMIT @limit FOR UPDATE SKIP LOCKED)
             """);
         AddInstant(command, "before", decidedBefore);
-        command.Parameters.AddWithValue("limit", limit);
+        AddInt(command, "limit", limit);
         return command;
     }
 
@@ -229,15 +237,18 @@ public sealed partial class PostgresContactStore
         var accountFilter = PostgresAccessFilterTranslator.Translate(filter, AccountFilterColumns, "access_a_").OrDenyAll();
         var command = new NpgsqlCommand();
         AddScope(command, scope);
-        foreach (var parameter in candidateFilter.Parameters.Concat(accountFilter.Parameters))
+        foreach (var parameter in candidateFilter.Parameters)
             command.Parameters.Add(parameter.Clone());
-        command.Parameters.AddWithValue("status", (short)query.Status);
-        command.Parameters.AddWithValue("scan", maximumRowsExamined);
+        foreach (var parameter in accountFilter.Parameters)
+            command.Parameters.Add(parameter.Clone());
+        AddSmallInt(command, "status", (short)query.Status);
+        AddInt(command, "scan", maximumRowsExamined);
+        AddInt(command, "limit", query.Limit);
         var after = string.Empty;
         if (query.After is { } cursor)
         {
             after = " AND s.suggestion_id > @after";
-            command.Parameters.AddWithValue("after", cursor);
+            AddUuid(command, "after", cursor);
         }
         const string scopeColumns = "s.tenant_id=@tenant AND s.project_id=@project AND s.environment_id=@environment AND s.app_id=@app AND s.workspace_id=@workspace";
         string scan;
@@ -264,14 +275,28 @@ public sealed partial class PostgresContactStore
                 WHERE s.scope_key={ScopeKey} AND {scopeColumns} AND s.status=@status{after}
                 ORDER BY s.suggestion_id LIMIT @scan
                 """;
-        var columns = string.Join(", ", SuggestionColumns.Split(", ").Select(column => "x." + column));
         command.CommandText = $"""
-            SELECT (c.contact_id IS NOT NULL AND a.contact_id IS NOT NULL AND ({candidateFilter.Sql}) IS TRUE AND ({accountFilter.Sql}) IS TRUE), {columns} FROM (
-                {scan}) x
-            LEFT JOIN tf_contacts c ON c.contact_key=x.candidate_key AND c.contact_id=x.candidate_id
-            LEFT JOIN tf_contacts a ON a.contact_key=x.account_key AND a.contact_id=x.account_id
-            {FilterJoin}
-            ORDER BY x.suggestion_id
+            WITH examined AS (
+                SELECT (c.contact_id IS NOT NULL AND a.contact_id IS NOT NULL AND ({candidateFilter.Sql}) IS TRUE AND ({accountFilter.Sql}) IS TRUE) AS visible,
+                       row_number() OVER (ORDER BY x.suggestion_id) AS rn,
+                       {AliasedSuggestionColumns}
+                FROM ({scan}) x
+                LEFT JOIN tf_contacts c ON c.contact_key=x.candidate_key AND c.contact_id=x.candidate_id
+                LEFT JOIN tf_contacts a ON a.contact_key=x.account_key AND a.contact_id=x.account_id
+                {FilterJoin}
+            ),
+            visible AS (
+                SELECT true AS visible, rn, {SuggestionColumns}
+                FROM examined WHERE visible
+                ORDER BY rn LIMIT @limit
+            )
+            SELECT visible, {SuggestionColumns} FROM (
+                SELECT visible, rn, 0 AS is_tail, {SuggestionColumns} FROM visible
+                UNION ALL
+                SELECT false AS visible, rn, 1 AS is_tail, {SuggestionColumns} FROM examined
+                WHERE rn = @scan AND (SELECT count(*) FROM visible) < @limit
+            ) r
+            ORDER BY is_tail, rn
             """;
         return command;
     }
@@ -282,48 +307,55 @@ public sealed partial class PostgresContactStore
         await using var command = new NpgsqlCommand($"SELECT {SuggestionColumns} FROM tf_contact_link_suggestions WHERE {SuggestionKey}{(lockRow ? " FOR UPDATE" : string.Empty)}",
             connection, transaction);
         AddScope(command, scope);
-        command.Parameters.AddWithValue("suggestion", id);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        AddUuid(command, "suggestion", id);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadSuggestion(reader, scope, 0) : null;
     }
 
-    private static StoredContactLinkSuggestion ReadSuggestion(NpgsqlDataReader reader, TicketScope scope, int offset) => Decode(() =>
+    private static StoredContactLinkSuggestion ReadSuggestion(NpgsqlDataReader reader, TicketScope scope, int offset)
     {
-        if (reader.GetInt16(offset + 1) != 1)
-            throw new FormatException("Unsupported suggestion format version.");
-        AccessActor? decidedBy = reader.IsDBNull(offset + 13) ? null : new AccessActor((AccessActorKind)reader.GetInt16(offset + 13), reader.GetString(offset + 14));
-        var suggestion = new ContactLinkSuggestion(
-            reader.GetGuid(offset),
-            new ContactId(reader.GetString(offset + 2)),
-            new ContactId(reader.GetString(offset + 3)),
-            ContactJsonCodec.RestoreAddress((ContactIdentityKind)reader.GetInt16(offset + 4), reader.GetString(offset + 5), reader.GetString(offset + 6)),
-            reader.GetBoolean(offset + 7),
-            (ContactLinkSuggestionStatus)reader.GetInt16(offset + 8),
-            reader.GetFieldValue<DateTimeOffset>(offset + 9),
-            reader.GetFieldValue<DateTimeOffset>(offset + 10),
-            new AccessActor((AccessActorKind)reader.GetInt16(offset + 11), reader.GetString(offset + 12)),
-            decidedBy,
-            reader.IsDBNull(offset + 15) ? null : reader.GetGuid(offset + 15));
-        return new StoredContactLinkSuggestion(scope, suggestion, reader.GetInt64(offset + 16));
-    }, "link suggestion");
+        try
+        {
+            if (reader.GetInt16(offset + 1) != 1)
+                throw new FormatException("Unsupported suggestion format version.");
+            AccessActor? decidedBy = reader.IsDBNull(offset + 13) ? null : new AccessActor((AccessActorKind)reader.GetInt16(offset + 13), reader.GetString(offset + 14));
+            var suggestion = new ContactLinkSuggestion(
+                reader.GetGuid(offset),
+                new ContactId(reader.GetString(offset + 2)),
+                new ContactId(reader.GetString(offset + 3)),
+                ContactJsonCodec.RestoreAddress((ContactIdentityKind)reader.GetInt16(offset + 4), reader.GetString(offset + 5), reader.GetString(offset + 6)),
+                reader.GetBoolean(offset + 7),
+                (ContactLinkSuggestionStatus)reader.GetInt16(offset + 8),
+                reader.GetFieldValue<DateTimeOffset>(offset + 9),
+                reader.GetFieldValue<DateTimeOffset>(offset + 10),
+                new AccessActor((AccessActorKind)reader.GetInt16(offset + 11), reader.GetString(offset + 12)),
+                decidedBy,
+                reader.IsDBNull(offset + 15) ? null : reader.GetGuid(offset + 15));
+            return new StoredContactLinkSuggestion(scope, suggestion, reader.GetInt64(offset + 16));
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw StoredDataError(error, "link suggestion");
+        }
+    }
 
     private static void BindSuggestion(NpgsqlCommand command, TicketScope scope, ContactLinkSuggestion suggestion)
     {
         AddScope(command, scope);
-        command.Parameters.AddWithValue("suggestion", suggestion.Id);
+        AddUuid(command, "suggestion", suggestion.Id);
         AddText(command, "candidate", suggestion.Candidate.Value);
         AddText(command, "account", suggestion.Account.Value);
-        command.Parameters.AddWithValue("evidence_kind", (short)suggestion.Evidence.Kind);
+        AddSmallInt(command, "evidence_kind", (short)suggestion.Evidence.Kind);
         AddText(command, "evidence_namespace", suggestion.Evidence.Namespace);
         AddText(command, "evidence_value", suggestion.Evidence.Value);
-        command.Parameters.AddWithValue("evidence_verified", suggestion.EvidenceVerified);
-        command.Parameters.AddWithValue("status", (short)suggestion.Status);
+        AddBool(command, "evidence_verified", suggestion.EvidenceVerified);
+        AddSmallInt(command, "status", (short)suggestion.Status);
         AddInstant(command, "created", suggestion.CreatedAt);
         AddInstant(command, "updated", suggestion.UpdatedAt);
-        command.Parameters.AddWithValue("created_by_kind", (short)suggestion.CreatedBy.Kind);
+        AddSmallInt(command, "created_by_kind", (short)suggestion.CreatedBy.Kind);
         AddText(command, "created_by_id", suggestion.CreatedBy.Id);
-        command.Parameters.Add(new NpgsqlParameter("decided_by_kind", NpgsqlDbType.Smallint) { Value = suggestion.DecidedBy is { } decided ? (object)(short)decided.Kind : DBNull.Value });
+        AddNullableSmallInt(command, "decided_by_kind", suggestion.DecidedBy is { } decided ? (short)decided.Kind : null);
         AddText(command, "decided_by_id", suggestion.DecidedBy?.Id);
-        command.Parameters.Add(new NpgsqlParameter("merge", NpgsqlDbType.Uuid) { Value = (object?)suggestion.Merge ?? DBNull.Value });
+        AddNullableUuid(command, "merge", suggestion.Merge);
     }
 }

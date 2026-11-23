@@ -3,24 +3,46 @@ import type { ChatMessage } from "./protocol";
 /** Messages per conversation, ordered by sequence and de-duplicated by message id (pushes and refetches overlap). */
 export class Transcript {
   private readonly byConversation = new Map<string, ChatMessage[]>();
+  private readonly indexByConversation = new Map<string, Map<string, number>>();
 
   /** Adds or replaces messages; returns true when anything changed. */
   merge(messages: ChatMessage[]): boolean {
     let changed = false;
+    let dirty: Set<string> | undefined;
     for (const message of messages) {
-      const list = this.byConversation.get(message.conversation) ?? [];
-      const index = list.findIndex((item) => item.message === message.message);
-      if (index >= 0) {
-        if (list[index]!.sequence !== message.sequence || list[index]!.body !== message.body) {
+      let list = this.byConversation.get(message.conversation);
+      let indexMap = this.indexByConversation.get(message.conversation);
+      if (!list) {
+        list = [];
+        indexMap = new Map();
+        this.byConversation.set(message.conversation, list);
+        this.indexByConversation.set(message.conversation, indexMap);
+      }
+      const index = indexMap!.get(message.message);
+      if (index !== undefined) {
+        const existing = list[index]!;
+        if (existing.sequence !== message.sequence || existing.body !== message.body) {
+          const seqChanged = existing.sequence !== message.sequence;
           list[index] = message;
           changed = true;
+          if (seqChanged) (dirty ??= new Set()).add(message.conversation);
         }
       } else {
+        const prevSeq = list.length > 0 ? list[list.length - 1]!.sequence : -Infinity;
+        indexMap!.set(message.message, list.length);
         list.push(message);
         changed = true;
+        if (message.sequence < prevSeq) (dirty ??= new Set()).add(message.conversation);
       }
-      list.sort((left, right) => left.sequence - right.sequence);
-      this.byConversation.set(message.conversation, list);
+    }
+    if (dirty) {
+      for (const conversation of dirty) {
+        const list = this.byConversation.get(conversation)!;
+        const indexMap = this.indexByConversation.get(conversation)!;
+        list.sort((left, right) => left.sequence - right.sequence);
+        indexMap.clear();
+        for (let i = 0; i < list.length; i++) indexMap.set(list[i]!.message, i);
+      }
     }
     return changed;
   }

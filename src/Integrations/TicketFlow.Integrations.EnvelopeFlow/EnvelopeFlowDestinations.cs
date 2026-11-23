@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Buffers.Text;
 using System.Text;
 using System.Text.Json;
 using EnvelopeFlow.Core;
@@ -24,9 +26,22 @@ public static class EnvelopeFlowDestinations
     public static string? Encode(TicketScope scope, string configurationId, ConversationId conversation)
     {
         ArgumentNullException.ThrowIfNull(scope);
-        var json = JsonSerializer.SerializeToUtf8Bytes(new[] { scope.WorkspaceId.Value, configurationId, conversation.Value });
-        var value = Prefix + Convert.ToBase64String(json).TrimEnd('=').Replace('+', '-').Replace('/', '_');
-        return value.Length <= TicketScope.MaximumIdentifierLength ? value : null;
+        var buffer = new ArrayBufferWriter<byte>(192);
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteStartArray();
+            writer.WriteStringValue(scope.WorkspaceId.Value);
+            writer.WriteStringValue(configurationId);
+            writer.WriteStringValue(conversation.Value);
+            writer.WriteEndArray();
+        }
+        var encodedLen = Base64Url.GetEncodedLength(buffer.WrittenCount);
+        if (Prefix.Length + encodedLen > TicketScope.MaximumIdentifierLength)
+            return null;
+        Span<char> chars = stackalloc char[Prefix.Length + encodedLen];
+        Prefix.AsSpan().CopyTo(chars);
+        Base64Url.EncodeToChars(buffer.WrittenSpan, chars[Prefix.Length..]);
+        return new string(chars);
     }
 
     /// <summary>Decodes a destination id produced by <see cref="Encode"/> within the EnvelopeFlow scope it was issued for.</summary>
@@ -40,14 +55,24 @@ public static class EnvelopeFlowDestinations
             return false;
         try
         {
-            var text = destinationId[Prefix.Length..].Replace('-', '+').Replace('_', '/');
-            text = text.PadRight(text.Length + (4 - text.Length % 4) % 4, '=');
-            var parts = JsonSerializer.Deserialize<string[]>(Encoding.UTF8.GetString(Convert.FromBase64String(text)));
-            if (parts is not { Length: 3 })
+            var encoded = destinationId.AsSpan(Prefix.Length);
+            Span<byte> utf8 = stackalloc byte[Base64Url.GetMaxDecodedLength(encoded.Length)];
+            if (Base64Url.DecodeFromChars(encoded, utf8, out _, out var written) != OperationStatus.Done)
                 return false;
-            scope = new TicketScope(owner.TenantId, owner.ProjectId, owner.Environment, owner.AppName, new WorkspaceId(parts[0]));
-            configurationId = TicketScope.RequireIdentifier(parts[1], nameof(destinationId));
-            conversation = new ConversationId(parts[2]);
+            var reader = new Utf8JsonReader(utf8[..written]);
+            if (!reader.Read() || reader.TokenType != JsonTokenType.StartArray)
+                return false;
+            if (!reader.Read() || reader.TokenType != JsonTokenType.String || reader.GetString() is not { } ws)
+                return false;
+            if (!reader.Read() || reader.TokenType != JsonTokenType.String || reader.GetString() is not { } cfg)
+                return false;
+            if (!reader.Read() || reader.TokenType != JsonTokenType.String || reader.GetString() is not { } conv)
+                return false;
+            if (!reader.Read() || reader.TokenType != JsonTokenType.EndArray)
+                return false;
+            scope = new TicketScope(owner.TenantId, owner.ProjectId, owner.Environment, owner.AppName, new WorkspaceId(ws));
+            configurationId = TicketScope.RequireIdentifier(cfg, nameof(destinationId));
+            conversation = new ConversationId(conv);
             return true;
         }
         catch (Exception error) when (error is FormatException or JsonException or ArgumentException)
@@ -81,10 +106,13 @@ public sealed class EnvelopeFlowDestinationContextResolver(IChannelConversationS
         if (!EnvelopeFlowDestinations.TryDecode(owner.Scope, destinationId, out var scope, out var configurationId, out var conversation)
             || owner.Identity.IdentityNamespace != EnvelopeFlowDestinations.IdentityNamespace)
             return null;
-        var stored = await conversations.GetAsync(scope, conversation, cancellationToken).ConfigureAwait(false);
+        var storedTask = conversations.GetAsync(scope, conversation, cancellationToken);
+        var stateTask = states.GetAsync(scope, conversation, cancellationToken);
+        await Task.WhenAll(storedTask, stateTask).ConfigureAwait(false);
+        var stored = storedTask.Result;
         if (stored is null || stored.Conversation.Contact.Value != owner.RecipientId)
             return null;
-        var state = await states.GetAsync(scope, conversation, cancellationToken).ConfigureAwait(false);
+        var state = stateTask.Result;
         if (state is null)
             return null;
         return new EnvelopeFlowDestinationContext(scope, conversation, configurationId, state.State.Recipient, state.State.ExternalThreadId,

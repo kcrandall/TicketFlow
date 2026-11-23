@@ -102,8 +102,11 @@ public sealed record AttachmentRef
         StorageRef = ConversationText.RequireText(storageRef, MaximumStorageRefLength, nameof(storageRef));
         FileName = ConversationText.RequireText(fileName, MaximumFileNameLength, nameof(fileName));
         MediaType = ConversationText.RequireText(mediaType, MaximumMediaTypeLength, nameof(mediaType));
-        if (!MediaType.Contains('/') || MediaType.Any(char.IsWhiteSpace))
+        if (!MediaType.Contains('/'))
             throw new ArgumentException("Media types have the form type/subtype.", nameof(mediaType));
+        foreach (var ch in MediaType)
+            if (char.IsWhiteSpace(ch))
+                throw new ArgumentException("Media types have the form type/subtype.", nameof(mediaType));
         ArgumentOutOfRangeException.ThrowIfNegative(sizeBytes);
         SizeBytes = sizeBytes;
     }
@@ -129,9 +132,16 @@ public static class ConversationMessageLimits
 
     internal static IReadOnlyList<AttachmentRef> Attachments(IEnumerable<AttachmentRef>? attachments, string parameterName)
     {
-        IReadOnlyList<AttachmentRef> snapshot = [.. attachments ?? []];
-        if (snapshot.Count > MaximumAttachments || snapshot.Any(attachment => attachment is null))
+        if (attachments is null)
+            return [];
+        if (attachments is ICollection<AttachmentRef> { Count: 0 } or IReadOnlyCollection<AttachmentRef> { Count: 0 })
+            return [];
+        AttachmentRef[] snapshot = [.. attachments];
+        if (snapshot.Length > MaximumAttachments)
             throw new ArgumentException($"At most {MaximumAttachments} attachments are allowed.", parameterName);
+        for (var i = 0; i < snapshot.Length; i++)
+            if (snapshot[i] is null)
+                throw new ArgumentException($"At most {MaximumAttachments} attachments are allowed.", parameterName);
         return snapshot;
     }
 
@@ -171,6 +181,19 @@ public sealed record MessageEvent
         Delivery = delivery;
     }
 
+    private MessageEvent(MessageId id, MessageDirection direction, ConversationParty sender, string body, MessageContentType contentType,
+        IReadOnlyList<AttachmentRef> attachments, string? externalId, MessageDelivery delivery)
+    {
+        Id = id;
+        Direction = direction;
+        Sender = sender;
+        Body = body;
+        ContentType = contentType;
+        Attachments = attachments;
+        ExternalId = externalId;
+        Delivery = delivery;
+    }
+
     public MessageId Id { get; }
     public MessageDirection Direction { get; }
     public ConversationParty Sender { get; }
@@ -181,12 +204,26 @@ public sealed record MessageEvent
     public MessageDelivery Delivery { get; }
 
     /// <summary>A copy with the current delivery state and external identifier.</summary>
-    public MessageEvent WithDelivery(MessageDelivery delivery, string? externalId) =>
-        new(Id, Direction, Sender, Body, ContentType, Attachments, externalId, delivery);
+    public MessageEvent WithDelivery(MessageDelivery delivery, string? externalId)
+    {
+        ArgumentNullException.ThrowIfNull(delivery);
+        if ((Direction == MessageDirection.Incoming) != (delivery.State == MessageDeliveryState.Received))
+            throw new ArgumentException("Only incoming messages are Received.", nameof(delivery));
+        var validatedExternal = ReferenceEquals(externalId, ExternalId) ? ExternalId : ConversationMessageLimits.ExternalId(externalId, nameof(externalId));
+        return new(Id, Direction, Sender, Body, ContentType, Attachments, validatedExternal, delivery);
+    }
 
-    public bool Equals(MessageEvent? other) =>
-        other is not null && Id == other.Id && Direction == other.Direction && Sender.Equals(other.Sender) && Body == other.Body
-        && ContentType == other.ContentType && Attachments.SequenceEqual(other.Attachments) && ExternalId == other.ExternalId && Delivery == other.Delivery;
+    public bool Equals(MessageEvent? other)
+    {
+        if (other is null || Id != other.Id || Direction != other.Direction || !Sender.Equals(other.Sender) || !string.Equals(Body, other.Body, StringComparison.Ordinal)
+            || ContentType != other.ContentType || Attachments.Count != other.Attachments.Count || !string.Equals(ExternalId, other.ExternalId, StringComparison.Ordinal)
+            || Delivery != other.Delivery)
+            return false;
+        for (var i = 0; i < Attachments.Count; i++)
+            if (Attachments[i] != other.Attachments[i])
+                return false;
+        return true;
+    }
 
     public override int GetHashCode() => HashCode.Combine(Id, Direction, Body.Length);
 
@@ -231,11 +268,47 @@ public sealed record LabelsChanged
     {
         ArgumentNullException.ThrowIfNull(added);
         ArgumentNullException.ThrowIfNull(removed);
-        Added = [.. added.Distinct().OrderBy(label => label.Value, StringComparer.Ordinal)];
-        Removed = [.. removed.Distinct().OrderBy(label => label.Value, StringComparer.Ordinal)];
-        if (Added.Concat(Removed).Any(label => label == default) || Added.Intersect(Removed).Any() || Added.Count + Removed.Count == 0
-            || Added.Count + Removed.Count > 2 * Conversation.MaximumLabels)
+        Added = Normalize(added);
+        Removed = Normalize(removed);
+        if (Added.Count + Removed.Count == 0 || Added.Count + Removed.Count > 2 * Conversation.MaximumLabels)
             throw new ArgumentException("Label changes must be initialized, disjoint and non-empty.");
+        if (Added.Count > 0 && Removed.Count > 0)
+        {
+            int i = 0, j = 0;
+            while (i < Added.Count && j < Removed.Count)
+            {
+                var cmp = string.CompareOrdinal(Added[i].Value, Removed[j].Value);
+                if (cmp == 0)
+                    throw new ArgumentException("Label changes must be initialized, disjoint and non-empty.");
+                if (cmp < 0)
+                    i++;
+                else
+                    j++;
+            }
+        }
+    }
+
+    private static IReadOnlyList<LabelId> Normalize(IEnumerable<LabelId> source)
+    {
+        var list = new List<LabelId>();
+        foreach (var label in source)
+        {
+            if (label == default)
+                throw new ArgumentException("Label changes must be initialized, disjoint and non-empty.");
+            list.Add(label);
+        }
+        if (list.Count == 0)
+            return [];
+        if (list.Count == 1)
+            return list.AsReadOnly();
+        list.Sort(static (a, b) => string.CompareOrdinal(a.Value, b.Value));
+        var write = 1;
+        for (var read = 1; read < list.Count; read++)
+            if (!string.Equals(list[read].Value, list[write - 1].Value, StringComparison.Ordinal))
+                list[write++] = list[read];
+        if (write < list.Count)
+            list.RemoveRange(write, list.Count - write);
+        return list.AsReadOnly();
     }
 
     public IReadOnlyList<LabelId> Added { get; }

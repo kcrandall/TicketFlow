@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Security.Claims;
+using System.Text;
 using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -50,8 +53,11 @@ public enum UiSessionState
 public sealed class TicketFlowUISession
 {
     private const int DecisionBatch = AccessDecisionContexts.MaximumPermissions;
+    private static readonly ConditionalWeakTable<IPermissionCatalog, CatalogChunks> PermissionChunkCache = new();
     private readonly HashSet<Permission> permissions;
     private readonly Dictionary<string, string> userNames = new(StringComparer.Ordinal);
+    private string? cachedDisplayName;
+    private bool displayNameResolved;
 
     internal TicketFlowUISession(HttpContext http, TicketFlowBlazorUIOptions options, UiSessionState state, TicketScope? scope, PrincipalRef? principal,
         HashSet<Permission> permissions, TicketFlowThemePreference theme)
@@ -105,7 +111,17 @@ public sealed class TicketFlowUISession
 
     public bool Can(Permission permission) => permissions.Contains(permission);
 
-    public bool CanAny(params Permission[] candidates) => candidates.Any(permissions.Contains);
+    public bool CanAny(Permission first, Permission second) => permissions.Contains(first) || permissions.Contains(second);
+
+    public bool CanAny(Permission first, Permission second, Permission third) => permissions.Contains(first) || permissions.Contains(second) || permissions.Contains(third);
+
+    public bool CanAny(params Permission[] candidates)
+    {
+        for (var i = 0; i < candidates.Length; i++)
+            if (permissions.Contains(candidates[i]))
+                return true;
+        return false;
+    }
 
     /// <summary>An optional feature service, or <see langword="null"/> when the host did not register the feature.</summary>
     public T? Service<T>() where T : class => Services.GetService<T>();
@@ -121,10 +137,17 @@ public sealed class TicketFlowUISession
     {
         get
         {
+            if (displayNameResolved)
+                return cachedDisplayName!;
             var user = Http.User;
-            return user.FindFirstValue("name") ?? user.FindFirstValue(ClaimTypes.Name) ?? user.Identity?.Name ?? UserName(UserId);
+            cachedDisplayName = ClaimDisplayName(user) ?? UserName(UserId);
+            displayNameResolved = true;
+            return cachedDisplayName;
         }
     }
+
+    private static string? ClaimDisplayName(ClaimsPrincipal user) =>
+        user.FindFirstValue("name") ?? user.FindFirstValue(ClaimTypes.Name) ?? user.Identity?.Name;
 
     public string? Email => Http.User.FindFirstValue("email") ?? Http.User.FindFirstValue(ClaimTypes.Email);
 
@@ -135,23 +158,65 @@ public sealed class TicketFlowUISession
     {
         if (Service<ITicketFlowUserDirectory>() is not { } directory || scope is null)
             return;
-        var missing = users.OfType<UserId>().Distinct().Where(user => !userNames.ContainsKey(user.Value)).ToList();
-        if (missing.Count == 0)
+        List<UserId>? missing = null;
+        HashSet<string>? queued = null;
+        foreach (var candidate in users)
+        {
+            if (candidate is not { } user || userNames.ContainsKey(user.Value))
+                continue;
+            queued ??= new HashSet<string>(StringComparer.Ordinal);
+            if (!queued.Add(user.Value))
+                continue;
+            missing ??= [];
+            missing.Add(user);
+        }
+        if (missing is null)
             return;
-        foreach (var (user, profile) in await directory.FindManyAsync(scope, missing, Aborted))
+        foreach (var (user, profile) in await directory.FindManyAsync(scope, missing, Aborted).ConfigureAwait(false))
             userNames[user.Value] = profile.DisplayName;
+        displayNameResolved = false;
     }
 
     public static string Initials(string name)
     {
-        var parts = name.Split([' ', '.', '-', '_', '@'], StringSplitOptions.RemoveEmptyEntries);
-        return parts.Length switch
+        var span = name.AsSpan();
+        int firstStart = -1, firstLen = 0, lastStart = -1;
+        var i = 0;
+        while (i < span.Length)
         {
-            0 => "?",
-            1 => parts[0][..Math.Min(2, parts[0].Length)].ToUpperInvariant(),
-            _ => string.Concat(char.ToUpperInvariant(parts[0][0]), char.ToUpperInvariant(parts[^1][0])),
-        };
+            while (i < span.Length && IsInitialSeparator(span[i]))
+                i++;
+            if (i >= span.Length)
+                break;
+            var start = i;
+            while (i < span.Length && !IsInitialSeparator(span[i]))
+                i++;
+            if (firstStart < 0)
+            {
+                firstStart = start;
+                firstLen = i - start;
+            }
+            else
+                lastStart = start;
+        }
+        if (firstStart < 0)
+            return "?";
+        if (lastStart < 0)
+            return firstLen == 1
+                ? char.ToUpperInvariant(span[firstStart]).ToString()
+                : string.Create(2, (span[firstStart], span[firstStart + 1]), static (dst, state) =>
+                {
+                    dst[0] = char.ToUpperInvariant(state.Item1);
+                    dst[1] = char.ToUpperInvariant(state.Item2);
+                });
+        return string.Create(2, (span[firstStart], span[lastStart]), static (dst, state) =>
+        {
+            dst[0] = char.ToUpperInvariant(state.Item1);
+            dst[1] = char.ToUpperInvariant(state.Item2);
+        });
     }
+
+    private static bool IsInitialSeparator(char c) => c is ' ' or '.' or '-' or '_' or '@';
 
     internal static string RelativePath(HttpContext http, TicketFlowBlazorUIOptions options)
     {
@@ -161,8 +226,8 @@ public sealed class TicketFlowUISession
         return path.Trim('/');
     }
 
-    /// <summary>Resolves the session of <paramref name="http"/>: authentication state, scope, principal, permission snapshot and theme.</summary>
-    public static async Task<TicketFlowUISession> ResolveAsync(HttpContext http)
+    /// <summary>Lightweight session resolution without loading the full permission snapshot (for streaming endpoints that authorize through feature services).</summary>
+    internal static async Task<TicketFlowUISession> ResolvePrincipalAsync(HttpContext http)
     {
         ArgumentNullException.ThrowIfNull(http);
         var services = http.RequestServices;
@@ -171,57 +236,133 @@ public sealed class TicketFlowUISession
         var none = new HashSet<Permission>();
         if (http.User.Identity?.IsAuthenticated != true)
             return new TicketFlowUISession(http, options, UiSessionState.Unauthenticated, null, null, none, theme);
-        var workspace = options.ResolveWorkspace is { } resolveWorkspace ? await resolveWorkspace(http) : options.Workspace;
+        var workspace = options.ResolveWorkspace is { } resolveWorkspace ? await resolveWorkspace(http).ConfigureAwait(false) : options.Workspace;
         var partitions = services.GetService<ITicketFlowPartitionResolver>();
         var resolver = services.GetService<ITicketFlowPrincipalResolver>();
-        if (workspace is not { } id || partitions is null || resolver is null || await partitions.ResolveAsync(http, http.RequestAborted) is not { } partition)
+        if (workspace is not { } id || partitions is null || resolver is null || await partitions.ResolveAsync(http, http.RequestAborted).ConfigureAwait(false) is not { } partition)
             return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, null, null, none, theme);
         var scope = partition.InWorkspace(id);
-        if (await resolver.ResolveAsync(http, scope, http.RequestAborted) is not { Value: not null } principal || principal.Scope != scope)
+        if (await resolver.ResolveAsync(http, scope, http.RequestAborted).ConfigureAwait(false) is not { Value: not null } principal || principal.Scope != scope)
             return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, scope, null, none, theme);
+        return new TicketFlowUISession(http, options, UiSessionState.Ready, scope, principal, none, theme);
+    }
 
-        var held = new HashSet<Permission>();
+    /// <summary>Resolves the session of <paramref name="http"/>: authentication state, scope, principal, permission snapshot and theme.</summary>
+    public static async Task<TicketFlowUISession> ResolveAsync(HttpContext http)
+    {
+        var basic = await ResolvePrincipalAsync(http).ConfigureAwait(false);
+        if (basic.State != UiSessionState.Ready)
+            return basic;
+        var services = http.RequestServices;
+        var options = basic.Options;
+        var scope = basic.Scope;
+        var principal = basic.Principal;
+
+        var held = basic.permissions;
         if (services.GetService<IPermissionCatalog>() is { } catalog)
         {
-            // A permission counts as held when any grant provides it on some resource (workspace, team or inbox grant), so
-            // team- and inbox-scoped agents see their sections. Services still authorize every resource.
-            foreach (var chunk in catalog.Definitions.Where(definition => !definition.IsSensitive).Select(definition => definition.Permission).Chunk(DecisionBatch))
-                held.UnionWith(await HeldAsync(services, principal, scope, chunk, http.RequestAborted));
-            // Every plan for a sensitive permission is audited, so their snapshot is cached per principal for
-            // SensitivePermissionCacheDuration (navigation gating only; pages and services re-check with fresh decisions).
+            var chunks = GetChunks(catalog);
+            var planner = services.GetService<IAccessQueryPlanner>();
+            var evaluator = planner is null ? services.GetService<IAccessEvaluator>() : null;
             var cache = services.GetRequiredService<UiSensitivePermissionCache>();
             var key = UiSensitivePermissionCache.Key(principal);
-            if (!cache.TryGet(key, out var sensitive))
+            var needSensitive = !cache.TryGet(key, out var sensitive);
+
+            var regularChunks = chunks.Regular;
+            var sensitiveChunks = needSensitive ? chunks.Sensitive : [];
+            var total = regularChunks.Length + sensitiveChunks.Length;
+            if (total == 1)
             {
-                var probed = new HashSet<Permission>();
-                foreach (var chunk in catalog.Definitions.Where(definition => definition.IsSensitive).Select(definition => definition.Permission).Chunk(DecisionBatch))
-                    probed.UnionWith(await HeldAsync(services, principal, scope, chunk, http.RequestAborted));
-                sensitive = probed;
-                cache.Set(key, probed, options.SensitivePermissionCacheDuration);
+                if (regularChunks.Length == 1)
+                    held.UnionWith(await HeldAsync(planner, evaluator, principal, scope, regularChunks[0], http.RequestAborted).ConfigureAwait(false));
+                else
+                {
+                    var probed = new HashSet<Permission>(await HeldAsync(planner, evaluator, principal, scope, sensitiveChunks[0], http.RequestAborted).ConfigureAwait(false));
+                    sensitive = probed;
+                    cache.Set(key, probed, options.SensitivePermissionCacheDuration);
+                }
+            }
+            else if (total > 1)
+            {
+                var tasks = new Task<IReadOnlySet<Permission>>[total];
+                for (var i = 0; i < regularChunks.Length; i++)
+                    tasks[i] = HeldAsync(planner, evaluator, principal, scope, regularChunks[i], http.RequestAborted);
+                for (var i = 0; i < sensitiveChunks.Length; i++)
+                    tasks[regularChunks.Length + i] = HeldAsync(planner, evaluator, principal, scope, sensitiveChunks[i], http.RequestAborted);
+                var results = await Task.WhenAll(tasks).ConfigureAwait(false);
+                for (var i = 0; i < regularChunks.Length; i++)
+                    held.UnionWith(results[i]);
+                if (needSensitive)
+                {
+                    var probed = new HashSet<Permission>();
+                    for (var i = 0; i < sensitiveChunks.Length; i++)
+                        probed.UnionWith(results[regularChunks.Length + i]);
+                    sensitive = probed;
+                    cache.Set(key, probed, options.SensitivePermissionCacheDuration);
+                }
+            }
+            else if (needSensitive)
+            {
+                var empty = new HashSet<Permission>();
+                sensitive = empty;
+                cache.Set(key, empty, options.SensitivePermissionCacheDuration);
             }
             held.UnionWith(sensitive);
         }
-        var session = new TicketFlowUISession(http, options, UiSessionState.Ready, scope, principal, held, theme);
-        await session.LoadUsersAsync([session.UserId]);
-        return session;
+        if (ClaimDisplayName(http.User) is null && basic.UserId is { } userId)
+            await basic.LoadUsersAsync([userId]).ConfigureAwait(false);
+        return basic;
+    }
+
+    private sealed class CatalogChunks
+    {
+        public int Count { get; init; }
+        public required Permission[][] Regular { get; init; }
+        public required Permission[][] Sensitive { get; init; }
+    }
+
+    private static CatalogChunks GetChunks(IPermissionCatalog catalog)
+    {
+        var definitions = catalog.Definitions;
+        if (PermissionChunkCache.TryGetValue(catalog, out var cached) && cached.Count == definitions.Count)
+            return cached;
+        var regular = new List<Permission>(definitions.Count);
+        var sensitive = new List<Permission>();
+        for (var i = 0; i < definitions.Count; i++)
+        {
+            var definition = definitions[i];
+            if (definition.IsSensitive)
+                sensitive.Add(definition.Permission);
+            else
+                regular.Add(definition.Permission);
+        }
+        var built = new CatalogChunks
+        {
+            Count = definitions.Count,
+            Regular = regular.Count == 0 ? [] : [.. regular.Chunk(DecisionBatch)],
+            Sensitive = sensitive.Count == 0 ? [] : [.. sensitive.Chunk(DecisionBatch)],
+        };
+        PermissionChunkCache.AddOrUpdate(catalog, built);
+        return built;
     }
 
     /// <summary>
     /// Permissions held on any resource of the scope: <see cref="IAccessQueryPlanner.HeldAnywhereAsync"/> (one grant load per batch) when
     /// a planner is registered, otherwise workspace-level decisions.
     /// </summary>
-    private static async Task<IReadOnlySet<Permission>> HeldAsync(IServiceProvider services, PrincipalRef principal, TicketScope scope, Permission[] permissions, CancellationToken cancellationToken)
+    private static async Task<IReadOnlySet<Permission>> HeldAsync(IAccessQueryPlanner? planner, IAccessEvaluator? evaluator, PrincipalRef principal, TicketScope scope, Permission[] permissions,
+        CancellationToken cancellationToken)
     {
-        if (services.GetService<IAccessQueryPlanner>() is { } planner)
-            return await planner.HeldAnywhereAsync(principal, scope, permissions, cancellationToken);
+        if (planner is not null)
+            return await planner.HeldAnywhereAsync(principal, scope, permissions, cancellationToken).ConfigureAwait(false);
         var held = new HashSet<Permission>();
-        if (services.GetService<IAccessEvaluator>() is not { } evaluator)
+        if (evaluator is null)
             return held;
-        var context = await evaluator.LoadDecisionContextAsync(principal, scope, permissions, cancellationToken);
+        var context = await evaluator.LoadDecisionContextAsync(principal, scope, permissions, cancellationToken).ConfigureAwait(false);
         var resource = WorkspaceResources.Workspace(scope);
-        foreach (var permission in permissions)
-            if ((await context.DecideAsync(permission, resource, cancellationToken)).IsPermitted)
-                held.Add(permission);
+        for (var i = 0; i < permissions.Length; i++)
+            if ((await context.DecideAsync(permissions[i], resource, cancellationToken).ConfigureAwait(false)).IsPermitted)
+                held.Add(permissions[i]);
         return held;
     }
 }
@@ -233,16 +374,39 @@ internal static class UiUrls
         var root = basePath == "/" ? string.Empty : basePath;
         var relative = path.TrimStart('/');
         var url = relative.Length == 0 ? (root.Length == 0 ? "/" : root) : $"{root}/{relative}";
-        var parts = query.Where(pair => !string.IsNullOrEmpty(pair.Value)).Select(pair => $"{UrlEncoder.Default.Encode(pair.Key)}={UrlEncoder.Default.Encode(pair.Value!)}").ToList();
-        return parts.Count == 0 ? url : url + (url.Contains('?') ? "&" : "?") + string.Join('&', parts);
+        if (query.Length == 0)
+            return url;
+        StringBuilder? sb = null;
+        for (var i = 0; i < query.Length; i++)
+        {
+            var (key, value) = query[i];
+            if (string.IsNullOrEmpty(value))
+                continue;
+            if (sb is null)
+            {
+                sb = new StringBuilder(url.Length + 32);
+                sb.Append(url).Append(url.Contains('?') ? '&' : '?');
+            }
+            else
+                sb.Append('&');
+            sb.Append(UrlEncoder.Default.Encode(key)).Append('=').Append(UrlEncoder.Default.Encode(value));
+        }
+        return sb is null ? url : sb.ToString();
     }
 
     /// <summary>A safe local return path inside the UI, or the dashboard.</summary>
     public static string SafeReturn(string basePath, string? candidate)
     {
         var root = basePath == "/" ? "/" : basePath;
-        if (string.IsNullOrEmpty(candidate) || candidate.Any(character => character < 0x20 || character == 0x7f) || !candidate.StartsWith('/') || candidate.StartsWith("//", StringComparison.Ordinal) || candidate.Contains('\\')
-            || !(candidate == root || candidate.StartsWith(root == "/" ? "/" : root + "/", StringComparison.Ordinal) || candidate.StartsWith(root + "?", StringComparison.Ordinal)))
+        if (string.IsNullOrEmpty(candidate) || candidate[0] != '/' || candidate.StartsWith("//", StringComparison.Ordinal))
+            return root;
+        for (var i = 0; i < candidate.Length; i++)
+        {
+            var c = candidate[i];
+            if (c < 0x20 || c == 0x7f || c == '\\')
+                return root;
+        }
+        if (!(candidate == root || candidate.StartsWith(root == "/" ? "/" : root + "/", StringComparison.Ordinal) || candidate.StartsWith(root + "?", StringComparison.Ordinal)))
             return root;
         return candidate;
     }
@@ -255,7 +419,8 @@ internal static class UiUrls
 public sealed class UiSensitivePermissionCache(TimeProvider time)
 {
     private const int MaximumEntries = 10_000;
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTimeOffset Expires, IReadOnlySet<Permission> Permissions)> entries = new(StringComparer.Ordinal);
+    private static readonly IReadOnlySet<Permission> Empty = new HashSet<Permission>();
+    private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, IReadOnlySet<Permission> Permissions)> entries = new(StringComparer.Ordinal);
 
     public static string Key(PrincipalRef principal) => principal.Value switch
     {
@@ -273,7 +438,7 @@ public sealed class UiSensitivePermissionCache(TimeProvider time)
             permissions = entry.Permissions;
             return true;
         }
-        permissions = new HashSet<Permission>();
+        permissions = Empty;
         return false;
     }
 
@@ -281,10 +446,12 @@ public sealed class UiSensitivePermissionCache(TimeProvider time)
     {
         if (duration <= TimeSpan.Zero)
             return;
+        var now = time.GetUtcNow();
         if (entries.Count >= MaximumEntries)
-            foreach (var expired in entries.Where(pair => pair.Value.Expires <= time.GetUtcNow()).Select(pair => pair.Key).ToList())
-                entries.TryRemove(expired, out _);
+            foreach (var pair in entries)
+                if (pair.Value.Expires <= now)
+                    entries.TryRemove(pair.Key, out _);
         if (entries.Count < MaximumEntries)
-            entries[key] = (time.GetUtcNow() + duration, permissions);
+            entries[key] = (now + duration, permissions);
     }
 }

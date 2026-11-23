@@ -113,6 +113,9 @@ public sealed class CrossNodeRealtimeBus : IRealtimeBus, IDisposable
 
     private async Task OnBackplaneMessageAsync(string envelopeJson, CancellationToken cancellationToken)
     {
+        // Fast-path: ignore self-echoed envelopes before full JSON parse/deserialization.
+        if (RealtimePublicationEnvelope.IsOrigin(envelopeJson, NodeId))
+            return;
         if (!RealtimePublicationEnvelope.TryDeserialize(envelopeJson, out var envelope, out _, options.MaximumEnvelopeBytes) || envelope is null)
             return;
         if (string.Equals(envelope.Origin, NodeId, StringComparison.Ordinal))
@@ -120,13 +123,19 @@ public sealed class CrossNodeRealtimeBus : IRealtimeBus, IDisposable
         await DeliverLocallyAsync(envelope.Publication, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task DeliverLocallyAsync(RealtimePublication publication, CancellationToken cancellationToken)
+    private Task DeliverLocallyAsync(RealtimePublication publication, CancellationToken cancellationToken)
     {
-        foreach (var handler in handlers)
+        var current = handlers;
+        return current.IsEmpty ? Task.CompletedTask : DeliverLocallyCoreAsync(current, publication, cancellationToken);
+    }
+
+    private static async Task DeliverLocallyCoreAsync(ImmutableArray<Func<RealtimePublication, CancellationToken, Task>> current, RealtimePublication publication, CancellationToken cancellationToken)
+    {
+        for (var i = 0; i < current.Length; i++)
         {
             try
             {
-                await handler(publication, cancellationToken).ConfigureAwait(false);
+                await current[i](publication, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {

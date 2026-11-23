@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using TicketFlow.Conversations;
@@ -19,6 +20,24 @@ public sealed record RealtimeEnvelope(string Origin, RealtimePublication Publica
 public static class RealtimePublicationEnvelope
 {
     public const int FormatVersion = 1;
+    private const string OriginPrefix = "{\"v\":1,\"origin\":\"";
+
+    [ThreadStatic]
+    private static ArrayBufferWriter<byte>? sharedBuffer;
+
+    [ThreadStatic]
+    private static Utf8JsonWriter? sharedWriter;
+
+    /// <summary>Zero-alloc prefix check for self-echoed envelopes produced by <see cref="Serialize"/>.</summary>
+    internal static bool IsOrigin(string json, string expectedOrigin)
+    {
+        if (json is null || !json.StartsWith(OriginPrefix, StringComparison.Ordinal))
+            return false;
+        var rest = json.AsSpan(OriginPrefix.Length);
+        return rest.Length > expectedOrigin.Length
+            && rest[expectedOrigin.Length] == '"'
+            && rest[..expectedOrigin.Length].SequenceEqual(expectedOrigin.AsSpan());
+    }
 
     /// <summary>Serializes <paramref name="publication"/> with <paramref name="origin"/> into compact UTF-8 JSON.</summary>
     /// <exception cref="FormatException">The encoded envelope exceeds <paramref name="maximumBytes"/>.</exception>
@@ -27,21 +46,45 @@ public static class RealtimePublicationEnvelope
         ArgumentNullException.ThrowIfNull(publication);
         if (string.IsNullOrWhiteSpace(origin) || origin.Length > 128)
             throw new ArgumentException("An origin identifier (1-128 chars) is required.", nameof(origin));
-        var buffer = new ArrayBufferWriter<byte>();
-        using (var writer = new Utf8JsonWriter(buffer))
+        var buffer = sharedBuffer;
+        var writer = sharedWriter;
+        sharedBuffer = null;
+        sharedWriter = null;
+        if (buffer is null)
+        {
+            buffer = new ArrayBufferWriter<byte>(512);
+            writer = new Utf8JsonWriter(buffer);
+        }
+        else
+        {
+            buffer.ResetWrittenCount();
+            writer!.Reset(buffer);
+        }
+        try
         {
             writer.WriteStartObject();
-            writer.WriteNumber("v", FormatVersion);
-            writer.WriteString("origin", origin);
-            writer.WritePropertyName("topic");
+            writer.WriteNumber("v"u8, FormatVersion);
+            writer.WriteString("origin"u8, origin);
+            writer.WritePropertyName("topic"u8);
             WriteTopic(writer, publication.Topic);
-            writer.WritePropertyName("event");
+            writer.WritePropertyName("event"u8);
             WriteEvent(writer, publication.Event);
             writer.WriteEndObject();
+            writer.Flush();
+            if (buffer.WrittenCount > maximumBytes)
+                throw new FormatException($"Serialized realtime envelope ({buffer.WrittenCount} bytes) exceeds limit ({maximumBytes} bytes).");
+            return Encoding.UTF8.GetString(buffer.WrittenSpan);
         }
-        if (buffer.WrittenCount > maximumBytes)
-            throw new FormatException($"Serialized realtime envelope ({buffer.WrittenCount} bytes) exceeds limit ({maximumBytes} bytes).");
-        return Encoding.UTF8.GetString(buffer.WrittenSpan);
+        finally
+        {
+            if (buffer.Capacity <= 65_536)
+            {
+                sharedBuffer = buffer;
+                sharedWriter = writer;
+            }
+            else
+                writer.Dispose();
+        }
     }
 
     /// <summary>Strictly decodes and validates a versioned envelope JSON string.</summary>
@@ -201,89 +244,89 @@ public static class RealtimePublicationEnvelope
                 if (c.Message is { } message)
                     writer.WriteString("message", message.Value);
                 if (c.Delivery is { } delivery)
-                    writer.WriteNumber("delivery", (int)delivery);
-                writer.WriteString("occurredAt", c.OccurredAt.ToString("O", CultureInfo.InvariantCulture));
+                    writer.WriteNumber("delivery"u8, (int)delivery);
+                writer.WriteString("occurredAt"u8, c.OccurredAt);
                 break;
             case PresenceChangedEvent p:
-                writer.WriteString("k", "presence");
-                writer.WriteString("conversation", p.Conversation.Value);
-                writer.WriteString("user", p.User.Value);
+                writer.WriteString("k"u8, "presence"u8);
+                writer.WriteString("conversation"u8, p.Conversation.Value);
+                writer.WriteString("user"u8, p.User.Value);
                 if (p.Activity is { } activity)
-                    writer.WriteNumber("activity", (int)activity);
-                writer.WriteString("at", p.At.ToString("O", CultureInfo.InvariantCulture));
+                    writer.WriteNumber("activity"u8, (int)activity);
+                writer.WriteString("at"u8, p.At);
                 break;
             case ReplyLockChangedEvent r:
-                writer.WriteString("k", "reply-lock");
-                writer.WriteString("conversation", r.Conversation.Value);
+                writer.WriteString("k"u8, "reply-lock"u8);
+                writer.WriteString("conversation"u8, r.Conversation.Value);
                 if (r.Holder is { } holder)
-                    writer.WriteString("holder", holder.Value);
+                    writer.WriteString("holder"u8, holder.Value);
                 if (r.ExpiresAt is { } expiresAt)
-                    writer.WriteString("expiresAt", expiresAt.ToString("O", CultureInfo.InvariantCulture));
-                writer.WriteString("at", r.At.ToString("O", CultureInfo.InvariantCulture));
+                    writer.WriteString("expiresAt"u8, expiresAt);
+                writer.WriteString("at"u8, r.At);
                 break;
             case AgentStatusChangedEvent a:
-                writer.WriteString("k", "agent-status");
-                writer.WriteString("agent", a.Agent.Value);
-                writer.WriteNumber("status", (int)a.Status);
-                writer.WriteString("at", a.At.ToString("O", CultureInfo.InvariantCulture));
+                writer.WriteString("k"u8, "agent-status"u8);
+                writer.WriteString("agent"u8, a.Agent.Value);
+                writer.WriteNumber("status"u8, (int)a.Status);
+                writer.WriteString("at"u8, a.At);
                 break;
             case ConversationAssignedEvent a:
-                writer.WriteString("k", "conversation-assigned");
-                writer.WriteString("conversation", a.Conversation.Value);
-                writer.WriteString("agent", a.Agent.Value);
-                writer.WriteNumber("revision", a.Revision);
-                writer.WriteString("at", a.At.ToString("O", CultureInfo.InvariantCulture));
+                writer.WriteString("k"u8, "conversation-assigned"u8);
+                writer.WriteString("conversation"u8, a.Conversation.Value);
+                writer.WriteString("agent"u8, a.Agent.Value);
+                writer.WriteNumber("revision"u8, a.Revision);
+                writer.WriteString("at"u8, a.At);
                 break;
             case QueueChangedEvent q:
-                writer.WriteString("k", "queue-changed");
-                writer.WriteString("conversation", q.Conversation.Value);
-                writer.WriteString("inbox", q.Inbox.Value);
-                writer.WriteNumber("change", (int)q.Change);
-                writer.WriteString("at", q.At.ToString("O", CultureInfo.InvariantCulture));
+                writer.WriteString("k"u8, "queue-changed"u8);
+                writer.WriteString("conversation"u8, q.Conversation.Value);
+                writer.WriteString("inbox"u8, q.Inbox.Value);
+                writer.WriteNumber("change"u8, (int)q.Change);
+                writer.WriteString("at"u8, q.At);
                 break;
             case TypingEvent t:
-                writer.WriteString("k", "typing");
-                writer.WriteString("conversation", t.Conversation.Value);
-                writer.WritePropertyName("actor");
+                writer.WriteString("k"u8, "typing"u8);
+                writer.WriteString("conversation"u8, t.Conversation.Value);
+                writer.WritePropertyName("actor"u8);
                 WriteActor(writer, t.Actor);
-                writer.WriteBoolean("typing", t.Typing);
-                writer.WriteString("at", t.At.ToString("O", CultureInfo.InvariantCulture));
+                writer.WriteBoolean("typing"u8, t.Typing);
+                writer.WriteString("at"u8, t.At);
                 break;
             case ReadReceiptEvent r:
-                writer.WriteString("k", "read-receipt");
-                writer.WriteString("conversation", r.Conversation.Value);
-                writer.WritePropertyName("actor");
+                writer.WriteString("k"u8, "read-receipt"u8);
+                writer.WriteString("conversation"u8, r.Conversation.Value);
+                writer.WritePropertyName("actor"u8);
                 WriteActor(writer, r.Actor);
-                writer.WriteNumber("upToSequence", r.UpToSequence);
-                writer.WriteString("at", r.At.ToString("O", CultureInfo.InvariantCulture));
+                writer.WriteNumber("upToSequence"u8, r.UpToSequence);
+                writer.WriteString("at"u8, r.At);
                 break;
             case VisitorMessageEvent v:
-                writer.WriteString("k", "visitor-message");
-                writer.WriteString("session", v.Session.Value);
-                writer.WriteString("conversation", v.Conversation.Value);
-                writer.WriteString("message", v.Message.Value);
-                writer.WriteNumber("sequence", v.Sequence);
-                writer.WriteNumber("direction", (int)v.Direction);
-                writer.WriteString("body", v.Body);
-                writer.WriteNumber("contentType", (int)v.ContentType);
-                writer.WriteStartArray("attachments");
+                writer.WriteString("k"u8, "visitor-message"u8);
+                writer.WriteString("session"u8, v.Session.Value);
+                writer.WriteString("conversation"u8, v.Conversation.Value);
+                writer.WriteString("message"u8, v.Message.Value);
+                writer.WriteNumber("sequence"u8, v.Sequence);
+                writer.WriteNumber("direction"u8, (int)v.Direction);
+                writer.WriteString("body"u8, v.Body);
+                writer.WriteNumber("contentType"u8, (int)v.ContentType);
+                writer.WriteStartArray("attachments"u8);
                 foreach (var attachment in v.Attachments)
                 {
                     writer.WriteStartObject();
-                    writer.WriteString("storageRef", attachment.StorageRef);
-                    writer.WriteString("fileName", attachment.FileName);
-                    writer.WriteString("mediaType", attachment.MediaType);
-                    writer.WriteNumber("sizeBytes", attachment.SizeBytes);
+                    writer.WriteString("storageRef"u8, attachment.StorageRef);
+                    writer.WriteString("fileName"u8, attachment.FileName);
+                    writer.WriteString("mediaType"u8, attachment.MediaType);
+                    writer.WriteNumber("sizeBytes"u8, attachment.SizeBytes);
                     writer.WriteEndObject();
                 }
                 writer.WriteEndArray();
-                writer.WriteString("at", v.At.ToString("O", CultureInfo.InvariantCulture));
+                writer.WriteString("at"u8, v.At);
                 break;
             case VisitorSessionEndedEvent e:
-                writer.WriteString("k", "visitor-session-ended");
-                writer.WriteString("session", e.Session.Value);
-                writer.WriteNumber("reason", (int)e.Reason);
-                writer.WriteString("at", e.At.ToString("O", CultureInfo.InvariantCulture));
+                writer.WriteString("k"u8, "visitor-session-ended"u8);
+                writer.WriteString("session"u8, e.Session.Value);
+                writer.WriteNumber("reason"u8, (int)e.Reason);
+                writer.WriteString("at"u8, e.At);
                 break;
         }
         writer.WriteEndObject();
@@ -347,18 +390,23 @@ public static class RealtimePublicationEnvelope
             : null;
 
     private static DateTimeOffset RequireInstant(JsonElement element, string name) =>
-        DateTimeOffset.ParseExact(RequireString(element, name), "O", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        element.GetProperty(name) is { ValueKind: JsonValueKind.String } value ? value.GetDateTimeOffset() : throw new FormatException($"Property '{name}' must be a string.");
 
     private static DateTimeOffset? OptionalInstant(JsonElement element, string name) =>
-        OptionalString(element, name) is { } text ? DateTimeOffset.ParseExact(text, "O", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind) : null;
+        element.TryGetProperty(name, out var value) && value.ValueKind != JsonValueKind.Null
+            ? (value.ValueKind == JsonValueKind.String ? value.GetDateTimeOffset() : throw new FormatException($"Property '{name}' must be a string."))
+            : null;
 
-    private static TEnum RequireEnum<TEnum>(JsonElement element, string name) where TEnum : struct, Enum
-    {
-        var raw = element.GetProperty(name).GetInt32();
-        var value = (TEnum)Enum.ToObject(typeof(TEnum), raw);
-        return Enum.IsDefined(value) ? value : throw new FormatException($"Invalid enum value for '{name}'.");
-    }
+    private static TEnum RequireEnum<TEnum>(JsonElement element, string name) where TEnum : struct, Enum =>
+        ReadEnum<TEnum>(element.GetProperty(name), name);
 
     private static TEnum? OptionalEnum<TEnum>(JsonElement element, string name) where TEnum : struct, Enum =>
-        element.TryGetProperty(name, out var prop) && prop.ValueKind != JsonValueKind.Null ? RequireEnum<TEnum>(element, name) : null;
+        element.TryGetProperty(name, out var prop) && prop.ValueKind != JsonValueKind.Null ? ReadEnum<TEnum>(prop, name) : null;
+
+    private static TEnum ReadEnum<TEnum>(JsonElement prop, string name) where TEnum : struct, Enum
+    {
+        var raw = prop.GetInt32();
+        var value = Unsafe.As<int, TEnum>(ref raw);
+        return Enum.IsDefined(value) ? value : throw new FormatException($"Invalid enum value for '{name}'.");
+    }
 }

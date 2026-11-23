@@ -1,4 +1,5 @@
 using System.Collections.Frozen;
+using System.Collections.ObjectModel;
 
 namespace TicketFlow.Core;
 
@@ -40,12 +41,16 @@ public sealed record UserPrincipal
 
     public override string ToString() => "UserPrincipal { <redacted> }";
 
-    private static FrozenSet<TeamId> SnapshotTeams(IEnumerable<TeamId>? teams)
+    private static IReadOnlySet<TeamId> SnapshotTeams(IEnumerable<TeamId>? teams)
     {
         if (teams is null)
             return FrozenSet<TeamId>.Empty;
 
-        var snapshot = new HashSet<TeamId>();
+        var capacity = teams.TryGetNonEnumeratedCount(out var count) ? Math.Min(count, MaximumTeamMemberships) : 0;
+        if (count == 0 && teams is ICollection<TeamId> or IReadOnlyCollection<TeamId>)
+            return FrozenSet<TeamId>.Empty;
+
+        var snapshot = capacity > 0 ? new HashSet<TeamId>(capacity) : new HashSet<TeamId>();
         foreach (var team in teams)
         {
             if (team == default)
@@ -53,6 +58,6 @@ public sealed record UserPrincipal
             if (snapshot.Add(team) && snapshot.Count > MaximumTeamMemberships)
                 throw new ArgumentException($"A principal can carry at most {MaximumTeamMemberships} team memberships.", nameof(teams));
         }
-        return snapshot.ToFrozenSet();
+        return snapshot.Count == 0 ? FrozenSet<TeamId>.Empty : new ReadOnlySet<TeamId>(snapshot);
     }
 }

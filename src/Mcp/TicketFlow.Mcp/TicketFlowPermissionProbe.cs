@@ -35,8 +35,11 @@ internal static class TicketFlowPermissionProbe
         var evaluator = services.GetService<IAccessEvaluator>();
         var catalog = services.GetService<IPermissionCatalog>();
         var probe = new List<Permission>();
-        foreach (var value in permissions.Distinct(StringComparer.Ordinal))
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var value in permissions)
         {
+            if (!seen.Add(value))
+                continue;
             if (evaluator is null || catalog is null)
             {
                 result[value] = null;
@@ -54,20 +57,46 @@ internal static class TicketFlowPermissionProbe
             return result;
         if (anyScope && services.GetService<IAccessQueryPlanner>() is { } planner)
         {
-            foreach (var chunk in probe.Chunk(Batch))
+            if (probe.Count <= Batch)
             {
-                var held = await planner.HeldAnywhereAsync(principal, principal.Scope, chunk, cancellationToken).ConfigureAwait(false);
-                foreach (var permission in chunk)
-                    result[permission.Value] = held.Contains(permission);
+                var held = await planner.HeldAnywhereAsync(principal, principal.Scope, probe, cancellationToken).ConfigureAwait(false);
+                for (var i = 0; i < probe.Count; i++)
+                    result[probe[i].Value] = held.Contains(probe[i]);
+                return result;
+            }
+            var chunks = probe.Chunk(Batch).ToArray();
+            var tasks = new Task<IReadOnlySet<Permission>>[chunks.Length];
+            for (var i = 0; i < chunks.Length; i++)
+                tasks[i] = planner.HeldAnywhereAsync(principal, principal.Scope, chunks[i], cancellationToken);
+            var results = await Task.WhenAll(tasks).ConfigureAwait(false);
+            for (var i = 0; i < chunks.Length; i++)
+            {
+                var chunk = chunks[i];
+                var held = results[i];
+                for (var j = 0; j < chunk.Length; j++)
+                    result[chunk[j].Value] = held.Contains(chunk[j]);
             }
             return result;
         }
         var resource = WorkspaceResources.Workspace(principal.Scope);
-        foreach (var chunk in probe.Chunk(Batch))
+        if (probe.Count <= Batch)
         {
-            var context = await evaluator.LoadDecisionContextAsync(principal, principal.Scope, chunk, cancellationToken).ConfigureAwait(false);
-            foreach (var permission in chunk)
-                result[permission.Value] = (await context.DecideAsync(permission, resource, cancellationToken).ConfigureAwait(false)).IsPermitted;
+            var context = await evaluator.LoadDecisionContextAsync(principal, principal.Scope, probe, cancellationToken).ConfigureAwait(false);
+            for (var i = 0; i < probe.Count; i++)
+                result[probe[i].Value] = (await context.DecideAsync(probe[i], resource, cancellationToken).ConfigureAwait(false)).IsPermitted;
+            return result;
+        }
+        var workspaceChunks = probe.Chunk(Batch).ToArray();
+        var contextTasks = new Task<IAccessDecisionContext>[workspaceChunks.Length];
+        for (var i = 0; i < workspaceChunks.Length; i++)
+            contextTasks[i] = evaluator.LoadDecisionContextAsync(principal, principal.Scope, workspaceChunks[i], cancellationToken);
+        var contexts = await Task.WhenAll(contextTasks).ConfigureAwait(false);
+        for (var i = 0; i < workspaceChunks.Length; i++)
+        {
+            var chunk = workspaceChunks[i];
+            var context = contexts[i];
+            for (var j = 0; j < chunk.Length; j++)
+                result[chunk[j].Value] = (await context.DecideAsync(chunk[j], resource, cancellationToken).ConfigureAwait(false)).IsPermitted;
         }
         return result;
     }
@@ -75,11 +104,30 @@ internal static class TicketFlowPermissionProbe
     /// <summary>Whether the probed decisions satisfy a tool: true, false or <see langword="null"/> (undetermined).</summary>
     public static bool? Satisfies(TicketFlowToolDescriptor tool, IReadOnlyDictionary<string, bool?> decisions)
     {
-        if (tool.Permissions.Count == 0)
+        var count = tool.Permissions.Count;
+        if (count == 0)
             return true;
-        var values = tool.Permissions.Select(permission => decisions.GetValueOrDefault(permission)).ToList();
+        var anyNull = false;
         if (tool.AnyOf)
-            return values.Any(value => value == true) ? true : values.Any(value => value is null) ? null : false;
-        return values.Any(value => value == false) ? false : values.All(value => value == true) ? true : null;
+        {
+            for (var i = 0; i < count; i++)
+            {
+                var value = decisions.GetValueOrDefault(tool.Permissions[i]);
+                if (value == true)
+                    return true;
+                if (value is null)
+                    anyNull = true;
+            }
+            return anyNull ? null : false;
+        }
+        for (var i = 0; i < count; i++)
+        {
+            var value = decisions.GetValueOrDefault(tool.Permissions[i]);
+            if (value == false)
+                return false;
+            if (value is null)
+                anyNull = true;
+        }
+        return anyNull ? null : true;
     }
 }

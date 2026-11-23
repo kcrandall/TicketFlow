@@ -74,14 +74,7 @@ public sealed class LiveChatSessionDirectory(ILiveChatSessionStore sessions, Tim
         LiveSessionsAsync(sessions, scope, conversation, time.GetUtcNow(), cancellationToken);
 
     /// <summary>Linked sessions that are still live (not revoked, not expired) at <paramref name="now"/>.</summary>
-    internal static async Task<IReadOnlyList<VisitorSessionId>> LiveSessionsAsync(ILiveChatSessionStore sessions, TicketFlow.Core.TicketScope scope,
-        TicketFlow.Core.ConversationId conversation, DateTimeOffset now, CancellationToken cancellationToken)
-    {
-        var live = new List<VisitorSessionId>();
-        var partition = TicketFlow.Access.AccessPartition.From(scope);
-        foreach (var id in await sessions.FindSessionsAsync(scope, conversation, IVisitorSessionDirectory.MaximumSessions, cancellationToken).ConfigureAwait(false))
-            if (await sessions.GetAsync(partition, id, cancellationToken).ConfigureAwait(false) is { } stored && stored.Scope == scope && stored.Session.IsLive(now))
-                live.Add(id);
-        return live;
-    }
+    internal static Task<IReadOnlyList<VisitorSessionId>> LiveSessionsAsync(ILiveChatSessionStore sessions, TicketFlow.Core.TicketScope scope,
+        TicketFlow.Core.ConversationId conversation, DateTimeOffset now, CancellationToken cancellationToken) =>
+        sessions.FindLiveSessionsAsync(scope, conversation, now, IVisitorSessionDirectory.MaximumSessions, cancellationToken);
 }

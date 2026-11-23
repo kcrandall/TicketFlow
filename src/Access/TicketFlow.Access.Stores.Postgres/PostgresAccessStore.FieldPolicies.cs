@@ -1,3 +1,4 @@
+using System.Data;
 using Npgsql;
 using TicketFlow.Core;
 
@@ -14,7 +15,7 @@ public sealed partial class PostgresAccessStore
         RequireField(field);
         await using var command = source.CreateCommand($"SELECT {PolicyColumns} FROM tf_access_field_policies WHERE {PolicyKey}");
         BindPolicyKey(command, scope, field);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadPolicy(reader, scope) : null;
     }
 
@@ -73,18 +74,21 @@ public sealed partial class PostgresAccessStore
         ArgumentNullException.ThrowIfNull(policy);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        await using (var update = new NpgsqlCommand($"UPDATE tf_access_field_policies SET applies_to=@applies_to, unmasked_roles=@unmasked_roles, reveal_permission=@reveal, revision=revision+1 WHERE {PolicyKey} AND revision=@expected RETURNING revision", connection, transaction))
+        await using (var update = new NpgsqlCommand($"""
+            UPDATE tf_access_field_policies SET applies_to=@applies_to, unmasked_roles=@unmasked_roles, reveal_permission=@reveal, revision=revision+1
+            WHERE {PolicyKey} AND revision=@expected RETURNING revision
+            """, connection))
         {
             BindPolicy(update, scope, policy);
-            update.Parameters.AddWithValue("expected", expectedRevision);
+            AddLong(update, "expected", expectedRevision);
             if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
-            {
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
                 return new AccessWriteApplied<StoredAccessFieldPolicy>(new(scope, policy, revision));
-            }
         }
-        return await MissAsync<StoredAccessFieldPolicy>(connection, transaction, $"SELECT revision FROM tf_access_field_policies WHERE {PolicyKey}", command => BindPolicyKey(command, scope, policy.Field), cancellationToken).ConfigureAwait(false);
+        await using var current = new NpgsqlCommand($"SELECT revision FROM tf_access_field_policies WHERE {PolicyKey}", connection);
+        BindPolicyKey(current, scope, policy.Field);
+        return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
+            ? new AccessWriteConflict(existing)
+            : AccessWriteNotFound.Instance;
     }
 
     public async Task<AccessWriteResult<StoredAccessFieldPolicy>> DeleteAsync(TicketScope scope, FieldPath field, long expectedRevision, CancellationToken cancellationToken = default)
@@ -93,22 +97,19 @@ public sealed partial class PostgresAccessStore
         RequireField(field);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        await using (var delete = new NpgsqlCommand($"DELETE FROM tf_access_field_policies WHERE {PolicyKey} AND revision=@expected RETURNING {PolicyColumns}", connection, transaction))
+        await using (var delete = new NpgsqlCommand($"DELETE FROM tf_access_field_policies WHERE {PolicyKey} AND revision=@expected RETURNING {PolicyColumns}", connection))
         {
             BindPolicyKey(delete, scope, field);
-            delete.Parameters.AddWithValue("expected", expectedRevision);
-            StoredAccessFieldPolicy? removed = null;
-            await using (var reader = await delete.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
-                if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                    removed = ReadPolicy(reader, scope);
-            if (removed is not null)
-            {
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return new AccessWriteApplied<StoredAccessFieldPolicy>(removed);
-            }
+            AddLong(delete, "expected", expectedRevision);
+            await using var reader = await delete.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                return new AccessWriteApplied<StoredAccessFieldPolicy>(ReadPolicy(reader, scope));
         }
-        return await MissAsync<StoredAccessFieldPolicy>(connection, transaction, $"SELECT revision FROM tf_access_field_policies WHERE {PolicyKey}", command => BindPolicyKey(command, scope, field), cancellationToken).ConfigureAwait(false);
+        await using var current = new NpgsqlCommand($"SELECT revision FROM tf_access_field_policies WHERE {PolicyKey}", connection);
+        BindPolicyKey(current, scope, field);
+        return await current.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long existing
+            ? new AccessWriteConflict(existing)
+            : AccessWriteNotFound.Instance;
     }
 
     private static void RequireField(FieldPath field)
@@ -126,20 +127,47 @@ public sealed partial class PostgresAccessStore
     private static void BindPolicy(NpgsqlCommand command, TicketScope scope, AccessFieldPolicy policy)
     {
         BindPolicyKey(command, scope, policy.Field);
-        AddTextArray(command, "applies_to", policy.AppliesTo.Select(permission => permission.Value).Order(StringComparer.Ordinal));
-        AddTextArray(command, "unmasked_roles", policy.UnmaskedRoles.Select(role => role.Value).Order(StringComparer.Ordinal));
+        var appliesTo = new string[policy.AppliesTo.Count];
+        var index = 0;
+        foreach (var permission in policy.AppliesTo)
+            appliesTo[index++] = permission.Value;
+        Array.Sort(appliesTo, StringComparer.Ordinal);
+        AddTextArray(command, "applies_to", appliesTo);
+
+        var unmasked = new string[policy.UnmaskedRoles.Count];
+        index = 0;
+        foreach (var role in policy.UnmaskedRoles)
+            unmasked[index++] = role.Value;
+        Array.Sort(unmasked, StringComparer.Ordinal);
+        AddTextArray(command, "unmasked_roles", unmasked);
+
         AddText(command, "reveal", policy.RevealPermission?.Value);
     }
 
-    private static StoredAccessFieldPolicy ReadPolicy(NpgsqlDataReader reader, TicketScope scope) => Decode(() =>
+    private static StoredAccessFieldPolicy ReadPolicy(NpgsqlDataReader reader, TicketScope scope, int offset = 0)
     {
-        if (reader.GetInt16(1) != 1)
-            throw new FormatException("Unsupported field policy format version.");
-        var policy = new AccessFieldPolicy(
-            new FieldPath(reader.GetString(0)),
-            reader.GetFieldValue<string[]>(2).Select(Permission.Parse),
-            reader.GetFieldValue<string[]>(3).Select(role => new RoleId(role)),
-            reader.IsDBNull(4) ? null : Permission.Parse(reader.GetString(4)));
-        return new StoredAccessFieldPolicy(scope, policy, reader.GetInt64(5));
-    }, "field policy");
+        try
+        {
+            if (reader.GetInt16(offset + 1) != 1)
+                throw new FormatException("Unsupported field policy format version.");
+            var rawApplies = reader.GetFieldValue<string[]>(offset + 2);
+            var applies = new Permission[rawApplies.Length];
+            for (var i = 0; i < rawApplies.Length; i++)
+                applies[i] = Permission.Parse(rawApplies[i]);
+            var rawRoles = reader.GetFieldValue<string[]>(offset + 3);
+            var unmasked = new RoleId[rawRoles.Length];
+            for (var i = 0; i < rawRoles.Length; i++)
+                unmasked[i] = new RoleId(rawRoles[i]);
+            var policy = new AccessFieldPolicy(
+                new FieldPath(reader.GetString(offset)),
+                applies,
+                unmasked,
+                reader.IsDBNull(offset + 4) ? null : Permission.Parse(reader.GetString(offset + 4)));
+            return new StoredAccessFieldPolicy(scope, policy, reader.GetInt64(offset + 5));
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw StoredDataError(error, "field policy");
+        }
+    }
 }

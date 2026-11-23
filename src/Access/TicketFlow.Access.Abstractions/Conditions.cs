@@ -43,20 +43,25 @@ public closed record AccessCondition
         return (depth + 1, nodes);
     }
 
-    private protected static IReadOnlyList<AccessCondition> Items(IEnumerable<AccessCondition> items, string parameterName)
+    private protected static (IReadOnlyList<AccessCondition> List, int Depth, int Nodes) Items(IEnumerable<AccessCondition> items, string parameterName)
     {
         ArgumentNullException.ThrowIfNull(items, parameterName);
-        var snapshot = new List<AccessCondition>();
+        var capacity = items.TryGetNonEnumeratedCount(out var count) ? Math.Min(count, MaximumNodes) : 0;
+        var snapshot = capacity > 0 ? new List<AccessCondition>(capacity) : new List<AccessCondition>();
+        var depth = 0;
+        var nodes = 1;
         foreach (var item in items)
         {
             ArgumentNullException.ThrowIfNull(item, parameterName);
             snapshot.Add(item);
             if (snapshot.Count > MaximumNodes)
                 throw new ArgumentException($"Conditions can contain at most {MaximumNodes} nodes.", parameterName);
+            depth = Math.Max(depth, item.Depth);
+            nodes += item.NodeCount;
         }
         if (snapshot.Count == 0)
             throw new ArgumentException("At least one operand is required.", parameterName);
-        return snapshot.AsReadOnly();
+        return (snapshot.AsReadOnly(), depth + 1, nodes);
     }
 
     internal static string RequireKey(string key, string parameterName) =>
@@ -74,8 +79,8 @@ public sealed record AndCondition : AccessCondition
     {
     }
 
-    private AndCondition(IReadOnlyList<AccessCondition> items)
-        : base(Measure(items).Depth, Measure(items).Nodes) => Operands = items;
+    private AndCondition((IReadOnlyList<AccessCondition> List, int Depth, int Nodes) items)
+        : base(items.Depth, items.Nodes) => Operands = items.List;
 
     public IReadOnlyList<AccessCondition> Operands { get; }
 
@@ -92,8 +97,8 @@ public sealed record OrCondition : AccessCondition
     {
     }
 
-    private OrCondition(IReadOnlyList<AccessCondition> items)
-        : base(Measure(items).Depth, Measure(items).Nodes) => Operands = items;
+    private OrCondition((IReadOnlyList<AccessCondition> List, int Depth, int Nodes) items)
+        : base(items.Depth, items.Nodes) => Operands = items.List;
 
     public IReadOnlyList<AccessCondition> Operands { get; }
 
@@ -140,6 +145,8 @@ public sealed record AttributeEqualsCondition : AccessCondition
 /// <summary>A resource attribute is one of 1-64 literals (ordinal). Unknown when the attribute is not in the snapshot.</summary>
 public sealed record AttributeInCondition : AccessCondition
 {
+    private readonly string[] values;
+
     public AttributeInCondition(string key, params IEnumerable<string> values)
         : base(1, 1)
     {
@@ -154,11 +161,13 @@ public sealed record AttributeInCondition : AccessCondition
         }
         if (snapshot.Count == 0)
             throw new ArgumentException("At least one value is required.", nameof(values));
-        Values = [.. snapshot];
+        this.values = [.. snapshot];
     }
 
     /// <summary>Distinct values in ordinal order.</summary>
-    public IReadOnlyList<string> Values { get; }
+    public IReadOnlyList<string> Values => values;
+
+    public bool ContainsValue(string value) => Array.BinarySearch(values, value, StringComparer.Ordinal) >= 0;
 
     public string Key { get; }
 

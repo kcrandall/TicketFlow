@@ -261,7 +261,7 @@ public sealed partial class PostgresHelpCenterStore : IHelpCenterStore, IArticle
     private static async Task<T?> ReadSingleAsync<T>(NpgsqlCommand command, Func<NpgsqlDataReader, T> read, CancellationToken cancellationToken)
         where T : class
     {
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(System.Data.CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? read(reader) : null;
     }
 

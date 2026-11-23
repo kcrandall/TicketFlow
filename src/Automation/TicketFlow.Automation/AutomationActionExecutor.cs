@@ -91,7 +91,7 @@ public sealed class AutomationActionExecutor
                 var messageId = MessageIdFor(request.IdempotencyKey);
                 if (await AlreadyRecordedAsync(actor.Scope, id, messageId, cancellationToken).ConfigureAwait(false) is { } existing)
                     return new AutomationActionApplied([existing]);
-                var body = noteAction.Template.Render(AutomationTemplateValues.From(request.Context, request.AgentName));
+                var body = noteAction.Template.Render(AutomationTemplateValues.Resolver(request.Context, request.AgentName));
                 if (body is null)
                     return new AutomationActionFailed("template-output-too-large");
                 if (string.IsNullOrWhiteSpace(body))
@@ -141,7 +141,7 @@ public sealed class AutomationActionExecutor
             }
             case AddNoteAction note:
             {
-                var body = note.Template.Render(AutomationTemplateValues.From(context, agentName));
+                var body = note.Template.Render(AutomationTemplateValues.Resolver(context, agentName));
                 return new AutomationActionPreview(index, action, body, body is null ? "template-output-too-large" : null);
             }
             case SendWebhookAction:
@@ -164,7 +164,7 @@ public sealed class AutomationActionExecutor
         if (stored is null)
             return (null, MessageContentType.PlainText, "canned-response-missing");
         var response = stored.Response;
-        var body = response.Select(context.Contact?.Locale).Template.Render(AutomationTemplateValues.From(context, agentName), response.Escaping);
+        var body = response.Select(context.Contact?.Locale).Template.Render(AutomationTemplateValues.Resolver(context, agentName), response.Escaping);
         if (body is null)
             return (null, response.ContentType, "template-output-too-large");
         if (string.IsNullOrWhiteSpace(body))
@@ -226,6 +226,13 @@ public sealed class AutomationActionExecutor
 
 internal static class AutomationTextTokens
 {
-    public static bool IsToken(string? value) =>
-        value is { Length: > 0 and <= 64 } && value[0] is >= 'a' and <= 'z' && value.All(character => character is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-' or '_' or '.');
+    public static bool IsToken(string? value)
+    {
+        if (value is not { Length: > 0 and <= 64 } || value[0] is not (>= 'a' and <= 'z'))
+            return false;
+        for (var i = 1; i < value.Length; i++)
+            if (value[i] is not ((>= 'a' and <= 'z') or (>= '0' and <= '9') or '-' or '_' or '.'))
+                return false;
+        return true;
+    }
 }

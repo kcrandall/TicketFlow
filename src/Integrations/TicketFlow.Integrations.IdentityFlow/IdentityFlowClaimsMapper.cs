@@ -121,20 +121,61 @@ public static class IdentityFlowClaimsMapper
         ArgumentNullException.ThrowIfNull(options);
         if (user?.Identity is not { IsAuthenticated: true } identity)
             return null;
-        var method = Single(user, AuthenticationMethodClaim);
-        var client = Single(user, IdentityFlowClaimTypes.ClientId) ?? Single(user, "client_id");
-        var session = identity.AuthenticationType is { } type && options.BrowserSessionAuthenticationTypes.Contains(type)
-            || Single(user, IdentityFlowClaimTypes.SessionId) is not null && client is null && method is null;
-        if (!session && options.RequiredScopes.Count > 0 && !Scopes(user).Any(options.RequiredScopes.Contains))
+
+        // Single pass over user.Claims instead of 5-8 separate FindAll enumerations.
+        string? method = null;
+        var methodAmbiguous = false;
+        string? idfClient = null;
+        var idfClientAmbiguous = false;
+        string? rawClient = null;
+        var rawClientAmbiguous = false;
+        string? sessionId = null;
+        var sessionIdAmbiguous = false;
+        string? idfSub = null;
+        var idfSubAmbiguous = false;
+        string? nameId = null;
+        var nameIdAmbiguous = false;
+        string? methodId = null;
+        var methodIdAmbiguous = false;
+        var checkScopes = options.RequiredScopes.Count > 0;
+        var hasRequiredScope = false;
+
+        foreach (var claim in user.Claims)
+        {
+            var type = claim.Type;
+            var value = claim.Value;
+            if (string.Equals(type, AuthenticationMethodClaim, StringComparison.OrdinalIgnoreCase))
+                Accumulate(ref method, ref methodAmbiguous, value);
+            else if (string.Equals(type, IdentityFlowClaimTypes.ClientId, StringComparison.OrdinalIgnoreCase))
+                Accumulate(ref idfClient, ref idfClientAmbiguous, value);
+            else if (string.Equals(type, "client_id", StringComparison.OrdinalIgnoreCase))
+                Accumulate(ref rawClient, ref rawClientAmbiguous, value);
+            else if (string.Equals(type, IdentityFlowClaimTypes.SessionId, StringComparison.OrdinalIgnoreCase))
+                Accumulate(ref sessionId, ref sessionIdAmbiguous, value);
+            else if (string.Equals(type, IdentityFlowClaimTypes.Subject, StringComparison.OrdinalIgnoreCase))
+                Accumulate(ref idfSub, ref idfSubAmbiguous, value);
+            else if (string.Equals(type, ClaimTypes.NameIdentifier, StringComparison.OrdinalIgnoreCase))
+                Accumulate(ref nameId, ref nameIdAmbiguous, value);
+            else if (string.Equals(type, MethodIdClaim, StringComparison.OrdinalIgnoreCase))
+                Accumulate(ref methodId, ref methodIdAmbiguous, value);
+            else if (checkScopes && !hasRequiredScope && string.Equals(type, ScopeClaim, StringComparison.OrdinalIgnoreCase))
+                hasRequiredScope = HasScope(value, options.RequiredScopes);
+        }
+
+        var methodVal = Resolve(method, methodAmbiguous);
+        var client = Resolve(idfClient, idfClientAmbiguous) ?? Resolve(rawClient, rawClientAmbiguous);
+        var session = identity.AuthenticationType is { } authType && options.BrowserSessionAuthenticationTypes.Contains(authType)
+            || Resolve(sessionId, sessionIdAmbiguous) is not null && client is null && methodVal is null;
+        if (!session && checkScopes && !hasRequiredScope)
             return null;
-        var subject = Single(user, IdentityFlowClaimTypes.Subject) ?? Single(user, ClaimTypes.NameIdentifier);
-        if (method == ApiKeyMethod)
+        var subject = Resolve(idfSub, idfSubAmbiguous) ?? Resolve(nameId, nameIdAmbiguous);
+        if (methodVal == ApiKeyMethod)
         {
             if (subject is null)
                 return null;
             if (options.ApiKeys == IdentityFlowApiKeyMapping.User)
                 return Identity(IdentityFlowPrincipalKind.User, options.UserIdPrefix, subject, options);
-            var source = options.ApiKeyClients == IdentityFlowApiKeyClientSource.Method ? Single(user, MethodIdClaim) : subject;
+            var source = options.ApiKeyClients == IdentityFlowApiKeyClientSource.Method ? Resolve(methodId, methodIdAmbiguous) : subject;
             return source is null ? null : Identity(IdentityFlowPrincipalKind.ApiClient, options.ApiClientIdPrefix, source, options);
         }
         if (subject is not null)
@@ -142,30 +183,47 @@ public static class IdentityFlowClaimsMapper
         return client is null ? null : Identity(IdentityFlowPrincipalKind.ApiClient, options.ApiClientIdPrefix, client, options);
     }
 
+    private static void Accumulate(ref string? found, ref bool ambiguous, string value)
+    {
+        if (ambiguous)
+            return;
+        if (found is not null && found != value)
+            ambiguous = true;
+        else
+            found = value;
+    }
+
+    private static string? Resolve(string? found, bool ambiguous) =>
+        ambiguous || string.IsNullOrWhiteSpace(found) ? null : found;
+
+    private static bool HasScope(string value, ISet<string> required)
+    {
+        var span = value.AsSpan();
+        var start = 0;
+        while (start < span.Length)
+        {
+            while (start < span.Length && span[start] == ' ')
+                start++;
+            if (start >= span.Length)
+                break;
+            var end = start;
+            while (end < span.Length && span[end] != ' ')
+                end++;
+            if (required.Contains(span[start..end].ToString()))
+                return true;
+            start = end;
+        }
+        return false;
+    }
+
     private static IdentityFlowIdentity? Identity(IdentityFlowPrincipalKind kind, string prefix, string value, IdentityFlowPrincipalOptions options)
     {
         var normalized = Guid.TryParse(value, out var guid) ? guid.ToString("D") : value;
-        var id = prefix + normalized;
+        var id = prefix.Length == 0 ? normalized : prefix + normalized;
         if (id.Length is 0 or > Core.TicketScope.MaximumIdentifierLength || id.Any(char.IsControl) || !System.Text.Unicode.Utf16.IsValid(id))
             return null;
         if (kind == IdentityFlowPrincipalKind.ApiClient && options.ReservedApiClientIds.Contains(id))
             return null;
         return new IdentityFlowIdentity(kind, id, normalized);
     }
-
-    /// <summary>The single value of <paramref name="type"/>; several distinct values are ambiguous and ignored.</summary>
-    private static string? Single(ClaimsPrincipal user, string type)
-    {
-        string? found = null;
-        foreach (var claim in user.FindAll(type))
-        {
-            if (found is not null && found != claim.Value)
-                return null;
-            found = claim.Value;
-        }
-        return string.IsNullOrWhiteSpace(found) ? null : found;
-    }
-
-    private static IEnumerable<string> Scopes(ClaimsPrincipal user) =>
-        user.FindAll(ScopeClaim).SelectMany(claim => claim.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries));
 }

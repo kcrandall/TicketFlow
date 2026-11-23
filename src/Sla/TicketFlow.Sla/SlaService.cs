@@ -48,38 +48,69 @@ public sealed class SlaService : ISlaService
         var tracker = await trackers.GetAsync(scope, conversation, cancellationToken).ConfigureAwait(false);
         if (tracker is null)
             return new SlaValue<SlaStatusView>(new SlaStatusView(conversation, stored.Conversation.Inbox, null, null, null, false, [], false, false, null, now));
-        return new SlaValue<SlaStatusView>(await ViewAsync(scope, tracker.Tracker, now, cancellationToken).ConfigureAwait(false));
+        return new SlaValue<SlaStatusView>(await ViewAsync(scope, tracker.Tracker, now, calendarCache: null, cancellationToken).ConfigureAwait(false));
     }
 
     public async Task<SlaResult<SlaRiskPage>> ListAsync(PrincipalRef actor, SlaRiskQuery query, string? cursor = null, CancellationToken cancellationToken = default)
     {
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
-        var fingerprint = Fingerprint(query);
+        string? fingerprint = null;
         SlaRiskCursor? after = null;
-        if (cursor is not null && !TryDecodeCursor(cursor, fingerprint, out after))
-            return SlaRefused.Invalid("The cursor is invalid or belongs to a different query.");
+        if (cursor is not null)
+        {
+            fingerprint = Fingerprint(query);
+            if (!TryDecodeCursor(cursor, fingerprint, out after))
+                return SlaRefused.Invalid("The cursor is invalid or belongs to a different query.");
+        }
         var now = time.GetUtcNow();
         var filter = await planner.PlanAsync(new AccessQuery(actor, SlaPermissions.Read, scope), cancellationToken).ConfigureAwait(false);
         var page = await trackers.ListAsync(scope, query.WithAfter(after ?? query.After), now, filter, cancellationToken).ConfigureAwait(false);
-        var items = new List<SlaStatusView>(page.Trackers.Count);
-        foreach (var tracker in page.Trackers)
+        if (page.Trackers.Count == 0)
+            return new SlaValue<SlaRiskPage>(new SlaRiskPage([], page.Next is { } emptyNext ? EncodeCursor(emptyNext, fingerprint ?? Fingerprint(query)) : null));
+
+        var ids = new ConversationId[page.Trackers.Count];
+        for (var i = 0; i < page.Trackers.Count; i++)
         {
-            if (tracker.Scope != scope)
+            if (page.Trackers[i].Scope != scope)
                 throw new InvalidOperationException("The SLA tracker store returned a record outside the requested scope.");
-            var stored = await conversations.GetAsync(scope, tracker.Conversation, cancellationToken).ConfigureAwait(false);
-            if (stored is null || !await PermittedAsync(actor, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
-                continue;
-            items.Add(await ViewAsync(scope, tracker.Tracker, now, cancellationToken).ConfigureAwait(false));
+            ids[i] = page.Trackers[i].Conversation;
         }
-        return new SlaValue<SlaRiskPage>(new SlaRiskPage(items, page.Next is { } next ? EncodeCursor(next, fingerprint) : null));
+        var convTask = conversations.GetManyAsync(scope, ids, cancellationToken);
+        var contextTask = evaluator.LoadDecisionContextAsync(actor, scope, [SlaPermissions.Read], cancellationToken);
+        await Task.WhenAll(convTask, contextTask).ConfigureAwait(false);
+        var loaded = convTask.Result;
+        var decisionContext = contextTask.Result;
+        var calendarCache = new Dictionary<BusinessCalendarId, SlaClockTime?>();
+        var items = new List<SlaStatusView>(page.Trackers.Count);
+        for (var i = 0; i < page.Trackers.Count; i++)
+        {
+            var tracker = page.Trackers[i];
+            if (!loaded.TryGetValue(tracker.Conversation, out var stored))
+                continue;
+            if (!(await decisionContext.DecideAsync(SlaPermissions.Read, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false)).IsPermitted)
+                continue;
+            items.Add(await ViewAsync(scope, tracker.Tracker, now, calendarCache, cancellationToken).ConfigureAwait(false));
+        }
+        return new SlaValue<SlaRiskPage>(new SlaRiskPage(items, page.Next is { } next ? EncodeCursor(next, fingerprint ?? Fingerprint(query)) : null));
     }
 
-    private async Task<SlaStatusView> ViewAsync(TicketScope scope, SlaTracker tracker, DateTimeOffset now, CancellationToken cancellationToken)
+    private async Task<SlaStatusView> ViewAsync(TicketScope scope, SlaTracker tracker, DateTimeOffset now, Dictionary<BusinessCalendarId, SlaClockTime?>? calendarCache,
+        CancellationToken cancellationToken)
     {
         SlaClockTime? business = null;
-        if (tracker.Applied?.Calendar is { } calendarId && await calendars.GetAsync(scope, calendarId, cancellationToken).ConfigureAwait(false) is { } calendar)
-            business = SlaClockTime.Business(new BusinessCalendarCalculator(calendar.Calendar));
+        if (tracker.Applied?.Calendar is { } calendarId)
+        {
+            if (calendarCache is not null && calendarCache.TryGetValue(calendarId, out var cached))
+                business = cached;
+            else
+            {
+                if (await calendars.GetAsync(scope, calendarId, cancellationToken).ConfigureAwait(false) is { } calendar)
+                    business = SlaClockTime.Business(new BusinessCalendarCalculator(calendar.Calendar));
+                if (calendarCache is not null)
+                    calendarCache[calendarId] = business;
+            }
+        }
         return SlaEngine.View(tracker, id => id == tracker.Applied?.Calendar ? business : null, now);
     }
 
@@ -95,12 +126,23 @@ public sealed class SlaService : ISlaService
 
     private static string Fingerprint(SlaRiskQuery query)
     {
-        var text = string.Join('\u001F', ((int)query.Filter).ToString(CultureInfo.InvariantCulture), query.Inbox?.Value ?? "", query.Limit.ToString(CultureInfo.InvariantCulture));
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)).AsSpan(0, 8));
+        var inbox = query.Inbox?.Value ?? "";
+        var byteLen = Encoding.UTF8.GetByteCount(inbox) + 32;
+        Span<byte> buf = byteLen <= 512 ? stackalloc byte[byteLen] : new byte[byteLen];
+        Utf8Formatter.TryFormat((int)query.Filter, buf, out var pos);
+        buf[pos++] = 0x1F;
+        if (inbox.Length > 0)
+            pos += Encoding.UTF8.GetBytes(inbox.AsSpan(), buf[pos..]);
+        buf[pos++] = 0x1F;
+        Utf8Formatter.TryFormat(query.Limit, buf[pos..], out var limLen);
+        pos += limLen;
+        Span<byte> hash = stackalloc byte[32];
+        SHA256.HashData(buf[..pos], hash);
+        return Convert.ToHexStringLower(hash[..8]);
     }
 
     private static string EncodeCursor(SlaRiskCursor cursor, string fingerprint) =>
-        Base64Url.EncodeToString(Encoding.UTF8.GetBytes(string.Join('|', "v1", fingerprint, cursor.UrgencyAt.UtcTicks.ToString(CultureInfo.InvariantCulture), cursor.Conversation.Value)));
+        Base64Url.EncodeToString(Encoding.UTF8.GetBytes($"v1|{fingerprint}|{cursor.UrgencyAt.UtcTicks.ToString(CultureInfo.InvariantCulture)}|{cursor.Conversation.Value}"));
 
     private static bool TryDecodeCursor(string token, string fingerprint, out SlaRiskCursor? cursor)
     {

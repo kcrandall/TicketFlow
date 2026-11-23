@@ -54,5 +54,9 @@ public static class PostgresLiveChatMigrations
         CREATE INDEX tf_livechat_links_session ON tf_livechat_links (session_scope_key, linked_at DESC);
         CREATE INDEX tf_livechat_links_conversation ON tf_livechat_links (conversation_key, linked_at DESC);
         CREATE INDEX tf_livechat_links_session_ref ON tf_livechat_links (session_ref);
+        """),
+        new(2, "perf-link-sort-indexes", """
+        CREATE INDEX tf_livechat_links_session_v2 ON tf_livechat_links (session_scope_key, linked_at DESC, conversation_id DESC);
+        CREATE INDEX tf_livechat_links_conversation_v2 ON tf_livechat_links (conversation_key, linked_at DESC, session_id);
         """)]);
 }

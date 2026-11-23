@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 
 namespace TicketFlow.Automation;
 
@@ -20,13 +21,14 @@ public sealed record AutomationSchedule
     /// <summary>Searches at most this many days ahead; a schedule that matches no day within it never fires.</summary>
     public const int MaximumSearchDays = 366 * 5;
 
-    private readonly bool[] minutes = new bool[60];
-    private readonly bool[] hours = new bool[24];
-    private readonly bool[] days = new bool[32];
-    private readonly bool[] months = new bool[13];
-    private readonly bool[] weekdays = new bool[7];
+    private readonly ulong minutesMask;
+    private readonly uint hoursMask;
+    private readonly uint daysMask;
+    private readonly ushort monthsMask;
+    private readonly byte weekdaysMask;
     private readonly bool dayRestricted;
     private readonly bool weekdayRestricted;
+    private TimeZoneInfo? cachedZone;
 
     public AutomationSchedule(string expression, string timeZoneId)
     {
@@ -35,17 +37,19 @@ public sealed record AutomationSchedule
         var fields = Expression.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (fields.Length != 5)
             throw new ArgumentException("Schedules have five fields: minute hour day-of-month month day-of-week.", nameof(expression));
-        Parse(fields[0], 0, 59, minutes, nameof(expression));
-        Parse(fields[1], 0, 23, hours, nameof(expression));
-        dayRestricted = !Parse(fields[2], 1, 31, days, nameof(expression));
-        Parse(fields[3], 1, 12, months, nameof(expression));
-        var weekdayField = new bool[8];
-        weekdayRestricted = !Parse(fields[4], 0, 7, weekdayField, nameof(expression));
-        for (var day = 0; day < 7; day++)
-            weekdays[day] = weekdayField[day] || (day == 0 && weekdayField[7]);
-        if (minutes.Count(value => value) * hours.Count(value => value) > MaximumFiresPerDay)
+        Parse(fields[0], 0, 59, out minutesMask, nameof(expression));
+        Parse(fields[1], 0, 23, out var hoursBits, nameof(expression));
+        hoursMask = (uint)hoursBits;
+        dayRestricted = !Parse(fields[2], 1, 31, out var daysBits, nameof(expression));
+        daysMask = (uint)daysBits;
+        Parse(fields[3], 1, 12, out var monthsBits, nameof(expression));
+        monthsMask = (ushort)monthsBits;
+        weekdayRestricted = !Parse(fields[4], 0, 7, out var weekdayBits, nameof(expression));
+        var sunday = (weekdayBits & 1UL) | ((weekdayBits >> 7) & 1UL);
+        weekdaysMask = (byte)((weekdayBits & 0x7EUL) | sunday);
+        if (BitOperations.PopCount(minutesMask) * BitOperations.PopCount(hoursMask) > MaximumFiresPerDay)
             throw new ArgumentException($"Schedules fire at most {MaximumFiresPerDay} times per day.", nameof(expression));
-        if (!months.Any(value => value) || !days.Any(value => value) || !weekdays.Any(value => value))
+        if (monthsMask == 0 || daysMask == 0 || weekdaysMask == 0)
             throw new ArgumentException("The schedule matches no day.", nameof(expression));
     }
 
@@ -57,7 +61,7 @@ public sealed record AutomationSchedule
 
     /// <summary>Resolves <see cref="TimeZoneId"/> on this host.</summary>
     /// <exception cref="TimeZoneNotFoundException">The zone is unknown on this host.</exception>
-    public TimeZoneInfo ResolveTimeZone() => TimeZoneInfo.FindSystemTimeZoneById(TimeZoneId);
+    public TimeZoneInfo ResolveTimeZone() => cachedZone ??= TimeZoneInfo.FindSystemTimeZoneById(TimeZoneId);
 
     /// <summary>
     /// The first fire instant strictly after <paramref name="after"/> (UTC, whole minutes), or <see langword="null"/> when none occurs
@@ -66,20 +70,29 @@ public sealed record AutomationSchedule
     public DateTimeOffset? NextAfter(DateTimeOffset after, TimeZoneInfo? zone = null)
     {
         zone ??= ResolveTimeZone();
-        var startDate = TimeZoneInfo.ConvertTime(after, zone).Date.AddDays(-1);
-        for (var offset = 0; offset <= MaximumSearchDays; offset++)
+        var localAfter = TimeZoneInfo.ConvertTime(after, zone);
+        var hasDst = zone.SupportsDaylightSavingTime;
+        var backOneDay = hasDst && localAfter.Hour < 3;
+        var startDate = backOneDay ? localAfter.Date.AddDays(-1) : localAfter.Date;
+        var maxOffset = backOneDay ? MaximumSearchDays : MaximumSearchDays - 1;
+        for (var offset = 0; offset <= maxOffset; offset++)
         {
             var date = startDate.AddDays(offset);
             if (!DayMatches(date))
                 continue;
-            for (var hour = 0; hour < 24; hour++)
+            var isSameDay = date == localAfter.Date;
+            var minHour = isSameDay ? (hasDst ? Math.Max(0, localAfter.Hour - 2) : localAfter.Hour) : 0;
+            var hMask = hoursMask & (~0U << minHour);
+            while (hMask != 0)
             {
-                if (!hours[hour])
-                    continue;
-                for (var minute = 0; minute < 60; minute++)
+                var hour = BitOperations.TrailingZeroCount(hMask);
+                hMask &= hMask - 1;
+                var minMinute = isSameDay && !hasDst && hour == localAfter.Hour ? localAfter.Minute : 0;
+                var mMask = minutesMask & (~0UL << minMinute);
+                while (mMask != 0)
                 {
-                    if (!minutes[minute])
-                        continue;
+                    var minute = BitOperations.TrailingZeroCount(mMask);
+                    mMask &= mMask - 1;
                     var instant = ToInstant(DateTime.SpecifyKind(date.AddHours(hour).AddMinutes(minute), DateTimeKind.Unspecified), zone);
                     if (instant > after)
                         return instant;
@@ -95,10 +108,10 @@ public sealed record AutomationSchedule
 
     private bool DayMatches(DateTime date)
     {
-        if (!months[date.Month])
+        if ((monthsMask & (1 << date.Month)) == 0)
             return false;
-        var day = days[date.Day];
-        var weekday = weekdays[(int)date.DayOfWeek];
+        var day = (daysMask & (1U << date.Day)) != 0;
+        var weekday = (weekdaysMask & (1 << (int)date.DayOfWeek)) != 0;
         return (dayRestricted, weekdayRestricted) switch
         {
             (true, true) => day || weekday,
@@ -120,17 +133,25 @@ public sealed record AutomationSchedule
             return new DateTimeOffset(end - zone.GetUtcOffset(end), TimeSpan.Zero);
         }
         if (zone.IsAmbiguousTime(local))
-            return new DateTimeOffset(local - zone.GetAmbiguousTimeOffsets(local).Max(), TimeSpan.Zero);
+        {
+            var offsets = zone.GetAmbiguousTimeOffsets(local);
+            var max = offsets[0];
+            for (var i = 1; i < offsets.Length; i++)
+                if (offsets[i] > max)
+                    max = offsets[i];
+            return new DateTimeOffset(local - max, TimeSpan.Zero);
+        }
         return new DateTimeOffset(local - zone.GetUtcOffset(local), TimeSpan.Zero);
     }
 
-    /// <summary>Parses one field into <paramref name="set"/>; returns true when the field is an unrestricted <c>*</c>.</summary>
-    private static bool Parse(string field, int minimum, int maximum, bool[] set, string parameterName)
+    /// <summary>Parses one field into <paramref name="mask"/>; returns true when the field is an unrestricted <c>*</c>.</summary>
+    private static bool Parse(string field, int minimum, int maximum, out ulong mask, string parameterName)
     {
+        mask = 0;
         if (field == "*")
         {
             for (var value = minimum; value <= maximum; value++)
-                set[value] = true;
+                mask |= 1UL << value;
             return true;
         }
         var parts = field.Split(',');
@@ -139,15 +160,15 @@ public sealed record AutomationSchedule
         foreach (var part in parts)
         {
             var step = 1;
-            var range = part;
-            var slash = part.IndexOf('/');
+            var range = part.AsSpan();
+            var slash = range.IndexOf('/');
             if (slash >= 0)
             {
-                step = Number(part[(slash + 1)..], 1, maximum - minimum + 1, parameterName);
-                range = part[..slash];
+                step = Number(range[(slash + 1)..], 1, maximum - minimum + 1, parameterName);
+                range = range[..slash];
             }
             int start, end;
-            if (range == "*")
+            if (range.SequenceEqual("*"))
                 (start, end) = (minimum, maximum);
             else if (range.IndexOf('-') is var dash and > 0)
             {
@@ -162,15 +183,19 @@ public sealed record AutomationSchedule
                 end = slash >= 0 ? maximum : start;
             }
             for (var value = start; value <= end; value += step)
-                set[value] = true;
+                mask |= 1UL << value;
         }
         return false;
     }
 
-    private static int Number(string text, int minimum, int maximum, string parameterName)
+    private static int Number(ReadOnlySpan<char> text, int minimum, int maximum, string parameterName)
     {
-        if (text.Length is 0 or > 2 || !text.All(char.IsAsciiDigit) || !int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var value)
-            || value < minimum || value > maximum)
+        if (text.Length is 0 or > 2)
+            throw new ArgumentException($"Schedule values must be {minimum}-{maximum}.", parameterName);
+        for (var i = 0; i < text.Length; i++)
+            if (!char.IsAsciiDigit(text[i]))
+                throw new ArgumentException($"Schedule values must be {minimum}-{maximum}.", parameterName);
+        if (!int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var value) || value < minimum || value > maximum)
             throw new ArgumentException($"Schedule values must be {minimum}-{maximum}.", parameterName);
         return value;
     }

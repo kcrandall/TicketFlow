@@ -22,7 +22,7 @@
             <table class="tf-table">
                 <thead><tr><th>Rule</th><th>When</th><th>If</th><th>Then</th><th class="tf-num">Runs (7d)</th><th>Status</th></tr></thead>
                 <tbody>
-                    @foreach (var stored in rules.OrderBy(rule => rule.Rule.Priority).ThenBy(rule => rule.Id.Value, StringComparer.Ordinal))
+                    @foreach (var stored in rules)
                     {
                         var rule = stored.Rule;
                         var trigger = UiAutomationText.Trigger(rule.Trigger);
@@ -61,7 +61,7 @@
                 @foreach (var execution in executions)
                 {
                     <tr>
-                        <td>@(rules.FirstOrDefault(rule => rule.Id == execution.Execution.Rule)?.Rule.Name ?? execution.Execution.Rule.Value)</td>
+                        <td>@(ruleNames.GetValueOrDefault(execution.Execution.Rule, execution.Execution.Rule.Value))</td>
                         <td>@if (execution.Execution.Conversation is { } conversation) { <a class="tf-row-link tf-mono" href="@Url($"conversations/{conversation.Value}")">@conversation.Value</a> }</td>
                         <td class="tf-muted">@UiFormat.Token(execution.Execution.EventKind)</td>
                         <td><span class="tf-badge @(execution.Execution.Status.ToString() == "Completed" ? "tf-badge--success" : "tf-badge--muted")">@UiFormat.Token(execution.Execution.Status)</span> <span class="tf-small tf-muted">@execution.Execution.Outcomes.Count/@execution.Execution.ActionCount actions</span></td>
@@ -81,14 +81,22 @@
     private List<StoredAutomationRule> rules = [];
     private List<StoredAutomationExecution> executions = [];
     private readonly Dictionary<string, int> runs = [];
+    private readonly Dictionary<AutomationRuleId, string> ruleNames = [];
 
     protected override async Task OnInitializedAsync()
     {
         if (Service<IAutomationRuleService>() is not { } service)
             return;
-        if (await service.ListAsync(Actor, Aborted) is AutomationValue<IReadOnlyList<StoredAutomationRule>> list)
-            rules = [.. list.Value];
-        if (await service.ListExecutionsAsync(Actor, new AutomationExecutionQuery(from: Now.AddDays(-7), limit: 100), Aborted) is AutomationValue<AutomationExecutionPage> page)
+        var rulesTask = service.ListAsync(Actor, Aborted);
+        var execTask = service.ListExecutionsAsync(Actor, new AutomationExecutionQuery(from: Now.AddDays(-7), limit: 100), Aborted);
+        await Task.WhenAll(rulesTask, execTask);
+        if (await rulesTask is AutomationValue<IReadOnlyList<StoredAutomationRule>> list)
+        {
+            rules = [.. list.Value.OrderBy(rule => rule.Rule.Priority).ThenBy(rule => rule.Id.Value, StringComparer.Ordinal)];
+            foreach (var r in rules)
+                ruleNames[r.Id] = r.Rule.Name;
+        }
+        if (await execTask is AutomationValue<AutomationExecutionPage> page)
         {
             foreach (var execution in page.Value.Executions)
                 runs[execution.Execution.Rule.Value] = runs.GetValueOrDefault(execution.Execution.Rule.Value) + 1;

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Globalization;
 using System.Text;
 using Microsoft.Extensions.Options;
@@ -10,7 +11,7 @@ using TicketFlow.HelpCenter;
 namespace TicketFlow.Assist;
 
 /// <summary>What context to build: the timeline, the contact and optional help center grounding.</summary>
-public sealed record AssistContextRequest(bool IncludeTimeline = true, bool IncludeContact = true, AssistGrounding? Grounding = null);
+public sealed record AssistContextRequest(bool IncludeTimeline = true, bool IncludeContact = true, AssistGrounding? Grounding = null, bool BuildSupportData = true);
 
 /// <summary>A help center snippet supplied to the model under <see cref="Key"/> (<c>A1</c>, <c>A2</c>, ...).</summary>
 public sealed record AssistSnippet(string Key, ArticleSnippet Article)
@@ -88,27 +89,47 @@ public sealed class AssistContextBuilder
         if (!decision.IsPermitted)
             return Forbidden(AssistPermissions.Use);
 
+        var timelineTask = request.IncludeTimeline ? ReadTimelineAsync(actor, view, cancellationToken) : null;
+        var contactTask = request.IncludeContact ? contacts.GetAsync(actor, view.Contact, cancellationToken) : null;
+        var eagerSearchTask = request.Grounding is { Query: not null } eagerGrounding && options.MaximumSnippets > 0
+            ? SearchAsync(actor, eagerGrounding, [], cancellationToken)
+            : null;
+
+        if (timelineTask is not null && contactTask is not null && eagerSearchTask is not null)
+            await Task.WhenAll(timelineTask, contactTask, eagerSearchTask).ConfigureAwait(false);
+        else if (timelineTask is not null && contactTask is not null)
+            await Task.WhenAll(timelineTask, contactTask).ConfigureAwait(false);
+        else if (timelineTask is not null && eagerSearchTask is not null)
+            await Task.WhenAll(timelineTask, eagerSearchTask).ConfigureAwait(false);
+        else if (contactTask is not null && eagerSearchTask is not null)
+            await Task.WhenAll(contactTask, eagerSearchTask).ConfigureAwait(false);
+
         IReadOnlyList<TimelineEventView> events = [];
         var notesIncluded = false;
-        if (request.IncludeTimeline)
+        if (timelineTask is not null)
         {
-            var read = await ReadTimelineAsync(actor, view, cancellationToken).ConfigureAwait(false);
+            var read = await timelineTask.ConfigureAwait(false);
             if (read is null)
                 return Forbidden(ConversationPermissions.Read);
             (events, notesIncluded) = read.Value;
         }
 
         ContactView? contact = null;
-        if (request.IncludeContact)
-            contact = await contacts.GetAsync(actor, view.Contact, cancellationToken).ConfigureAwait(false) switch
+        if (contactTask is not null)
+            contact = await contactTask.ConfigureAwait(false) switch
             {
                 ContactApplied<ContactView> applied => applied.Value,
                 ContactRefused => null,
             };
 
         IReadOnlyList<AssistSnippet> snippets = [];
-        if (request.Grounding is { } grounding && options.MaximumSnippets > 0)
+        if (eagerSearchTask is not null)
+            snippets = await eagerSearchTask.ConfigureAwait(false);
+        else if (request.Grounding is { } grounding && options.MaximumSnippets > 0)
             snippets = await SearchAsync(actor, grounding, events, cancellationToken).ConfigureAwait(false);
+
+        if (!request.BuildSupportData)
+            return new AssistConversationContext(view, events, string.Empty, snippets, 0, notesIncluded, contact is not null);
 
         var header = new StringBuilder();
         RenderConversation(header, view);
@@ -398,22 +419,53 @@ public sealed class AssistContextBuilder
         ListAttributeValue list => string.Join(", ", list.Items),
     };
 
+    private static readonly SearchValues<char> EscapeChars = SearchValues.Create("&<>\"");
+
     /// <summary>XML-escapes text so data cannot open or close sections.</summary>
     internal static string Escape(string value)
     {
-        if (value.AsSpan().IndexOfAny("&<>\"") < 0)
+        var span = value.AsSpan();
+        var first = span.IndexOfAny(EscapeChars);
+        if (first < 0)
             return value;
         var builder = new StringBuilder(value.Length + 16);
-        foreach (var character in value)
-            builder.Append(character switch
+        AppendEscaped(builder, span, first);
+        return builder.ToString();
+    }
+
+    internal static void AppendEscaped(StringBuilder builder, ReadOnlySpan<char> span)
+    {
+        var first = span.IndexOfAny(EscapeChars);
+        if (first < 0)
+        {
+            builder.Append(span);
+            return;
+        }
+        AppendEscaped(builder, span, first);
+    }
+
+    private static void AppendEscaped(StringBuilder builder, ReadOnlySpan<char> span, int next)
+    {
+        while (true)
+        {
+            if (next > 0)
+                builder.Append(span[..next]);
+            builder.Append(span[next] switch
             {
                 '&' => "&amp;",
                 '<' => "&lt;",
                 '>' => "&gt;",
-                '"' => "&quot;",
-                _ => character.ToString(),
+                _ => "&quot;",
             });
-        return builder.ToString();
+            span = span[(next + 1)..];
+            next = span.IndexOfAny(EscapeChars);
+            if (next < 0)
+            {
+                if (!span.IsEmpty)
+                    builder.Append(span);
+                return;
+            }
+        }
     }
 
     private static AssistRefused NotFound { get; } = new(AssistRefusal.NotFound, ["The conversation does not exist."]);

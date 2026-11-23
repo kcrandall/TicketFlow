@@ -1,3 +1,5 @@
+using System.Data;
+using System.Text;
 using Npgsql;
 using NpgsqlTypes;
 using TicketFlow.Access;
@@ -25,6 +27,21 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
     private const string StateColumns = "conversation_id, inbox_id, channel_kind, recipient_kind, recipient_namespace, recipient_value, external_thread_id, subject, last_incoming_at, last_incoming_external_id, revision, format_version, contact_id";
     private const string DispatchColumns = "conversation_id, message_id, inbox_id, channel_kind, state, attempts, updated_at, next_attempt_at, external_message_id, code, revision, format_version";
 
+    private const string CreateEndpointSql = $"""
+        WITH existing AS (
+            SELECT revision FROM tf_channel_endpoints
+            WHERE endpoint_key=tf_key_v1({ScopeArgs},@kind,@configuration) AND channel_kind=@kind AND configuration_id=@configuration AND {ScopeWhere}
+        ),
+        inserted AS (
+            INSERT INTO tf_channel_endpoints (tenant_id, project_id, environment_id, app_id, workspace_id, channel_kind, configuration_id, format_version, inbox_id, address, revision)
+            SELECT @tenant,@project,@environment,@app,@workspace,@kind,@configuration,1,@inbox,@address,1
+            WHERE NOT EXISTS (SELECT 1 FROM existing)
+              AND (SELECT count(*) FROM tf_channel_endpoints WHERE scope_key=tf_key_v1({ScopeArgs}) AND {ScopeWhere}) < @max
+            RETURNING revision
+        )
+        SELECT (SELECT revision FROM inserted), (SELECT revision FROM existing)
+        """;
+
     private readonly NpgsqlDataSource source;
 
     public PostgresChannelStore(NpgsqlDataSource dataSource) => source = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
@@ -39,8 +56,15 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(configurationId);
-        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        return await LoadEndpointAsync(connection, null, scope, kind, configurationId, cancellationToken).ConfigureAwait(false);
+        await using var command = source.CreateCommand($"""
+            SELECT {EndpointColumns} FROM tf_channel_endpoints
+            WHERE endpoint_key=tf_key_v1({ScopeArgs},@kind,@configuration) AND channel_kind=@kind AND configuration_id=@configuration AND {ScopeWhere}
+            """);
+        AddScope(command, scope);
+        AddText(command, "kind", Kind(kind));
+        AddText(command, "configuration", configurationId);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadEndpoint(reader, scope) : null;
     }
 
     public async Task<StoredChannelEndpoint?> FindByAddressAsync(AccessPartition partition, ChannelKind kind, string address, CancellationToken cancellationToken = default)
@@ -58,7 +82,7 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         AddText(command, "app", partition.AppId);
         AddText(command, "kind", Kind(kind));
         AddText(command, "address", address);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadEndpoint(reader, null) : null;
     }
 
@@ -68,19 +92,46 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         ArgumentNullException.ThrowIfNull(prefix);
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IChannelEndpointStore.MaximumPrefixMatches);
-        await using var command = source.CreateCommand($"""
-            SELECT {EndpointColumns} FROM tf_channel_endpoints
-            WHERE tenant_id=@tenant AND project_id=@project AND environment_id=@environment AND app_id=@app AND channel_kind=@kind
-              AND address IS NOT NULL AND address >= @prefix AND left(address, char_length(@prefix)) = @prefix
-            ORDER BY address LIMIT @limit
-            """);
+        string sql;
+        string? upper = null;
+        if (prefix.Length == 0)
+        {
+            sql = $"""
+                SELECT {EndpointColumns} FROM tf_channel_endpoints
+                WHERE tenant_id=@tenant AND project_id=@project AND environment_id=@environment AND app_id=@app AND channel_kind=@kind
+                  AND address IS NOT NULL
+                ORDER BY address LIMIT @limit
+                """;
+        }
+        else if ((upper = PrefixUpperBound(prefix)) is not null)
+        {
+            sql = $"""
+                SELECT {EndpointColumns} FROM tf_channel_endpoints
+                WHERE tenant_id=@tenant AND project_id=@project AND environment_id=@environment AND app_id=@app AND channel_kind=@kind
+                  AND address IS NOT NULL AND address >= @prefix AND address < @upper
+                ORDER BY address LIMIT @limit
+                """;
+        }
+        else
+        {
+            sql = $"""
+                SELECT {EndpointColumns} FROM tf_channel_endpoints
+                WHERE tenant_id=@tenant AND project_id=@project AND environment_id=@environment AND app_id=@app AND channel_kind=@kind
+                  AND address IS NOT NULL AND address >= @prefix AND starts_with(address, @prefix)
+                ORDER BY address LIMIT @limit
+                """;
+        }
+        await using var command = source.CreateCommand(sql);
         AddText(command, "tenant", partition.TenantId);
         AddText(command, "project", partition.ProjectId);
         AddText(command, "environment", partition.EnvironmentId);
         AddText(command, "app", partition.AppId);
         AddText(command, "kind", Kind(kind));
-        AddText(command, "prefix", prefix);
-        command.Parameters.AddWithValue("limit", limit);
+        if (prefix.Length > 0)
+            AddText(command, "prefix", prefix);
+        if (upper is not null)
+            AddText(command, "upper", upper);
+        AddInt32(command, "limit", limit);
         var endpoints = new List<StoredChannelEndpoint>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -95,30 +146,33 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await LockAsync(connection, transaction, ["tf.channels.endpoints", scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value], cancellationToken).ConfigureAwait(false);
-        if (await LoadEndpointAsync(connection, transaction, scope, endpoint.Kind, endpoint.ConfigurationId, cancellationToken).ConfigureAwait(false) is { } existing)
-            return new ChannelWriteConflict(existing.Revision);
-        await using (var count = new NpgsqlCommand($"SELECT count(*) FROM tf_channel_endpoints WHERE scope_key=tf_key_v1({ScopeArgs}) AND {ScopeWhere}", connection, transaction))
+        long? insertedRevision;
+        long? existingRevision;
+        await using (var create = new NpgsqlCommand(CreateEndpointSql, connection, transaction))
         {
-            AddScope(count, scope);
-            if ((long)(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))! >= IChannelEndpointStore.MaximumEndpointsPerScope)
-                return new ChannelWriteRejected(ChannelWriteRejection.CapacityExceeded);
+            AddScope(create, scope);
+            AddEndpoint(create, endpoint);
+            AddInt64(create, "max", IChannelEndpointStore.MaximumEndpointsPerScope);
+            try
+            {
+                await using var reader = await create.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+                await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+                insertedRevision = reader.IsDBNull(0) ? null : reader.GetInt64(0);
+                existingRevision = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+            }
+            catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == "tf_channel_endpoints_address")
+            {
+                return new ChannelWriteRejected(ChannelWriteRejection.AddressTaken);
+            }
         }
-        await using var insert = new NpgsqlCommand("""
-            INSERT INTO tf_channel_endpoints (tenant_id, project_id, environment_id, app_id, workspace_id, channel_kind, configuration_id, format_version, inbox_id, address, revision)
-            VALUES (@tenant,@project,@environment,@app,@workspace,@kind,@configuration,1,@inbox,@address,1)
-            """, connection, transaction);
-        AddScope(insert, scope);
-        AddEndpoint(insert, endpoint);
-        try
+        if (insertedRevision is { } rev)
         {
-            await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new ChannelWriteApplied<StoredChannelEndpoint>(new StoredChannelEndpoint(scope, endpoint, rev));
         }
-        catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == "tf_channel_endpoints_address")
-        {
-            return new ChannelWriteRejected(ChannelWriteRejection.AddressTaken);
-        }
-        return new ChannelWriteApplied<StoredChannelEndpoint>(new StoredChannelEndpoint(scope, endpoint, 1));
+        return existingRevision is { } existing
+            ? new ChannelWriteConflict(existing)
+            : new ChannelWriteRejected(ChannelWriteRejection.CapacityExceeded);
     }
 
     public async Task<ChannelWriteResult<StoredChannelEndpoint>> UpdateAsync(TicketScope scope, ChannelEndpoint endpoint, long expectedRevision, CancellationToken cancellationToken = default)
@@ -134,7 +188,7 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
             """, connection);
         AddScope(command, scope);
         AddEndpoint(command, endpoint);
-        command.Parameters.AddWithValue("revision", expectedRevision);
+        AddInt64(command, "revision", expectedRevision);
         try
         {
             if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
@@ -162,8 +216,8 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         AddScope(command, scope);
         AddText(command, "kind", Kind(kind));
         AddText(command, "configuration", configurationId);
-        command.Parameters.AddWithValue("revision", expectedRevision);
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        AddInt64(command, "revision", expectedRevision);
+        await using (var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false))
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 return new ChannelWriteApplied<StoredChannelEndpoint>(ReadEndpoint(reader, scope));
         var current = await LoadEndpointAsync(connection, null, scope, kind, configurationId, cancellationToken).ConfigureAwait(false);
@@ -180,18 +234,25 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         AddScope(command, scope);
         AddText(command, "kind", Kind(kind));
         AddText(command, "configuration", configurationId);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadEndpoint(reader, scope) : null;
     }
 
-    private static StoredChannelEndpoint ReadEndpoint(NpgsqlDataReader reader, TicketScope? scope) => Decode(() =>
+    private static StoredChannelEndpoint ReadEndpoint(NpgsqlDataReader reader, TicketScope? scope)
     {
-        if (reader.GetInt16(5) != 1)
-            throw new FormatException("Unsupported endpoint format version.");
-        var stored = scope ?? new TicketScope(reader.GetString(6), reader.GetString(7), reader.GetString(8), reader.GetString(9), new WorkspaceId(reader.GetString(10)));
-        return new StoredChannelEndpoint(stored, new ChannelEndpoint(new ChannelKind(reader.GetString(0)), reader.GetString(1), new InboxId(reader.GetString(2)),
-            NullableText(reader, 3)), reader.GetInt64(4));
-    }, "endpoint");
+        try
+        {
+            if (reader.GetInt16(5) != 1)
+                throw new FormatException("Unsupported endpoint format version.");
+            var stored = scope ?? new TicketScope(reader.GetString(6), reader.GetString(7), reader.GetString(8), reader.GetString(9), new WorkspaceId(reader.GetString(10)));
+            return new StoredChannelEndpoint(stored, new ChannelEndpoint(new ChannelKind(reader.GetString(0)), reader.GetString(1), new InboxId(reader.GetString(2)),
+                NullableText(reader, 3)), reader.GetInt64(4));
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw new InvalidOperationException("A stored channel endpoint is invalid or incompatible.", error);
+        }
+    }
 
     private static void AddEndpoint(NpgsqlCommand command, ChannelEndpoint endpoint)
     {
@@ -207,8 +268,14 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireId(conversation);
-        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        return await LoadStateAsync(connection, scope, conversation, cancellationToken).ConfigureAwait(false);
+        await using var command = source.CreateCommand($"""
+            SELECT {StateColumns} FROM tf_channel_conversation_states
+            WHERE state_key=tf_key_v1({ScopeArgs},@conversation) AND conversation_id=@conversation AND {ScopeWhere}
+            """);
+        AddScope(command, scope);
+        AddText(command, "conversation", conversation.Value);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadState(reader, scope) : null;
     }
 
     public async Task<ChannelWriteResult<StoredChannelConversationState>> WriteAsync(TicketScope scope, ChannelConversationState state, long? expectedRevision, CancellationToken cancellationToken = default)
@@ -236,7 +303,7 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         AddText(command, "conversation", state.Conversation.Value);
         AddText(command, "inbox", state.Inbox.Value);
         AddText(command, "kind", state.Channel.Value);
-        command.Parameters.AddWithValue("recipientKind", (short)state.Recipient.Kind);
+        AddInt16(command, "recipientKind", (short)state.Recipient.Kind);
         AddText(command, "recipientNamespace", state.Recipient.Namespace);
         AddText(command, "recipientValue", state.Recipient.Value);
         AddText(command, "thread", state.ExternalThreadId);
@@ -244,7 +311,8 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         AddInstant(command, "lastAt", state.LastIncomingAt);
         AddText(command, "lastId", state.LastIncomingExternalId);
         AddText(command, "contact", state.Contact?.Value);
-        command.Parameters.AddWithValue("revision", expectedRevision ?? 0);
+        if (expectedRevision is { } expected)
+            AddInt64(command, "revision", expected);
         if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
             return new ChannelWriteApplied<StoredChannelConversationState>(new StoredChannelConversationState(scope, state, revision));
         var current = await LoadStateAsync(connection, scope, state.Conversation, cancellationToken).ConfigureAwait(false);
@@ -292,10 +360,13 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
             """, connection);
         AddScope(command, scope);
         AddText(command, "conversation", conversation.Value);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            return null;
-        return Decode(() =>
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadState(reader, scope) : null;
+    }
+
+    private static StoredChannelConversationState ReadState(NpgsqlDataReader reader, TicketScope scope)
+    {
+        try
         {
             if (reader.GetInt16(11) != 1)
                 throw new FormatException("Unsupported state format version.");
@@ -303,7 +374,11 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
             return new StoredChannelConversationState(scope, new ChannelConversationState(new ConversationId(reader.GetString(0)), new InboxId(reader.GetString(1)),
                 new ChannelKind(reader.GetString(2)), recipient, NullableText(reader, 6), NullableText(reader, 7), NullableInstant(reader, 8), NullableText(reader, 9),
                 NullableText(reader, 12) is { } contact ? new ContactId(contact) : null), reader.GetInt64(10));
-        }, "conversation state");
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw new InvalidOperationException("A stored channel conversation state is invalid or incompatible.", error);
+        }
     }
 
     // ---- References ----
@@ -314,41 +389,55 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         ArgumentNullException.ThrowIfNull(scope);
         RequireId(conversation);
         ArgumentNullException.ThrowIfNull(references);
-        if (references.Count > IChannelThreadStore.MaximumReferencesPerCall || references.Any(reference => reference is null))
+        if (references.Count > IChannelThreadStore.MaximumReferencesPerCall)
             throw new ArgumentException($"At most {IChannelThreadStore.MaximumReferencesPerCall} references per call.", nameof(references));
-        if (references.Count == 0)
+        var count = references.Count;
+        if (count == 0)
             return 0;
+        var refValues = new string[count];
+        var directions = new short[count];
+        var messageIds = new string?[count];
+        for (var i = 0; i < count; i++)
+        {
+            var reference = references[i] ?? throw new ArgumentException($"At most {IChannelThreadStore.MaximumReferencesPerCall} references per call.", nameof(references));
+            refValues[i] = reference.Reference;
+            directions[i] = (short)reference.Direction;
+            messageIds[i] = reference.Message?.Value;
+        }
+        var at = ChannelConversationState.Microseconds(recordedAt);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await LockAsync(connection, transaction, ["tf.channels.references", scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value, conversation.Value],
             cancellationToken).ConfigureAwait(false);
-        var added = 0;
-        foreach (var reference in references)
+        int added;
+        await using (var insert = new NpgsqlCommand("""
+            INSERT INTO tf_channel_references (tenant_id, project_id, environment_id, app_id, workspace_id, inbox_id, conversation_id, reference, format_version,
+                direction, message_id, recorded_at)
+            SELECT @tenant,@project,@environment,@app,@workspace,@inbox,@conversation,item.reference,1,item.direction,item.message,@at
+            FROM unnest(@references, @directions, @messages) WITH ORDINALITY AS item(reference, direction, message, ord)
+            ORDER BY item.ord
+            ON CONFLICT (reference_key) DO NOTHING
+            """, connection, transaction))
         {
-            await using var insert = new NpgsqlCommand("""
-                INSERT INTO tf_channel_references (tenant_id, project_id, environment_id, app_id, workspace_id, inbox_id, conversation_id, reference, format_version,
-                    direction, message_id, recorded_at)
-                VALUES (@tenant,@project,@environment,@app,@workspace,@inbox,@conversation,@reference,1,@direction,@message,@at)
-                ON CONFLICT (reference_key) DO NOTHING
-                """, connection, transaction);
             AddScope(insert, scope);
             AddText(insert, "inbox", inbox.Value);
             AddText(insert, "conversation", conversation.Value);
-            AddText(insert, "reference", reference.Reference);
-            insert.Parameters.AddWithValue("direction", (short)reference.Direction);
-            AddText(insert, "message", reference.Message?.Value);
-            AddInstant(insert, "at", ChannelConversationState.Microseconds(recordedAt));
-            added += await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            insert.Parameters.Add(new NpgsqlParameter<string[]>("references", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = refValues });
+            insert.Parameters.Add(new NpgsqlParameter<short[]>("directions", NpgsqlDbType.Array | NpgsqlDbType.Smallint) { TypedValue = directions });
+            insert.Parameters.Add(new NpgsqlParameter<string?[]>("messages", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = messageIds });
+            AddInstant(insert, "at", at);
+            added = await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
-        await using (var prune = new NpgsqlCommand($"""
-            DELETE FROM tf_channel_references WHERE conversation_key=tf_key_v1({ScopeArgs},@conversation) AND conversation_id=@conversation AND {ScopeWhere}
-              AND sequence < (SELECT sequence FROM tf_channel_references WHERE conversation_key=tf_key_v1({ScopeArgs},@conversation) AND conversation_id=@conversation
-                  AND {ScopeWhere} ORDER BY sequence DESC OFFSET @keep LIMIT 1)
-            """, connection, transaction))
+        if (added > 0)
         {
+            await using var prune = new NpgsqlCommand($"""
+                DELETE FROM tf_channel_references WHERE conversation_key=tf_key_v1({ScopeArgs},@conversation) AND conversation_id=@conversation AND {ScopeWhere}
+                  AND sequence < (SELECT sequence FROM tf_channel_references WHERE conversation_key=tf_key_v1({ScopeArgs},@conversation) AND conversation_id=@conversation
+                      AND {ScopeWhere} ORDER BY sequence DESC OFFSET @keep LIMIT 1)
+                """, connection, transaction);
             AddScope(prune, scope);
             AddText(prune, "conversation", conversation.Value);
-            prune.Parameters.AddWithValue("keep", IChannelThreadStore.MaximumReferencesPerConversation - 1);
+            AddInt32(prune, "keep", IChannelThreadStore.MaximumReferencesPerConversation - 1);
             await prune.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -361,25 +450,37 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         ArgumentNullException.ThrowIfNull(references);
         if (references.Count > IChannelThreadStore.MaximumReferencesPerCall)
             throw new ArgumentException($"At most {IChannelThreadStore.MaximumReferencesPerCall} references per call.", nameof(references));
-        var candidates = references.Where(reference => reference is not null).Distinct(StringComparer.Ordinal).ToArray();
-        if (candidates.Length == 0)
+        var candidates = new List<string>(references.Count);
+        HashSet<string>? seen = null;
+        for (var i = 0; i < references.Count; i++)
+        {
+            var reference = references[i];
+            if (reference is null)
+                continue;
+            if (candidates.Count >= 4)
+            {
+                seen ??= new HashSet<string>(candidates, StringComparer.Ordinal);
+                if (seen.Add(reference))
+                    candidates.Add(reference);
+            }
+            else if (!candidates.Contains(reference, StringComparer.Ordinal))
+                candidates.Add(reference);
+        }
+        if (candidates.Count == 0)
             return null;
         await using var command = source.CreateCommand($"""
-            SELECT reference, conversation_id FROM tf_channel_references
-            WHERE reference_key IN (SELECT tf_key_v1({ScopeArgs},@inbox,candidate) FROM unnest(@references) AS candidate)
-              AND reference = ANY(@references) AND inbox_id=@inbox AND {ScopeWhere}
+            SELECT r.conversation_id
+            FROM unnest(@references) WITH ORDINALITY AS k(candidate, ord)
+            JOIN tf_channel_references r
+              ON r.reference_key = tf_key_v1({ScopeArgs},@inbox,k.candidate)
+             AND r.reference = k.candidate AND r.inbox_id = @inbox
+             AND r.tenant_id=@tenant AND r.project_id=@project AND r.environment_id=@environment AND r.app_id=@app AND r.workspace_id=@workspace
+            ORDER BY k.ord LIMIT 1
             """);
         AddScope(command, scope);
         AddText(command, "inbox", inbox.Value);
-        command.Parameters.Add(new NpgsqlParameter("references", NpgsqlDbType.Array | NpgsqlDbType.Text) { Value = candidates });
-        var found = new Dictionary<string, string>(StringComparer.Ordinal);
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                found[reader.GetString(0)] = reader.GetString(1);
-        foreach (var candidate in candidates)
-            if (found.TryGetValue(candidate, out var conversation))
-                return new ConversationId(conversation);
-        return null;
+        command.Parameters.Add(new NpgsqlParameter<string[]>("references", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = [.. candidates] });
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is string conversation ? new ConversationId(conversation) : null;
     }
 
     public async Task<IReadOnlyList<StoredChannelMessageReference>> ListAsync(TicketScope scope, ConversationId conversation, CancellationToken cancellationToken = default)
@@ -396,15 +497,24 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         var references = new List<StoredChannelMessageReference>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            references.Add(Decode(() =>
-            {
-                if (reader.GetInt16(6) != 1)
-                    throw new FormatException("Unsupported reference format version.");
-                var message = NullableText(reader, 3);
-                return new StoredChannelMessageReference(conversation, new InboxId(reader.GetString(0)), new ChannelMessageReference(reader.GetString(1),
-                    Defined((MessageDirection)reader.GetInt16(2)), message is null ? null : new MessageId(message)), reader.GetInt64(4), reader.GetFieldValue<DateTimeOffset>(5));
-            }, "reference"));
+            references.Add(ReadReference(reader, conversation));
         return references;
+    }
+
+    private static StoredChannelMessageReference ReadReference(NpgsqlDataReader reader, ConversationId conversation)
+    {
+        try
+        {
+            if (reader.GetInt16(6) != 1)
+                throw new FormatException("Unsupported reference format version.");
+            var message = NullableText(reader, 3);
+            return new StoredChannelMessageReference(conversation, new InboxId(reader.GetString(0)), new ChannelMessageReference(reader.GetString(1),
+                Defined((MessageDirection)reader.GetInt16(2)), message is null ? null : new MessageId(message)), reader.GetInt64(4), reader.GetFieldValue<DateTimeOffset>(5));
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw new InvalidOperationException("A stored channel reference is invalid or incompatible.", error);
+        }
     }
 
     // ---- Dispatches ----
@@ -413,8 +523,17 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
     {
         ArgumentNullException.ThrowIfNull(scope);
         RequireId(conversation);
-        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        return await LoadDispatchAsync(connection, scope, conversation, message, cancellationToken).ConfigureAwait(false);
+        if (message == default)
+            throw new ArgumentException("A message identifier is required.", nameof(message));
+        await using var command = source.CreateCommand($"""
+            SELECT {DispatchColumns} FROM tf_channel_dispatches
+            WHERE dispatch_key=tf_key_v1({ScopeArgs},@conversation,@message) AND conversation_id=@conversation AND message_id=@message AND {ScopeWhere}
+            """);
+        AddScope(command, scope);
+        AddText(command, "conversation", conversation.Value);
+        AddText(command, "message", message.Value);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadDispatch(reader, scope) : null;
     }
 
     public async Task<ChannelWriteResult<StoredChannelDispatch>> WriteAsync(TicketScope scope, ChannelDispatch dispatch, long? expectedRevision, CancellationToken cancellationToken = default)
@@ -443,13 +562,14 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         AddText(command, "message", dispatch.Message.Value);
         AddText(command, "inbox", dispatch.Inbox.Value);
         AddText(command, "kind", dispatch.Channel.Value);
-        command.Parameters.AddWithValue("state", (short)dispatch.State);
-        command.Parameters.AddWithValue("attempts", dispatch.Attempts);
+        AddInt16(command, "state", (short)dispatch.State);
+        AddInt32(command, "attempts", dispatch.Attempts);
         AddInstant(command, "updated", dispatch.UpdatedAt);
         AddInstant(command, "next", dispatch.NextAttemptAt);
         AddText(command, "external", dispatch.ExternalMessageId);
         AddText(command, "code", dispatch.Code);
-        command.Parameters.AddWithValue("revision", expectedRevision ?? 0);
+        if (expectedRevision is { } expected)
+            AddInt64(command, "revision", expected);
         if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
             return new ChannelWriteApplied<StoredChannelDispatch>(new StoredChannelDispatch(scope, dispatch, revision));
         var current = await LoadDispatchAsync(connection, scope, dispatch.Conversation, dispatch.Message, cancellationToken).ConfigureAwait(false);
@@ -467,25 +587,55 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         AddScope(command, scope);
         AddText(command, "conversation", conversation.Value);
         AddText(command, "message", message.Value);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            return null;
-        return Decode(() =>
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadDispatch(reader, scope) : null;
+    }
+
+    private static StoredChannelDispatch ReadDispatch(NpgsqlDataReader reader, TicketScope scope)
+    {
+        try
         {
             if (reader.GetInt16(11) != 1)
                 throw new FormatException("Unsupported dispatch format version.");
             return new StoredChannelDispatch(scope, new ChannelDispatch(new ConversationId(reader.GetString(0)), new MessageId(reader.GetString(1)), new InboxId(reader.GetString(2)),
                 new ChannelKind(reader.GetString(3)), Defined((ChannelDispatchState)reader.GetInt16(4)), reader.GetInt32(5), reader.GetFieldValue<DateTimeOffset>(6),
                 NullableInstant(reader, 7), NullableText(reader, 8), NullableText(reader, 9)), reader.GetInt64(10));
-        }, "dispatch");
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw new InvalidOperationException("A stored channel dispatch is invalid or incompatible.", error);
+        }
     }
 
     // ---- Helpers ----
 
+    /// <summary>Computes the exclusive upper bound for a COLLATE "C" (UTF-8 code-point order) prefix range scan.</summary>
+    private static string? PrefixUpperBound(string prefix)
+    {
+        var span = prefix.AsSpan();
+        var end = span.Length;
+        while (end > 0)
+        {
+            if (Rune.DecodeLastFromUtf16(span[..end], out var rune, out var consumed) != System.Buffers.OperationStatus.Done)
+                return null;
+            end -= consumed;
+            var next = rune.Value + 1;
+            if (next == 0xD800)
+                next = 0xE000;
+            if (next <= 0x10FFFF)
+            {
+                Span<char> tail = stackalloc char[2];
+                var written = new Rune(next).EncodeToUtf16(tail);
+                return string.Concat(span[..end], tail[..written]);
+            }
+        }
+        return null;
+    }
+
     private static async Task LockAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string[] parts, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand("SELECT pg_advisory_xact_lock(hashtextextended(array_to_string(@parts, chr(31)), 0))", connection, transaction);
-        command.Parameters.Add(new NpgsqlParameter("parts", NpgsqlDbType.Array | NpgsqlDbType.Text) { Value = parts });
+        command.Parameters.Add(new NpgsqlParameter<string[]>("parts", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = parts });
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -507,26 +657,30 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
     }
 
     private static void AddText(NpgsqlCommand command, string name, string? value) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = (object?)value ?? DBNull.Value });
+        command.Parameters.Add(value is null
+            ? new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = DBNull.Value }
+            : new NpgsqlParameter<string>(name, NpgsqlDbType.Text) { TypedValue = value });
+
+    private static void AddInstant(NpgsqlCommand command, string name, DateTimeOffset value) =>
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>(name, NpgsqlDbType.TimestampTz) { TypedValue = value });
 
     private static void AddInstant(NpgsqlCommand command, string name, DateTimeOffset? value) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = (object?)value ?? DBNull.Value });
+        command.Parameters.Add(value is { } instant
+            ? new NpgsqlParameter<DateTimeOffset>(name, NpgsqlDbType.TimestampTz) { TypedValue = instant }
+            : new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = DBNull.Value });
+
+    private static void AddInt16(NpgsqlCommand command, string name, short value) =>
+        command.Parameters.Add(new NpgsqlParameter<short>(name, NpgsqlDbType.Smallint) { TypedValue = value });
+
+    private static void AddInt32(NpgsqlCommand command, string name, int value) =>
+        command.Parameters.Add(new NpgsqlParameter<int>(name, NpgsqlDbType.Integer) { TypedValue = value });
+
+    private static void AddInt64(NpgsqlCommand command, string name, long value) =>
+        command.Parameters.Add(new NpgsqlParameter<long>(name, NpgsqlDbType.Bigint) { TypedValue = value });
 
     private static void RequireId(ConversationId id)
     {
         if (id == default)
             throw new ArgumentException("A conversation identifier is required.", nameof(id));
-    }
-
-    private static T Decode<T>(Func<T> decode, string description)
-    {
-        try
-        {
-            return decode();
-        }
-        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
-        {
-            throw new InvalidOperationException($"A stored channel {description} is invalid or incompatible.", error);
-        }
     }
 }

@@ -1,5 +1,8 @@
+using System.Buffers;
+using System.Buffers.Text;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using TicketFlow.Core;
 
 namespace TicketFlow.Surveys;
@@ -62,9 +65,11 @@ public readonly record struct SurveyLocale : IComparable<SurveyLocale>
     public static bool TryParse(string? value, out SurveyLocale locale)
     {
         var canonical = value is null ? null : Canonicalize(value);
-        locale = canonical is null ? default : new SurveyLocale(canonical);
+        locale = canonical is null ? default : new SurveyLocale(canonical, true);
         return canonical is not null;
     }
+
+    private SurveyLocale(string canonical, bool _) => value = canonical;
 
     public int CompareTo(SurveyLocale other) => string.CompareOrdinal(value, other.value);
 
@@ -74,24 +79,88 @@ public readonly record struct SurveyLocale : IComparable<SurveyLocale>
     {
         if (string.IsNullOrEmpty(value) || value.Length > MaximumLength)
             return null;
-        var parts = value.Split('-');
-        if (parts.Length > 4 || parts[0].Length is < 2 or > 3 || !parts[0].All(char.IsAsciiLetter))
-            return null;
-        var result = new string[parts.Length];
-        result[0] = parts[0].ToLowerInvariant();
-        for (var index = 1; index < parts.Length; index++)
+        var span = value.AsSpan();
+        Span<char> dest = stackalloc char[span.Length];
+        var pos = 0;
+        var partIndex = 0;
+        var changed = false;
+        while (true)
         {
-            var part = parts[index];
-            if (part.Length is < 2 or > 8 || !part.All(char.IsAsciiLetterOrDigit))
+            if (partIndex >= 4)
                 return null;
-            result[index] = part.Length switch
+            var dash = span[pos..].IndexOf('-');
+            var partLen = dash < 0 ? span.Length - pos : dash;
+            var part = span.Slice(pos, partLen);
+            if (partIndex == 0)
             {
-                2 when part.All(char.IsAsciiLetter) => part.ToUpperInvariant(),
-                4 when part.All(char.IsAsciiLetter) => char.ToUpperInvariant(part[0]) + part[1..].ToLowerInvariant(),
-                _ => part.ToLowerInvariant(),
-            };
+                if (partLen is < 2 or > 3)
+                    return null;
+                for (var i = 0; i < partLen; i++)
+                {
+                    var c = part[i];
+                    if (!char.IsAsciiLetter(c))
+                        return null;
+                    var lower = char.ToLowerInvariant(c);
+                    dest[pos + i] = lower;
+                    if (lower != c)
+                        changed = true;
+                }
+            }
+            else
+            {
+                if (partLen is < 2 or > 8)
+                    return null;
+                var allLetters = true;
+                for (var i = 0; i < partLen; i++)
+                {
+                    var c = part[i];
+                    if (!char.IsAsciiLetterOrDigit(c))
+                        return null;
+                    if (!char.IsAsciiLetter(c))
+                        allLetters = false;
+                }
+                if (partLen == 2 && allLetters)
+                {
+                    for (var i = 0; i < partLen; i++)
+                    {
+                        var upper = char.ToUpperInvariant(part[i]);
+                        dest[pos + i] = upper;
+                        if (upper != part[i])
+                            changed = true;
+                    }
+                }
+                else if (partLen == 4 && allLetters)
+                {
+                    var first = char.ToUpperInvariant(part[0]);
+                    dest[pos] = first;
+                    if (first != part[0])
+                        changed = true;
+                    for (var i = 1; i < partLen; i++)
+                    {
+                        var lower = char.ToLowerInvariant(part[i]);
+                        dest[pos + i] = lower;
+                        if (lower != part[i])
+                            changed = true;
+                    }
+                }
+                else
+                {
+                    for (var i = 0; i < partLen; i++)
+                    {
+                        var lower = char.ToLowerInvariant(part[i]);
+                        dest[pos + i] = lower;
+                        if (lower != part[i])
+                            changed = true;
+                    }
+                }
+            }
+            partIndex++;
+            if (dash < 0)
+                break;
+            dest[pos + partLen] = '-';
+            pos += partLen + 1;
         }
-        return string.Join('-', result);
+        return changed ? new string(dest) : value;
     }
 }
 
@@ -111,7 +180,12 @@ public readonly record struct SurveyToken
     /// <exception cref="InvalidOperationException">The token is <c>default</c>.</exception>
     public string Value => value ?? throw new InvalidOperationException("The SurveyToken is uninitialized.");
 
-    public static SurveyToken Create() => new(Prefix + Base64Url(RandomNumberGenerator.GetBytes(32)));
+    public static SurveyToken Create()
+    {
+        Span<byte> random = stackalloc byte[32];
+        RandomNumberGenerator.Fill(random);
+        return FromBytes(random);
+    }
 
     /// <summary>Minimum length of a derivation key in bytes.</summary>
     public const int MinimumKeyLength = 32;
@@ -129,11 +203,24 @@ public readonly record struct SurveyToken
             throw new ArgumentException($"Token keys must contain at least {MinimumKeyLength} bytes.", nameof(key));
         if (!invitation.IsInitialized)
             throw new ArgumentException("An invitation identifier is required.", nameof(invitation));
-        var framed = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new[]
+        var buffer = new ArrayBufferWriter<byte>(256);
+        using (var writer = new Utf8JsonWriter(buffer))
         {
-            "tf-survey-token-v1", scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value, invitation.ToString(),
-        });
-        return new(Prefix + Base64Url(HMACSHA256.HashData(key, framed)));
+            writer.WriteStartArray();
+            writer.WriteStringValue("tf-survey-token-v1"u8);
+            writer.WriteStringValue(scope.TenantId);
+            writer.WriteStringValue(scope.ProjectId);
+            writer.WriteStringValue(scope.EnvironmentId);
+            writer.WriteStringValue(scope.AppId);
+            writer.WriteStringValue(scope.WorkspaceId.Value);
+            Span<char> guid = stackalloc char[36];
+            invitation.Value.TryFormat(guid, out _, "D");
+            writer.WriteStringValue(guid);
+            writer.WriteEndArray();
+        }
+        Span<byte> mac = stackalloc byte[32];
+        HMACSHA256.HashData(key, buffer.WrittenSpan, mac);
+        return FromBytes(mac);
     }
 
     /// <summary>Parses untrusted input; false for anything that is not a well-formed version-1 token.</summary>
@@ -153,7 +240,13 @@ public readonly record struct SurveyToken
 
     public override string ToString() => "SurveyToken { <redacted> }";
 
-    private static string Base64Url(byte[] bytes) => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    private static SurveyToken FromBytes(ReadOnlySpan<byte> bytes)
+    {
+        Span<char> chars = stackalloc char[Length];
+        Prefix.AsSpan().CopyTo(chars);
+        Base64Url.EncodeToChars(bytes, chars[Prefix.Length..]);
+        return new(new string(chars));
+    }
 }
 
 /// <summary>The SHA-256 digest of a <see cref="SurveyToken"/> (32 bytes), the only token form stores persist and look up.</summary>
@@ -171,7 +264,14 @@ public readonly record struct SurveyTokenHash
 
     public byte[] ToBytes() => Convert.FromHexString(Hex);
 
-    public static SurveyTokenHash Of(SurveyToken token) => new(Convert.ToHexStringLower(SHA256.HashData(Encoding.ASCII.GetBytes(token.Value))));
+    public static SurveyTokenHash Of(SurveyToken token)
+    {
+        Span<byte> ascii = stackalloc byte[SurveyToken.Length];
+        Encoding.ASCII.GetBytes(token.Value, ascii);
+        Span<byte> digest = stackalloc byte[32];
+        SHA256.HashData(ascii, digest);
+        return new(Convert.ToHexStringLower(digest));
+    }
 
     public static SurveyTokenHash FromBytes(ReadOnlySpan<byte> bytes)
     {

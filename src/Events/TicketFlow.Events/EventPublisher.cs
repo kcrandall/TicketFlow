@@ -12,7 +12,9 @@ public sealed class EventPublisher(IEventLog log, TimeProvider time) : IEventPub
         ArgumentNullException.ThrowIfNull(drafts);
         if (drafts.Count == 0)
             return new EventAppendResult([], 0);
-        var appended = new List<StoredIntegrationEvent>();
+        if (drafts.Count <= IEventLog.MaximumAppend)
+            return await log.AppendAsync(scope, drafts, time.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+        var appended = new List<StoredIntegrationEvent>(drafts.Count);
         var duplicates = 0;
         foreach (var chunk in drafts.Chunk(IEventLog.MaximumAppend))
         {

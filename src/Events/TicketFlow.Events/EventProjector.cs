@@ -47,32 +47,59 @@ public sealed class EventProjector : IConversationOutboxBatchHandler
         ArgumentNullException.ThrowIfNull(entries);
         if (entries.Count == 0)
             return;
+        if (entries.Count == 1)
+        {
+            await HandleAsync(entries[0], cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        // Batch-fetch distinct conversations per scope once instead of N individual GetAsync calls.
+        var idsByScope = new Dictionary<TicketScope, HashSet<ConversationId>>();
+        for (var i = 0; i < entries.Count; i++)
+        {
+            var entry = entries[i] ?? throw new ArgumentNullException(nameof(entries));
+            if (!idsByScope.TryGetValue(entry.Change.Scope, out var set))
+                idsByScope[entry.Change.Scope] = set = [];
+            set.Add(entry.Change.Conversation);
+        }
+        var snapshotsByScope = new Dictionary<TicketScope, IReadOnlyDictionary<ConversationId, StoredConversation>>(idsByScope.Count);
+        foreach (var (scope, set) in idsByScope)
+        {
+            var ids = new ConversationId[set.Count];
+            set.CopyTo(ids);
+            snapshotsByScope[scope] = await conversations.GetManyAsync(scope, ids, cancellationToken).ConfigureAwait(false);
+        }
         var byScope = new Dictionary<TicketScope, List<IntegrationEventDraft>>();
         var order = new List<TicketScope>();
-        foreach (var entry in entries)
+        for (var i = 0; i < entries.Count; i++)
         {
-            ArgumentNullException.ThrowIfNull(entry);
-            var drafts = await ProjectAsync(entry.Change, cancellationToken).ConfigureAwait(false);
+            var change = entries[i].Change;
+            snapshotsByScope[change.Scope].TryGetValue(change.Conversation, out var stored);
+            var drafts = await ProjectCoreAsync(change, stored?.Conversation, cancellationToken).ConfigureAwait(false);
             if (drafts.Count == 0)
                 continue;
-            if (!byScope.TryGetValue(entry.Change.Scope, out var list))
+            if (!byScope.TryGetValue(change.Scope, out var list))
             {
                 list = [];
-                byScope[entry.Change.Scope] = list;
-                order.Add(entry.Change.Scope);
+                byScope[change.Scope] = list;
+                order.Add(change.Scope);
             }
             list.AddRange(drafts);
         }
-        foreach (var scope in order)
-            await publisher.PublishAsync(scope, byScope[scope], cancellationToken).ConfigureAwait(false);
+        for (var i = 0; i < order.Count; i++)
+            await publisher.PublishAsync(order[i], byScope[order[i]], cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The drafts for one change (idempotent: equal ids for equal sources).</summary>
     public async Task<IReadOnlyList<IntegrationEventDraft>> ProjectAsync(ConversationChange change, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(change);
+        var snapshot = (await conversations.GetAsync(change.Scope, change.Conversation, cancellationToken).ConfigureAwait(false))?.Conversation;
+        return await ProjectCoreAsync(change, snapshot, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<IntegrationEventDraft>> ProjectCoreAsync(ConversationChange change, Conversation? snapshot, CancellationToken cancellationToken)
+    {
         var scope = change.Scope;
-        var snapshot = (await conversations.GetAsync(scope, change.Conversation, cancellationToken).ConfigureAwait(false))?.Conversation;
         var resource = snapshot is null ? new EventResource(change.Conversation, change.Inbox) : EventMapping.Resource(snapshot);
         var drafts = new List<IntegrationEventDraft>();
         switch (change.Kind)
@@ -80,15 +107,15 @@ public sealed class EventProjector : IConversationOutboxBatchHandler
             case ConversationChangeKind.Started:
                 if (snapshot is null)
                     break;   // deleted before projection: only the deleted event remains
-                var history = await ReadAsync(scope, change.Conversation, change.Events, cancellationToken).ConfigureAwait(false);
-                var initial = await InitialAsync(scope, snapshot, change.Events.Count == 0 ? 0 : change.Events.Max(summary => summary.Sequence), cancellationToken).ConfigureAwait(false);
+                var (history, initial) = await StartedAsync(scope, snapshot, change.Events, cancellationToken).ConfigureAwait(false);
                 drafts.Add(Draft(change.Id, change.OccurredAt, null, initial, resource));
-                foreach (var timelineEvent in history)
-                    Map(timelineEvent, change.Inbox, resource, drafts);
+                for (var i = 0; i < history.Count; i++)
+                    Map(history[i], change.Inbox, resource, drafts);
                 break;
             case ConversationChangeKind.EventsAppended:
-                foreach (var timelineEvent in await ReadAsync(scope, change.Conversation, change.Events, cancellationToken).ConfigureAwait(false))
-                    Map(timelineEvent, change.Inbox, resource, drafts);
+                var appended = await ReadAsync(scope, change.Conversation, change.Events, cancellationToken).ConfigureAwait(false);
+                for (var i = 0; i < appended.Count; i++)
+                    Map(appended[i], change.Inbox, resource, drafts);
                 break;
             case ConversationChangeKind.DeliveryUpdated:
                 drafts.Add(Draft(change.Id, change.OccurredAt, null,
@@ -178,63 +205,122 @@ public sealed class EventProjector : IConversationOutboxBatchHandler
     {
         if (summaries.Count == 0)
             return [];
-        var wanted = summaries.Select(summary => summary.Sequence).ToHashSet();
-        var first = wanted.Min();
-        var count = (int)Math.Min(wanted.Max() - first + 1, IConversationStore.MaximumTimelineRead);
+        var wanted = new HashSet<long>(summaries.Count);
+        long first = long.MaxValue, last = 0;
+        for (var i = 0; i < summaries.Count; i++)
+        {
+            var seq = summaries[i].Sequence;
+            wanted.Add(seq);
+            if (seq < first)
+                first = seq;
+            if (seq > last)
+                last = seq;
+        }
+        var count = (int)Math.Min(last - first + 1, IConversationStore.MaximumTimelineRead);
         var events = await conversations.ReadTimelineAsync(scope, id, first - 1, count, includeNotes: true, cancellationToken).ConfigureAwait(false);
-        return [.. events.Where(item => wanted.Contains(item.Sequence)).OrderBy(item => item.Sequence)];
+        var matched = new List<TimelineEvent>(wanted.Count);
+        for (var i = 0; i < events.Count; i++)
+            if (wanted.Contains(events[i].Sequence))
+                matched.Add(events[i]);
+        return matched;
     }
 
     /// <summary>
-    /// The conversation as created: the snapshot with later assignment, team, priority, status and label changes undone (first previous
-    /// values; labels reversed). Timelines longer than <see cref="EventsOptions.MaximumReplayEvents"/> use the snapshot as is.
+    /// Reads the start change's events and reconstructs the conversation as created in one timeline pass, retaining only
+    /// <see cref="LabelsChanged"/> events for the reverse pass.
     /// </summary>
-    private async Task<ConversationCreatedData> InitialAsync(TicketScope scope, Conversation conversation, long createdHead, CancellationToken cancellationToken)
+    private async Task<(IReadOnlyList<TimelineEvent> History, ConversationCreatedData Initial)> StartedAsync(TicketScope scope, Conversation conversation,
+        IReadOnlyList<ConversationEventSummary> summaries, CancellationToken cancellationToken)
     {
+        HashSet<long>? wanted = null;
+        long createdHead = 0;
+        long firstWanted = long.MaxValue;
+        for (var i = 0; i < summaries.Count; i++)
+        {
+            var seq = summaries[i].Sequence;
+            (wanted ??= new(summaries.Count)).Add(seq);
+            if (seq > createdHead)
+                createdHead = seq;
+            if (seq < firstWanted)
+                firstWanted = seq;
+        }
+
         var assignee = conversation.Assignee;
         var team = conversation.Team;
         var priority = conversation.Priority;
         var status = conversation.Status.Kind;
         var labels = new HashSet<LabelId>(conversation.Labels);
-        if (conversation.LastSequence > createdHead && conversation.LastSequence - createdHead <= options.MaximumReplayEvents)
+        var needReplay = conversation.LastSequence > createdHead && conversation.LastSequence - createdHead <= options.MaximumReplayEvents;
+        var history = new List<TimelineEvent>(summaries.Count);
+
+        if (!needReplay)
         {
-            var later = new List<TimelineEvent>();
-            var after = createdHead;
+            if (wanted is not null)
+            {
+                var count = (int)Math.Min(createdHead - firstWanted + 1, IConversationStore.MaximumTimelineRead);
+                var events = await conversations.ReadTimelineAsync(scope, conversation.Id, firstWanted - 1, count, includeNotes: true, cancellationToken).ConfigureAwait(false);
+                for (var i = 0; i < events.Count; i++)
+                    if (wanted.Contains(events[i].Sequence))
+                        history.Add(events[i]);
+            }
+        }
+        else
+        {
+            bool assigneeSeen = false, teamSeen = false, prioritySeen = false, statusSeen = false;
+            List<LabelsChanged>? labelChanges = null;
+            var after = wanted is not null ? firstWanted - 1 : createdHead;
             while (after < conversation.LastSequence)
             {
                 var page = await conversations.ReadTimelineAsync(scope, conversation.Id, after, IConversationStore.MaximumTimelineRead, includeNotes: true, cancellationToken)
                     .ConfigureAwait(false);
                 if (page.Count == 0 || page[^1].Sequence <= after)
                     break;
-                later.AddRange(page.Where(item => item.Sequence > after && item.Sequence <= conversation.LastSequence));
+                for (var i = 0; i < page.Count; i++)
+                {
+                    var timelineEvent = page[i];
+                    var seq = timelineEvent.Sequence;
+                    if (seq <= after || seq > conversation.LastSequence)
+                        continue;
+                    if (wanted is not null && seq <= createdHead && wanted.Contains(seq))
+                        history.Add(timelineEvent);
+                    if (seq > createdHead)
+                    {
+                        switch (timelineEvent.Event.Value)
+                        {
+                            case AssignmentChanged change when !assigneeSeen:
+                                (assignee, assigneeSeen) = (change.Previous, true);
+                                break;
+                            case TeamChanged change when !teamSeen:
+                                (team, teamSeen) = (change.Previous, true);
+                                break;
+                            case PriorityChanged change when !prioritySeen:
+                                (priority, prioritySeen) = (change.Previous, true);
+                                break;
+                            case StatusChanged change when !statusSeen:
+                                (status, statusSeen) = (change.Previous.Kind, true);
+                                break;
+                            case LabelsChanged change:
+                                (labelChanges ??= []).Add(change);
+                                break;
+                        }
+                    }
+                }
                 after = page[^1].Sequence;
             }
-            bool assigneeSeen = false, teamSeen = false, prioritySeen = false, statusSeen = false;
-            foreach (var timelineEvent in later)
-                switch (timelineEvent.Event.Value)
+            if (labelChanges is not null)
+            {
+                for (var index = labelChanges.Count - 1; index >= 0; index--)
                 {
-                    case AssignmentChanged change when !assigneeSeen:
-                        (assignee, assigneeSeen) = (change.Previous, true);
-                        break;
-                    case TeamChanged change when !teamSeen:
-                        (team, teamSeen) = (change.Previous, true);
-                        break;
-                    case PriorityChanged change when !prioritySeen:
-                        (priority, prioritySeen) = (change.Previous, true);
-                        break;
-                    case StatusChanged change when !statusSeen:
-                        (status, statusSeen) = (change.Previous.Kind, true);
-                        break;
-                }
-            for (var index = later.Count - 1; index >= 0; index--)
-                if (later[index].Event.Value is LabelsChanged change)
-                {
+                    var change = labelChanges[index];
                     labels.ExceptWith(change.Added);
                     labels.UnionWith(change.Removed);
                 }
+            }
         }
+
         var channel = conversation.ChannelThread?.Channel is { } kind && EventText.IsToken(kind, 64) ? kind : null;
-        return new ConversationCreatedData(conversation.Id, conversation.Inbox, conversation.Contact, assignee, team, EventMapping.Status(status), EventMapping.Priority(priority),
+        var initial = new ConversationCreatedData(conversation.Id, conversation.Inbox, conversation.Contact, assignee, team, EventMapping.Status(status), EventMapping.Priority(priority),
             labels.OrderBy(label => label.Value, StringComparer.Ordinal), channel);
+        return (history, initial);
     }
 }

@@ -106,12 +106,16 @@ public sealed class CannedResponseService(ICannedResponseStore responses, IAcces
             return AutomationRefused.Forbidden;
         if (await responses.GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is not { } response)
             return AutomationNotFound.Instance;
-        var (context, failure) = await contexts.BuildAsync(actor, conversation, AutomationEvent.MessageSent(), null, cancellationToken).ConfigureAwait(false);
+        var needs = AutomationContextNeedsHelper.ForCannedResponse(response.Response, needsContactLocale: locale is null);
+        var (context, failure) = await contexts.BuildInternalAsync(actor, conversation, AutomationEvent.MessageSent(), null, needs, cache: null, cancellationToken)
+            .ConfigureAwait(false);
         if (context is null)
             return failure == AutomationContextFailure.Forbidden ? AutomationRefused.Forbidden : AutomationNotFound.Instance;
-        var agentName = actor.Value is UserPrincipal user && agents is not null ? await agents.GetDisplayNameAsync(scope, user.UserId, cancellationToken).ConfigureAwait(false) : null;
+        var agentName = (needs & AutomationContextNeeds.AgentName) != 0 && actor.Value is UserPrincipal user && agents is not null
+            ? await agents.GetDisplayNameAsync(scope, user.UserId, cancellationToken).ConfigureAwait(false)
+            : null;
         var variant = response.Response.Select(locale ?? context.Contact?.Locale);
-        var body = variant.Template.Render(AutomationTemplateValues.From(context, agentName), response.Response.Escaping);
+        var body = variant.Template.Render(AutomationTemplateValues.Resolver(context, agentName), response.Response.Escaping);
         if (body is null)
             return AutomationRefused.Invalid("The rendered response exceeds the output limit.");
         return new AutomationValue<RenderedCannedResponse>(new RenderedCannedResponse(id, variant.Locale, response.Response.ContentType, body));

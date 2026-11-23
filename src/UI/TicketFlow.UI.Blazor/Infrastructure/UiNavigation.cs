@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using TicketFlow.Access;
 using TicketFlow.Automation;
 using TicketFlow.Channels;
@@ -18,7 +19,13 @@ public sealed record UiSection(string Key, string Title, string Path, string Ico
     /// <summary>The host registered the feature (optional features without services are hidden entirely).</summary>
     public bool IsAvailable(TicketFlowUISession session) => Service is null || session.Services.GetService(Service) is not null;
 
-    public bool IsPermitted(TicketFlowUISession session) => Permissions.Count == 0 || Permissions.Any(session.Can);
+    public bool IsPermitted(TicketFlowUISession session)
+    {
+        for (var i = 0; i < Permissions.Count; i++)
+            if (session.Can(Permissions[i]))
+                return true;
+        return Permissions.Count == 0;
+    }
 
     public bool IsVisible(TicketFlowUISession session) => IsAvailable(session) && IsPermitted(session);
 }
@@ -52,30 +59,37 @@ public static class UiNavigation
         new("settings", "Settings", "settings", "settings", Administration, null, []),
     ];
 
-    public static UiSection Section(string key) => Sections.First(section => section.Key == key);
+    private static readonly FrozenDictionary<string, UiSection> ByKey = Sections.ToFrozenDictionary(section => section.Key, StringComparer.Ordinal);
+
+    public static UiSection Section(string key) => ByKey[key];
 
     /// <summary>Whether the session may open <paramref name="route"/> (the same rule for GET pages and POST actions).</summary>
     public static bool Allows(TicketFlowUISession session, UiRoute route) =>
         session.State == UiSessionState.Ready && Section(route.Section).IsVisible(session);
 
     /// <summary>The section an action belongs to; actions run only on a page of that section. Null for unknown actions.</summary>
-    public static string? ActionSection(string action) => action.Split('.')[0] switch
+    public static string? ActionSection(string action)
     {
-        "conversation" => "conversations",
-        "contact" => "contacts",
-        "inbox" => "inboxes",
-        "team" => "teams",
-        "calendar" => "calendars",
-        "channel" => "channels",
-        "routing" => "routing",
-        "sla" => "sla",
-        "automation" => "automation",
-        "helpcenter" => "help-center",
-        "survey" => "surveys",
-        "access" => "access",
-        "settings" => "settings",
-        _ => null,
-    };
+        var dot = action.IndexOf('.');
+        var prefix = dot < 0 ? action.AsSpan() : action.AsSpan(0, dot);
+        return prefix switch
+        {
+            "conversation" => "conversations",
+            "contact" => "contacts",
+            "inbox" => "inboxes",
+            "team" => "teams",
+            "calendar" => "calendars",
+            "channel" => "channels",
+            "routing" => "routing",
+            "sla" => "sla",
+            "automation" => "automation",
+            "helpcenter" => "help-center",
+            "survey" => "surveys",
+            "access" => "access",
+            "settings" => "settings",
+            _ => null,
+        };
+    }
 
     public static IEnumerable<UiSection> Visible(TicketFlowUISession session) =>
         Sections.Where(section => section.IsAvailable(session) && (section.IsPermitted(session) || session.Options.ShowDisabledSections));

@@ -82,10 +82,14 @@ public static class ConversationAccess
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(conversation);
-        return new(scope, conversation.Id.Value, conversation.Team, conversation.Inbox, conversation.Assignee, conversation.Labels,
-            conversation.Attributes
-                .Where(pair => pair.Value.ConditionValue is not null)
-                .Select(pair => new KeyValuePair<string, string>(pair.Key, pair.Value.ConditionValue!)));
+        List<KeyValuePair<string, string>>? attributes = null;
+        if (conversation.Attributes.Count > 0)
+        {
+            foreach (var (key, value) in conversation.Attributes)
+                if (value.ConditionValue is { } conditionValue)
+                    (attributes ??= new List<KeyValuePair<string, string>>(conversation.Attributes.Count)).Add(new(key, conditionValue));
+        }
+        return new(scope, conversation.Id.Value, conversation.Team, conversation.Inbox, conversation.Assignee, conversation.Labels, attributes);
     }
 
     public static AccessResource Resource(StoredConversation stored)

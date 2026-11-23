@@ -30,15 +30,22 @@ public sealed class SelfTools(TicketFlowToolContext context)
         {
             var catalog = context.Services.GetService<IPermissionCatalog>();
             var names = (catalog?.Definitions ?? []).Select(definition => definition.Permission.Value).ToList();
-            var held = await TicketFlowPermissionProbe.ProbeAsync(context.Services, principal, names, includeSensitive, cancellationToken);
-            var workspaceLevel = await TicketFlowPermissionProbe.WorkspaceAsync(context.Services, principal, names, includeSensitive, cancellationToken);
-            var grants = await OwnGrantsAsync(principal, cancellationToken);
+            var heldTask = TicketFlowPermissionProbe.ProbeAsync(context.Services, principal, names, includeSensitive, cancellationToken);
+            var grantsTask = OwnGrantsAsync(principal, cancellationToken);
+            await Task.WhenAll(heldTask, grantsTask).ConfigureAwait(false);
+            var held = await heldTask.ConfigureAwait(false);
+            var grants = await grantsTask.ConfigureAwait(false);
+            var heldNames = held.Where(pair => pair.Value == true).Select(pair => pair.Key).ToList();
+            heldNames.Sort(StringComparer.Ordinal);
+            var workspaceLevel = heldNames.Count == 0
+                ? (IReadOnlyDictionary<string, bool?>)new Dictionary<string, bool?>(StringComparer.Ordinal)
+                : await TicketFlowPermissionProbe.WorkspaceAsync(context.Services, principal, heldNames, includeSensitive, cancellationToken).ConfigureAwait(false);
             return new WhoAmIOutput(
                 Principal(principal),
                 Scope(principal.Scope),
                 grants,
                 [.. grants.Select(grant => grant.Role).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)],
-                [.. held.Where(pair => pair.Value == true).Select(pair => pair.Key).Order(StringComparer.Ordinal)],
+                heldNames,
                 [.. workspaceLevel.Where(pair => pair.Value == true).Select(pair => pair.Key).Order(StringComparer.Ordinal)],
                 includeSensitive,
                 [.. held.Where(pair => pair.Value is null).Select(pair => pair.Key).Order(StringComparer.Ordinal)],
@@ -135,17 +142,29 @@ public sealed class SelfTools(TicketFlowToolContext context)
                 return TicketFlowToolError.NotFound(described);
             var evaluator = context.Service<IAccessEvaluator>();
             var catalog = context.Services.GetService<IPermissionCatalog>();
-            var results = new List<PermissionDecisionOutput>();
-            var verdicts = new List<bool>();
-            foreach (var value in permissions)
+            var results = new List<PermissionDecisionOutput>(permissions.Count);
+            var verdicts = new List<bool>(permissions.Count);
+            IAccessDecisionContext? batch = null;
+            Permission[]? parsedAll = null;
+            if (permissions.Count > 1)
             {
-                var parsed = new Permission(value);
+                parsedAll = new Permission[permissions.Count];
+                for (var i = 0; i < permissions.Count; i++)
+                    parsedAll[i] = new Permission(permissions[i]);
+                batch = await evaluator.LoadDecisionContextAsync(principal, principal.Scope, parsedAll, cancellationToken).ConfigureAwait(false);
+            }
+            for (var i = 0; i < permissions.Count; i++)
+            {
+                var value = permissions[i];
+                var parsed = parsedAll is not null ? parsedAll[i] : new Permission(value);
                 var definition = catalog?.Find(parsed);
-                var decision = await evaluator.AuthorizeAsync(new AccessRequest(principal, parsed, resource), cancellationToken);
+                var decision = batch is not null
+                    ? await batch.DecideAsync(parsed, resource, cancellationToken).ConfigureAwait(false)
+                    : await evaluator.AuthorizeAsync(new AccessRequest(principal, parsed, resource), cancellationToken).ConfigureAwait(false);
                 verdicts.Add(decision.IsPermitted);
                 var known = definition is not null;
                 var sensitive = definition?.IsSensitive ?? false;
-                var roles = TicketFlowToolCatalog.RolesGranting([value]);
+                var roles = TicketFlowToolCatalog.RolesGranting(value);
                 results.Add(decision switch
                 {
                     AccessAllowed allowed => new PermissionDecisionOutput(value, known, sensitive, "allowed", null,
@@ -253,7 +272,7 @@ public sealed class SelfTools(TicketFlowToolContext context)
     {
         var definition = TicketFlowToolCatalog.FindPermission(permission);
         return new PermissionInfoOutput(permission, definition?.IsSensitive ?? false, definition?.Description, decisions?.GetValueOrDefault(permission),
-            TicketFlowToolCatalog.RolesGranting([permission]));
+            TicketFlowToolCatalog.RolesGranting(permission));
     }
 
     internal static PrincipalOutput Principal(PrincipalRef principal) => principal switch

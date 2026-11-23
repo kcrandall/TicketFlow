@@ -63,11 +63,19 @@
 
     protected override async Task OnInitializedAsync()
     {
-        await LoadWorkspaceAsync();
-        (calendars, slaNames, routingNames) = await InboxFields.LoadOptionsAsync(Session);
+        var inboxesTask = LoadInboxesAsync();
+        var optionsTask = InboxFields.LoadOptionsAsync(Session);
+        await Task.WhenAll(inboxesTask, optionsTask);
+        (calendars, slaNames, routingNames) = await optionsTask;
+        if (Inboxes.Count == 0)
+            return;
         // Open counts come from reporting's store-side backlog (hidden without reporting), never from loading rows.
-        foreach (var inbox in Inboxes)
-            if (await OpenBacklogAsync(new TicketFlow.Reporting.ReportFilter(inbox: inbox.Inbox.Id)) is { } count)
-                open[inbox.Inbox.Id.Value] = count;
+        var backlogTasks = new Task<long?>[Inboxes.Count];
+        for (var i = 0; i < Inboxes.Count; i++)
+            backlogTasks[i] = OpenBacklogAsync(new TicketFlow.Reporting.ReportFilter(inbox: Inboxes[i].Inbox.Id));
+        var counts = await Task.WhenAll(backlogTasks);
+        for (var i = 0; i < Inboxes.Count; i++)
+            if (counts[i] is { } count)
+                open[Inboxes[i].Inbox.Id.Value] = count;
     }
 }

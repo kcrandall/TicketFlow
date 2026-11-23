@@ -1,6 +1,9 @@
+using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -14,6 +17,9 @@ namespace TicketFlow.Mcp;
 public sealed class TicketFlowMcpRegistry
 {
     private readonly IServiceProviderIsService? isService;
+    private readonly ConcurrentDictionary<string, bool> toolEnabled = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<TicketFlowToolsets, bool> toolsetServices = new();
+    private string? cachedGuide;
 
     internal TicketFlowMcpRegistry(TicketFlowToolsets registered, IServiceProviderIsService? isService)
     {
@@ -25,15 +31,25 @@ public sealed class TicketFlowMcpRegistry
     public TicketFlowToolsets Registered { get; }
 
     /// <summary>Whether every feature service <paramref name="tool"/> calls is registered.</summary>
-    public bool ServicesAvailable(TicketFlowToolDescriptor tool) => tool.Services.All(IsRegistered);
+    public bool ServicesAvailable(TicketFlowToolDescriptor tool)
+    {
+        for (var i = 0; i < tool.Services.Count; i++)
+            if (!IsRegistered(tool.Services[i]))
+                return false;
+        return true;
+    }
 
     /// <summary>Whether the primary feature service of <paramref name="toolset"/> is registered.</summary>
-    public bool ServicesAvailable(TicketFlowToolsets toolset) => toolset == TicketFlowToolsets.None || IsRegistered(TicketFlowToolsetCatalog.Get(toolset).PrimaryService);
+    public bool ServicesAvailable(TicketFlowToolsets toolset) => toolset == TicketFlowToolsets.None
+        || toolsetServices.GetOrAdd(toolset, static (set, self) => self.IsRegistered(TicketFlowToolsetCatalog.Get(set).PrimaryService), this);
 
     public bool IsRegistered(TicketFlowToolsets toolset) => toolset == TicketFlowToolsets.None || (Registered & toolset) == toolset;
 
     /// <summary>Registered on this server and its services available: the tool can be listed and called.</summary>
-    public bool IsEnabled(TicketFlowToolDescriptor tool) => IsRegistered(tool.Toolset) && ServicesAvailable(tool);
+    public bool IsEnabled(TicketFlowToolDescriptor tool) =>
+        toolEnabled.GetOrAdd(tool.Name, static (_, state) => state.Self.IsRegistered(state.Tool.Toolset) && state.Self.ServicesAvailable(state.Tool), (Self: this, Tool: tool));
+
+    internal string GetOrRenderGuide(Func<TicketFlowMcpRegistry, string> render) => cachedGuide ??= render(this);
 
     private bool IsRegistered(Type service) => isService?.IsService(service) ?? false;
 }
@@ -104,10 +120,13 @@ public static class TicketFlowMcpServerBuilderExtensions
             ["ticketflow/anyOf"] = tool.AnyOf,
             ["ticketflow/grantedByBuiltInRoles"] = new JsonArray([.. tool.GrantedByBuiltInRoles.Select(role => (JsonNode)JsonValue.Create(role))]),
         };
+        var factory = ActivatorUtilities.CreateFactory(tool.DeclaringType, [typeof(TicketFlowToolContext)]);
+        var options = root.GetService<IOptions<TicketFlowMcpOptions>>()?.Value ?? new TicketFlowMcpOptions();
+        var logger = root.GetService<ILoggerFactory>()?.CreateLogger("TicketFlow.Mcp") ?? NullLogger.Instance;
         return McpServerTool.Create(tool.Method, request =>
         {
             var services = request.Services ?? root;
-            return ActivatorUtilities.CreateInstance(services, tool.DeclaringType, new TicketFlowToolContext(services, request.User, tool));
+            return factory(services, [new TicketFlowToolContext(services, request.User, tool, options, logger)]);
         }, new McpServerToolCreateOptions { Services = root, Meta = meta, OutputSchema = TicketFlowToolJson.OutputSchema(tool.OutputType) });
     }
 

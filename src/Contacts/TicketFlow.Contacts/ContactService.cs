@@ -72,7 +72,7 @@ public sealed partial class ContactService : IContactService
             return ContactRefused.Forbidden;
 
         var batch = new ContactWriteBatch(puts: [new ContactPut(contact, null)], changes: [Change(ContactChangeKind.Created, contact.Id, now)]);
-        return await WriteAsync(actor, scope, batch, async applied => await ViewAsync(actor, applied.Contacts[0], cancellationToken).ConfigureAwait(false), cancellationToken)
+        return await WriteAsync(actor, scope, batch, applied => ViewAsync(actor, applied.Contacts[0], definitionMap, cancellationToken), cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -97,19 +97,29 @@ public sealed partial class ContactService : IContactService
     {
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(ids);
-        var distinct = ids.Distinct().ToList();
-        if (distinct.Count > IContactService.MaximumBatch)
-            throw new ArgumentException($"At most {IContactService.MaximumBatch} contacts per batch.", nameof(ids));
-        foreach (var id in distinct)
+        var distinct = new List<ContactId>();
+        var seen = new HashSet<ContactId>();
+        foreach (var id in ids)
+        {
+            if (!seen.Add(id))
+                continue;
+            if (distinct.Count == IContactService.MaximumBatch)
+                throw new ArgumentException($"At most {IContactService.MaximumBatch} contacts per batch.", nameof(ids));
             RequireId(id);
-        var views = new List<ContactView>();
+            distinct.Add(id);
+        }
         if (distinct.Count == 0)
-            return views;
-        var decisions = await evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Read], cancellationToken).ConfigureAwait(false);
+            return [];
+        var decisionsTask = evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Read], cancellationToken);
+        var loadedTask = store.GetManyAsync(scope, distinct, cancellationToken);
+        await Task.WhenAll(decisionsTask, loadedTask).ConfigureAwait(false);
+        var decisions = decisionsTask.Result;
+        var loaded = loadedTask.Result;
+        var views = new List<ContactView>(loaded.Count);
         ContactMasking? masking = null;
         foreach (var id in distinct)
         {
-            if (await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is not { } stored || stored.Contact.MergedInto is not null)
+            if (!loaded.TryGetValue(id, out var stored) || stored.Contact.MergedInto is not null)
                 continue;
             var decision = await decisions.DecideAsync(ContactPermissions.Read, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false);
             if (!decision.IsPermitted)
@@ -134,17 +144,26 @@ public sealed partial class ContactService : IContactService
             return ContactRefused.NotFound;
         if (stored.Revision != expectedRevision)
             return new ContactRefused(ContactRefusal.Conflict, [], stored.Revision);
-        if (!(await AuthorizeAsync(actor, ContactPermissions.Update, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false)).IsPermitted)
+
+        HashSet<FieldPath>? identityFields = null;
+        foreach (var edit in editList)
+        {
+            if (IdentityField(edit) is { } field)
+                (identityFields ??= []).Add(field);
+        }
+        var decisions = await evaluator.LoadDecisionContextAsync(actor, scope,
+            identityFields is not null ? [ContactPermissions.Update, ContactPermissions.Read] : [ContactPermissions.Update], cancellationToken).ConfigureAwait(false);
+        var storedResource = ContactAccess.Resource(stored);
+        if (!(await decisions.DecideAsync(ContactPermissions.Update, storedResource, cancellationToken).ConfigureAwait(false)).IsPermitted)
             return ContactRefused.Forbidden;
         if (stored.Contact.MergedInto is { } mergedInto)
             return new ContactRefused(ContactRefusal.Merged, [], stored.Revision, mergedInto);
 
         // Identity edits on a field the actor cannot see unmasked are refused up front with one uniform answer, so neither the
         // presence of an address on this contact nor its verified ownership elsewhere can be probed through updates.
-        var identityFields = editList.Select(IdentityField).OfType<FieldPath>().ToHashSet();
-        if (identityFields.Count > 0)
+        if (identityFields is not null)
         {
-            var read = await AuthorizeAsync(actor, ContactPermissions.Read, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false);
+            var read = await decisions.DecideAsync(ContactPermissions.Read, storedResource, cancellationToken).ConfigureAwait(false);
             if (!Unmasked(read, identityFields))
                 return ContactRefused.Forbidden;
         }
@@ -154,11 +173,11 @@ public sealed partial class ContactService : IContactService
         var (updated, refusal) = ApplyEdits(stored.Contact, editList, definitionMap, now);
         if (updated is null)
             return refusal!;
-        if (!(await AuthorizeAsync(actor, ContactPermissions.Update, ContactAccess.Resource(scope, updated), cancellationToken).ConfigureAwait(false)).IsPermitted)
+        if (!(await decisions.DecideAsync(ContactPermissions.Update, ContactAccess.Resource(scope, updated), cancellationToken).ConfigureAwait(false)).IsPermitted)
             return ContactRefused.Forbidden;
 
         var batch = new ContactWriteBatch(puts: [new ContactPut(updated, expectedRevision)], changes: [Change(ContactChangeKind.Updated, id, now)]);
-        return await WriteAsync(actor, scope, batch, async result => await ViewAsync(actor, result.Contacts[0], cancellationToken).ConfigureAwait(false), cancellationToken)
+        return await WriteAsync(actor, scope, batch, result => ViewAsync(actor, result.Contacts[0], definitionMap, cancellationToken), cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -174,24 +193,36 @@ public sealed partial class ContactService : IContactService
             return ContactRefused.NotFound;
         if (stored.Revision != expectedRevision)
             return new ContactRefused(ContactRefusal.Conflict, [], stored.Revision);
-        if (!(await AuthorizeAsync(actor, ContactPermissions.Delete, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false)).IsPermitted)
+        var decisions = await evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Delete], cancellationToken).ConfigureAwait(false);
+        if (!(await decisions.DecideAsync(ContactPermissions.Delete, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false)).IsPermitted)
             return ContactRefused.Forbidden;
 
         // Every tombstone the delete cascades to is authorized too; the store applies the delete only for exactly this set.
         var cascade = new List<ContactId>();
+        var seen = new HashSet<ContactId> { id };
         var pending = new Queue<ContactId>([id]);
         while (pending.TryDequeue(out var parent))
         {
-            foreach (var child in await store.ListMergedIntoAsync(scope, parent, ContactDelete.MaximumCascade, cancellationToken).ConfigureAwait(false))
+            var children = await store.ListMergedIntoAsync(scope, parent, ContactDelete.MaximumCascade, cancellationToken).ConfigureAwait(false);
+            if (children.Count == 0)
+                continue;
+            var batchIds = new List<ContactId>(children.Count);
+            foreach (var child in children)
             {
-                if (child == id || cascade.Contains(child))
+                if (!seen.Add(child))
                     continue;
-                if (cascade.Count == ContactDelete.MaximumCascade)
+                if (cascade.Count + batchIds.Count == ContactDelete.MaximumCascade)
                     return new ContactRefused(ContactRefusal.Rejected, ["The contact's merge history is too large to delete in one operation."]);
-                var tombstone = await store.GetAsync(scope, child, cancellationToken).ConfigureAwait(false);
-                if (tombstone is null)
+                batchIds.Add(child);
+            }
+            if (batchIds.Count == 0)
+                continue;
+            var tombstones = await store.GetManyAsync(scope, batchIds, cancellationToken).ConfigureAwait(false);
+            foreach (var child in batchIds)
+            {
+                if (!tombstones.TryGetValue(child, out var tombstone))
                     continue;
-                if (!(await AuthorizeAsync(actor, ContactPermissions.Delete, ContactAccess.Resource(tombstone), cancellationToken).ConfigureAwait(false)).IsPermitted)
+                if (!(await decisions.DecideAsync(ContactPermissions.Delete, ContactAccess.Resource(tombstone), cancellationToken).ConfigureAwait(false)).IsPermitted)
                     return ContactRefused.Forbidden;
                 cascade.Add(child);
                 pending.Enqueue(child);
@@ -281,16 +312,31 @@ public sealed partial class ContactService : IContactService
     private Task<ContactMasking> MaskingAsync(TicketScope scope, Permission permission, CancellationToken cancellationToken) =>
         ContactMasking.LoadAsync(scope, permission, definitions, policies, cancellationToken);
 
-    private async Task<IReadOnlyDictionary<string, ContactAttributeDefinition>> DefinitionsAsync(TicketScope scope, CancellationToken cancellationToken) =>
-        (await definitions.ListAsync(scope, cancellationToken).ConfigureAwait(false))
-            .ToDictionary(stored => stored.Definition.Key, stored => stored.Definition, StringComparer.Ordinal);
+    private async Task<IReadOnlyDictionary<string, ContactAttributeDefinition>> DefinitionsAsync(TicketScope scope, CancellationToken cancellationToken)
+    {
+        var stored = await definitions.ListAsync(scope, cancellationToken).ConfigureAwait(false);
+        var map = new Dictionary<string, ContactAttributeDefinition>(stored.Count, StringComparer.Ordinal);
+        foreach (var item in stored)
+            map[item.Definition.Key] = item.Definition;
+        return map;
+    }
 
     /// <summary>A view masked per the actor's <c>contact:read</c> decision (everything masked when read is denied).</summary>
     private async Task<ContactView> ViewAsync(PrincipalRef actor, StoredContact stored, CancellationToken cancellationToken)
     {
-        var decision = await AuthorizeAsync(actor, ContactPermissions.Read, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false);
-        var masking = await MaskingAsync(stored.Scope, ContactPermissions.Read, cancellationToken).ConfigureAwait(false);
-        return masking.Project(stored, decision);
+        var decisionTask = AuthorizeAsync(actor, ContactPermissions.Read, ContactAccess.Resource(stored), cancellationToken);
+        var maskingTask = MaskingAsync(stored.Scope, ContactPermissions.Read, cancellationToken);
+        await Task.WhenAll(decisionTask, maskingTask).ConfigureAwait(false);
+        return maskingTask.Result.Project(stored, decisionTask.Result);
+    }
+
+    private async Task<ContactView> ViewAsync(PrincipalRef actor, StoredContact stored,
+        IReadOnlyDictionary<string, ContactAttributeDefinition> definitionMap, CancellationToken cancellationToken)
+    {
+        var decisionTask = AuthorizeAsync(actor, ContactPermissions.Read, ContactAccess.Resource(stored), cancellationToken);
+        var maskingTask = ContactMasking.LoadAsync(stored.Scope, ContactPermissions.Read, definitionMap, policies, cancellationToken);
+        await Task.WhenAll(decisionTask, maskingTask).ConfigureAwait(false);
+        return maskingTask.Result.Project(stored, decisionTask.Result);
     }
 
     private ContactDecisionCache Decisions(PrincipalRef actor, Permission permission) =>
@@ -302,12 +348,17 @@ public sealed partial class ContactService : IContactService
     private static ContactRefused? ValidateAttributes(IReadOnlyDictionary<string, ContactAttributeValue> attributes, IReadOnlyDictionary<string, ContactAttributeDefinition> definitionMap)
     {
         foreach (var (key, value) in attributes)
-        {
-            if (!definitionMap.TryGetValue(key, out var definition))
-                return ContactRefused.Invalid($"Attribute '{SafeKey(key)}' is not defined.");
-            if (value.Value is null || !definition.Accepts(value))
-                return ContactRefused.Invalid($"Attribute '{definition.Key}' requires a {definition.Type} value.");
-        }
+            if (ValidateAttribute(key, value, definitionMap) is { } invalid)
+                return invalid;
+        return null;
+    }
+
+    private static ContactRefused? ValidateAttribute(string key, ContactAttributeValue value, IReadOnlyDictionary<string, ContactAttributeDefinition> definitionMap)
+    {
+        if (!definitionMap.TryGetValue(key, out var definition))
+            return ContactRefused.Invalid($"Attribute '{SafeKey(key)}' is not defined.");
+        if (value.Value is null || !definition.Accepts(value))
+            return ContactRefused.Invalid($"Attribute '{definition.Key}' requires a {definition.Type} value.");
         return null;
     }
 
@@ -316,9 +367,9 @@ public sealed partial class ContactService : IContactService
     private static (Contact? Contact, ContactRefused? Refused) ApplyEdits(Contact contact, IReadOnlyList<ContactEdit> edits, IReadOnlyDictionary<string, ContactAttributeDefinition> definitionMap, DateTimeOffset now)
     {
         var profile = contact.Profile;
-        var identities = contact.Identities.ToDictionary(identity => identity.Address);
-        var attributes = new Dictionary<string, ContactAttributeValue>(contact.Attributes, StringComparer.Ordinal);
-        var labels = contact.Labels.ToList();
+        Dictionary<ContactIdentityAddress, ContactIdentity>? identities = null;
+        Dictionary<string, ContactAttributeValue>? attributes = null;
+        List<LabelId>? labels = null;
         var blocked = contact.Blocked;
         foreach (var edit in edits)
         {
@@ -330,21 +381,25 @@ public sealed partial class ContactService : IContactService
                     profile = set.Profile;
                     break;
                 case SetContactAttribute set:
-                    if (ValidateAttributes(new Dictionary<string, ContactAttributeValue> { [set.Key ?? string.Empty] = set.Value }, definitionMap) is { } invalid)
+                    if (ValidateAttribute(set.Key ?? string.Empty, set.Value, definitionMap) is { } invalid)
                         return Refuse(invalid);
+                    attributes ??= new Dictionary<string, ContactAttributeValue>(contact.Attributes, StringComparer.Ordinal);
                     attributes[set.Key!] = set.Value;
                     break;
                 case RemoveContactAttribute remove:
+                    attributes ??= new Dictionary<string, ContactAttributeValue>(contact.Attributes, StringComparer.Ordinal);
                     if (remove.Key is null || !attributes.Remove(remove.Key))
                         return Refuse(ContactRefused.Invalid($"Attribute '{SafeKey(remove.Key ?? string.Empty)}' is not set."));
                     break;
                 case AddContactLabel add:
                     if (add.Label == default)
                         return Refuse(ContactRefused.Invalid("Labels must be initialized."));
+                    labels ??= [.. contact.Labels];
                     if (!labels.Contains(add.Label))
                         labels.Add(add.Label);
                     break;
                 case RemoveContactLabel remove:
+                    labels ??= [.. contact.Labels];
                     labels.Remove(remove.Label);
                     break;
                 case SetContactBlocked set:
@@ -353,9 +408,11 @@ public sealed partial class ContactService : IContactService
                 case AddContactIdentity add:
                     if (add.Identity is null)
                         return Refuse(ContactRefused.Invalid("An identity is required."));
+                    identities ??= contact.Identities.ToDictionary(identity => identity.Address);
                     identities[add.Identity.Address] = add.Identity;
                     break;
                 case RemoveContactIdentity remove:
+                    identities ??= contact.Identities.ToDictionary(identity => identity.Address);
                     if (remove.Address is null || !identities.Remove(remove.Address))
                         return Refuse(ContactRefused.Invalid("The identity is not on the contact."));
                     break;
@@ -363,7 +420,7 @@ public sealed partial class ContactService : IContactService
         }
         try
         {
-            return (contact.With(profile, identities.Values, attributes, labels, blocked, now < contact.UpdatedAt ? contact.UpdatedAt : now), null);
+            return (contact.With(profile, identities?.Values, attributes, labels, blocked, now < contact.UpdatedAt ? contact.UpdatedAt : now), null);
         }
         catch (ArgumentException)
         {

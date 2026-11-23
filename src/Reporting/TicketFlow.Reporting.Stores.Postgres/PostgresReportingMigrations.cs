@@ -70,5 +70,9 @@ public static class PostgresReportingMigrations
         DROP INDEX tf_report_rollups_query;
         CREATE INDEX tf_report_rollups_query_v2 ON tf_report_rollups (scope_key, metric, cell_us) WHERE label = '';
         CREATE INDEX tf_report_facts_labelled ON tf_report_facts (scope_key, metric, cell_us) WHERE cardinality(labels) > 0;
+        """),
+        new(3, "perf-indexes", """
+        CREATE INDEX tf_report_rollups_scope_cell ON tf_report_rollups (scope_key, cell_us) WHERE label = '';
+        CREATE INDEX tf_report_conversations_open_v2 ON tf_report_conversations (scope_key) INCLUDE (inbox_id, team_id, assignee_id, channel, priority) WHERE status NOT IN (4, 5);
         """)]);
 }

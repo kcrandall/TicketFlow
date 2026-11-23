@@ -41,34 +41,64 @@ public sealed class AutomationOutboxHandler : IConversationOutboxHandler
         var change = entry.Change;
         if (change.Kind is ConversationChangeKind.DeliveryUpdated or ConversationChangeKind.Deleted)
             return;
-        var eventRules = (await cache.GetAsync(rules, change.Scope, cancellationToken).ConfigureAwait(false))
-            .Where(rule => rule.Enabled && rule.Trigger.Value is not (ScheduledTrigger or ContactUpdatedTrigger))
-            .ToList();
-        if (eventRules.Count == 0)
+        var compiled = await cache.GetCompiledAsync(rules, change.Scope, cancellationToken).ConfigureAwait(false);
+        if (!compiled.HasEventDrivenRules)
             return;
         if (change.Kind == ConversationChangeKind.Started)
-            await runner.RunAsync(new AutomationOccurrence(change.Scope, change.Conversation, AutomationEvent.ConversationCreated(), AutomationTriggerKeys.Started,
-                false, null, null), eventRules, cancellationToken).ConfigureAwait(false);
-        var wanted = change.Events.Where(summary => summary.Kind is not (ConversationEventKind.Note or ConversationEventKind.System or ConversationEventKind.Contact))
-            .Select(summary => summary.Sequence).ToHashSet();
-        if (wanted.Count == 0)
+        {
+            var createdRules = compiled.ForEvent(AutomationEventKind.ConversationCreated);
+            if (createdRules.Length > 0)
+                await runner.RunCompiledAsync(new AutomationOccurrence(change.Scope, change.Conversation, AutomationEvent.ConversationCreated(), AutomationTriggerKeys.Started,
+                    false, null, null), createdRules, cache: null, cancellationToken).ConfigureAwait(false);
+        }
+        long first = long.MaxValue, last = 0;
+        HashSet<long>? wanted = null;
+        for (var i = 0; i < change.Events.Count; i++)
+        {
+            var summary = change.Events[i];
+            if (summary.Kind is ConversationEventKind.Note or ConversationEventKind.System or ConversationEventKind.Contact)
+                continue;
+            (wanted ??= []).Add(summary.Sequence);
+            if (summary.Sequence < first)
+                first = summary.Sequence;
+            if (summary.Sequence > last)
+                last = summary.Sequence;
+        }
+        if (wanted is null)
             return;
         // One read covers the change's (contiguous, at most 16) appended events.
-        var first = wanted.Min();
-        var timeline = await conversations.ReadTimelineAsync(change.Scope, change.Conversation, first - 1, (int)(wanted.Max() - first + 1), includeNotes: false, cancellationToken)
+        var timeline = await conversations.ReadTimelineAsync(change.Scope, change.Conversation, first - 1, (int)(last - first + 1), includeNotes: false, cancellationToken)
             .ConfigureAwait(false);
-        foreach (var timelineEvent in timeline.Where(item => wanted.Contains(item.Sequence)).OrderBy(item => item.Sequence))
+        for (var i = 0; i < timeline.Count; i++)
         {
+            var timelineEvent = timeline[i];
+            if (!wanted.Contains(timelineEvent.Sequence))
+                continue;
             var (derived, message) = AutomationEventDerivation.Derive(timelineEvent, options.SlaWorkerClientId);
             if (derived.Count == 0)
+                continue;
+            var anyCandidates = false;
+            for (var j = 0; j < derived.Count; j++)
+                if (compiled.ForEvent(derived[j].Kind).Length > 0)
+                {
+                    anyCandidates = true;
+                    break;
+                }
+            if (!anyCandidates)
                 continue;
             var causedByAutomation = AutomationEventDerivation.IsAutomationActor(timelineEvent.Actor, options.ClientId);
             var cause = causedByAutomation
                 ? await executions.FindCauseAsync(change.Scope, change.Conversation, timelineEvent.Sequence, cancellationToken).ConfigureAwait(false)
                 : null;
-            foreach (var automationEvent in derived)
-                await runner.RunAsync(new AutomationOccurrence(change.Scope, change.Conversation, automationEvent, AutomationTriggerKeys.TimelineEvent(timelineEvent.Sequence),
-                    causedByAutomation, cause, message), eventRules, cancellationToken).ConfigureAwait(false);
+            var triggerKey = AutomationTriggerKeys.TimelineEvent(timelineEvent.Sequence);
+            for (var j = 0; j < derived.Count; j++)
+            {
+                var automationEvent = derived[j];
+                var candidates = compiled.ForEvent(automationEvent.Kind);
+                if (candidates.Length > 0)
+                    await runner.RunCompiledAsync(new AutomationOccurrence(change.Scope, change.Conversation, automationEvent, triggerKey,
+                        causedByAutomation, cause, message), candidates, cache: null, cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 }

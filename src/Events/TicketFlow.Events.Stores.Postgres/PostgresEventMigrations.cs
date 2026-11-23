@@ -65,5 +65,7 @@ public static class PostgresEventMigrations
         ALTER TABLE tf_event_heads SET (fillfactor = 50);
         DROP INDEX tf_events_retention;
         CREATE INDEX tf_events_recorded_brin ON tf_events USING brin (recorded_at);
+        """), new(3, "due-covering-index", """
+        CREATE INDEX tf_event_subscriptions_due_v2 ON tf_event_subscriptions (available_at, subscription_key) INCLUDE (scope_key, delivery_cursor, lease_until) WHERE enabled AND NOT suspended;
         """)]);
 }

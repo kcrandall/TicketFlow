@@ -84,5 +84,10 @@ public static class PostgresAutomationMigrations
         CREATE INDEX tf_automation_executions_rule ON tf_automation_executions (scope_key, rule_id, started_at DESC, execution_id DESC);
         CREATE INDEX tf_automation_executions_purge ON tf_automation_executions (started_at, execution_key) WHERE finished;
         CREATE INDEX tf_automation_causes_execution ON tf_automation_causes (execution_id);
+        """), new(3, "perf-indexes-and-macro-visibility", """
+        CREATE INDEX tf_automation_rules_due_v2 ON tf_automation_rules (next_run_at, rule_key) INCLUDE (lease_until) WHERE next_run_at IS NOT NULL;
+        ALTER TABLE tf_automation_macros ADD COLUMN visibility smallint NOT NULL DEFAULT 1, ADD COLUMN owner_id text COLLATE "C" NULL;
+        UPDATE tf_automation_macros SET visibility = CASE WHEN definition::jsonb->>'vis' = 'personal' THEN 2 ELSE 1 END, owner_id = definition::jsonb->>'owner';
+        CREATE INDEX tf_automation_macros_visibility ON tf_automation_macros (scope_key, visibility, owner_id, macro_id);
         """)]);
 }

@@ -137,10 +137,15 @@ public sealed record SlaTargets
 public sealed record SlaCondition
 {
     public const int MaximumLabels = 16;
+    private readonly byte priorityMask;
 
     public SlaCondition(IEnumerable<ConversationPriority>? priorities = null, IEnumerable<LabelId>? labels = null)
     {
         Priorities = [.. (priorities ?? []).Select(priority => SlaText.Defined(priority, nameof(priorities))).Distinct().Order()];
+        byte mask = 0;
+        for (var i = 0; i < Priorities.Count; i++)
+            mask |= (byte)(1 << (int)Priorities[i]);
+        priorityMask = mask;
         Labels = [.. (labels ?? []).Distinct().OrderBy(label => label.Value, StringComparer.Ordinal)];
         if (Labels.Any(label => label == default) || Labels.Count > MaximumLabels)
             throw new ArgumentException($"Conditions name at most {MaximumLabels} initialized labels.", nameof(labels));
@@ -152,15 +157,27 @@ public sealed record SlaCondition
     public IReadOnlyList<ConversationPriority> Priorities { get; }
     public IReadOnlyList<LabelId> Labels { get; }
 
+    public bool MatchesPriority(ConversationPriority priority) => priorityMask == 0 || (priorityMask & (1 << (int)priority)) != 0;
+
     public bool Matches(ConversationPriority priority, IEnumerable<LabelId> labels)
     {
         ArgumentNullException.ThrowIfNull(labels);
-        if (Priorities.Count > 0 && !Priorities.Contains(priority))
+        if (!MatchesPriority(priority))
             return false;
         if (Labels.Count == 0)
             return true;
+        if (labels is IReadOnlySet<LabelId> set)
+        {
+            for (var i = 0; i < Labels.Count; i++)
+                if (!set.Contains(Labels[i]))
+                    return false;
+            return true;
+        }
         var present = labels as IReadOnlyCollection<LabelId> ?? [.. labels];
-        return Labels.All(present.Contains);
+        for (var i = 0; i < Labels.Count; i++)
+            if (!present.Contains(Labels[i]))
+                return false;
+        return true;
     }
 
     public bool Equals(SlaCondition? other) => other is not null && Priorities.SequenceEqual(other.Priorities) && Labels.SequenceEqual(other.Labels);
@@ -173,6 +190,11 @@ public sealed record SlaRule
 {
     public const int MaximumNameLength = 128;
     public const int MaximumEscalations = 16;
+    private static readonly int[] BreachOnly = [100];
+
+    private readonly int[] firstResponseThresholds;
+    private readonly int[] nextResponseThresholds;
+    private readonly int[] resolutionThresholds;
 
     public SlaRule(string name, SlaCondition condition, SlaTargets targets, SlaClockBasis basis = SlaClockBasis.BusinessHours, IEnumerable<SlaEscalation>? escalations = null)
     {
@@ -187,6 +209,30 @@ public sealed record SlaRule
             throw new ArgumentException("Escalations must be unique per metric and threshold.", nameof(escalations));
         if (Escalations.Any(escalation => Targets.For(escalation.Metric) is null))
             throw new ArgumentException("Escalations require a target for their metric.", nameof(escalations));
+        firstResponseThresholds = BuildThresholds(Escalations, SlaMetric.FirstResponse);
+        nextResponseThresholds = BuildThresholds(Escalations, SlaMetric.NextResponse);
+        resolutionThresholds = BuildThresholds(Escalations, SlaMetric.Resolution);
+    }
+
+    private static int[] BuildThresholds(IReadOnlyList<SlaEscalation> escalations, SlaMetric metric)
+    {
+        List<int>? list = null;
+        var has100 = false;
+        for (var i = 0; i < escalations.Count; i++)
+        {
+            var e = escalations[i];
+            if (e.Metric != metric)
+                continue;
+            list ??= [];
+            list.Add(e.ThresholdPercent);
+            if (e.ThresholdPercent == 100)
+                has100 = true;
+        }
+        if (list is null)
+            return BreachOnly;
+        if (!has100)
+            list.Add(100);
+        return [.. list];
     }
 
     public string Name { get; }
@@ -198,12 +244,25 @@ public sealed record SlaRule
     public IReadOnlyList<SlaEscalation> Escalations { get; }
 
     /// <summary>Thresholds tracked for <paramref name="metric"/>: every escalation threshold plus 100 (breach), ascending.</summary>
-    public IReadOnlyList<int> Thresholds(SlaMetric metric) =>
-        [.. Escalations.Where(escalation => escalation.Metric == metric).Select(escalation => escalation.ThresholdPercent).Append(100).Distinct().Order()];
+    public IReadOnlyList<int> Thresholds(SlaMetric metric) => metric switch
+    {
+        SlaMetric.FirstResponse => firstResponseThresholds,
+        SlaMetric.NextResponse => nextResponseThresholds,
+        SlaMetric.Resolution => resolutionThresholds,
+        _ => throw new ArgumentOutOfRangeException(nameof(metric)),
+    };
 
     /// <summary>The actions of the escalation at exactly <paramref name="thresholdPercent"/>, or none.</summary>
-    public IReadOnlyList<SlaAction> ActionsAt(SlaMetric metric, int thresholdPercent) =>
-        Escalations.FirstOrDefault(escalation => escalation.Metric == metric && escalation.ThresholdPercent == thresholdPercent)?.Actions ?? [];
+    public IReadOnlyList<SlaAction> ActionsAt(SlaMetric metric, int thresholdPercent)
+    {
+        for (var i = 0; i < Escalations.Count; i++)
+        {
+            var e = Escalations[i];
+            if (e.Metric == metric && e.ThresholdPercent == thresholdPercent)
+                return e.Actions;
+        }
+        return [];
+    }
 
     public bool Equals(SlaRule? other) =>
         other is not null && Name == other.Name && Condition.Equals(other.Condition) && Targets.Equals(other.Targets) && Basis == other.Basis
@@ -263,7 +322,8 @@ public sealed record SlaPolicy
     /// <summary>The index of the first rule matching <paramref name="priority"/> and <paramref name="labels"/>, or <see langword="null"/>.</summary>
     public int? Match(ConversationPriority priority, IEnumerable<LabelId> labels)
     {
-        IReadOnlyCollection<LabelId> present = [.. labels ?? throw new ArgumentNullException(nameof(labels))];
+        ArgumentNullException.ThrowIfNull(labels);
+        var present = labels as IReadOnlyCollection<LabelId> ?? [.. labels];
         for (var index = 0; index < Rules.Count; index++)
             if (Rules[index].Condition.Matches(priority, present))
                 return index;

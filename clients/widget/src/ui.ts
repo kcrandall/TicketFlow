@@ -40,9 +40,14 @@ export class ChatWidget {
   readonly client: ChatClient;
   private readonly body: HTMLElement;
   private readonly panel: HTMLElement;
+  private readonly statusLine: HTMLElement;
+  private readonly attachButton: HTMLButtonElement;
   private readonly typingLine: HTMLElement;
   private readonly composer: HTMLFormElement;
   private readonly typing: TypingNotifier;
+  private readonly unsubscribe: () => void;
+  private readonly bubbles = new Map<string, { el: HTMLElement; body: string; sequence: number }>();
+  private renderedConversation: string | null = null;
   private pending: Attachment[] = [];
   private searched = false;
 
@@ -65,6 +70,8 @@ export class ChatWidget {
       </section>`;
     this.panel = this.$(".panel");
     this.body = this.$(".body");
+    this.statusLine = this.$(".status");
+    this.attachButton = this.$<HTMLButtonElement>(".attach");
     this.typingLine = this.$(".typing");
     this.composer = this.$<HTMLFormElement>(".composer");
     this.$(".title").textContent = options.title ?? "Chat with us";
@@ -83,10 +90,10 @@ export class ChatWidget {
       void this.sendCurrent(text);
     });
     const file = this.$<HTMLInputElement>(".file");
-    this.$(".attach").addEventListener("click", () => file.click());
+    this.attachButton.addEventListener("click", () => file.click());
     file.addEventListener("change", () => void this.attach(file));
 
-    this.client.subscribe((event) => {
+    this.unsubscribe = this.client.subscribe((event) => {
       switch (event.type) {
         case "connected":
           this.renderState();
@@ -111,6 +118,12 @@ export class ChatWidget {
     });
   }
 
+  destroy(): void {
+    this.typing.stop();
+    this.unsubscribe();
+    this.bubbles.clear();
+  }
+
   async start(): Promise<void> {
     try {
       await this.client.start();
@@ -121,8 +134,8 @@ export class ChatWidget {
 
   private renderState(): void {
     const widget = this.client.widget;
-    this.$(".status").textContent = widget?.online === false ? widget.awayMessage ?? "We are away" : "We typically reply in a few minutes";
-    this.$(".attach").hidden = !widget?.attachments;
+    this.statusLine.textContent = widget?.online === false ? widget.awayMessage ?? "We are away" : "We typically reply in a few minutes";
+    this.attachButton.hidden = !widget?.attachments;
     const needsPrechat = !this.client.prechatAnswered && (widget?.prechat.some((field) => field.required) ?? false);
     this.root.querySelector(".prechat")?.remove();
     if (needsPrechat && widget) {
@@ -162,21 +175,64 @@ export class ChatWidget {
 
   private renderMessages(): void {
     const conversation = this.client.conversation;
-    for (const element of Array.from(this.body.querySelectorAll(".bubble"))) element.remove();
-    if (!conversation) return;
-    for (const message of this.client.transcript.messages(conversation)) {
-      const bubble = document.createElement("div");
-      bubble.className = `bubble ${message.direction}`;
-      bubble.textContent = message.body; // Never innerHTML: bodies are untrusted.
-      for (const attachment of message.attachments) {
-        const line = document.createElement("div");
-        line.className = "notice";
-        line.textContent = `📎 ${attachment.fileName}`;
-        bubble.append(line);
-      }
-      this.body.append(bubble);
+    if (conversation !== this.renderedConversation) {
+      for (const entry of this.bubbles.values()) entry.el.remove();
+      this.bubbles.clear();
+      this.renderedConversation = conversation;
     }
-    this.body.scrollTop = this.body.scrollHeight;
+    if (!conversation) return;
+    const messages = this.client.transcript.messages(conversation);
+    let appended = false;
+    let outOfOrder = false;
+    let lastRenderedSeq = -Infinity;
+    for (const entry of this.bubbles.values()) if (entry.sequence > lastRenderedSeq) lastRenderedSeq = entry.sequence;
+    const fragment = document.createDocumentFragment();
+    for (const message of messages) {
+      const existing = this.bubbles.get(message.message);
+      if (existing) {
+        if (existing.body !== message.body) {
+          existing.el.textContent = message.body; // Never innerHTML: bodies are untrusted.
+          for (const attachment of message.attachments) {
+            const line = document.createElement("div");
+            line.className = "notice";
+            line.textContent = `📎 ${attachment.fileName}`;
+            existing.el.append(line);
+          }
+          existing.body = message.body;
+        }
+        if (existing.sequence !== message.sequence) {
+          existing.sequence = message.sequence;
+          outOfOrder = true;
+        }
+      } else {
+        const bubble = document.createElement("div");
+        bubble.className = `bubble ${message.direction}`;
+        bubble.textContent = message.body; // Never innerHTML: bodies are untrusted.
+        for (const attachment of message.attachments) {
+          const line = document.createElement("div");
+          line.className = "notice";
+          line.textContent = `📎 ${attachment.fileName}`;
+          bubble.append(line);
+        }
+        this.bubbles.set(message.message, { el: bubble, body: message.body, sequence: message.sequence });
+        if (message.sequence < lastRenderedSeq) outOfOrder = true;
+        else lastRenderedSeq = message.sequence;
+        fragment.append(bubble);
+        appended = true;
+      }
+    }
+    if (outOfOrder) {
+      const ordered = document.createDocumentFragment();
+      for (const message of messages) {
+        const entry = this.bubbles.get(message.message);
+        if (entry) ordered.append(entry.el);
+      }
+      this.body.append(ordered);
+      this.body.scrollTop = this.body.scrollHeight;
+    } else if (appended) {
+      this.body.append(fragment);
+      this.body.scrollTop = this.body.scrollHeight;
+    }
   }
 
   private async sendCurrent(input: HTMLTextAreaElement): Promise<void> {

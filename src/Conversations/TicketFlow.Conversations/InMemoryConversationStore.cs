@@ -12,13 +12,15 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
 {
     private readonly Lock gate = new();
     private readonly TimeProvider time;
-    private readonly Dictionary<(TicketScope Scope, ConversationId Id), StoredConversation> conversations = [];
+    private readonly Dictionary<TicketScope, Dictionary<ConversationId, StoredConversation>> conversationsByScope = [];
+    private readonly Dictionary<(TicketScope Scope, InboxId Inbox, ChannelThreadRef Thread), List<ConversationId>> byThread = [];
     private readonly Dictionary<(TicketScope Scope, ConversationId Id), List<TimelineEvent>> timelines = [];
     private readonly Dictionary<(TicketScope Scope, ConversationId Conversation, MessageId Message), StoredMessage> messages = [];
     private readonly Dictionary<(TicketScope Scope, InboxId Inbox, string ExternalId), (ConversationId Conversation, MessageId Message)> externalIds = [];
     private readonly SortedDictionary<long, ConversationOutboxEntry> entries = [];
     private readonly SortedDictionary<string, SortedDictionary<long, Delivery>> deliveries = new(StringComparer.Ordinal);
     private long nextSequence;
+    private int conversationCount;
     private int eventCount;
 
     public InMemoryConversationStore(TimeProvider? time = null, int maximumConversations = 10_000, int maximumEvents = 200_000, int maximumOutboxEntries = 100_000)
@@ -41,7 +43,31 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
         ArgumentNullException.ThrowIfNull(scope);
         RequireId(id);
         lock (gate)
-            return Task.FromResult(conversations.GetValueOrDefault((scope, id)));
+            return Task.FromResult(conversationsByScope.TryGetValue(scope, out var bucket) ? bucket.GetValueOrDefault(id) : null);
+    }
+
+    public Task<IReadOnlyDictionary<ConversationId, StoredConversation>> GetManyAsync(TicketScope scope, IReadOnlyList<ConversationId> ids,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(ids);
+        if (ids.Count == 0)
+            return Task.FromResult<IReadOnlyDictionary<ConversationId, StoredConversation>>(EmptyConversations);
+        for (var i = 0; i < ids.Count; i++)
+            RequireId(ids[i]);
+        lock (gate)
+        {
+            if (!conversationsByScope.TryGetValue(scope, out var bucket) || bucket.Count == 0)
+                return Task.FromResult<IReadOnlyDictionary<ConversationId, StoredConversation>>(EmptyConversations);
+            var results = new Dictionary<ConversationId, StoredConversation>(Math.Min(ids.Count, bucket.Count));
+            for (var i = 0; i < ids.Count; i++)
+            {
+                var id = ids[i];
+                if (bucket.TryGetValue(id, out var stored))
+                    results[id] = stored;
+            }
+            return Task.FromResult<IReadOnlyDictionary<ConversationId, StoredConversation>>(results);
+        }
     }
 
     public Task<ConversationWriteResult> WriteAsync(TicketScope scope, ConversationWrite write, CancellationToken cancellationToken = default)
@@ -57,12 +83,14 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
     {
         var conversation = write.Conversation;
         var key = (scope, conversation.Id);
-        var exists = conversations.TryGetValue(key, out var existing);
+        conversationsByScope.TryGetValue(scope, out var bucket);
+        StoredConversation? existing = null;
+        var exists = bucket is not null && bucket.TryGetValue(conversation.Id, out existing);
         if (write.ExpectedRevision is null)
         {
             if (exists)
                 return new ConversationWriteConflict(existing!.Revision);
-            if (conversations.Count >= MaximumConversations)
+            if (conversationCount >= MaximumConversations)
                 return new ConversationWriteRejected(ConversationWriteRejection.CapacityExceeded);
         }
         else
@@ -80,29 +108,48 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
         if (eventCount + write.Events.Count > MaximumEvents || (write.Change is not null && entries.Count >= MaximumOutboxEntries))
             return new ConversationWriteRejected(ConversationWriteRejection.CapacityExceeded);
 
-        var newMessages = new List<StoredMessage>();
-        foreach (var item in write.Events)
+        List<StoredMessage>? newMessages = null;
+        for (var i = 0; i < write.Events.Count; i++)
         {
+            var item = write.Events[i];
             if (item.Event.Value is not MessageEvent message)
                 continue;
             if (messages.ContainsKey((scope, conversation.Id, message.Id)))
                 return new ConversationWriteRejected(ConversationWriteRejection.DuplicateMessageId);
             if (message.ExternalId is { } external && externalIds.TryGetValue((scope, conversation.Inbox, external), out var holder))
                 return new ConversationDuplicateMessage(messages[(scope, holder.Conversation, holder.Message)]);
+            newMessages ??= [];
             newMessages.Add(new StoredMessage(scope, conversation.Id, conversation.Inbox, message.Id, item.Sequence, message.Direction, message.ExternalId, message.Delivery, 1));
         }
 
         var stored = new StoredConversation(scope, conversation, checked((existing?.Revision ?? 0) + 1));
-        conversations[key] = stored;
+        if (bucket is null)
+            conversationsByScope[scope] = bucket = [];
+        if (!exists)
+        {
+            conversationCount++;
+            if (conversation.ChannelThread is { } thread)
+            {
+                var threadKey = (scope, conversation.Inbox, thread);
+                if (!byThread.TryGetValue(threadKey, out var threadList))
+                    byThread[threadKey] = threadList = [];
+                threadList.Add(conversation.Id);
+            }
+        }
+        bucket[conversation.Id] = stored;
         if (!timelines.TryGetValue(key, out var timeline))
             timelines[key] = timeline = [];
         timeline.AddRange(write.Events);
         eventCount += write.Events.Count;
-        foreach (var message in newMessages)
+        if (newMessages is not null)
         {
-            messages[(scope, conversation.Id, message.Message)] = message;
-            if (message.ExternalId is { } external)
-                externalIds[(scope, conversation.Inbox, external)] = (conversation.Id, message.Message);
+            for (var i = 0; i < newMessages.Count; i++)
+            {
+                var message = newMessages[i];
+                messages[(scope, conversation.Id, message.Message)] = message;
+                if (message.ExternalId is { } external)
+                    externalIds[(scope, conversation.Inbox, external)] = (conversation.Id, message.Message);
+            }
         }
         var entry = write.Change is null ? null : Append(write.Change);
         return new ConversationWriteApplied(stored, write.Events, entry);
@@ -119,20 +166,35 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
             throw new ArgumentException("The change must describe this delete.", nameof(change));
         lock (gate)
         {
-            if (!conversations.TryGetValue((scope, id), out var existing))
+            if (!conversationsByScope.TryGetValue(scope, out var bucket) || !bucket.TryGetValue(id, out var existing))
                 return Task.FromResult<ConversationWriteResult>(ConversationWriteNotFound.Instance);
             if (existing.Revision != expectedRevision)
                 return Task.FromResult<ConversationWriteResult>(new ConversationWriteConflict(existing.Revision));
             if (entries.Count >= MaximumOutboxEntries)
                 return Task.FromResult<ConversationWriteResult>(new ConversationWriteRejected(ConversationWriteRejection.CapacityExceeded));
-            conversations.Remove((scope, id));
-            if (timelines.Remove((scope, id), out var timeline))
-                eventCount -= timeline.Count;
-            foreach (var message in messages.Values.Where(message => message.Scope == scope && message.Conversation == id).ToList())
+            bucket.Remove(id);
+            conversationCount--;
+            if (bucket.Count == 0)
+                conversationsByScope.Remove(scope);
+            if (existing.Conversation.ChannelThread is { } thread)
             {
-                messages.Remove((scope, id, message.Message));
-                if (message.ExternalId is { } external)
-                    externalIds.Remove((scope, message.Inbox, external));
+                var threadKey = (scope, existing.Conversation.Inbox, thread);
+                if (byThread.TryGetValue(threadKey, out var threadList))
+                {
+                    threadList.Remove(id);
+                    if (threadList.Count == 0)
+                        byThread.Remove(threadKey);
+                }
+            }
+            if (timelines.Remove((scope, id), out var timeline))
+            {
+                eventCount -= timeline.Count;
+                for (var i = 0; i < timeline.Count; i++)
+                {
+                    if (timeline[i].Event.Value is MessageEvent message && messages.Remove((scope, id, message.Id), out var storedMessage)
+                        && storedMessage.ExternalId is { } external)
+                        externalIds.Remove((scope, storedMessage.Inbox, external));
+                }
             }
             return Task.FromResult<ConversationWriteResult>(new ConversationWriteApplied(existing, [], Append(change)));
         }
@@ -147,16 +209,38 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IConversationStore.MaximumTimelineRead);
         lock (gate)
         {
-            if (!timelines.TryGetValue((scope, id), out var timeline))
+            if (!timelines.TryGetValue((scope, id), out var timeline) || timeline.Count == 0)
                 return Task.FromResult<IReadOnlyList<TimelineEvent>>([]);
-            IReadOnlyList<TimelineEvent> page = [.. timeline
-                .Where(item => item.Sequence > afterSequence && (includeNotes || item.Event.Kind != ConversationEventKind.Note))
-                .Take(limit)
-                .Select(item => item.Event.Value is MessageEvent message && messages.TryGetValue((scope, id, message.Id), out var current)
-                    ? item.WithEvent(message.WithDelivery(current.Delivery, current.ExternalId))
-                    : item)];
-            return Task.FromResult(page);
+            var start = FindFirstAfter(timeline, afterSequence);
+            if (start >= timeline.Count)
+                return Task.FromResult<IReadOnlyList<TimelineEvent>>([]);
+            var page = new List<TimelineEvent>(Math.Min(limit, timeline.Count - start));
+            for (var i = start; i < timeline.Count && page.Count < limit; i++)
+            {
+                var item = timeline[i];
+                if (!includeNotes && item.Event.Kind == ConversationEventKind.Note)
+                    continue;
+                if (item.Event.Value is MessageEvent message && messages.TryGetValue((scope, id, message.Id), out var current)
+                    && (current.Delivery != message.Delivery || current.ExternalId != message.ExternalId))
+                    item = item.WithEvent(message.WithDelivery(current.Delivery, current.ExternalId));
+                page.Add(item);
+            }
+            return Task.FromResult<IReadOnlyList<TimelineEvent>>(page);
         }
+    }
+
+    private static int FindFirstAfter(List<TimelineEvent> timeline, long afterSequence)
+    {
+        int lo = 0, hi = timeline.Count;
+        while (lo < hi)
+        {
+            var mid = lo + ((hi - lo) >> 1);
+            if (timeline[mid].Sequence <= afterSequence)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        return lo;
     }
 
     public Task<StoredMessage?> GetMessageAsync(TicketScope scope, ConversationId conversation, MessageId message, CancellationToken cancellationToken = default)
@@ -186,7 +270,8 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
         RequireChangeScope(scope, write.Change);
         lock (gate)
         {
-            if (!conversations.ContainsKey((scope, write.Conversation)) || !messages.TryGetValue((scope, write.Conversation, write.Message), out var current))
+            if (!conversationsByScope.TryGetValue(scope, out var bucket) || !bucket.ContainsKey(write.Conversation)
+                || !messages.TryGetValue((scope, write.Conversation, write.Message), out var current))
                 return Task.FromResult<MessageDeliveryWriteResult>(ConversationWriteNotFound.Instance);
             if (current.DeliveryRevision != write.ExpectedDeliveryRevision)
                 return Task.FromResult<MessageDeliveryWriteResult>(new MessageDeliveryConflict(current));
@@ -216,12 +301,19 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(thread);
         lock (gate)
-            return Task.FromResult(conversations.Values
-                .Where(stored => stored.Scope == scope && stored.Conversation.Inbox == inbox && Equals(stored.Conversation.ChannelThread, thread)
-                    && stored.Conversation.Status.Kind != ConversationStatusKind.Closed)
-                .OrderByDescending(stored => stored.Conversation.CreatedAt)
-                .ThenByDescending(stored => stored.Id.Value, StringComparer.Ordinal)
-                .FirstOrDefault());
+        {
+            if (!byThread.TryGetValue((scope, inbox, thread), out var ids) || !conversationsByScope.TryGetValue(scope, out var bucket))
+                return Task.FromResult<StoredConversation?>(null);
+            StoredConversation? best = null;
+            for (var i = 0; i < ids.Count; i++)
+            {
+                if (!bucket.TryGetValue(ids[i], out var stored) || stored.Conversation.Status.Kind == ConversationStatusKind.Closed)
+                    continue;
+                if (best is null || CompareCreatedDesc(stored, best) < 0)
+                    best = stored;
+            }
+            return Task.FromResult(best);
+        }
     }
 
     public Task<ConversationPage> ListAsync(TicketScope scope, ConversationListQuery query, AccessFilter filter, CancellationToken cancellationToken = default)
@@ -231,18 +323,35 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
         ArgumentNullException.ThrowIfNull(filter);
         lock (gate)
         {
-            var rows = conversations.Values
-                .Where(stored => stored.Scope == scope && query.Matches(stored.Conversation) && query.IsAfterCursor(stored.Conversation)
+            if (!conversationsByScope.TryGetValue(scope, out var bucket) || bucket.Count == 0)
+                return Task.FromResult(new ConversationPage([], null));
+            var rows = new List<StoredConversation>();
+            foreach (var stored in bucket.Values)
+            {
+                if (query.Matches(stored.Conversation) && query.IsAfterCursor(stored.Conversation)
                     && AccessFilterEvaluator.Matches(filter, ConversationAccess.Resource(stored)))
-                .OrderByDescending(stored => stored.Conversation.LastActivityAt)
-                .ThenByDescending(stored => stored.Id.Value, StringComparer.Ordinal)
-                .Take(query.Limit + 1)
-                .ToList();
+                    rows.Add(stored);
+            }
+            if (rows.Count > 1)
+                rows.Sort(CompareActivityDesc);
             if (rows.Count <= query.Limit)
                 return Task.FromResult(new ConversationPage(rows, null));
-            var page = rows[..query.Limit];
-            return Task.FromResult(new ConversationPage(page, new ConversationListCursor(page[^1].Conversation.LastActivityAt, page[^1].Id)));
+            rows.RemoveRange(query.Limit, rows.Count - query.Limit);
+            var last = rows[^1];
+            return Task.FromResult(new ConversationPage(rows, new ConversationListCursor(last.Conversation.LastActivityAt, last.Id)));
         }
+    }
+
+    private static int CompareCreatedDesc(StoredConversation a, StoredConversation b)
+    {
+        var cmp = b.Conversation.CreatedAt.CompareTo(a.Conversation.CreatedAt);
+        return cmp != 0 ? cmp : StringComparer.Ordinal.Compare(b.Id.Value, a.Id.Value);
+    }
+
+    private static int CompareActivityDesc(StoredConversation a, StoredConversation b)
+    {
+        var cmp = b.Conversation.LastActivityAt.CompareTo(a.Conversation.LastActivityAt);
+        return cmp != 0 ? cmp : StringComparer.Ordinal.Compare(b.Id.Value, a.Id.Value);
     }
 
     public Task RegisterConsumerAsync(string consumer, CancellationToken cancellationToken = default)
@@ -295,17 +404,91 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
     }
 
     public Task<bool> AcknowledgeAsync(string consumer, long sequence, long fence, CancellationToken cancellationToken = default) =>
-        Complete(consumer, sequence, fence, requireLease: true, delivery => delivery.State = DeliveryState.Acknowledged);
+        Complete(consumer, sequence, fence, requireLease: true, DeliveryState.Acknowledged, null);
+
+    public Task<int> AcknowledgeBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> items, CancellationToken cancellationToken = default)
+    {
+        IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
+        ArgumentNullException.ThrowIfNull(items);
+        if (items.Count == 0)
+            return Task.FromResult(0);
+        lock (gate)
+        {
+            if (!deliveries.TryGetValue(consumer, out var pending))
+                return Task.FromResult(0);
+            var now = time.GetUtcNow();
+            var updated = 0;
+            for (var i = 0; i < items.Count; i++)
+            {
+                var (sequence, fence) = items[i];
+                if (pending.TryGetValue(sequence, out var delivery) && delivery.State == DeliveryState.Pending
+                    && delivery.Fence != 0 && delivery.Fence == fence && delivery.LeaseUntil > now)
+                {
+                    delivery.State = DeliveryState.Acknowledged;
+                    updated++;
+                }
+            }
+            return Task.FromResult(updated);
+        }
+    }
 
     public Task<bool> ReleaseAsync(string consumer, long sequence, long fence, DateTimeOffset retryAt, CancellationToken cancellationToken = default) =>
-        Complete(consumer, sequence, fence, requireLease: true, delivery =>
+        Complete(consumer, sequence, fence, requireLease: true, DeliveryState.Pending, retryAt);
+
+    public Task<int> ReleaseBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence, DateTimeOffset RetryAt)> items, CancellationToken cancellationToken = default)
+    {
+        IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
+        ArgumentNullException.ThrowIfNull(items);
+        if (items.Count == 0)
+            return Task.FromResult(0);
+        lock (gate)
         {
-            delivery.LeaseUntil = null;
-            delivery.AvailableAt = retryAt;
-        });
+            if (!deliveries.TryGetValue(consumer, out var pending))
+                return Task.FromResult(0);
+            var now = time.GetUtcNow();
+            var updated = 0;
+            for (var i = 0; i < items.Count; i++)
+            {
+                var (sequence, fence, retryAt) = items[i];
+                if (pending.TryGetValue(sequence, out var delivery) && delivery.State == DeliveryState.Pending
+                    && delivery.Fence != 0 && delivery.Fence == fence && delivery.LeaseUntil > now)
+                {
+                    delivery.LeaseUntil = null;
+                    delivery.AvailableAt = retryAt;
+                    updated++;
+                }
+            }
+            return Task.FromResult(updated);
+        }
+    }
 
     public Task<bool> DeadLetterAsync(string consumer, long sequence, long fence, CancellationToken cancellationToken = default) =>
-        Complete(consumer, sequence, fence, requireLease: false, delivery => delivery.State = DeliveryState.DeadLettered);
+        Complete(consumer, sequence, fence, requireLease: false, DeliveryState.DeadLettered, null);
+
+    public Task<int> DeadLetterBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> items, CancellationToken cancellationToken = default)
+    {
+        IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
+        ArgumentNullException.ThrowIfNull(items);
+        if (items.Count == 0)
+            return Task.FromResult(0);
+        lock (gate)
+        {
+            if (!deliveries.TryGetValue(consumer, out var pending))
+                return Task.FromResult(0);
+            var updated = 0;
+            for (var i = 0; i < items.Count; i++)
+            {
+                var (sequence, fence) = items[i];
+                if (pending.TryGetValue(sequence, out var delivery) && delivery.State == DeliveryState.Pending
+                    && delivery.Fence != 0 && delivery.Fence == fence)
+                {
+                    delivery.State = DeliveryState.DeadLettered;
+                    updated++;
+                }
+            }
+            return Task.FromResult(updated);
+        }
+    }
 
     public Task<int> PruneAsync(DateTimeOffset olderThan, int limit, CancellationToken cancellationToken = default)
     {
@@ -313,14 +496,29 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IConversationOutbox.MaximumPrune);
         lock (gate)
         {
-            var doomed = entries.Values
-                .Where(entry => entry.Change.OccurredAt < olderThan
-                    && deliveries.Values.All(byConsumer => !byConsumer.TryGetValue(entry.Sequence, out var delivery) || delivery.State != DeliveryState.Pending))
-                .Take(limit)
-                .Select(entry => entry.Sequence)
-                .ToList();
-            foreach (var sequence in doomed)
+            var doomed = new List<long>();
+            foreach (var entry in entries.Values)
             {
+                if (entry.Change.OccurredAt >= olderThan)
+                    continue;
+                var pending = false;
+                foreach (var byConsumer in deliveries.Values)
+                {
+                    if (byConsumer.TryGetValue(entry.Sequence, out var delivery) && delivery.State == DeliveryState.Pending)
+                    {
+                        pending = true;
+                        break;
+                    }
+                }
+                if (pending)
+                    continue;
+                doomed.Add(entry.Sequence);
+                if (doomed.Count == limit)
+                    break;
+            }
+            for (var i = 0; i < doomed.Count; i++)
+            {
+                var sequence = doomed[i];
                 entries.Remove(sequence);
                 foreach (var byConsumer in deliveries.Values)
                     byConsumer.Remove(sequence);
@@ -329,7 +527,7 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
         }
     }
 
-    private Task<bool> Complete(string consumer, long sequence, long fence, bool requireLease, Action<Delivery> apply)
+    private Task<bool> Complete(string consumer, long sequence, long fence, bool requireLease, DeliveryState nextState, DateTimeOffset? retryAt)
     {
         IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
         lock (gate)
@@ -338,7 +536,13 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
                 || delivery.State != DeliveryState.Pending || delivery.Fence == 0 || delivery.Fence != fence
                 || (requireLease && !(delivery.LeaseUntil > time.GetUtcNow())))
                 return Task.FromResult(false);
-            apply(delivery);
+            if (retryAt is { } retry)
+            {
+                delivery.LeaseUntil = null;
+                delivery.AvailableAt = retry;
+            }
+            else
+                delivery.State = nextState;
             return Task.FromResult(true);
         }
     }
@@ -373,6 +577,8 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
             throw new ArgumentException("A conversation identifier is required.", nameof(id));
     }
 
+    private static readonly Dictionary<ConversationId, StoredConversation> EmptyConversations = [];
+
     private enum DeliveryState
     {
         Pending,
@@ -395,7 +601,8 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
 public sealed class InMemoryConversationAttributeDefinitionStore : IConversationAttributeDefinitionStore
 {
     private readonly Lock gate = new();
-    private readonly Dictionary<(TicketScope Scope, string Key), StoredConversationAttributeDefinition> definitions = [];
+    private readonly Dictionary<TicketScope, Dictionary<string, StoredConversationAttributeDefinition>> definitionsByScope = [];
+    private int totalCount;
 
     public InMemoryConversationAttributeDefinitionStore(int maximumEntries = 10_000)
     {
@@ -410,15 +617,23 @@ public sealed class InMemoryConversationAttributeDefinitionStore : IConversation
         ArgumentNullException.ThrowIfNull(scope);
         ConversationAttributeDefinition.RequireKey(key, nameof(key));
         lock (gate)
-            return Task.FromResult(definitions.GetValueOrDefault((scope, key)));
+            return Task.FromResult(definitionsByScope.TryGetValue(scope, out var bucket) ? bucket.GetValueOrDefault(key) : null);
     }
 
     public Task<IReadOnlyList<StoredConversationAttributeDefinition>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         lock (gate)
-            return Task.FromResult<IReadOnlyList<StoredConversationAttributeDefinition>>([.. definitions.Values.Where(entry => entry.Scope == scope)
-                .OrderBy(entry => entry.Definition.Key, StringComparer.Ordinal)]);
+        {
+            if (!definitionsByScope.TryGetValue(scope, out var bucket) || bucket.Count == 0)
+                return Task.FromResult<IReadOnlyList<StoredConversationAttributeDefinition>>([]);
+            var list = new List<StoredConversationAttributeDefinition>(bucket.Count);
+            foreach (var entry in bucket.Values)
+                list.Add(entry);
+            if (list.Count > 1)
+                list.Sort(static (a, b) => StringComparer.Ordinal.Compare(a.Definition.Key, b.Definition.Key));
+            return Task.FromResult<IReadOnlyList<StoredConversationAttributeDefinition>>(list);
+        }
     }
 
     public Task<ConversationAttributeDefinitionWriteResult> CreateAsync(TicketScope scope, ConversationAttributeDefinition definition, CancellationToken cancellationToken = default)
@@ -427,13 +642,17 @@ public sealed class InMemoryConversationAttributeDefinitionStore : IConversation
         ArgumentNullException.ThrowIfNull(definition);
         lock (gate)
         {
-            if (definitions.TryGetValue((scope, definition.Key), out var existing))
+            definitionsByScope.TryGetValue(scope, out var bucket);
+            if (bucket is not null && bucket.TryGetValue(definition.Key, out var existing))
                 return Result(new ConversationWriteConflict(existing.Revision));
-            if (definitions.Count >= MaximumEntries
-                || definitions.Keys.Count(key => key.Scope == scope) >= IConversationAttributeDefinitionStore.MaximumDefinitionsPerWorkspace)
+            if (totalCount >= MaximumEntries
+                || (bucket?.Count ?? 0) >= IConversationAttributeDefinitionStore.MaximumDefinitionsPerWorkspace)
                 return Result(new ConversationWriteRejected(ConversationWriteRejection.CapacityExceeded));
             var stored = new StoredConversationAttributeDefinition(scope, definition, 1);
-            definitions.Add((scope, definition.Key), stored);
+            if (bucket is null)
+                definitionsByScope[scope] = bucket = new Dictionary<string, StoredConversationAttributeDefinition>(StringComparer.Ordinal);
+            bucket.Add(definition.Key, stored);
+            totalCount++;
             return Result(new ConversationAttributeDefinitionApplied(stored));
         }
     }
@@ -445,14 +664,14 @@ public sealed class InMemoryConversationAttributeDefinitionStore : IConversation
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         lock (gate)
         {
-            if (!definitions.TryGetValue((scope, definition.Key), out var existing))
+            if (!definitionsByScope.TryGetValue(scope, out var bucket) || !bucket.TryGetValue(definition.Key, out var existing))
                 return Result(ConversationWriteNotFound.Instance);
             if (existing.Revision != expectedRevision)
                 return Result(new ConversationWriteConflict(existing.Revision));
             if (existing.Definition.Type != definition.Type)
                 return Result(new ConversationWriteRejected(ConversationWriteRejection.TypeChanged));
             var stored = new StoredConversationAttributeDefinition(scope, definition, checked(existing.Revision + 1));
-            definitions[(scope, definition.Key)] = stored;
+            bucket[definition.Key] = stored;
             return Result(new ConversationAttributeDefinitionApplied(stored));
         }
     }
@@ -464,11 +683,14 @@ public sealed class InMemoryConversationAttributeDefinitionStore : IConversation
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         lock (gate)
         {
-            if (!definitions.TryGetValue((scope, key), out var existing))
+            if (!definitionsByScope.TryGetValue(scope, out var bucket) || !bucket.TryGetValue(key, out var existing))
                 return Result(ConversationWriteNotFound.Instance);
             if (existing.Revision != expectedRevision)
                 return Result(new ConversationWriteConflict(existing.Revision));
-            definitions.Remove((scope, key));
+            bucket.Remove(key);
+            totalCount--;
+            if (bucket.Count == 0)
+                definitionsByScope.Remove(scope);
             return Result(new ConversationAttributeDefinitionApplied(existing));
         }
     }

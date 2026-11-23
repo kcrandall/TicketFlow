@@ -69,10 +69,11 @@ public sealed class SurveyDispatcher : ISurveyDispatcher
             }
 
             var token = SurveyToken.Derive(options.TokenKey, scope, invitation.Id);
-            if (invitation.TokenHash != token.Hash())
+            var tokenHash = token.Hash();
+            if (invitation.TokenHash != tokenHash)
             {
                 // First issue (or a changed TokenKey, which cannot reproduce the earlier link).
-                var issued = invitation.Issue(token.Hash(), now, survey.Policy.InvitationLifetime);
+                var issued = invitation.Issue(tokenHash, now, survey.Policy.InvitationLifetime);
                 if (await WriteAsync(scope, issued, revision).ConfigureAwait(false) is not { } applied)
                     continue;
                 (invitation, revision) = (issued, applied.Revision);

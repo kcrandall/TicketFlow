@@ -125,7 +125,7 @@ public sealed class PostgresEventStoreTests
     public async Task SchemaUsesBoundedKeysAndVersionedRows()
     {
         await using var database = await Database.CreateAsync();
-        Assert.AreEqual(2L, await database.ScalarAsync("SELECT count(*) FROM tf_store_migrations WHERE component = 'ticketflow.events'"));
+        Assert.AreEqual(3L, await database.ScalarAsync("SELECT count(*) FROM tf_store_migrations WHERE component = 'ticketflow.events'"));
         Assert.AreEqual("brin", await database.ScalarAsync(
             "SELECT am.amname FROM pg_class c JOIN pg_am am ON am.oid = c.relam WHERE c.relname = 'tf_events_recorded_brin' AND c.relnamespace = current_schema()::regnamespace"));
         StringAssert.Contains((string)(await database.ScalarAsync(

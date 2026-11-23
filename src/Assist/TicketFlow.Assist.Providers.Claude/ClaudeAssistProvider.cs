@@ -163,6 +163,7 @@ public sealed class ClaudeAssistProvider : IAssistChatProvider, IDisposable
 /// </summary>
 internal sealed class ClaudeChatClient(ClaudeAssistProvider provider, string model) : IChatClient
 {
+    private readonly Lock innerGate = new();
     private IChatClient? inner;
 
     public async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
@@ -228,15 +229,22 @@ internal sealed class ClaudeChatClient(ClaudeAssistProvider provider, string mod
 
     private IChatClient Inner()
     {
-        if (inner is not null)
-            return inner;
-        try
+        if (Volatile.Read(ref inner) is { } existing)
+            return existing;
+        lock (innerGate)
         {
-            return inner = provider.Client().AsIChatClient(model);
-        }
-        catch (Exception error) when (error is not AssistProviderException)
-        {
-            throw ClaudeAssistProvider.Map(error);
+            if (inner is not null)
+                return inner;
+            try
+            {
+                var created = provider.Client().AsIChatClient(model);
+                Volatile.Write(ref inner, created);
+                return created;
+            }
+            catch (Exception error) when (error is not AssistProviderException)
+            {
+                throw ClaudeAssistProvider.Map(error);
+            }
         }
     }
 }

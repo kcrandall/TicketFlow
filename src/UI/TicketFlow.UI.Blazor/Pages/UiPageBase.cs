@@ -12,6 +12,8 @@ namespace TicketFlow.UI.Blazor.Pages;
 public abstract class UiPageBase : ComponentBase
 {
     private readonly Dictionary<ContactId, string> contactNames = [];
+    private Dictionary<InboxId, StoredInbox>? inboxById;
+    private Dictionary<TeamId, TeamSummary>? teamById;
 
     [CascadingParameter] public TicketFlowUISession Session { get; set; } = default!;
 
@@ -35,17 +37,55 @@ public abstract class UiPageBase : ComponentBase
 
     protected async Task LoadWorkspaceAsync()
     {
-        if (Service<IInboxService>() is { } inboxes && await inboxes.ListAsync(Actor, new WorkspacePageRequest(100), Aborted) is WorkspaceSucceeded<WorkspacePage<StoredInbox>> inboxPage)
-            Inboxes = inboxPage.Value.Items;
-        if (Service<ITeamService>() is { } teams && await teams.ListAsync(Actor, new WorkspacePageRequest(100), Aborted) is WorkspaceSucceeded<WorkspacePage<TeamSummary>> teamPage)
-            Teams = teamPage.Value.Items;
+        var inboxService = Service<IInboxService>();
+        var teamService = Service<ITeamService>();
+        var inboxTask = inboxService?.ListAsync(Actor, new WorkspacePageRequest(100), Aborted);
+        var teamTask = teamService?.ListAsync(Actor, new WorkspacePageRequest(100), Aborted);
+        if (inboxTask is not null && teamTask is not null)
+            await Task.WhenAll(inboxTask, teamTask);
+        if (inboxTask is not null && await inboxTask is WorkspaceSucceeded<WorkspacePage<StoredInbox>> inboxPage)
+            SetInboxes(inboxPage.Value.Items);
+        if (teamTask is not null && await teamTask is WorkspaceSucceeded<WorkspacePage<TeamSummary>> teamPage)
+            SetTeams(teamPage.Value.Items);
     }
 
-    protected string InboxName(InboxId inbox) => Inboxes.FirstOrDefault(item => item.Inbox.Id == inbox)?.Inbox.Name ?? inbox.Value;
+    protected async Task LoadInboxesAsync()
+    {
+        if (Service<IInboxService>() is { } inboxes && await inboxes.ListAsync(Actor, new WorkspacePageRequest(100), Aborted) is WorkspaceSucceeded<WorkspacePage<StoredInbox>> inboxPage)
+            SetInboxes(inboxPage.Value.Items);
+    }
 
-    protected string InboxChannel(InboxId inbox) => Inboxes.FirstOrDefault(item => item.Inbox.Id == inbox)?.Inbox.Channel.Kind.Value ?? "api";
+    protected async Task LoadTeamsAsync()
+    {
+        if (Service<ITeamService>() is { } teams && await teams.ListAsync(Actor, new WorkspacePageRequest(100), Aborted) is WorkspaceSucceeded<WorkspacePage<TeamSummary>> teamPage)
+            SetTeams(teamPage.Value.Items);
+    }
 
-    protected string TeamName(TeamId? team) => team is not { } id ? "No team" : Teams.FirstOrDefault(item => item.Id == id)?.Name ?? id.Value;
+    private void SetInboxes(IReadOnlyList<StoredInbox> items)
+    {
+        Inboxes = items;
+        var map = new Dictionary<InboxId, StoredInbox>(items.Count);
+        for (var i = 0; i < items.Count; i++)
+            map[items[i].Inbox.Id] = items[i];
+        inboxById = map;
+    }
+
+    private void SetTeams(IReadOnlyList<TeamSummary> items)
+    {
+        Teams = items;
+        var map = new Dictionary<TeamId, TeamSummary>(items.Count);
+        for (var i = 0; i < items.Count; i++)
+            map[items[i].Id] = items[i];
+        teamById = map;
+    }
+
+    protected string InboxName(InboxId inbox) => inboxById is not null && inboxById.TryGetValue(inbox, out var found) ? found.Inbox.Name : inbox.Value;
+
+    protected string InboxChannel(InboxId inbox) => inboxById is not null && inboxById.TryGetValue(inbox, out var found) ? found.Inbox.Channel.Kind.Value : "api";
+
+    protected string TeamName(TeamId? team) => team is not { } id ? "No team" : teamById is not null && teamById.TryGetValue(id, out var found) ? found.Name : id.Value;
+
+    protected void SeedContact(ContactView view) => contactNames[view.Id] = UiText.ContactName(view);
 
     /// <summary>
     /// The open backlog from reporting (current open conversations matching <paramref name="filter"/>), or <see langword="null"/> when

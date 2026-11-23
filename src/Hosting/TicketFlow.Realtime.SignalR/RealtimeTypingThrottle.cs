@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.Options;
 
 namespace TicketFlow.Realtime.SignalR;
@@ -10,7 +11,7 @@ namespace TicketFlow.Realtime.SignalR;
 /// </summary>
 public sealed class RealtimeTypingThrottle(IOptions<TicketFlowSignalROptions> options, TimeProvider time)
 {
-    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, (bool Typing, DateTimeOffset At)>> connections = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Dictionary<string, (bool Typing, DateTimeOffset At)>> connections = new(StringComparer.Ordinal);
     private readonly TimeSpan interval = (options ?? throw new ArgumentNullException(nameof(options))).Value.TypingThrottleInterval;
     private readonly TimeProvider time = time ?? throw new ArgumentNullException(nameof(time));
 
@@ -23,15 +24,17 @@ public sealed class RealtimeTypingThrottle(IOptions<TicketFlowSignalROptions> op
     {
         ArgumentNullException.ThrowIfNull(connectionId);
         ArgumentNullException.ThrowIfNull(conversation);
-        var perConnection = connections.GetOrAdd(connectionId, _ => new ConcurrentDictionary<string, (bool, DateTimeOffset)>(StringComparer.Ordinal));
+        var perConnection = connections.GetOrAdd(connectionId, static _ => new Dictionary<string, (bool, DateTimeOffset)>(StringComparer.Ordinal));
         var now = time.GetUtcNow();
+        var minInterval = Interval;
         lock (perConnection)
         {
-            if (perConnection.TryGetValue(conversation, out var last) && now - last.At < Interval && !(last.Typing && !typing))
-                return false;
             if (perConnection.Count >= 256 && !perConnection.ContainsKey(conversation))
                 return false;
-            perConnection[conversation] = (typing, now);
+            ref var entry = ref CollectionsMarshal.GetValueRefOrAddDefault(perConnection, conversation, out var exists);
+            if (exists && now - entry.At < minInterval && !(entry.Typing && !typing))
+                return false;
+            entry = (typing, now);
             return true;
         }
     }

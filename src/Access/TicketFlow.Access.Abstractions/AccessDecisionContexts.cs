@@ -42,10 +42,10 @@ public sealed class PointAccessDecisionContext : IAccessDecisionContext
     public TicketScope Scope { get; }
     public IReadOnlySet<Permission> Permissions { get; }
 
-    public async ValueTask<AccessDecision> DecideAsync(Permission permission, AccessResource resource, CancellationToken cancellationToken = default)
+    public ValueTask<AccessDecision> DecideAsync(Permission permission, AccessResource resource, CancellationToken cancellationToken = default)
     {
         AccessDecisionContexts.RequireLoaded(Permissions, permission);
-        return await evaluator.AuthorizeAsync(new AccessRequest(Principal, permission, resource), cancellationToken).ConfigureAwait(false);
+        return new ValueTask<AccessDecision>(evaluator.AuthorizeAsync(new AccessRequest(Principal, permission, resource), cancellationToken));
     }
 }
 

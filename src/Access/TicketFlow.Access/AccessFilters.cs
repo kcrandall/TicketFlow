@@ -47,7 +47,7 @@ public static class AccessFilters
             else
                 operands.Add(item);
         }
-        operands = Coalesce(operands, filter => filter, filter => filter);
+        operands = Coalesce(operands, negated: false);
         return operands.Count switch
         {
             0 => DenyAllFilter.Instance,
@@ -69,36 +69,56 @@ public static class AccessFilters
     }
 
     private static List<AccessFilter> CoalesceNegated(List<AccessFilter> operands) =>
-        Coalesce(operands, filter => filter is NotFilter not ? not.Operand : null, filter => new NotFilter(filter));
+        operands.Count <= 1 ? operands : Coalesce(operands, negated: true);
 
     /// <summary>Merges every operand whose (unwrapped) form is a team or inbox membership into one membership per kind, in first-seen position.</summary>
-    private static List<AccessFilter> Coalesce(List<AccessFilter> operands, Func<AccessFilter, AccessFilter?> unwrap, Func<AccessFilter, AccessFilter> wrap)
+    private static List<AccessFilter> Coalesce(List<AccessFilter> operands, bool negated)
     {
+        if (operands.Count <= 1)
+            return operands;
+        TeamInFilter? firstTeam = null;
+        InboxInFilter? firstInbox = null;
         HashSet<TicketFlow.Core.TeamId>? teams = null;
         HashSet<TicketFlow.Core.InboxId>? inboxes = null;
         int teamIndex = -1, inboxIndex = -1;
         var result = new List<AccessFilter>(operands.Count);
-        foreach (var operand in operands)
+        for (var i = 0; i < operands.Count; i++)
         {
-            switch (unwrap(operand))
+            var operand = operands[i];
+            var inner = negated ? (operand is NotFilter not ? not.Operand : null) : operand;
+            switch (inner)
             {
                 case TeamInFilter team:
-                    if (teams is null)
+                    if (firstTeam is null)
                     {
-                        teams = [];
+                        firstTeam = team;
                         teamIndex = result.Count;
                         result.Add(operand);
                     }
-                    teams.UnionWith(team.Teams);
+                    else
+                    {
+                        if (teams is null)
+                        {
+                            teams = [.. firstTeam.Teams];
+                        }
+                        teams.UnionWith(team.Teams);
+                    }
                     break;
                 case InboxInFilter inbox:
-                    if (inboxes is null)
+                    if (firstInbox is null)
                     {
-                        inboxes = [];
+                        firstInbox = inbox;
                         inboxIndex = result.Count;
                         result.Add(operand);
                     }
-                    inboxes.UnionWith(inbox.Inboxes);
+                    else
+                    {
+                        if (inboxes is null)
+                        {
+                            inboxes = [.. firstInbox.Inboxes];
+                        }
+                        inboxes.UnionWith(inbox.Inboxes);
+                    }
                     break;
                 default:
                     result.Add(operand);
@@ -106,9 +126,15 @@ public static class AccessFilters
             }
         }
         if (teams is not null)
-            result[teamIndex] = wrap(new TeamInFilter(teams));
+        {
+            AccessFilter merged = new TeamInFilter(teams);
+            result[teamIndex] = negated ? new NotFilter(merged) : merged;
+        }
         if (inboxes is not null)
-            result[inboxIndex] = wrap(new InboxInFilter(inboxes));
+        {
+            AccessFilter merged = new InboxInFilter(inboxes);
+            result[inboxIndex] = negated ? new NotFilter(merged) : merged;
+        }
         return result;
     }
 }

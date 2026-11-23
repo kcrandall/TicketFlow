@@ -70,5 +70,12 @@ public static class PostgresWorkspaceMigrations
         ALTER TABLE tf_workspace_inboxes ADD COLUMN binding_key bytea GENERATED ALWAYS AS
             (tf_key_v1(tenant_id, project_id, environment_id, app_id, workspace_id, channel_kind, channel_config_id)) STORED NOT NULL;
         CREATE UNIQUE INDEX tf_workspace_inboxes_channel_binding ON tf_workspace_inboxes (binding_key);
+        """),
+        new(3, "perf-composite-indexes", """
+        CREATE INDEX tf_workspace_inboxes_scope_id ON tf_workspace_inboxes (scope_key, inbox_id COLLATE "C");
+        CREATE INDEX tf_workspace_teams_scope_id ON tf_workspace_teams (scope_key, team_id COLLATE "C");
+        CREATE INDEX tf_workspace_team_members_team_user ON tf_workspace_team_members (team_key, user_id COLLATE "C");
+        CREATE INDEX tf_workspace_team_members_user_team ON tf_workspace_team_members (user_key, team_id COLLATE "C");
+        CREATE INDEX tf_workspace_calendars_scope_id ON tf_workspace_calendars (scope_key, calendar_id COLLATE "C");
         """)]);
 }

@@ -1,3 +1,4 @@
+using System.Data;
 using Npgsql;
 using NpgsqlTypes;
 using TicketFlow.Core;
@@ -13,6 +14,7 @@ public sealed class PostgresMailboxCheckpointStore(NpgsqlDataSource dataSource) 
 {
     private const string ScopeWhere = "tenant_id=@tenant AND project_id=@project AND environment_id=@environment AND app_id=@app AND workspace_id=@workspace";
     private const string ScopeArgs = "@tenant,@project,@environment,@app,@workspace";
+    private static readonly HashSet<string> EmptySeen = new(StringComparer.Ordinal);
 
     private readonly NpgsqlDataSource source = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
 
@@ -32,7 +34,7 @@ public sealed class PostgresMailboxCheckpointStore(NpgsqlDataSource dataSource) 
         AddScope(command, scope);
         AddText(command, "config", configurationId);
         AddText(command, "folder", folder);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             return null;
         if (reader.GetInt16(3) != 1)
@@ -57,9 +59,9 @@ public sealed class PostgresMailboxCheckpointStore(NpgsqlDataSource dataSource) 
         AddScope(command, scope);
         AddText(command, "config", configurationId);
         AddText(command, "folder", folder);
-        command.Parameters.AddWithValue("uid_validity", (long)checkpoint.UidValidity);
-        command.Parameters.AddWithValue("last_uid", (long)checkpoint.LastUid);
-        command.Parameters.Add(new NpgsqlParameter("updated_at", NpgsqlDbType.TimestampTz) { Value = checkpoint.UpdatedAt.ToUniversalTime() });
+        AddInt64(command, "uid_validity", checkpoint.UidValidity);
+        AddInt64(command, "last_uid", checkpoint.LastUid);
+        AddInstant(command, "updated_at", checkpoint.UpdatedAt.ToUniversalTime());
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -78,7 +80,7 @@ public sealed class PostgresMailboxCheckpointStore(NpgsqlDataSource dataSource) 
         AddText(command, "config", configurationId);
         AddText(command, "folder", folder);
         AddText(command, "message_id", messageId);
-        command.Parameters.Add(new NpgsqlParameter("seen_at", NpgsqlDbType.TimestampTz) { Value = seenAt.ToUniversalTime() });
+        AddInstant(command, "seen_at", seenAt.ToUniversalTime());
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
     }
 
@@ -100,15 +102,77 @@ public sealed class PostgresMailboxCheckpointStore(NpgsqlDataSource dataSource) 
         return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
     }
 
+    public async Task<IReadOnlySet<string>> FindSeenMessageIdsAsync(TicketScope scope, string configurationId, string folder, IReadOnlyList<string> messageIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(configurationId);
+        ArgumentNullException.ThrowIfNull(folder);
+        ArgumentNullException.ThrowIfNull(messageIds);
+        if (messageIds.Count == 0)
+            return EmptySeen;
+        var ids = messageIds as string[] ?? [.. messageIds];
+        await using var command = source.CreateCommand($"""
+            SELECT s.message_id
+            FROM unnest(@ids) AS k(id)
+            JOIN tf_mailbox_seen_messages s
+              ON s.seen_key = tf_key_v1({ScopeArgs}, @config, @folder, k.id)
+             AND s.message_id = k.id
+             AND s.tenant_id=@tenant AND s.project_id=@project AND s.environment_id=@environment AND s.app_id=@app AND s.workspace_id=@workspace
+             AND s.configuration_id=@config AND s.folder=@folder
+            """);
+        AddScope(command, scope);
+        AddText(command, "config", configurationId);
+        AddText(command, "folder", folder);
+        command.Parameters.Add(new NpgsqlParameter<string[]>("ids", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = ids });
+        var found = new HashSet<string>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            found.Add(reader.GetString(0));
+        return found;
+    }
+
+    public async Task RecordAndSaveCheckpointAsync(TicketScope scope, string configurationId, string folder, string messageId, MailboxCheckpoint checkpoint,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(configurationId);
+        ArgumentNullException.ThrowIfNull(folder);
+        ArgumentNullException.ThrowIfNull(messageId);
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        var updatedAt = checkpoint.UpdatedAt.ToUniversalTime();
+        await using var command = source.CreateCommand("""
+            WITH seen AS (
+                INSERT INTO tf_mailbox_seen_messages(tenant_id, project_id, environment_id, app_id, workspace_id, configuration_id, folder, message_id, seen_at)
+                VALUES(@tenant, @project, @environment, @app, @workspace, @config, @folder, @message_id, @updated_at)
+                ON CONFLICT (seen_key) DO NOTHING
+            )
+            INSERT INTO tf_mailbox_checkpoints(tenant_id, project_id, environment_id, app_id, workspace_id, configuration_id, folder, format_version, uid_validity, last_uid, updated_at)
+            VALUES(@tenant, @project, @environment, @app, @workspace, @config, @folder, 1, @uid_validity, @last_uid, @updated_at)
+            ON CONFLICT (mailbox_key) DO UPDATE SET
+                uid_validity = EXCLUDED.uid_validity,
+                last_uid = EXCLUDED.last_uid,
+                updated_at = EXCLUDED.updated_at
+            """);
+        AddScope(command, scope);
+        AddText(command, "config", configurationId);
+        AddText(command, "folder", folder);
+        AddText(command, "message_id", messageId);
+        AddInt64(command, "uid_validity", checkpoint.UidValidity);
+        AddInt64(command, "last_uid", checkpoint.LastUid);
+        AddInstant(command, "updated_at", updatedAt);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<int> PruneSeenMessageIdsAsync(DateTimeOffset olderThan, int limit, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         await using var command = source.CreateCommand("""
             DELETE FROM tf_mailbox_seen_messages WHERE seen_key IN (
-                SELECT seen_key FROM tf_mailbox_seen_messages WHERE seen_at < @before ORDER BY seen_at LIMIT @limit)
+                SELECT seen_key FROM tf_mailbox_seen_messages WHERE seen_at < @before ORDER BY seen_at LIMIT @limit FOR UPDATE SKIP LOCKED)
             """);
-        command.Parameters.Add(new NpgsqlParameter("before", NpgsqlDbType.TimestampTz) { Value = olderThan.ToUniversalTime() });
-        command.Parameters.AddWithValue("limit", limit);
+        AddInstant(command, "before", olderThan.ToUniversalTime());
+        AddInt32(command, "limit", limit);
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -122,5 +186,14 @@ public sealed class PostgresMailboxCheckpointStore(NpgsqlDataSource dataSource) 
     }
 
     private static void AddText(NpgsqlCommand command, string name, string value) =>
-        command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = value });
+        command.Parameters.Add(new NpgsqlParameter<string>(name, NpgsqlDbType.Text) { TypedValue = value });
+
+    private static void AddInt32(NpgsqlCommand command, string name, int value) =>
+        command.Parameters.Add(new NpgsqlParameter<int>(name, NpgsqlDbType.Integer) { TypedValue = value });
+
+    private static void AddInt64(NpgsqlCommand command, string name, long value) =>
+        command.Parameters.Add(new NpgsqlParameter<long>(name, NpgsqlDbType.Bigint) { TypedValue = value });
+
+    private static void AddInstant(NpgsqlCommand command, string name, DateTimeOffset value) =>
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset>(name, NpgsqlDbType.TimestampTz) { TypedValue = value });
 }

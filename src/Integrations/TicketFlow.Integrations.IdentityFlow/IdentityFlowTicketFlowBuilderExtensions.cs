@@ -24,8 +24,10 @@ public static class IdentityFlowTicketFlowBuilderExtensions
             services.Configure(configure);
         foreach (var descriptor in services.Where(item => item.ServiceType == typeof(ITicketFlowPrincipalResolver) && item.ImplementationType == typeof(OptionsTicketFlowPrincipalResolver)).ToList())
             services.Remove(descriptor);
-        services.TryAddScoped(provider => ActivatorUtilities.CreateInstance<IdentityFlowPrincipalResolver>(provider,
-            provider.GetRequiredService<ITeamMembershipResolver>()));
+        services.TryAddScoped(provider => new IdentityFlowPrincipalResolver(
+            provider.GetRequiredService<ITeamMembershipResolver>(),
+            provider.GetRequiredService<Microsoft.Extensions.Options.IOptions<IdentityFlowPrincipalOptions>>(),
+            provider.GetService<IStaffIdentityResolver>()));
         services.TryAddScoped<ITicketFlowPrincipalResolver>(provider => provider.GetRequiredService<IdentityFlowPrincipalResolver>());
         return builder;
     }

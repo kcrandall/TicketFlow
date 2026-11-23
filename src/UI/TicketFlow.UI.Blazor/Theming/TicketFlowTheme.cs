@@ -82,13 +82,21 @@ public sealed class TicketFlowTheme
                 throw new InvalidOperationException($"Theme '{Id}' has an invalid token '{key}'.");
     }
 
+    private string? cachedCss;
+    private int cachedLightCount = -1;
+    private int cachedDarkCount = -1;
+
     /// <summary>The CSS rules for <see cref="Light"/>/<see cref="Dark"/> overrides (validated: no braces, semicolons or markup).</summary>
     internal string ToCss()
     {
+        if (cachedCss is not null && cachedLightCount == Light.Count && cachedDarkCount == Dark.Count)
+            return cachedCss;
         var css = new StringBuilder();
         Append(css, $":is(html, .tf-scope):not(.dark)[data-tf-theme=\"{Id}\"]", Light);
         Append(css, $".dark:is(html, .tf-scope)[data-tf-theme=\"{Id}\"]", Dark);
-        return css.ToString();
+        cachedLightCount = Light.Count;
+        cachedDarkCount = Dark.Count;
+        return cachedCss = css.ToString();
     }
 
     private static void Append(StringBuilder css, string selector, IDictionary<string, string> tokens)

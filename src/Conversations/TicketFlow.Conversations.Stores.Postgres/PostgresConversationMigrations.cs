@@ -123,5 +123,10 @@ public static class PostgresConversationMigrations
         CREATE INDEX tf_conversations_assignee_status ON tf_conversations (scope_key, assignee_id, status, {Activity});
         CREATE INDEX tf_conversations_team_status ON tf_conversations (scope_key, team_id, status, {Activity});
         CREATE INDEX tf_conversation_outbox_deliveries_available ON tf_conversation_outbox_deliveries (consumer, available_at, sequence) WHERE state = 0;
+        """),
+        new(3, "perf-partial-indexes", """
+        CREATE INDEX tf_conversations_thread_open ON tf_conversations (thread_key, created_at DESC, conversation_id DESC) WHERE thread_key IS NOT NULL AND status <> 5;
+        CREATE INDEX tf_conversation_outbox_deliveries_seq_pending ON tf_conversation_outbox_deliveries (sequence) WHERE state = 0;
+        CREATE INDEX tf_conversation_attribute_definitions_scope_key ON tf_conversation_attribute_definitions (scope_key, attribute_key);
         """)]);
 }

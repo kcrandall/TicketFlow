@@ -53,8 +53,35 @@ public sealed class PostgresRealtimeBackplane : IRealtimeBackplane, IAsyncDispos
             return;
         }
         await using var command = source.CreateCommand("SELECT pg_notify(@channel, @payload)");
-        command.Parameters.AddWithValue("channel", options.PostgresNotifyChannel);
-        command.Parameters.AddWithValue("payload", envelopeJson);
+        command.Parameters.Add(new NpgsqlParameter<string>("channel", NpgsqlTypes.NpgsqlDbType.Text) { TypedValue = options.PostgresNotifyChannel });
+        command.Parameters.Add(new NpgsqlParameter<string>("payload", NpgsqlTypes.NpgsqlDbType.Text) { TypedValue = envelopeJson });
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task PublishBatchAsync(IReadOnlyList<string> envelopes, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(envelopes);
+        if (envelopes.Count == 0)
+            return;
+        if (envelopes.Count == 1)
+        {
+            await PublishAsync(envelopes[0], cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        var valid = new List<string>(envelopes.Count);
+        for (var i = 0; i < envelopes.Count; i++)
+        {
+            var json = envelopes[i] ?? throw new ArgumentNullException(nameof(envelopes));
+            if (Encoding.UTF8.GetByteCount(json) > PostgresNotifyLimitBytes)
+                logger?.LogWarning("Skipped PostgreSQL NOTIFY broadcast exceeding {Limit} bytes.", PostgresNotifyLimitBytes);
+            else
+                valid.Add(json);
+        }
+        if (valid.Count == 0)
+            return;
+        await using var command = source.CreateCommand("SELECT pg_notify(@channel, p) FROM unnest(@payloads) AS p");
+        command.Parameters.Add(new NpgsqlParameter<string>("channel", NpgsqlTypes.NpgsqlDbType.Text) { TypedValue = options.PostgresNotifyChannel });
+        command.Parameters.Add(new NpgsqlParameter<string[]>("payloads", NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text) { TypedValue = [.. valid] });
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -75,6 +102,7 @@ public sealed class PostgresRealtimeBackplane : IRealtimeBackplane, IAsyncDispos
                 var queue = System.Threading.Channels.Channel.CreateBounded<string>(new System.Threading.Channels.BoundedChannelOptions(1024)
                 {
                     SingleReader = true,
+                    SingleWriter = true,
                     FullMode = System.Threading.Channels.BoundedChannelFullMode.DropOldest,
                 });
                 connection.Notification += (_, args) => queue.Writer.TryWrite(args.Payload);

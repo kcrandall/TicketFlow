@@ -52,17 +52,17 @@ public sealed class TeamService : ITeamService
         ArgumentNullException.ThrowIfNull(team);
         var refused = await AuthorizeAsync(evaluator, actor, WorkspacePermissions.TeamManage, WorkspaceResources.Workspace(actor.Scope), cancellationToken).ConfigureAwait(false);
         // Grants may already name the team identifier, so initial members are checked like later additions.
-        refused ??= await policy.CheckAdditionsAsync(actor, team.Id, [.. team.Members], cancellationToken).ConfigureAwait(false);
+        refused ??= await policy.CheckAdditionsAsync(actor, team.Id, team.Members, cancellationToken).ConfigureAwait(false);
         if (refused is not null)
             return refused;
         return Map(await teams.CreateAsync(actor.Scope, team, cancellationToken).ConfigureAwait(false));
     }
 
-    public async Task<WorkspaceResult<StoredTeam>> UpdateAsync(PrincipalRef actor, Team team, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<WorkspaceResult<StoredTeam>> UpdateAsync(PrincipalRef actor, Team team, long expectedRevision, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(team);
-        return await ReplaceAsync(actor, team.Id, expectedRevision, _ => team, cancellationToken).ConfigureAwait(false);
+        return ReplaceAsync(actor, team.Id, expectedRevision, _ => team, knownAdded: null, knownRemoved: null, cancellationToken);
     }
 
     /// <summary>
@@ -95,7 +95,8 @@ public sealed class TeamService : ITeamService
         RequireActor(actor);
         RequireId(team);
         RequireMember(member);
-        return ReplaceAsync(actor, team, expectedRevision, current => current.Members.Contains(member) ? null : current.WithMembers(current.Members.Append(member)), cancellationToken);
+        return ReplaceAsync(actor, team, expectedRevision, current => current.Members.Contains(member) ? null : current.WithMembers(current.Members.Append(member)),
+            knownAdded: [member], knownRemoved: [], cancellationToken);
     }
 
     public Task<WorkspaceResult<StoredTeam>> RemoveMemberAsync(PrincipalRef actor, TeamId team, UserId member, long expectedRevision, CancellationToken cancellationToken = default)
@@ -103,14 +104,16 @@ public sealed class TeamService : ITeamService
         RequireActor(actor);
         RequireId(team);
         RequireMember(member);
-        return ReplaceAsync(actor, team, expectedRevision, current => current.Members.Contains(member) ? current.WithMembers(current.Members.Where(user => user != member)) : null, cancellationToken);
+        return ReplaceAsync(actor, team, expectedRevision, current => current.Members.Contains(member) ? current.WithMembers(current.Members.Where(user => user != member)) : null,
+            knownAdded: [], knownRemoved: [member], cancellationToken);
     }
 
     /// <summary>
     /// Authorizes <c>team:manage</c> on the team, fences on the loaded revision, checks added and removed members with
     /// <see cref="TeamGrantPolicy"/> and writes with compare-and-set. A <see langword="null"/> replacement is a no-op that returns the current state unchanged.
     /// </summary>
-    private async Task<WorkspaceResult<StoredTeam>> ReplaceAsync(PrincipalRef actor, TeamId id, long expectedRevision, Func<Team, Team?> replace, CancellationToken cancellationToken)
+    private async Task<WorkspaceResult<StoredTeam>> ReplaceAsync(PrincipalRef actor, TeamId id, long expectedRevision, Func<Team, Team?> replace,
+        IReadOnlyCollection<UserId>? knownAdded, IReadOnlyCollection<UserId>? knownRemoved, CancellationToken cancellationToken)
     {
         var refused = await AuthorizeAsync(evaluator, actor, WorkspacePermissions.TeamManage, WorkspaceResources.Team(actor.Scope, id), cancellationToken).ConfigureAwait(false)
             ?? ValidateRevision(expectedRevision);
@@ -122,13 +125,20 @@ public sealed class TeamService : ITeamService
         var replacement = replace(current!.Team);
         if (replacement is null)
             return new WorkspaceSucceeded<StoredTeam>(current);
-        UserId[] added = [.. replacement.Members.Where(member => !current.Team.Members.Contains(member))];
-        UserId[] removed = [.. current.Team.Members.Where(member => !replacement.Members.Contains(member))];
-        if (await policy.CheckAdditionsAsync(actor, id, added, cancellationToken).ConfigureAwait(false) is { } escalation)
-            return escalation;
-        if (await policy.CheckRemovalsAsync(actor, id, removed, cancellationToken).ConfigureAwait(false) is { } lifted)
-            return lifted;
+        var added = knownAdded ?? ComputeDiff(replacement.Members, current.Team.Members);
+        var removed = knownRemoved ?? ComputeDiff(current.Team.Members, replacement.Members);
+        if (await policy.CheckMembershipChangeAsync(actor, id, added, removed, cancellationToken).ConfigureAwait(false) is { } denied)
+            return denied;
         return Map(await teams.UpdateAsync(actor.Scope, replacement, expectedRevision, cancellationToken).ConfigureAwait(false));
+    }
+
+    private static IReadOnlyCollection<UserId> ComputeDiff(IReadOnlySet<UserId> source, IReadOnlySet<UserId> exclude)
+    {
+        List<UserId>? diff = null;
+        foreach (var member in source)
+            if (!exclude.Contains(member))
+                (diff ??= []).Add(member);
+        return (IReadOnlyCollection<UserId>?)diff ?? [];
     }
 
     private static void RequireId(TeamId id)

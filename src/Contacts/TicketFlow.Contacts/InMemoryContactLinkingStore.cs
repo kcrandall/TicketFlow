@@ -13,7 +13,14 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
     private readonly Lock gate = new();
     private readonly IContactStore contacts;
     private readonly Dictionary<TicketScope, StoredContactLinkingPolicy> policies = [];
-    private readonly Dictionary<(TicketScope Scope, Guid Id), StoredContactLinkSuggestion> suggestions = [];
+    private readonly Dictionary<TicketScope, ScopeBucket> scopes = [];
+    private int totalSuggestions;
+
+    private sealed class ScopeBucket
+    {
+        public Dictionary<Guid, StoredContactLinkSuggestion> ById { get; } = [];
+        public Dictionary<(ContactId Candidate, ContactId Account), Guid> PendingByPair { get; } = [];
+    }
 
     public InMemoryContactLinkingStore(IContactStore contacts, int maximumSuggestions = 10_000, int maximumRowsExamined = ContactLinkSuggestionQuery.DefaultMaximumRowsExamined)
     {
@@ -65,7 +72,7 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
     {
         ArgumentNullException.ThrowIfNull(scope);
         lock (gate)
-            return Task.FromResult(suggestions.GetValueOrDefault((scope, id)));
+            return Task.FromResult(scopes.TryGetValue(scope, out var bucket) ? bucket.ById.GetValueOrDefault(id) : null);
     }
 
     public Task<ContactLinkingWriteResult<StoredContactLinkSuggestion>> CreateSuggestionAsync(TicketScope scope, ContactLinkSuggestion suggestion, CancellationToken cancellationToken = default)
@@ -76,19 +83,22 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
             throw new ArgumentException("New suggestions are pending.", nameof(suggestion));
         lock (gate)
         {
+            scopes.TryGetValue(scope, out var bucket);
+            var pair = (suggestion.Candidate, suggestion.Account);
             ContactLinkingWriteResult<StoredContactLinkSuggestion> result;
-            if (suggestions.Values.FirstOrDefault(stored => stored.Scope == scope && stored.Suggestion.Status == ContactLinkSuggestionStatus.Pending
-                && stored.Suggestion.Candidate == suggestion.Candidate && stored.Suggestion.Account == suggestion.Account) is { } pending)
-                result = new LinkingWriteApplied<StoredContactLinkSuggestion>(pending, false);
-            else if (suggestions.ContainsKey((scope, suggestion.Id)))
-                result = new LinkingWriteConflict(suggestions[(scope, suggestion.Id)].Revision);
-            else if (suggestions.Count >= MaximumSuggestions || suggestions.Values.Count(stored => stored.Scope == scope
-                && stored.Suggestion.Status == ContactLinkSuggestionStatus.Pending) >= IContactLinkingStore.MaximumPendingSuggestions)
+            if (bucket is not null && bucket.PendingByPair.TryGetValue(pair, out var pendingId))
+                result = new LinkingWriteApplied<StoredContactLinkSuggestion>(bucket.ById[pendingId], false);
+            else if (bucket is not null && bucket.ById.TryGetValue(suggestion.Id, out var duplicate))
+                result = new LinkingWriteConflict(duplicate.Revision);
+            else if (totalSuggestions >= MaximumSuggestions || (bucket?.PendingByPair.Count ?? 0) >= IContactLinkingStore.MaximumPendingSuggestions)
                 result = new ContactWriteRejected(ContactWriteRejection.CapacityExceeded);
             else
             {
+                bucket ??= scopes[scope] = new ScopeBucket();
                 var stored = new StoredContactLinkSuggestion(scope, suggestion, 1);
-                suggestions[(scope, suggestion.Id)] = stored;
+                bucket.ById[suggestion.Id] = stored;
+                bucket.PendingByPair[pair] = suggestion.Id;
+                totalSuggestions++;
                 result = new LinkingWriteApplied<StoredContactLinkSuggestion>(stored);
             }
             return Task.FromResult(result);
@@ -103,7 +113,7 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
         lock (gate)
         {
             ContactLinkingWriteResult<StoredContactLinkSuggestion> result;
-            if (!suggestions.TryGetValue((scope, suggestion.Id), out var existing))
+            if (!scopes.TryGetValue(scope, out var bucket) || !bucket.ById.TryGetValue(suggestion.Id, out var existing))
                 result = LinkingWriteNotFound.Instance;
             else if (existing.Revision != expectedRevision)
                 result = new LinkingWriteConflict(existing.Revision);
@@ -114,7 +124,9 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
             else
             {
                 var stored = new StoredContactLinkSuggestion(scope, suggestion, checked(existing.Revision + 1));
-                suggestions[(scope, suggestion.Id)] = stored;
+                bucket.ById[suggestion.Id] = stored;
+                if (existing.Suggestion.Status == ContactLinkSuggestionStatus.Pending && suggestion.Status != ContactLinkSuggestionStatus.Pending)
+                    bucket.PendingByPair.Remove((suggestion.Candidate, suggestion.Account));
                 result = new LinkingWriteApplied<StoredContactLinkSuggestion>(stored, false);
             }
             return Task.FromResult(result);
@@ -129,19 +141,39 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
         List<StoredContactLinkSuggestion> examined;
         lock (gate)
         {
-            examined = [.. suggestions.Values
-                .Where(stored => stored.Scope == scope && stored.Suggestion.Status == query.Status
-                    && (query.Contact is not { } contact || stored.Suggestion.Candidate == contact || stored.Suggestion.Account == contact)
-                    && (query.After is not { } after || string.CompareOrdinal(stored.Suggestion.Id.ToString("D"), after.ToString("D")) > 0))
-                .OrderBy(stored => stored.Suggestion.Id.ToString("D"), StringComparer.Ordinal)
-                .Take(MaximumRowsExamined)];
+            if (!scopes.TryGetValue(scope, out var bucket) || bucket.ById.Count == 0)
+                return new ContactLinkSuggestionStorePage([], null);
+            var afterText = query.After?.ToString("D");
+            examined = [];
+            foreach (var stored in bucket.ById.Values)
+            {
+                if (stored.Suggestion.Status != query.Status)
+                    continue;
+                if (query.Contact is { } contact && stored.Suggestion.Candidate != contact && stored.Suggestion.Account != contact)
+                    continue;
+                if (afterText is not null && string.CompareOrdinal(stored.Suggestion.Id.ToString("D"), afterText) <= 0)
+                    continue;
+                examined.Add(stored);
+            }
+            examined.Sort(static (a, b) => string.CompareOrdinal(a.Suggestion.Id.ToString("D"), b.Suggestion.Id.ToString("D")));
+            if (examined.Count > MaximumRowsExamined)
+                examined.RemoveRange(MaximumRowsExamined, examined.Count - MaximumRowsExamined);
         }
-        var page = new List<StoredContactLinkSuggestion>();
+        if (examined.Count == 0)
+            return new ContactLinkSuggestionStorePage([], null);
+        var ids = new HashSet<ContactId>(examined.Count * 2);
         foreach (var stored in examined)
         {
-            var candidate = await contacts.GetAsync(scope, stored.Suggestion.Candidate, cancellationToken).ConfigureAwait(false);
-            var account = await contacts.GetAsync(scope, stored.Suggestion.Account, cancellationToken).ConfigureAwait(false);
-            if (candidate is null || account is null || !AccessFilterEvaluator.Matches(filter, ContactAccess.Resource(candidate))
+            ids.Add(stored.Suggestion.Candidate);
+            ids.Add(stored.Suggestion.Account);
+        }
+        var loaded = await contacts.GetManyAsync(scope, ids, cancellationToken).ConfigureAwait(false);
+        var page = new List<StoredContactLinkSuggestion>(Math.Min(query.Limit, examined.Count));
+        foreach (var stored in examined)
+        {
+            if (!loaded.TryGetValue(stored.Suggestion.Candidate, out var candidate)
+                || !loaded.TryGetValue(stored.Suggestion.Account, out var account)
+                || !AccessFilterEvaluator.Matches(filter, ContactAccess.Resource(candidate))
                 || !AccessFilterEvaluator.Matches(filter, ContactAccess.Resource(account)))
                 continue;
             page.Add(stored);
@@ -158,11 +190,23 @@ public sealed class InMemoryContactLinkingStore : IContactLinkingStore
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IContactLinkingStore.MaximumPruneBatch);
         lock (gate)
         {
-            var expired = suggestions.Where(pair => pair.Value.Suggestion.Status != ContactLinkSuggestionStatus.Pending && pair.Value.Suggestion.UpdatedAt < decidedBefore)
-                .OrderBy(pair => pair.Value.Suggestion.UpdatedAt).Take(limit).Select(pair => pair.Key).ToList();
-            foreach (var key in expired)
-                suggestions.Remove(key);
-            return Task.FromResult(expired.Count);
+            var expired = new List<(ScopeBucket Bucket, Guid Id, DateTimeOffset UpdatedAt)>();
+            foreach (var bucket in scopes.Values)
+            {
+                foreach (var pair in bucket.ById)
+                    if (pair.Value.Suggestion.Status != ContactLinkSuggestionStatus.Pending && pair.Value.Suggestion.UpdatedAt < decidedBefore)
+                        expired.Add((bucket, pair.Key, pair.Value.Suggestion.UpdatedAt));
+            }
+            if (expired.Count == 0)
+                return Task.FromResult(0);
+            expired.Sort(static (a, b) => a.UpdatedAt.CompareTo(b.UpdatedAt));
+            var count = Math.Min(limit, expired.Count);
+            for (var i = 0; i < count; i++)
+            {
+                if (expired[i].Bucket.ById.Remove(expired[i].Id))
+                    totalSuggestions--;
+            }
+            return Task.FromResult(count);
         }
     }
 

@@ -87,15 +87,21 @@ public sealed class PostHogEventSink : Events.IEventSink, IDisposable
 {
     public const string SinkKind = "posthog";
 
+    private static readonly System.Net.Http.Headers.MediaTypeHeaderValue JsonContentType = new("application/json") { CharSet = "utf-8" };
+
     private readonly PostHogOptions options;
     private readonly HttpClient client;
+    private readonly Dictionary<string, (PostHogProject Project, Uri BatchUri)> projects;
 
     public PostHogEventSink(IOptions<PostHogOptions> options, HttpMessageHandler? handler = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         this.options = options.Value;
         this.options.Validate();
-        client = new HttpClient(handler ?? new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false }) { Timeout = this.options.Timeout };
+        projects = new Dictionary<string, (PostHogProject, Uri)>(this.options.Projects.Count, StringComparer.Ordinal);
+        foreach (var pair in this.options.Projects)
+            projects[pair.Key] = (pair.Value, new Uri(pair.Value.Host, "batch/"));
+        client = new HttpClient(handler ?? new SocketsHttpHandler { AllowAutoRedirect = false, UseCookies = false, PooledConnectionLifetime = TimeSpan.FromMinutes(5) }) { Timeout = this.options.Timeout };
     }
 
     public string Kind => SinkKind;
@@ -103,18 +109,18 @@ public sealed class PostHogEventSink : Events.IEventSink, IDisposable
     public int MaximumBatchSize => Events.EventSubscription.MaximumBatchSize;
 
     public bool IsValidTarget(Core.TicketScope scope, string target) =>
-        scope is not null && target is not null && options.Projects.TryGetValue(target, out var project) && EventScopeRule.Allows(project.AllowedScopes, scope);
+        scope is not null && target is not null && projects.TryGetValue(target, out var entry) && EventScopeRule.Allows(entry.Project.AllowedScopes, scope);
 
     public async Task<Events.EventSinkResult> DeliverAsync(Events.EventDelivery delivery, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(delivery);
-        if (!options.Projects.TryGetValue(delivery.Subscription.Subscription.Sink.Target, out var project) || !EventScopeRule.Allows(project.AllowedScopes, delivery.Scope))
+        if (!projects.TryGetValue(delivery.Subscription.Subscription.Sink.Target, out var entry) || !EventScopeRule.Allows(entry.Project.AllowedScopes, delivery.Scope))
             return new Events.EventSinkFailed("project-missing", permanent: true);
-        using var content = new ByteArrayContent(Body(project, delivery));
-        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
+        using var content = new ByteArrayContent(Body(entry.Project, delivery));
+        content.Headers.ContentType = JsonContentType;
         try
         {
-            using var response = await client.PostAsync(new Uri(project.Host, "batch/"), content, cancellationToken).ConfigureAwait(false);
+            using var response = await client.PostAsync(entry.BatchUri, content, cancellationToken).ConfigureAwait(false);
             var status = (int)response.StatusCode;
             if (status is >= 200 and < 300)
                 return Events.EventSinkDelivered.Instance;

@@ -25,6 +25,23 @@ internal sealed class ClaudeRetryHandler : DelegatingHandler
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        // Fast path when retries are disabled: avoid buffering the full request body and cloning the HttpRequestMessage.
+        if (options.MaxRetries == 0)
+        {
+            request.Headers.Remove("x-stainless-retry-count");
+            request.Headers.TryAddWithoutValidation("x-stainless-retry-count", "0");
+            using var attemptTimeout = new CancellationTokenSource(options.AttemptTimeout, time);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, attemptTimeout.Token);
+            try
+            {
+                return await base.SendAsync(request, linked.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException("The Claude request timed out.");
+            }
+        }
+
         var body = request.Content is null ? null : await request.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
         var contentHeaders = request.Content?.Headers.ToList();
         for (var attempt = 0; ; attempt++)

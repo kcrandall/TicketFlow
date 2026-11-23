@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -14,44 +15,93 @@ public static class BusinessCalendarCodec
     /// <summary>Maximum encoded length accepted by <see cref="DecodeSchedule"/>.</summary>
     public const int MaximumLength = 1_000_000;
 
+    private const int MaximumPooledBufferCapacity = 64 * 1024;
+
+    [ThreadStatic]
+    private static ArrayBufferWriter<byte>? cachedBuffer;
+
+    [ThreadStatic]
+    private static Utf8JsonWriter? cachedWriter;
+
     public static string EncodeSchedule(BusinessCalendar calendar)
     {
         ArgumentNullException.ThrowIfNull(calendar);
-        using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(stream))
+        var buffer = RentBuffer();
+        try
         {
+            WriteSchedule(buffer, calendar);
+            return Encoding.UTF8.GetString(buffer.WrittenSpan);
+        }
+        finally
+        {
+            ReleaseBuffer(buffer);
+        }
+    }
+
+    private static ArrayBufferWriter<byte> RentBuffer()
+    {
+        var buffer = cachedBuffer;
+        if (buffer is null)
+            cachedBuffer = buffer = new ArrayBufferWriter<byte>(512);
+        else
+            buffer.ResetWrittenCount();
+        return buffer;
+    }
+
+    private static void ReleaseBuffer(ArrayBufferWriter<byte> buffer)
+    {
+        if (buffer.Capacity > MaximumPooledBufferCapacity)
+            cachedBuffer = null;
+        else
+            buffer.ResetWrittenCount();
+    }
+
+    private static void WriteSchedule(ArrayBufferWriter<byte> buffer, BusinessCalendar calendar)
+    {
+        var writer = cachedWriter;
+        if (writer is null)
+            cachedWriter = writer = new Utf8JsonWriter(buffer);
+        else
+            writer.Reset(buffer);
+
+        writer.WriteStartObject();
+        writer.WriteNumber("v"u8, 1);
+        writer.WriteStartArray("week"u8);
+        var weekly = calendar.WeeklyHours;
+        for (var i = 0; i < weekly.Count; i++)
+        {
+            var entry = weekly[i];
             writer.WriteStartObject();
-            writer.WriteNumber("v", 1);
-            writer.WriteStartArray("week");
-            foreach (var entry in calendar.WeeklyHours)
+            writer.WriteNumber("d"u8, (int)entry.Day);
+            WriteSpan(writer, entry.Hours);
+            writer.WriteEndObject();
+        }
+        writer.WriteEndArray();
+        writer.WriteStartArray("overrides"u8);
+        var overrides = calendar.Overrides;
+        Span<char> dateChars = stackalloc char[10];
+        for (var i = 0; i < overrides.Count; i++)
+        {
+            var entry = overrides[i];
+            writer.WriteStartObject();
+            entry.Date.TryFormat(dateChars, out _, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+            writer.WriteString("date"u8, dateChars);
+            if (entry.Name is not null)
+                writer.WriteString("name"u8, entry.Name);
+            writer.WriteStartArray("hours"u8);
+            var hoursList = entry.Hours;
+            for (var h = 0; h < hoursList.Count; h++)
             {
                 writer.WriteStartObject();
-                writer.WriteNumber("d", (int)entry.Day);
-                WriteSpan(writer, entry.Hours);
-                writer.WriteEndObject();
-            }
-            writer.WriteEndArray();
-            writer.WriteStartArray("overrides");
-            foreach (var entry in calendar.Overrides)
-            {
-                writer.WriteStartObject();
-                writer.WriteString("date", entry.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
-                if (entry.Name is not null)
-                    writer.WriteString("name", entry.Name);
-                writer.WriteStartArray("hours");
-                foreach (var hours in entry.Hours)
-                {
-                    writer.WriteStartObject();
-                    WriteSpan(writer, hours);
-                    writer.WriteEndObject();
-                }
-                writer.WriteEndArray();
+                WriteSpan(writer, hoursList[h]);
                 writer.WriteEndObject();
             }
             writer.WriteEndArray();
             writer.WriteEndObject();
         }
-        return Encoding.UTF8.GetString(stream.ToArray());
+        writer.WriteEndArray();
+        writer.WriteEndObject();
+        writer.Flush();
     }
 
     /// <summary>Rebuilds a calendar from its identity columns and an encoded schedule.</summary>
@@ -63,33 +113,72 @@ public static class BusinessCalendarCodec
             throw new FormatException("The encoded schedule is too long.");
         try
         {
-            using var document = JsonDocument.Parse(schedule, new JsonDocumentOptions { MaxDepth = 8 });
-            var root = Object(document.RootElement, "v", "week", "overrides");
-            if (Required(root, "v").ValueKind != JsonValueKind.Number || Required(root, "v").GetInt32() != 1)
-                throw new FormatException("Unsupported schedule version.");
-            var week = new List<WeeklyBusinessHours>();
-            foreach (var item in Array(Required(root, "week"), 7 * BusinessCalendar.MaximumSpansPerDay))
+            var maxBytes = Encoding.UTF8.GetMaxByteCount(schedule.Length);
+            byte[]? rented = null;
+            Span<byte> inputBytes = maxBytes <= 1024
+                ? stackalloc byte[1024]
+                : (rented = ArrayPool<byte>.Shared.Rent(maxBytes));
+            try
             {
-                var entry = Object(item, "d", "s", "e");
-                var day = Required(entry, "d").GetInt32();
-                if (day is < 0 or > 6)
-                    throw new FormatException("Invalid weekday.");
-                week.Add(new((DayOfWeek)day, ReadSpan(entry)));
+                var inputLength = Encoding.UTF8.GetBytes(schedule, inputBytes);
+                var inputUtf8 = inputBytes[..inputLength];
+                var reader = new Utf8JsonReader(inputUtf8, new JsonReaderOptions { MaxDepth = 8 });
+                if (!JsonDocument.TryParseValue(ref reader, out var document))
+                    throw new FormatException("The encoded schedule is invalid.");
+                using (document)
+                {
+                    var root = Object(document.RootElement, "v", "week", "overrides");
+                    var version = Required(root, "v"u8);
+                    if (version.ValueKind != JsonValueKind.Number || version.GetInt32() != 1)
+                        throw new FormatException("Unsupported schedule version.");
+                    var weekElement = Required(root, "week"u8);
+                    var weekEnum = Array(weekElement, 7 * BusinessCalendar.MaximumSpansPerDay);
+                    var week = new List<WeeklyBusinessHours>(weekElement.GetArrayLength());
+                    foreach (var item in weekEnum)
+                    {
+                        var entry = Object(item, "d", "s", "e");
+                        var day = Required(entry, "d"u8).GetInt32();
+                        if (day is < 0 or > 6)
+                            throw new FormatException("Invalid weekday.");
+                        week.Add(new((DayOfWeek)day, ReadSpan(entry)));
+                    }
+                    var overridesElement = Required(root, "overrides"u8);
+                    var overridesEnum = Array(overridesElement, BusinessCalendar.MaximumOverrides);
+                    var overrides = new List<CalendarDateOverride>(overridesElement.GetArrayLength());
+                    foreach (var item in overridesEnum)
+                    {
+                        var entry = Object(item, "date", "name", "hours");
+                        var date = DateOnly.ParseExact(Required(entry, "date"u8).GetString()!, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+                        string? overrideName = entry.TryGetProperty("name"u8, out var nameElement) ? nameElement.GetString() ?? throw new FormatException("Invalid name.") : null;
+                        var hoursElement = Required(entry, "hours"u8);
+                        var hoursEnum = Array(hoursElement, BusinessCalendar.MaximumSpansPerDay);
+                        var hours = new BusinessHours[hoursElement.GetArrayLength()];
+                        var hIndex = 0;
+                        foreach (var span in hoursEnum)
+                            hours[hIndex++] = ReadSpan(Object(span, "s", "e"));
+                        overrides.Add(new(date, hours, overrideName));
+                    }
+                    var calendar = new BusinessCalendar(id, name, timeZoneId, week, overrides);
+                    // Only canonical encodings decode, so a stored schedule never silently changes meaning on re-encoding.
+                    var canonicalBuffer = RentBuffer();
+                    try
+                    {
+                        WriteSchedule(canonicalBuffer, calendar);
+                        if (!canonicalBuffer.WrittenSpan.SequenceEqual(inputUtf8))
+                            throw new FormatException("The schedule is not in canonical form.");
+                    }
+                    finally
+                    {
+                        ReleaseBuffer(canonicalBuffer);
+                    }
+                    return calendar;
+                }
             }
-            var overrides = new List<CalendarDateOverride>();
-            foreach (var item in Array(Required(root, "overrides"), BusinessCalendar.MaximumOverrides))
+            finally
             {
-                var entry = Object(item, "date", "name", "hours");
-                var date = DateOnly.ParseExact(Required(entry, "date").GetString()!, "yyyy-MM-dd", CultureInfo.InvariantCulture);
-                string? overrideName = entry.TryGetProperty("name", out var nameElement) ? nameElement.GetString() ?? throw new FormatException("Invalid name.") : null;
-                var hours = Array(Required(entry, "hours"), BusinessCalendar.MaximumSpansPerDay).Select(span => ReadSpan(Object(span, "s", "e"))).ToList();
-                overrides.Add(new(date, hours, overrideName));
+                if (rented is not null)
+                    ArrayPool<byte>.Shared.Return(rented);
             }
-            var calendar = new BusinessCalendar(id, name, timeZoneId, week, overrides);
-            // Only canonical encodings decode, so a stored schedule never silently changes meaning on re-encoding.
-            if (EncodeSchedule(calendar) != schedule)
-                throw new FormatException("The schedule is not in canonical form.");
-            return calendar;
         }
         catch (Exception error) when (error is JsonException or InvalidOperationException or ArgumentException)
         {
@@ -99,33 +188,42 @@ public static class BusinessCalendarCodec
 
     private static void WriteSpan(Utf8JsonWriter writer, BusinessHours hours)
     {
-        writer.WriteNumber("s", (int)hours.Start.TotalMinutes);
-        writer.WriteNumber("e", (int)hours.End.TotalMinutes);
+        writer.WriteNumber("s"u8, (int)hours.Start.TotalMinutes);
+        writer.WriteNumber("e"u8, (int)hours.End.TotalMinutes);
     }
 
     private static BusinessHours ReadSpan(JsonElement element)
     {
-        var start = Required(element, "s").GetInt32();
-        var end = Required(element, "e").GetInt32();
+        var start = Required(element, "s"u8).GetInt32();
+        var end = Required(element, "e"u8).GetInt32();
         if (start is < 0 or > 1440 || end is < 0 or > 1440)
             throw new FormatException("Invalid business-hour span.");
         return new(TimeSpan.FromMinutes(start), TimeSpan.FromMinutes(end));
     }
 
-    private static JsonElement Object(JsonElement element, params string[] allowed)
+    private static JsonElement Object(JsonElement element, params ReadOnlySpan<string> allowed)
     {
         if (element.ValueKind != JsonValueKind.Object)
             throw new FormatException("Expected an object.");
         foreach (var property in element.EnumerateObject())
-            if (!allowed.Contains(property.Name, StringComparer.Ordinal))
+        {
+            var found = false;
+            for (var i = 0; i < allowed.Length; i++)
+                if (property.NameEquals(allowed[i]))
+                {
+                    found = true;
+                    break;
+                }
+            if (!found)
                 throw new FormatException("Unknown schedule property.");
+        }
         return element;
     }
 
-    private static JsonElement Required(JsonElement element, string name) =>
-        element.TryGetProperty(name, out var value) ? value : throw new FormatException($"Missing schedule property '{name}'.");
+    private static JsonElement Required(JsonElement element, ReadOnlySpan<byte> name) =>
+        element.TryGetProperty(name, out var value) ? value : throw new FormatException("Missing required schedule property.");
 
-    private static IEnumerable<JsonElement> Array(JsonElement element, int maximum)
+    private static JsonElement.ArrayEnumerator Array(JsonElement element, int maximum)
     {
         if (element.ValueKind != JsonValueKind.Array || element.GetArrayLength() > maximum)
             throw new FormatException("Expected a bounded array.");

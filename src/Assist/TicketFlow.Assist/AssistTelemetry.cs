@@ -9,7 +9,7 @@ namespace TicketFlow.Assist;
 /// Telemetry names and middleware for assistant chat clients. Tags carry feature, model, outcome and tool names only — never prompts,
 /// outputs, tool arguments or results.
 /// </summary>
-public static class AssistTelemetry
+public static partial class AssistTelemetry
 {
     public const string ActivitySourceName = "TicketFlow.Assist";
     public const string ToolActivitySourceName = "TicketFlow.Assist.Tools";
@@ -27,24 +27,33 @@ public static class AssistTelemetry
     public static ChatClientBuilder UseAssistUsageMetrics(this ChatClientBuilder builder, AssistModelDefinition model, AssistChatRequest request)
     {
         ArgumentNullException.ThrowIfNull(builder);
+        var featureName = request.Feature.ToString();
         return builder.Use(async (messages, options, inner, cancellationToken) =>
         {
             var started = Stopwatch.GetTimestamp();
             try
             {
                 var response = await inner.GetResponseAsync(messages, options, cancellationToken).ConfigureAwait(false);
-                Record(model, request, "success", started, response.Usage,
-                    response.Messages.SelectMany(message => message.Contents).Count(content => content is FunctionCallContent), response.FinishReason?.Value);
+                var toolCallCount = 0;
+                var responseMessages = response.Messages;
+                for (var m = 0; m < responseMessages.Count; m++)
+                {
+                    var contents = responseMessages[m].Contents;
+                    for (var c = 0; c < contents.Count; c++)
+                        if (contents[c] is FunctionCallContent)
+                            toolCallCount++;
+                }
+                Record(model, featureName, "success", started, response.Usage, toolCallCount, response.FinishReason?.Value);
                 return response;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                Record(model, request, "canceled", started, null, 0, null);
+                Record(model, featureName, "canceled", started, null, 0, null);
                 throw;
             }
             catch
             {
-                Record(model, request, "failure", started, null, 0, null);
+                Record(model, featureName, "failure", started, null, 0, null);
                 throw;
             }
         }, null);
@@ -65,39 +74,63 @@ public static class AssistTelemetry
             {
                 using var activity = ToolSource.StartActivity("ticketflow.assist.tool.invoke");
                 var toolName = context.CallContent.Name;
-                activity?.SetTag("ai.tool.name", toolName);
-                activity?.SetTag("ai.tool.call_id", context.CallContent.CallId);
-                using var scope = logger?.BeginScope(new Dictionary<string, object?> { ["tool_name"] = toolName, ["tool_call_id"] = context.CallContent.CallId });
+                if (activity is { IsAllDataRequested: true })
+                {
+                    activity.SetTag("ai.tool.name", toolName);
+                    activity.SetTag("ai.tool.call_id", context.CallContent.CallId);
+                }
+                using var scope = logger is not null && (logger.IsEnabled(LogLevel.Information) || logger.IsEnabled(LogLevel.Warning))
+                    ? logger.BeginScope(new Dictionary<string, object?> { ["tool_name"] = toolName, ["tool_call_id"] = context.CallContent.CallId })
+                    : null;
                 var started = Stopwatch.GetTimestamp();
                 try
                 {
                     var result = await next(context, cancellationToken).ConfigureAwait(false);
                     var elapsed = Stopwatch.GetElapsedTime(started);
-                    activity?.SetTag("ai.tool.success", true);
-                    activity?.SetTag("ai.tool.duration_ms", elapsed.TotalMilliseconds);
-                    activity?.SetTag("ai.tool.result_type", result?.GetType().Name);
-                    logger?.LogInformation("Assistant tool invocation completed. DurationMs={DurationMs} ResultType={ResultType}", (long)elapsed.TotalMilliseconds, result?.GetType().Name);
+                    var resultType = result?.GetType().Name;
+                    if (activity is { IsAllDataRequested: true })
+                    {
+                        activity.SetTag("ai.tool.success", true);
+                        activity.SetTag("ai.tool.duration_ms", elapsed.TotalMilliseconds);
+                        activity.SetTag("ai.tool.result_type", resultType);
+                    }
+                    if (logger is not null)
+                        LogToolCompleted(logger, (long)elapsed.TotalMilliseconds, resultType);
                     return result;
                 }
                 catch (Exception error)
                 {
                     var elapsed = Stopwatch.GetElapsedTime(started);
-                    activity?.SetStatus(ActivityStatusCode.Error, error.GetType().Name);
-                    activity?.SetTag("ai.tool.success", false);
-                    activity?.SetTag("ai.tool.duration_ms", elapsed.TotalMilliseconds);
-                    activity?.SetTag("ai.tool.exception_type", error.GetType().Name);
-                    logger?.LogWarning("Assistant tool invocation failed. DurationMs={DurationMs} ExceptionType={ExceptionType}", (long)elapsed.TotalMilliseconds, error.GetType().Name);
+                    var exceptionType = error.GetType().Name;
+                    if (activity is not null)
+                    {
+                        activity.SetStatus(ActivityStatusCode.Error, exceptionType);
+                        if (activity.IsAllDataRequested)
+                        {
+                            activity.SetTag("ai.tool.success", false);
+                            activity.SetTag("ai.tool.duration_ms", elapsed.TotalMilliseconds);
+                            activity.SetTag("ai.tool.exception_type", exceptionType);
+                        }
+                    }
+                    if (logger is not null)
+                        LogToolFailed(logger, (long)elapsed.TotalMilliseconds, exceptionType);
                     throw;
                 }
             };
         });
     }
 
-    private static void Record(AssistModelDefinition model, AssistChatRequest request, string outcome, long started, UsageDetails? usage, int toolCalls, string? finishReason)
+    [LoggerMessage(Level = LogLevel.Information, Message = "Assistant tool invocation completed. DurationMs={DurationMs} ResultType={ResultType}")]
+    private static partial void LogToolCompleted(ILogger logger, long durationMs, string? resultType);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Assistant tool invocation failed. DurationMs={DurationMs} ExceptionType={ExceptionType}")]
+    private static partial void LogToolFailed(ILogger logger, long durationMs, string exceptionType);
+
+    private static void Record(AssistModelDefinition model, string featureName, string outcome, long started, UsageDetails? usage, int toolCalls, string? finishReason)
     {
         var tags = new TagList
         {
-            { "ticketflow.assist.feature", request.Feature.ToString() },
+            { "ticketflow.assist.feature", featureName },
             { "ticketflow.assist.model", model.Id },
             { "ticketflow.assist.provider", model.Provider },
             { "ticketflow.assist.outcome", outcome },

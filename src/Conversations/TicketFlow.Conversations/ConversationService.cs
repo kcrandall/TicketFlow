@@ -75,24 +75,36 @@ public sealed partial class ConversationService : IConversationService
         if (!await PermittedAsync(actor, ConversationPermissions.Create, ConversationAccess.Resource(scope, conversation), cancellationToken).ConfigureAwait(false))
             return ConversationRefused.Forbidden;
 
-        var inbox = await inboxes.GetAsync(scope, conversation.Inbox, cancellationToken).ConfigureAwait(false);
+        var inboxTask = inboxes.GetAsync(scope, conversation.Inbox, cancellationToken);
+        var contactTask = contacts.GetAsync(scope, conversation.Contact, cancellationToken);
+        var teamTask = conversation.Team is { } team ? teams.GetAsync(scope, team, cancellationToken) : null;
+        var defsTask = conversation.Attributes.Count > 0 ? DefinitionsAsync(scope, cancellationToken) : null;
+        await Task.WhenAll(
+            teamTask is not null && defsTask is not null ? [inboxTask, contactTask, teamTask, defsTask]
+            : teamTask is not null ? [inboxTask, contactTask, teamTask]
+            : defsTask is not null ? [inboxTask, contactTask, defsTask]
+            : [inboxTask, contactTask]).ConfigureAwait(false);
+
+        var inbox = inboxTask.Result;
         if (inbox is null || !inbox.Inbox.Enabled)
             return ConversationRefused.Invalid("The inbox does not exist or is disabled.");
-        var contact = await contacts.GetAsync(scope, conversation.Contact, cancellationToken).ConfigureAwait(false);
+        var contact = contactTask.Result;
         if (contact is null)
             return ConversationRefused.Invalid("The contact does not exist.");
         if (contact.Contact.MergedInto is not null)
             return ConversationRefused.Invalid("The contact was merged; start the conversation with the surviving contact.");
-        if (conversation.Team is { } team && await teams.GetAsync(scope, team, cancellationToken).ConfigureAwait(false) is null)
+        if (teamTask is not null && teamTask.Result is null)
             return ConversationRefused.Invalid("The team does not exist.");
-        if (await ValidateAttributesAsync(scope, conversation.Attributes, cancellationToken).ConfigureAwait(false) is { } invalid)
+        if (defsTask is not null && ValidateAttributes(conversation.Attributes, defsTask.Result) is { } invalid)
             return invalid;
-        if (initial?.ExternalId is { } external && await ReplayAsync(actor, scope, conversation.Inbox, external, cancellationToken).ConfigureAwait(false) is { } replay)
+        if (request.Id is not null && initial?.ExternalId is { } external
+            && await ReplayAsync(actor, scope, conversation.Inbox, external, cancellationToken).ConfigureAwait(false) is { } replay)
             return replay;
 
         IReadOnlyList<TimelineEvent> events = initial is null ? [] : [Timeline(conversation.Id, 1, now, actor, initial)];
+        IReadOnlyList<ConversationEventSummary> summaries = initial is null ? [] : [ConversationEventSummary.From(events[0])];
         var change = new ConversationChange(Guid.CreateVersion7(), scope, conversation.Id, conversation.Inbox, 1, ConversationChangeKind.Started,
-            events.Select(ConversationEventSummary.From), null, null, now);
+            summaries, null, null, now);
         var result = await store.WriteAsync(scope, new ConversationWrite(conversation, null, events, change), cancellationToken).ConfigureAwait(false);
         return result switch
         {
@@ -110,12 +122,14 @@ public sealed partial class ConversationService : IConversationService
         return MutateAsync(actor, id, null, ConversationPermissions.Ingest, checkResulting: false, async (stored, now) =>
         {
             var conversation = stored.Conversation;
-            // A redelivered message is a replay even after the conversation was closed.
-            if (message.ExternalId is { } external
-                && await ReplayAsync(actor, stored.Scope, conversation.Inbox, external, cancellationToken).ConfigureAwait(false) is { } replay)
-                return replay;
             if (conversation.Status.Value is ClosedStatus)
+            {
+                // A redelivered message is a replay even after the conversation was closed.
+                if (message.ExternalId is { } external
+                    && await ReplayAsync(actor, stored.Scope, conversation.Inbox, external, cancellationToken).ConfigureAwait(false) is { } replay)
+                    return replay;
                 return ConversationRefused.Closed;
+            }
             MessageEvent incoming;
             try
             {
@@ -125,9 +139,9 @@ public sealed partial class ConversationService : IConversationService
             {
                 return ConversationRefused.Invalid("The message is invalid or exceeds message limits.");
             }
-            List<ConversationEvent> events = [incoming];
-            if (conversation.Status.Value is not OpenStatus)
-                events.Add(new StatusChanged(conversation.Status, ConversationStatus.Open));
+            List<ConversationEvent> events = conversation.Status.Value is OpenStatus
+                ? [incoming]
+                : [incoming, new StatusChanged(conversation.Status, ConversationStatus.Open)];
             return new Plan(conversation.With(status: ConversationStatus.Open, lastActivityAt: Later(conversation, now),
                 waitingSince: conversation.WaitingSince ?? now, lastIncomingAt: now), events);
         }, cancellationToken);
@@ -248,14 +262,40 @@ public sealed partial class ConversationService : IConversationService
         IReadOnlyList<LabelId> removes = [.. remove];
         return MutateAsync(actor, id, expectedRevision, ConversationPermissions.Manage, checkResulting: true, (stored, now) =>
         {
-            if (adds.Concat(removes).Any(label => label == default) || adds.Count + removes.Count > 2 * Conversation.MaximumLabels || adds.Intersect(removes).Any())
+            if (adds.Count + removes.Count > 2 * Conversation.MaximumLabels)
                 return Decided(ConversationRefused.Invalid("Label changes must be initialized, bounded and disjoint."));
+            var addSet = new HashSet<LabelId>(adds.Count);
+            foreach (var label in adds)
+            {
+                if (label == default)
+                    return Decided(ConversationRefused.Invalid("Label changes must be initialized, bounded and disjoint."));
+                addSet.Add(label);
+            }
+            var removeSet = new HashSet<LabelId>(removes.Count);
+            foreach (var label in removes)
+            {
+                if (label == default || addSet.Contains(label))
+                    return Decided(ConversationRefused.Invalid("Label changes must be initialized, bounded and disjoint."));
+                removeSet.Add(label);
+            }
             var conversation = stored.Conversation;
-            var added = adds.Distinct().Where(label => !conversation.Labels.Contains(label)).ToList();
-            var removed = removes.Distinct().Where(conversation.Labels.Contains).ToList();
+            var currentSet = conversation.Labels.Count > 0 ? new HashSet<LabelId>(conversation.Labels) : null;
+            var added = new List<LabelId>(addSet.Count);
+            foreach (var label in addSet)
+                if (currentSet is null || !currentSet.Contains(label))
+                    added.Add(label);
+            var removed = new List<LabelId>(removeSet.Count);
+            if (currentSet is not null)
+                foreach (var label in removeSet)
+                    if (currentSet.Contains(label))
+                        removed.Add(label);
             if (added.Count + removed.Count == 0)
                 return Decided(Unchanged(stored));
-            var labels = conversation.Labels.Except(removed).Concat(added).ToList();
+            var labels = new List<LabelId>(conversation.Labels.Count - removed.Count + added.Count);
+            foreach (var label in conversation.Labels)
+                if (!removeSet.Contains(label))
+                    labels.Add(label);
+            labels.AddRange(added);
             if (labels.Count > Conversation.MaximumLabels)
                 return Decided(new ConversationRefused(ConversationRefusal.Rejected, [$"A conversation carries at most {Conversation.MaximumLabels} labels."]));
             return Decided(new Plan(conversation.With(labels: labels), [new LabelsChanged(added, removed)]));
@@ -273,8 +313,9 @@ public sealed partial class ConversationService : IConversationService
             var conversation = stored.Conversation;
             var definitionMap = await DefinitionsAsync(stored.Scope, cancellationToken).ConfigureAwait(false);
             var attributes = new Dictionary<string, ConversationAttributeValue>(conversation.Attributes, StringComparer.Ordinal);
-            var events = new List<ConversationEvent>();
-            foreach (var (key, value) in snapshot.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+            var events = new List<ConversationEvent>(snapshot.Count);
+            snapshot.Sort(static (a, b) => string.CompareOrdinal(a.Key, b.Key));
+            foreach (var (key, value) in snapshot)
             {
                 if (!ConversationAttributeDefinition.IsValidKey(key))
                     return ConversationRefused.Invalid("Attribute keys must be lowercase tokens.");
@@ -297,7 +338,7 @@ public sealed partial class ConversationService : IConversationService
                 return Unchanged(stored);
             try
             {
-                return new Plan(conversation.With(attributes: attributes), events);
+                return new Plan(conversation.With(attributes: attributes), events, definitionMap);
             }
             catch (ArgumentException)
             {
@@ -310,21 +351,37 @@ public sealed partial class ConversationService : IConversationService
     {
         ArgumentNullException.ThrowIfNull(add);
         ArgumentNullException.ThrowIfNull(remove);
-        IReadOnlyList<UserId> adds = [.. add.Distinct()];
-        IReadOnlyList<UserId> removes = [.. remove.Distinct()];
+        var addSet = new HashSet<UserId>(add);
+        var removeSet = new HashSet<UserId>(remove);
         return MutateAsync(actor, id, expectedRevision, ConversationPermissions.Manage, checkResulting: false, (stored, now) =>
         {
-            if (adds.Concat(removes).Any(user => user == default) || adds.Intersect(removes).Any())
-                return Decided(ConversationRefused.Invalid("Participant changes must be initialized and disjoint."));
+            foreach (var user in addSet)
+                if (user == default || removeSet.Contains(user))
+                    return Decided(ConversationRefused.Invalid("Participant changes must be initialized and disjoint."));
+            foreach (var user in removeSet)
+                if (user == default)
+                    return Decided(ConversationRefused.Invalid("Participant changes must be initialized and disjoint."));
             var conversation = stored.Conversation;
-            var events = adds.Where(user => !conversation.Participants.Contains(user)).Select(user => (ConversationEvent)new ParticipantChanged(user, ParticipantChange.Added))
-                .Concat(removes.Where(conversation.Participants.Contains).Select(user => (ConversationEvent)new ParticipantChanged(user, ParticipantChange.Removed)))
-                .ToList();
+            var currentSet = conversation.Participants.Count > 0 ? new HashSet<UserId>(conversation.Participants) : null;
+            var events = new List<ConversationEvent>(addSet.Count + removeSet.Count);
+            foreach (var user in addSet)
+                if (currentSet is null || !currentSet.Contains(user))
+                    events.Add(new ParticipantChanged(user, ParticipantChange.Added));
+            if (currentSet is not null)
+                foreach (var user in removeSet)
+                    if (currentSet.Contains(user))
+                        events.Add(new ParticipantChanged(user, ParticipantChange.Removed));
             if (events.Count == 0)
                 return Decided(Unchanged(stored));
             if (events.Count > ConversationWrite.MaximumEvents)
                 return Decided(ConversationRefused.Invalid($"An update changes at most {ConversationWrite.MaximumEvents} participants."));
-            var participants = conversation.Participants.Except(removes).Concat(adds).Distinct().ToList();
+            var participants = new List<UserId>(conversation.Participants.Count + addSet.Count);
+            foreach (var user in conversation.Participants)
+                if (!removeSet.Contains(user))
+                    participants.Add(user);
+            foreach (var user in addSet)
+                if (currentSet is null || !currentSet.Contains(user))
+                    participants.Add(user);
             if (participants.Count > Conversation.MaximumParticipants)
                 return Decided(new ConversationRefused(ConversationRefusal.Rejected, [$"A conversation has at most {Conversation.MaximumParticipants} participants."]));
             return Decided(new Plan(conversation.With(participants: participants), events));
@@ -365,18 +422,23 @@ public sealed partial class ConversationService : IConversationService
     {
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(update);
+        StoredMessage? message = null;
+        StoredConversation? stored = null;
         for (var attempt = 1; ; attempt++)
         {
-            var message = update.Conversation is { } conversationId
+            message ??= update.Conversation is { } conversationId
                 ? await store.GetMessageAsync(scope, conversationId, update.Message!.Value, cancellationToken).ConfigureAwait(false)
                 : await store.FindMessageByExternalIdAsync(scope, update.Inbox!.Value, update.ExternalId!, cancellationToken).ConfigureAwait(false);
             if (message is null)
                 return ConversationNotFound.Instance;
-            var stored = await store.GetAsync(scope, message.Conversation, cancellationToken).ConfigureAwait(false);
             if (stored is null)
-                return ConversationNotFound.Instance;
-            if (!await PermittedAsync(actor, ConversationPermissions.Ingest, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
-                return ConversationRefused.Forbidden;
+            {
+                stored = await store.GetAsync(scope, message.Conversation, cancellationToken).ConfigureAwait(false);
+                if (stored is null)
+                    return ConversationNotFound.Instance;
+                if (!await PermittedAsync(actor, ConversationPermissions.Ingest, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
+                    return ConversationRefused.Forbidden;
+            }
             if (message.Direction != MessageDirection.Outgoing)
                 return ConversationRefused.Invalid("Delivery reports apply to outgoing messages.");
             if (update.ProviderMessageId is { } provider && message.ExternalId is { } recorded && provider != recorded)
@@ -397,7 +459,8 @@ public sealed partial class ConversationService : IConversationService
                     return new ConversationApplied(message.Conversation, stored.Revision, []);
                 case ConversationWriteNotFound:
                     return ConversationNotFound.Instance;
-                case MessageDeliveryConflict when attempt < options.MaximumWriteAttempts:
+                case MessageDeliveryConflict conflict when attempt < options.MaximumWriteAttempts:
+                    message = conflict.Current;
                     continue;
                 case MessageDeliveryConflict:
                     return new ConversationRefused(ConversationRefusal.Rejected, ["Concurrent delivery updates kept winning; retry."]);
@@ -408,7 +471,7 @@ public sealed partial class ConversationService : IConversationService
     }
 
     /// <summary>The planned next snapshot (head and revision are set by the pipeline) and the events to append.</summary>
-    private sealed record Plan(Conversation Next, IReadOnlyList<ConversationEvent> Events);
+    private sealed record Plan(Conversation Next, IReadOnlyList<ConversationEvent> Events, IReadOnlyDictionary<string, ConversationAttributeDefinition>? Definitions = null);
 
     /// <summary>A command decision: a plan, or a final outcome (refusal, no-op or replay).</summary>
     private readonly record struct Decision(Plan? Plan, ConversationCommandResult? Outcome)
@@ -422,19 +485,20 @@ public sealed partial class ConversationService : IConversationService
         public static implicit operator Decision(ConversationCommandResult result) => new(null, result);
     }
 
-    private static Task<Decision> Decided(Decision decision) => Task.FromResult(decision);
+    private static ValueTask<Decision> Decided(Decision decision) => ValueTask.FromResult(decision);
 
     /// <summary>
     /// Read → fence → authorize → decide → (authorize result) → revision-fenced atomic write. Without an expected revision, conflicts
     /// re-run the pipeline on the newer snapshot up to <see cref="ConversationsOptions.MaximumWriteAttempts"/> times.
     /// </summary>
     private async Task<ConversationCommandResult> MutateAsync(PrincipalRef actor, ConversationId id, long? expectedRevision, Permission permission, bool checkResulting,
-        Func<StoredConversation, DateTimeOffset, Task<Decision>> decide, CancellationToken cancellationToken)
+        Func<StoredConversation, DateTimeOffset, ValueTask<Decision>> decide, CancellationToken cancellationToken)
     {
         var scope = RequireActor(actor);
         RequireId(id);
         if (expectedRevision is < 1)
             throw new ArgumentOutOfRangeException(nameof(expectedRevision));
+        IAccessDecisionContext? accessContext = null;
         for (var attempt = 1; ; attempt++)
         {
             var stored = await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
@@ -442,27 +506,42 @@ public sealed partial class ConversationService : IConversationService
                 return ConversationNotFound.Instance;
             if (expectedRevision is { } expected && stored.Revision != expected)
                 return new ConversationConflict(stored.Revision);
-            if (!await PermittedAsync(actor, permission, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
+            if (checkResulting)
+            {
+                accessContext ??= await evaluator.LoadDecisionContextAsync(actor, scope, [permission], cancellationToken).ConfigureAwait(false);
+                if (!(await accessContext.DecideAsync(permission, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false)).IsPermitted)
+                    return ConversationRefused.Forbidden;
+            }
+            else if (!await PermittedAsync(actor, permission, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
                 return ConversationRefused.Forbidden;
             var now = Now;
             var decision = await decide(stored, now).ConfigureAwait(false);
             if (decision.Outcome is { } outcome)
                 return outcome;
             var plan = decision.Plan!;
-            if (checkResulting && !await PermittedAsync(actor, permission, ConversationAccess.Resource(scope, plan.Next), cancellationToken).ConfigureAwait(false))
+            if (checkResulting && !(await accessContext!.DecideAsync(permission, ConversationAccess.Resource(scope, plan.Next), cancellationToken).ConfigureAwait(false)).IsPermitted)
                 return ConversationRefused.Forbidden;
 
             var head = stored.Conversation.LastSequence;
-            IReadOnlyList<TimelineEvent> events = [.. plan.Events.Select((item, index) => Timeline(id, head + index + 1, now, actor, item))];
-            var next = plan.Next.With(lastSequence: head + events.Count);
+            var eventCount = plan.Events.Count;
+            var events = new TimelineEvent[eventCount];
+            var summaries = new ConversationEventSummary[eventCount];
+            var accessActor = AccessActor.From(actor);
+            for (var i = 0; i < eventCount; i++)
+            {
+                var te = new TimelineEvent(id, head + i + 1, Guid.CreateVersion7(), now, accessActor, plan.Events[i]);
+                events[i] = te;
+                summaries[i] = ConversationEventSummary.From(te);
+            }
+            var next = plan.Next.With(lastSequence: head + eventCount);
             var change = new ConversationChange(Guid.CreateVersion7(), scope, id, next.Inbox, stored.Revision + 1, ConversationChangeKind.EventsAppended,
-                events.Select(ConversationEventSummary.From), null, null, now);
+                summaries, null, null, now);
             var result = await store.WriteAsync(scope, new ConversationWrite(next, stored.Revision, events, change), cancellationToken).ConfigureAwait(false);
             switch (result)
             {
                 case ConversationWriteApplied applied:
                     return new ConversationApplied(id, applied.Conversation.Revision,
-                        await ProjectForActorAsync(actor, applied.Conversation, applied.Events, cancellationToken).ConfigureAwait(false));
+                        await ProjectForActorAsync(actor, applied.Conversation, applied.Events, cancellationToken, plan.Definitions).ConfigureAwait(false));
                 case ConversationWriteNotFound:
                     return ConversationNotFound.Instance;
                 case ConversationWriteConflict when expectedRevision is null && attempt < options.MaximumWriteAttempts:
@@ -505,8 +584,8 @@ public sealed partial class ConversationService : IConversationService
     private async Task<ConversationCommandResult> StartedAsync(PrincipalRef actor, ConversationWriteApplied applied, CancellationToken cancellationToken)
     {
         var stored = applied.Conversation;
-        if ((await contacts.GetAsync(stored.Scope, stored.Conversation.Contact, cancellationToken).ConfigureAwait(false))?.Contact.MergedInto is not null)
-            stored = await repointer.RepairAsync(stored.Scope, stored.Id, cancellationToken).ConfigureAwait(false) ?? stored;
+        if ((await contacts.GetAsync(stored.Scope, stored.Conversation.Contact, cancellationToken).ConfigureAwait(false))?.Contact.MergedInto is { } mergedInto)
+            stored = await repointer.RepairAsync(stored.Scope, stored.Id, cancellationToken, stored, mergedInto).ConfigureAwait(false) ?? stored;
         return new ConversationApplied(stored.Id, stored.Revision, await ProjectForActorAsync(actor, stored, applied.Events, cancellationToken).ConfigureAwait(false));
     }
 
@@ -516,13 +595,42 @@ public sealed partial class ConversationService : IConversationService
     /// values the actor could not see.
     /// </summary>
     private async Task<IReadOnlyList<TimelineEvent>> ProjectForActorAsync(PrincipalRef actor, StoredConversation stored, IReadOnlyList<TimelineEvent> events,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, IReadOnlyDictionary<string, ConversationAttributeDefinition>? preloadedDefinitions = null)
     {
-        if (!events.Any(item => item.Event.Value is AttributeChanged or MessageEvent { ExternalId: not null }))
+        var needsAttributes = false;
+        var needsChannel = false;
+        for (var i = 0; i < events.Count; i++)
+        {
+            var value = events[i].Event.Value;
+            if (value is AttributeChanged)
+                needsAttributes = true;
+            else if (value is MessageEvent { ExternalId: not null })
+                needsChannel = true;
+        }
+        if (!needsAttributes && !needsChannel)
             return events;
-        var decision = await DecideAsync(actor, ConversationPermissions.Read, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false);
-        var masking = await MaskingAsync(stored.Scope, cancellationToken).ConfigureAwait(false);
-        return [.. events.Select(item => masking.Project(item, decision).Event)];
+
+        AccessDecision decision;
+        ConversationMasking masking;
+        if (!needsAttributes)
+        {
+            decision = await DecideAsync(actor, ConversationPermissions.Read, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false);
+            masking = ConversationMasking.Empty;
+        }
+        else
+        {
+            var decisionTask = DecideAsync(actor, ConversationPermissions.Read, ConversationAccess.Resource(stored), cancellationToken);
+            var maskingTask = preloadedDefinitions is not null
+                ? ConversationMasking.LoadAsync(stored.Scope, ConversationPermissions.Read, preloadedDefinitions, policies, cancellationToken)
+                : MaskingAsync(stored.Scope, cancellationToken);
+            await Task.WhenAll(decisionTask, maskingTask).ConfigureAwait(false);
+            decision = decisionTask.Result;
+            masking = maskingTask.Result;
+        }
+        var projected = new TimelineEvent[events.Count];
+        for (var i = 0; i < events.Count; i++)
+            projected[i] = masking.Project(events[i], decision).Event;
+        return projected;
     }
 
     private MessageEvent Incoming(IncomingMessageDraft draft, ContactId contact, DateTimeOffset now) =>
@@ -560,15 +668,17 @@ public sealed partial class ConversationService : IConversationService
     private Task<AccessDecision> DecideAsync(PrincipalRef actor, Permission permission, AccessResource resource, CancellationToken cancellationToken) =>
         evaluator.AuthorizeAsync(new AccessRequest(actor, permission, resource), cancellationToken);
 
-    private async Task<IReadOnlyDictionary<string, ConversationAttributeDefinition>> DefinitionsAsync(TicketScope scope, CancellationToken cancellationToken) =>
-        (await definitions.ListAsync(scope, cancellationToken).ConfigureAwait(false))
-            .ToDictionary(stored => stored.Definition.Key, stored => stored.Definition, StringComparer.Ordinal);
-
-    private async Task<ConversationRefused?> ValidateAttributesAsync(TicketScope scope, IReadOnlyDictionary<string, ConversationAttributeValue> attributes, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<string, ConversationAttributeDefinition>> DefinitionsAsync(TicketScope scope, CancellationToken cancellationToken)
     {
-        if (attributes.Count == 0)
-            return null;
-        var definitionMap = await DefinitionsAsync(scope, cancellationToken).ConfigureAwait(false);
+        var stored = await definitions.ListAsync(scope, cancellationToken).ConfigureAwait(false);
+        var map = new Dictionary<string, ConversationAttributeDefinition>(stored.Count, StringComparer.Ordinal);
+        foreach (var item in stored)
+            map[item.Definition.Key] = item.Definition;
+        return map;
+    }
+
+    private static ConversationRefused? ValidateAttributes(IReadOnlyDictionary<string, ConversationAttributeValue> attributes, IReadOnlyDictionary<string, ConversationAttributeDefinition> definitionMap)
+    {
         foreach (var (key, value) in attributes)
         {
             if (!definitionMap.TryGetValue(key, out var definition))

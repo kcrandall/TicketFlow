@@ -12,19 +12,50 @@ internal static class SlaJson
 {
     public const int MaximumEncodedBytes = 1024 * 1024;
 
+    [ThreadStatic]
+    private static ArrayBufferWriter<byte>? sharedBuffer;
+
+    [ThreadStatic]
+    private static Utf8JsonWriter? sharedWriter;
+
     public static string Write(Action<Utf8JsonWriter> write)
     {
-        var buffer = new ArrayBufferWriter<byte>();
-        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Indented = false }))
+        var buffer = sharedBuffer;
+        var writer = sharedWriter;
+        sharedBuffer = null;
+        sharedWriter = null;
+        if (buffer is null)
+            buffer = new ArrayBufferWriter<byte>(512);
+        else
+            buffer.ResetWrittenCount();
+        if (writer is null)
+            writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Indented = false });
+        else
+            writer.Reset(buffer);
+        try
+        {
             write(writer);
-        return Encoding.UTF8.GetString(buffer.WrittenSpan);
+            writer.Flush();
+            return Encoding.UTF8.GetString(buffer.WrittenSpan);
+        }
+        finally
+        {
+            if (buffer.Capacity <= 65536)
+            {
+                sharedBuffer = buffer;
+                sharedWriter = writer;
+            }
+            else
+                writer.Dispose();
+        }
     }
 
     /// <exception cref="FormatException">The JSON is malformed, oversized or invalid.</exception>
     public static T Read<T>(string json, Func<JsonElement, T> read)
     {
         ArgumentNullException.ThrowIfNull(json);
-        if (json.Length > MaximumEncodedBytes || !System.Text.Unicode.Utf16.IsValid(json))
+        var span = json.AsSpan();
+        if (span.Length > MaximumEncodedBytes || (span.ContainsAnyInRange('\uD800', '\uDFFF') && !System.Text.Unicode.Utf16.IsValid(span)))
             throw new FormatException("The SLA payload is oversized or malformed.");
         try
         {
@@ -40,19 +71,34 @@ internal static class SlaJson
     }
 
     /// <summary>Rejects properties outside <paramref name="allowed"/> and duplicates; every allowed property is optional unless read.</summary>
-    public static void RequireProperties(JsonElement element, params string[] allowed)
+    public static void RequireProperties(JsonElement element, params ReadOnlySpan<string> allowed)
     {
         if (element.ValueKind != JsonValueKind.Object)
             throw new FormatException("A JSON object is required.");
-        var seen = new HashSet<string>(StringComparer.Ordinal);
+        ulong seenMask = 0;
         foreach (var property in element.EnumerateObject())
-            if (!allowed.Contains(property.Name, StringComparer.Ordinal) || !seen.Add(property.Name))
+        {
+            var matched = -1;
+            for (var i = 0; i < allowed.Length; i++)
+            {
+                if (property.NameEquals(allowed[i]))
+                {
+                    matched = i;
+                    break;
+                }
+            }
+            if (matched < 0)
                 throw new FormatException("Unknown or duplicate property.");
+            var bit = 1UL << matched;
+            if ((seenMask & bit) != 0)
+                throw new FormatException("Unknown or duplicate property.");
+            seenMask |= bit;
+        }
     }
 
     public static void RequireVersion(JsonElement element, int version = 1)
     {
-        if (element.GetProperty("v").GetInt32() != version)
+        if (element.GetProperty("v"u8).GetInt32() != version)
             throw new FormatException("Unsupported SLA payload version.");
     }
 
@@ -68,11 +114,15 @@ internal static class SlaJson
         _ => throw new FormatException("A boolean is required."),
     };
 
-    public static IEnumerable<JsonElement> Array(JsonElement element) =>
+    public static JsonElement.ArrayEnumerator Array(JsonElement element) =>
         element.ValueKind == JsonValueKind.Array ? element.EnumerateArray() : throw new FormatException("An array is required.");
 
-    public static void WriteInstant(Utf8JsonWriter writer, string name, DateTimeOffset value) =>
-        writer.WriteString(name, value.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture));
+    public static void WriteInstant(Utf8JsonWriter writer, string name, DateTimeOffset value)
+    {
+        Span<char> chars = stackalloc char[27];
+        value.UtcDateTime.TryFormat(chars, out var written, "yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture);
+        writer.WriteString(name, chars[..written]);
+    }
 
     public static void WriteOptionalInstant(Utf8JsonWriter writer, string name, DateTimeOffset? value)
     {
@@ -205,26 +255,26 @@ internal static class SlaJson
     public static void WriteActions(Utf8JsonWriter writer, string name, IReadOnlyList<SlaAction> actions)
     {
         writer.WriteStartArray(name);
-        foreach (var action in actions)
+        for (var i = 0; i < actions.Count; i++)
         {
             writer.WriteStartObject();
-            switch (action)
+            switch (actions[i])
             {
                 case NotifyUserAction user:
-                    writer.WriteString("a", "notify-user");
-                    writer.WriteString("user", user.User.Value);
+                    writer.WriteString("a"u8, "notify-user"u8);
+                    writer.WriteString("user"u8, user.User.Value);
                     break;
                 case NotifyTeamAction team:
-                    writer.WriteString("a", "notify-team");
-                    writer.WriteString("team", team.Team.Value);
+                    writer.WriteString("a"u8, "notify-team"u8);
+                    writer.WriteString("team"u8, team.Team.Value);
                     break;
                 case RaisePriorityAction raise:
-                    writer.WriteString("a", "raise-priority");
-                    writer.WriteString("priority", Name(raise.Priority));
+                    writer.WriteString("a"u8, "raise-priority"u8);
+                    writer.WriteString("priority"u8, Name(raise.Priority));
                     break;
                 case ReassignTeamAction reassign:
-                    writer.WriteString("a", "reassign-team");
-                    writer.WriteString("team", reassign.Team.Value);
+                    writer.WriteString("a"u8, "reassign-team"u8);
+                    writer.WriteString("team"u8, reassign.Team.Value);
                     break;
             }
             writer.WriteEndObject();
@@ -232,25 +282,36 @@ internal static class SlaJson
         writer.WriteEndArray();
     }
 
-    public static IReadOnlyList<SlaAction> Actions(JsonElement element) => [.. Array(element).Select(Action)];
+    public static IReadOnlyList<SlaAction> Actions(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Array)
+            throw new FormatException("An array is required.");
+        var len = element.GetArrayLength();
+        if (len == 0)
+            return [];
+        var list = new List<SlaAction>(len);
+        foreach (var item in element.EnumerateArray())
+            list.Add(Action(item));
+        return list;
+    }
 
     private static SlaAction Action(JsonElement element)
     {
-        var kind = String(element.GetProperty("a"));
+        var kind = String(element.GetProperty("a"u8));
         switch (kind)
         {
             case "notify-user":
                 RequireProperties(element, "a", "user");
-                return new NotifyUserAction(new UserId(String(element.GetProperty("user"))));
+                return new NotifyUserAction(new UserId(String(element.GetProperty("user"u8))));
             case "notify-team":
                 RequireProperties(element, "a", "team");
-                return new NotifyTeamAction(new TeamId(String(element.GetProperty("team"))));
+                return new NotifyTeamAction(new TeamId(String(element.GetProperty("team"u8))));
             case "raise-priority":
                 RequireProperties(element, "a", "priority");
-                return new RaisePriorityAction(Priority(element.GetProperty("priority")));
+                return new RaisePriorityAction(Priority(element.GetProperty("priority"u8)));
             case "reassign-team":
                 RequireProperties(element, "a", "team");
-                return new ReassignTeamAction(new TeamId(String(element.GetProperty("team"))));
+                return new ReassignTeamAction(new TeamId(String(element.GetProperty("team"u8))));
             default:
                 throw new FormatException("Unknown SLA action.");
         }

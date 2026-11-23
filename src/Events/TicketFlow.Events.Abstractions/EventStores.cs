@@ -125,6 +125,25 @@ public interface IEventSubscriptionStore
 
     Task<EventDeliveryState?> GetStateAsync(TicketScope scope, EventSubscriptionId id, CancellationToken cancellationToken = default);
 
+    async Task<(StoredEventSubscription Subscription, EventDeliveryState State)?> GetWithStateAsync(TicketScope scope, EventSubscriptionId id, CancellationToken cancellationToken = default)
+    {
+        var subscription = await GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
+        if (subscription is null)
+            return null;
+        var state = await GetStateAsync(scope, id, cancellationToken).ConfigureAwait(false);
+        return state is not null ? (subscription, state) : null;
+    }
+
+    async Task<IReadOnlyList<(StoredEventSubscription Subscription, EventDeliveryState State)>> ListWithStateAsync(TicketScope scope, CancellationToken cancellationToken = default)
+    {
+        var list = await ListAsync(scope, cancellationToken).ConfigureAwait(false);
+        var result = new List<(StoredEventSubscription, EventDeliveryState)>(list.Count);
+        for (var i = 0; i < list.Count; i++)
+            if (await GetStateAsync(scope, list[i].Subscription.Id, cancellationToken).ConfigureAwait(false) is { } state)
+                result.Add((list[i], state));
+        return result;
+    }
+
     Task<IReadOnlyList<EventDeliveryClaim>> ClaimAsync(DateTimeOffset now, int limit, TimeSpan lease, CancellationToken cancellationToken = default);
 
     /// <summary>Advances the cursor; <paramref name="note"/> (an error-code token, for example a retention gap) replaces the last error.</summary>

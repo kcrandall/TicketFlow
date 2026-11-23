@@ -19,7 +19,9 @@ public sealed partial class ConversationService
         var decision = await DecideAsync(actor, ConversationPermissions.Read, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false);
         if (!decision.IsPermitted)
             return ConversationRefused.Forbidden;
-        var masking = await MaskingAsync(scope, cancellationToken).ConfigureAwait(false);
+        var masking = stored.Conversation.Attributes.Count == 0
+            ? ConversationMasking.Empty
+            : await MaskingAsync(scope, cancellationToken).ConfigureAwait(false);
         return masking.Project(stored, decision);
     }
 
@@ -40,9 +42,24 @@ public sealed partial class ConversationService
             return ConversationRefused.Forbidden;
         var includeNotes = (await access.DecideAsync(ConversationPermissions.NoteRead, resource, cancellationToken).ConfigureAwait(false)).IsPermitted;
         var events = await store.ReadTimelineAsync(scope, id, afterSequence, limit, includeNotes, cancellationToken).ConfigureAwait(false);
-        var masking = await MaskingAsync(scope, cancellationToken).ConfigureAwait(false);
+        var needsAttributes = false;
+        for (var i = 0; i < events.Count; i++)
+            if (events[i].Event.Value is AttributeChanged)
+            {
+                needsAttributes = true;
+                break;
+            }
+        var masking = needsAttributes
+            ? await MaskingAsync(scope, cancellationToken).ConfigureAwait(false)
+            : ConversationMasking.Empty;
         // Defense in depth: never return a note to a principal without note:read, whatever the store returned.
-        var views = events.Where(item => includeNotes || item.Event.Kind != ConversationEventKind.Note).Select(item => masking.Project(item, decision)).ToList();
+        var views = new List<TimelineEventView>(events.Count);
+        for (var i = 0; i < events.Count; i++)
+        {
+            var item = events[i];
+            if (includeNotes || item.Event.Kind != ConversationEventKind.Note)
+                views.Add(masking.Project(item, decision));
+        }
         return new TimelinePage(id, views, events.Count == limit ? events[^1].Sequence : null, includeNotes);
     }
 
@@ -50,14 +67,40 @@ public sealed partial class ConversationService
     {
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(query);
-        var fingerprint = Fingerprint(query);
+        string? fingerprint = null;
         ConversationListCursor? after = null;
-        if (cursor is not null && !TryDecodeCursor(cursor, fingerprint, out after))
-            return ConversationRefused.Invalid("The cursor is invalid or belongs to a different query.");
+        if (cursor is not null)
+        {
+            fingerprint = Fingerprint(query);
+            if (!TryDecodeCursor(cursor, fingerprint, out after))
+                return ConversationRefused.Invalid("The cursor is invalid or belongs to a different query.");
+        }
         var filter = await planner.PlanAsync(new AccessQuery(actor, ConversationPermissions.Read, scope), cancellationToken).ConfigureAwait(false);
-        var page = await store.ListAsync(scope, query.WithAfter(after ?? query.After), filter, cancellationToken).ConfigureAwait(false);
-        var masking = await MaskingAsync(scope, cancellationToken).ConfigureAwait(false);
-        var access = await evaluator.LoadDecisionContextAsync(actor, scope, [ConversationPermissions.Read], cancellationToken).ConfigureAwait(false);
+        var page = await store.ListAsync(scope, after is not null ? query.WithAfter(after) : query, filter, cancellationToken).ConfigureAwait(false);
+        if (page.Conversations.Count == 0)
+            return new ConversationListPage([], page.Next is { } emptyNext ? EncodeCursor(emptyNext, fingerprint ?? Fingerprint(query)) : null);
+        var hasAttributes = false;
+        for (var i = 0; i < page.Conversations.Count; i++)
+            if (page.Conversations[i].Conversation.Attributes.Count > 0)
+            {
+                hasAttributes = true;
+                break;
+            }
+        ConversationMasking masking;
+        IAccessDecisionContext access;
+        if (hasAttributes)
+        {
+            var maskingTask = MaskingAsync(scope, cancellationToken);
+            var accessTask = evaluator.LoadDecisionContextAsync(actor, scope, [ConversationPermissions.Read], cancellationToken);
+            await Task.WhenAll(maskingTask, accessTask).ConfigureAwait(false);
+            masking = maskingTask.Result;
+            access = accessTask.Result;
+        }
+        else
+        {
+            masking = ConversationMasking.Empty;
+            access = await evaluator.LoadDecisionContextAsync(actor, scope, [ConversationPermissions.Read], cancellationToken).ConfigureAwait(false);
+        }
         var views = new List<ConversationView>(page.Conversations.Count);
         foreach (var stored in page.Conversations)
         {
@@ -69,7 +112,7 @@ public sealed partial class ConversationService
             if (decision.IsPermitted)
                 views.Add(masking.Project(stored, decision));
         }
-        return new ConversationListPage(views, page.Next is { } next ? EncodeCursor(next, fingerprint) : null);
+        return new ConversationListPage(views, page.Next is { } next ? EncodeCursor(next, fingerprint ?? Fingerprint(query)) : null);
     }
 
     public async Task<ConversationReadResult> FindByThreadAsync(PrincipalRef actor, InboxId inbox, ChannelThreadRef thread, CancellationToken cancellationToken = default)
@@ -82,11 +125,14 @@ public sealed partial class ConversationService
         if (stored is null)
             return ConversationNotFound.Instance;
         var resource = ConversationAccess.Resource(stored);
-        if (!await PermittedAsync(actor, ConversationPermissions.Ingest, resource, cancellationToken).ConfigureAwait(false))
+        var access = await evaluator.LoadDecisionContextAsync(actor, scope, [ConversationPermissions.Ingest, ConversationPermissions.Read], cancellationToken).ConfigureAwait(false);
+        if (!(await access.DecideAsync(ConversationPermissions.Ingest, resource, cancellationToken).ConfigureAwait(false)).IsPermitted)
             return ConversationRefused.Forbidden;
         // Masked per conversation:read; a principal without read sees every maskable field masked.
-        var decision = await DecideAsync(actor, ConversationPermissions.Read, resource, cancellationToken).ConfigureAwait(false);
-        var masking = await MaskingAsync(scope, cancellationToken).ConfigureAwait(false);
+        var decision = await access.DecideAsync(ConversationPermissions.Read, resource, cancellationToken).ConfigureAwait(false);
+        var masking = stored.Conversation.Attributes.Count == 0
+            ? ConversationMasking.Empty
+            : await MaskingAsync(scope, cancellationToken).ConfigureAwait(false);
         return masking.Project(stored, decision);
     }
 
@@ -98,7 +144,17 @@ public sealed partial class ConversationService
     {
         var text = string.Join('\u001F', query.Inbox?.Value ?? "", query.Status?.ToString() ?? "", query.Assignee?.Value ?? "", query.Unassigned ? "1" : "0",
             query.Team?.Value ?? "", query.Label?.Value ?? "", query.Contact?.Value ?? "", query.Limit.ToString(CultureInfo.InvariantCulture));
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)).AsSpan(0, 8));
+        Span<byte> hash = stackalloc byte[32];
+        var maxBytes = Encoding.UTF8.GetMaxByteCount(text.Length);
+        if (maxBytes <= 1024)
+        {
+            Span<byte> utf8 = stackalloc byte[maxBytes];
+            var len = Encoding.UTF8.GetBytes(text, utf8);
+            SHA256.HashData(utf8[..len], hash);
+        }
+        else
+            SHA256.HashData(Encoding.UTF8.GetBytes(text), hash);
+        return Convert.ToHexStringLower(hash[..8]);
     }
 
     private static string EncodeCursor(ConversationListCursor cursor, string fingerprint) =>

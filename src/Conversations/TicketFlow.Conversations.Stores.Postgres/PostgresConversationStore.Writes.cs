@@ -1,3 +1,4 @@
+using System.Data;
 using Npgsql;
 using NpgsqlTypes;
 using TicketFlow.Core;
@@ -12,6 +13,8 @@ public sealed partial class PostgresConversationStore
         ArgumentNullException.ThrowIfNull(write);
         RequireChangeScope(scope, write.Change);
         var conversation = write.Conversation;
+        var labelValues = ExtractLabels(conversation.Labels);
+        var participantValues = ExtractParticipants(conversation.Participants);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
@@ -20,11 +23,11 @@ public sealed partial class PostgresConversationStore
         long revision;
         await using (var put = new NpgsqlCommand(write.ExpectedRevision is null ? InsertConversation : UpdateConversation, connection, transaction))
         {
-            BindConversation(put, scope, conversation);
+            BindConversation(put, scope, conversation, labelValues, participantValues);
             if (write.ExpectedRevision is { } expected)
             {
-                put.Parameters.AddWithValue("expected", expected);
-                put.Parameters.AddWithValue("head", head);
+                AddInt64(put, "expected", expected);
+                AddInt64(put, "head", head);
             }
             if (await put.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not long written)
                 return await MissAsync(connection, transaction, scope, conversation.Id, cancellationToken).ConfigureAwait(false);
@@ -34,8 +37,30 @@ public sealed partial class PostgresConversationStore
         // Everything after the fenced snapshot row goes to the server in one batch: events, label index sync, message rows and the outbox
         // entry with its deliveries. Message inserts use ON CONFLICT DO NOTHING; a skipped row is diagnosed after rolling back.
         await using var batch = new NpgsqlBatch(connection, transaction);
-        if (write.Events.Count > 0)
+        List<(NpgsqlBatchCommand Command, MessageEvent Message)>? messageRows = null;
+        var eventCount = write.Events.Count;
+        if (eventCount > 0)
         {
+            var sequences = new long[eventCount];
+            var eventIds = new Guid[eventCount];
+            var kinds = new short[eventCount];
+            var messageIds = new string?[eventCount];
+            var occurred = new DateTimeOffset[eventCount];
+            var actorKinds = new short[eventCount];
+            var actorIds = new string[eventCount];
+            var payloads = new string[eventCount];
+            for (var i = 0; i < eventCount; i++)
+            {
+                var item = write.Events[i];
+                sequences[i] = item.Sequence;
+                eventIds[i] = item.Id;
+                kinds[i] = (short)item.Event.Kind;
+                messageIds[i] = MessageOf(item)?.Value;
+                occurred[i] = item.OccurredAt;
+                actorKinds[i] = (short)item.Actor.Kind;
+                actorIds[i] = item.Actor.Id;
+                payloads[i] = ConversationJsonCodec.SerializeEvent(item.Event);
+            }
             var insert = new NpgsqlBatchCommand("""
                 INSERT INTO tf_conversation_events(tenant_id, project_id, environment_id, app_id, workspace_id, conversation_id, sequence, event_id, format_version,
                     kind, message_id, occurred_at, actor_kind, actor_id, payload)
@@ -46,27 +71,30 @@ public sealed partial class PostgresConversationStore
             var parameters = insert.Parameters;
             AddScope(parameters, scope);
             AddText(parameters, "conversation", conversation.Id.Value);
-            parameters.Add(new NpgsqlParameter("sequences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { Value = write.Events.Select(item => item.Sequence).ToArray() });
-            parameters.Add(new NpgsqlParameter("events", NpgsqlDbType.Array | NpgsqlDbType.Uuid) { Value = write.Events.Select(item => item.Id).ToArray() });
-            parameters.Add(new NpgsqlParameter("kinds", NpgsqlDbType.Array | NpgsqlDbType.Smallint) { Value = write.Events.Select(item => (short)item.Event.Kind).ToArray() });
-            parameters.Add(new NpgsqlParameter("messages", NpgsqlDbType.Array | NpgsqlDbType.Text) { Value = write.Events.Select(item => MessageOf(item)?.Value).ToArray() });
-            parameters.Add(new NpgsqlParameter("occurred", NpgsqlDbType.Array | NpgsqlDbType.TimestampTz) { Value = write.Events.Select(item => item.OccurredAt).ToArray() });
-            parameters.Add(new NpgsqlParameter("actor_kinds", NpgsqlDbType.Array | NpgsqlDbType.Smallint) { Value = write.Events.Select(item => (short)item.Actor.Kind).ToArray() });
-            AddTextArray(parameters, "actor_ids", write.Events.Select(item => item.Actor.Id));
-            AddTextArray(parameters, "payloads", write.Events.Select(item => ConversationJsonCodec.SerializeEvent(item.Event)));
+            parameters.Add(new NpgsqlParameter<long[]>("sequences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { TypedValue = sequences });
+            parameters.Add(new NpgsqlParameter<Guid[]>("events", NpgsqlDbType.Array | NpgsqlDbType.Uuid) { TypedValue = eventIds });
+            parameters.Add(new NpgsqlParameter<short[]>("kinds", NpgsqlDbType.Array | NpgsqlDbType.Smallint) { TypedValue = kinds });
+            parameters.Add(new NpgsqlParameter<string?[]>("messages", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = messageIds });
+            parameters.Add(new NpgsqlParameter<DateTimeOffset[]>("occurred", NpgsqlDbType.Array | NpgsqlDbType.TimestampTz) { TypedValue = occurred });
+            parameters.Add(new NpgsqlParameter<short[]>("actor_kinds", NpgsqlDbType.Array | NpgsqlDbType.Smallint) { TypedValue = actorKinds });
+            AddTextArray(parameters, "actor_ids", actorIds);
+            AddTextArray(parameters, "payloads", payloads);
             batch.BatchCommands.Add(insert);
         }
 
         // The label side table mirrors the snapshot's labels and activity time for index-backed label lists.
-        var labels = new NpgsqlBatchCommand($"""
-            DELETE FROM tf_conversation_labels
-            WHERE conversation_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@conversation) AND NOT (label = ANY(@labels))
-            """);
-        AddScope(labels.Parameters, scope);
-        AddText(labels.Parameters, "conversation", conversation.Id.Value);
-        AddTextArray(labels.Parameters, "labels", conversation.Labels.Select(label => label.Value));
-        batch.BatchCommands.Add(labels);
-        if (conversation.Labels.Count > 0)
+        if (write.ExpectedRevision is not null)
+        {
+            var labels = new NpgsqlBatchCommand("""
+                DELETE FROM tf_conversation_labels
+                WHERE conversation_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@conversation) AND NOT (label = ANY(@labels))
+                """);
+            AddScope(labels.Parameters, scope);
+            AddText(labels.Parameters, "conversation", conversation.Id.Value);
+            AddTextArray(labels.Parameters, "labels", labelValues);
+            batch.BatchCommands.Add(labels);
+        }
+        if (labelValues.Length > 0)
         {
             var upsert = new NpgsqlBatchCommand("""
                 INSERT INTO tf_conversation_labels(scope_key, conversation_key, label, conversation_id, last_activity_at)
@@ -74,17 +102,18 @@ public sealed partial class PostgresConversationStore
                     label, @conversation, @last_activity_at
                 FROM unnest(@labels) AS item(label)
                 ON CONFLICT (conversation_key, label) DO UPDATE SET last_activity_at=EXCLUDED.last_activity_at
+                WHERE tf_conversation_labels.last_activity_at IS DISTINCT FROM EXCLUDED.last_activity_at
                 """);
             AddScope(upsert.Parameters, scope);
             AddText(upsert.Parameters, "conversation", conversation.Id.Value);
-            AddTextArray(upsert.Parameters, "labels", conversation.Labels.Select(label => label.Value));
+            AddTextArray(upsert.Parameters, "labels", labelValues);
             AddInstant(upsert.Parameters, "last_activity_at", conversation.LastActivityAt);
             batch.BatchCommands.Add(upsert);
         }
 
-        var messageRows = new List<(NpgsqlBatchCommand Command, MessageEvent Message)>();
-        foreach (var item in write.Events)
+        for (var i = 0; i < eventCount; i++)
         {
+            var item = write.Events[i];
             if (item.Event.Value is not MessageEvent message)
                 continue;
             var insert = new NpgsqlBatchCommand("""
@@ -98,30 +127,37 @@ public sealed partial class PostgresConversationStore
             AddText(parameters, "conversation", conversation.Id.Value);
             AddText(parameters, "message", message.Id.Value);
             AddText(parameters, "inbox", conversation.Inbox.Value);
-            parameters.AddWithValue("sequence", item.Sequence);
-            parameters.AddWithValue("direction", (short)message.Direction);
+            AddInt64(parameters, "sequence", item.Sequence);
+            AddInt16(parameters, "direction", (short)message.Direction);
             AddText(parameters, "external", message.ExternalId);
-            parameters.AddWithValue("state", (short)message.Delivery.State);
+            AddInt16(parameters, "state", (short)message.Delivery.State);
             AddText(parameters, "failure", message.Delivery.FailureCode);
             AddInstant(parameters, "updated", message.Delivery.UpdatedAt);
             batch.BatchCommands.Add(insert);
+            messageRows ??= [];
             messageRows.Add((insert, message));
         }
         if (write.Change is { } changed)
             batch.BatchCommands.Add(AppendCommand(changed));
 
-        var sequence = await ExecuteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-        foreach (var (command, message) in messageRows)
+        long? sequence = null;
+        if (batch.BatchCommands.Count > 0)
+            sequence = await ExecuteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+        if (messageRows is not null)
         {
-            if (command.RecordsAffected == 1)
-                continue;
-            // A committed row holds the message identifier or the external identifier: report which after rolling back.
-            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-            if (await LoadMessageAsync(connection, null, scope, conversation.Id, message.Id, forUpdate: false, cancellationToken).ConfigureAwait(false) is not null)
-                return new ConversationWriteRejected(ConversationWriteRejection.DuplicateMessageId);
-            if (message.ExternalId is { } external && await FindExternalAsync(connection, null, scope, conversation.Inbox, external, cancellationToken).ConfigureAwait(false) is { } holder)
-                return new ConversationDuplicateMessage(holder);
-            throw new InvalidOperationException("A conversation message row could not be written.");
+            for (var i = 0; i < messageRows.Count; i++)
+            {
+                var (command, message) = messageRows[i];
+                if (command.RecordsAffected == 1)
+                    continue;
+                // A committed row holds the message identifier or the external identifier: report which after rolling back.
+                await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                if (await LoadMessageAsync(connection, null, scope, conversation.Id, message.Id, forUpdate: false, cancellationToken).ConfigureAwait(false) is not null)
+                    return new ConversationWriteRejected(ConversationWriteRejection.DuplicateMessageId);
+                if (message.ExternalId is { } external && await FindExternalAsync(connection, null, scope, conversation.Inbox, external, cancellationToken).ConfigureAwait(false) is { } holder)
+                    return new ConversationDuplicateMessage(holder);
+                throw new InvalidOperationException("A conversation message row could not be written.");
+            }
         }
         var entry = write.Change is { } appended ? new ConversationOutboxEntry(sequence ?? throw new InvalidOperationException("The outbox entry was not written."), appended) : null;
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -142,6 +178,26 @@ public sealed partial class PostgresConversationStore
         return sequence;
     }
 
+    private const string DeleteConversationAndAppendSql = $"""
+        WITH deleted AS (
+            DELETE FROM tf_conversations WHERE {ConversationKey} AND revision=@expected
+            RETURNING {UnaliasedConversationColumns}
+        ),
+        entry AS (
+            INSERT INTO tf_conversation_outbox(entry_id, tenant_id, project_id, environment_id, app_id, workspace_id, conversation_id, inbox_id, format_version, kind,
+                revision, payload, occurred_at)
+            SELECT @entry, @tenant, @project, @environment, @app, @workspace, @conversation, @inbox, 1, @kind, @revision, @payload, @occurred
+            FROM deleted
+            RETURNING sequence
+        ),
+        fan AS (
+            INSERT INTO tf_conversation_outbox_deliveries(consumer, sequence, conversation_key, state, fence, attempts, available_at)
+            SELECT k.consumer, e.sequence, tf_key_v1(@tenant,@project,@environment,@app,@workspace,@conversation), 0, 0, 0, @now
+            FROM tf_conversation_outbox_consumers k CROSS JOIN entry e
+        )
+        SELECT {DeletedConversationColumns}, e.sequence FROM deleted d CROSS JOIN entry e
+        """;
+
     public async Task<ConversationWriteResult> DeleteAsync(TicketScope scope, ConversationId id, long expectedRevision, ConversationChange change, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -152,23 +208,46 @@ public sealed partial class PostgresConversationStore
         if (change.Kind != ConversationChangeKind.Deleted || change.Conversation != id)
             throw new ArgumentException("The change must describe this delete.", nameof(change));
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        var existing = await LoadAsync(connection, transaction, scope, id, forUpdate: true, cancellationToken).ConfigureAwait(false);
-        if (existing is null)
-            return ConversationWriteNotFound.Instance;
-        if (existing.Revision != expectedRevision)
-            return new ConversationWriteConflict(existing.Revision);
-        await using (var delete = new NpgsqlCommand($"DELETE FROM tf_conversations WHERE {ConversationKey} AND revision=@expected", connection, transaction))
+        await using (var command = new NpgsqlCommand(DeleteConversationAndAppendSql, connection))
         {
-            AddScope(delete, scope);
-            AddText(delete, "conversation", id.Value);
-            delete.Parameters.AddWithValue("expected", expectedRevision);
-            await delete.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            AddScope(command, scope);
+            AddText(command, "conversation", id.Value);
+            AddInt64(command, "expected", expectedRevision);
+            AddGuid(command.Parameters, "entry", change.Id);
+            AddText(command, "inbox", change.Inbox.Value);
+            AddInt16(command, "kind", (short)change.Kind);
+            AddInt64(command, "revision", change.Revision);
+            AddText(command, "payload", ConversationJsonCodec.SerializeChangePayload(change));
+            AddInstant(command, "occurred", change.OccurredAt);
+            AddInstant(command, "now", time.GetUtcNow());
+            await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var deleted = ReadConversation(reader, scope);
+                var sequence = reader.GetInt64(23);
+                return new ConversationWriteApplied(deleted, [], new ConversationOutboxEntry(sequence, change));
+            }
         }
-        var entry = await AppendAsync(connection, transaction, change, cancellationToken).ConfigureAwait(false);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new ConversationWriteApplied(existing, [], entry);
+        // Fresh Read Committed snapshot on conflict/not-found miss so concurrent updates report the exact winner revision.
+        await using var check = new NpgsqlCommand($"SELECT revision FROM tf_conversations WHERE {ConversationKey}", connection);
+        AddScope(check, scope);
+        AddText(check, "conversation", id.Value);
+        return await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision
+            ? new ConversationWriteConflict(revision)
+            : ConversationWriteNotFound.Instance;
     }
+
+    private const string LockMessageForDeliverySql = $"""
+        SELECT {MessageColumnsM}
+        FROM tf_conversations c
+        JOIN tf_conversation_messages m
+          ON m.conversation_key = c.conversation_key
+         AND m.message_key = tf_key_v1(@tenant,@project,@environment,@app,@workspace,@conversation,@message)
+         AND m.conversation_id = @conversation AND m.message_id = @message
+         AND {ScopeWhereM}
+        WHERE {ConversationKeyC}
+        FOR UPDATE OF c, m
+        """;
 
     public async Task<MessageDeliveryWriteResult> UpdateDeliveryAsync(TicketScope scope, MessageDeliveryWrite write, CancellationToken cancellationToken = default)
     {
@@ -177,10 +256,16 @@ public sealed partial class PostgresConversationStore
         RequireChangeScope(scope, write.Change);
         await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        // Locking the conversation row orders this outbox entry after the conversation's earlier writes.
-        if (await LoadAsync(connection, transaction, scope, write.Conversation, forUpdate: true, cancellationToken).ConfigureAwait(false) is null)
-            return ConversationWriteNotFound.Instance;
-        var current = await LoadMessageAsync(connection, transaction, scope, write.Conversation, write.Message, forUpdate: true, cancellationToken).ConfigureAwait(false);
+        // Locking both the conversation row and the message row in one query orders this outbox entry after earlier conversation writes.
+        StoredMessage? current;
+        await using (var lockCommand = new NpgsqlCommand(LockMessageForDeliverySql, connection, transaction))
+        {
+            AddScope(lockCommand, scope);
+            AddText(lockCommand, "conversation", write.Conversation.Value);
+            AddText(lockCommand, "message", write.Message.Value);
+            await using var reader = await lockCommand.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+            current = await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadMessage(reader, scope) : null;
+        }
         if (current is null)
             return ConversationWriteNotFound.Instance;
         if (current.DeliveryRevision != write.ExpectedDeliveryRevision)
@@ -194,24 +279,29 @@ public sealed partial class PostgresConversationStore
                 throw new ArgumentException("A message's external identifier cannot be replaced.", nameof(write));
             externalId = requested;
         }
-        await using (var update = new NpgsqlCommand($"""
-            UPDATE tf_conversation_messages SET delivery_state=@state, delivery_failure=@failure, delivery_updated_at=@updated, external_id=@external,
-                delivery_revision=delivery_revision+1
-            WHERE message_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@conversation,@message) AND conversation_id=@conversation AND message_id=@message
-              AND {ScopeWhere} AND delivery_revision=@expected
-            """, connection, transaction))
+        long sequence;
+        await using (var batch = new NpgsqlBatch(connection, transaction))
         {
-            AddScope(update, scope);
-            AddText(update, "conversation", write.Conversation.Value);
-            AddText(update, "message", write.Message.Value);
-            update.Parameters.AddWithValue("state", (short)write.Delivery.State);
-            AddText(update, "failure", write.Delivery.FailureCode);
-            AddInstant(update, "updated", write.Delivery.UpdatedAt);
-            AddText(update, "external", externalId);
-            update.Parameters.AddWithValue("expected", write.ExpectedDeliveryRevision);
+            var update = new NpgsqlBatchCommand($"""
+                UPDATE tf_conversation_messages SET delivery_state=@state, delivery_failure=@failure, delivery_updated_at=@updated, external_id=@external,
+                    delivery_revision=delivery_revision+1
+                WHERE message_key=tf_key_v1(@tenant,@project,@environment,@app,@workspace,@conversation,@message) AND conversation_id=@conversation AND message_id=@message
+                  AND {ScopeWhere} AND delivery_revision=@expected
+                """);
+            AddScope(update.Parameters, scope);
+            AddText(update.Parameters, "conversation", write.Conversation.Value);
+            AddText(update.Parameters, "message", write.Message.Value);
+            AddInt16(update.Parameters, "state", (short)write.Delivery.State);
+            AddText(update.Parameters, "failure", write.Delivery.FailureCode);
+            AddInstant(update.Parameters, "updated", write.Delivery.UpdatedAt);
+            AddText(update.Parameters, "external", externalId);
+            AddInt64(update.Parameters, "expected", write.ExpectedDeliveryRevision);
+            batch.BatchCommands.Add(update);
+            batch.BatchCommands.Add(AppendCommand(write.Change));
             try
             {
-                await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                sequence = await ExecuteBatchAsync(batch, cancellationToken).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException("The outbox entry was not written.");
             }
             catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation)
             {
@@ -221,9 +311,9 @@ public sealed partial class PostgresConversationStore
                 return new ConversationDuplicateMessage(holder);
             }
         }
-        var entry = await AppendAsync(connection, transaction, write.Change, cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return new MessageDeliveryApplied(current with { Delivery = write.Delivery, ExternalId = externalId, DeliveryRevision = current.DeliveryRevision + 1 }, entry);
+        return new MessageDeliveryApplied(current with { Delivery = write.Delivery, ExternalId = externalId, DeliveryRevision = current.DeliveryRevision + 1 },
+            new ConversationOutboxEntry(sequence, write.Change));
     }
 
     private const string InsertConversation = """
@@ -246,21 +336,41 @@ public sealed partial class PostgresConversationStore
         RETURNING revision
         """;
 
-    private static void BindConversation(NpgsqlCommand command, TicketScope scope, Conversation conversation)
+    private static string[] ExtractLabels(IReadOnlyList<LabelId> labels)
+    {
+        if (labels.Count == 0)
+            return [];
+        var values = new string[labels.Count];
+        for (var i = 0; i < labels.Count; i++)
+            values[i] = labels[i].Value;
+        return values;
+    }
+
+    private static string[] ExtractParticipants(IReadOnlyList<UserId> participants)
+    {
+        if (participants.Count == 0)
+            return [];
+        var values = new string[participants.Count];
+        for (var i = 0; i < participants.Count; i++)
+            values[i] = participants[i].Value;
+        return values;
+    }
+
+    private static void BindConversation(NpgsqlCommand command, TicketScope scope, Conversation conversation, string[] labelValues, string[] participantValues)
     {
         AddScope(command, scope);
         AddText(command, "conversation", conversation.Id.Value);
         AddText(command, "inbox", conversation.Inbox.Value);
         AddText(command, "contact", conversation.Contact.Value);
-        command.Parameters.AddWithValue("status", (short)conversation.Status.Kind);
+        AddInt16(command, "status", (short)conversation.Status.Kind);
         AddInstant(command, "snoozed_until", conversation.Status.SnoozedUntil);
-        command.Parameters.AddWithValue("priority", (short)conversation.Priority);
+        AddInt16(command, "priority", (short)conversation.Priority);
         AddText(command, "assignee", conversation.Assignee?.Value);
         AddText(command, "team", conversation.Team?.Value);
-        AddTextArray(command, "labels", conversation.Labels.Select(label => label.Value));
+        AddTextArray(command, "labels", labelValues);
         AddText(command, "attributes", ConversationJsonCodec.SerializeAttributes(conversation.Attributes));
         AddText(command, "access_attributes", ConversationJsonCodec.SerializeConditionAttributes(conversation.Attributes));
-        AddTextArray(command, "participants", conversation.Participants.Select(user => user.Value));
+        AddTextArray(command, "participants", participantValues);
         AddText(command, "channel_kind", conversation.ChannelThread?.Channel);
         AddText(command, "channel_thread", conversation.ChannelThread?.ExternalThreadId);
         AddInstant(command, "created_at", conversation.CreatedAt);
@@ -269,7 +379,7 @@ public sealed partial class PostgresConversationStore
         AddInstant(command, "first_reply_at", conversation.FirstReplyAt);
         AddInstant(command, "last_incoming_at", conversation.LastIncomingAt);
         AddInstant(command, "last_outgoing_at", conversation.LastOutgoingAt);
-        command.Parameters.AddWithValue("last_sequence", conversation.LastSequence);
+        AddInt64(command, "last_sequence", conversation.LastSequence);
         AddText(command, "redirects", ConversationJsonCodec.SerializeRedirects(conversation.ContactRedirects));
     }
 

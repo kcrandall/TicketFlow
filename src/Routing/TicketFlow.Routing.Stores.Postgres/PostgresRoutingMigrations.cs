@@ -103,5 +103,11 @@ public static class PostgresRoutingMigrations
         new(2, "queue-due-claim-order", """
         CREATE INDEX tf_routing_queue_due_v2 ON tf_routing_queue (next_attempt_at, conversation_key);
         DROP INDEX tf_routing_queue_due;
+        """),
+        new(3, "perf-indexes", """
+        CREATE INDEX tf_routing_agents_online ON tf_routing_agents (scope_key, agent_id) WHERE status = 1;
+        CREATE INDEX tf_routing_agents_reassign_v2 ON tf_routing_agents (agent_key) INCLUDE (reassign_lease_until) WHERE reassign_pending;
+        CREATE INDEX tf_routing_assignments_agent_load ON tf_routing_assignments (scope_key, agent_id, channel_kind) INCLUDE (conversation_id, state, reserved_until);
+        CREATE INDEX tf_routing_queue_team ON tf_routing_queue (scope_key, team_id, waiting_since, conversation_id) WHERE team_id IS NOT NULL;
         """)]);
 }

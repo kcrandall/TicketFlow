@@ -49,7 +49,7 @@ public sealed class AutomationScheduler
             if (claims.Count == 0)
                 break;
             var claim = claims[0];
-            var stored = await rules.GetAsync(claim.Scope, claim.Rule, cancellationToken).ConfigureAwait(false);
+            var stored = claim.Snapshot ?? await rules.GetAsync(claim.Scope, claim.Rule, cancellationToken).ConfigureAwait(false);
             if (stored?.Rule is not { Enabled: true, Trigger.Value: ScheduledTrigger trigger } rule)
             {
                 if (!await rules.CompleteScheduleAsync(claim, null, cancellationToken).ConfigureAwait(false))
@@ -59,13 +59,17 @@ public sealed class AutomationScheduler
             var failed = false;
             try
             {
-                foreach (var conversation in await SelectAsync(claim.Scope, trigger, cancellationToken).ConfigureAwait(false))
+                var selected = await SelectAsync(claim.Scope, trigger, cancellationToken).ConfigureAwait(false);
+                var contextCache = selected.Count > 1 ? new AutomationContextCache() : null;
+                AutomationRule[] singleRule = [rule];
+                var triggerKey = AutomationTriggerKeys.Scheduled(claim.DueAt);
+                for (var i = 0; i < selected.Count; i++)
                 {
                     scanned++;
                     try
                     {
-                        await runner.RunAsync(new AutomationOccurrence(claim.Scope, conversation, AutomationEvent.Scheduled(), AutomationTriggerKeys.Scheduled(claim.DueAt),
-                            false, null, null), [rule], cancellationToken).ConfigureAwait(false);
+                        await runner.RunCompiledAsync(new AutomationOccurrence(claim.Scope, selected[i], AutomationEvent.Scheduled(), triggerKey,
+                            false, null, null), singleRule, contextCache, cancellationToken).ConfigureAwait(false);
                     }
                     catch (Exception) when (!cancellationToken.IsCancellationRequested)
                     {

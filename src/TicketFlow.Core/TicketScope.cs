@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text.Unicode;
 
 namespace TicketFlow.Core;
@@ -5,6 +6,8 @@ namespace TicketFlow.Core;
 /// <summary>The complete isolation boundary for support data: tenant, project, environment, app and workspace.</summary>
 public sealed record TicketScope
 {
+    private static readonly SearchValues<char> ControlChars = CreateControlChars();
+
     /// <summary>Maximum identifier length in UTF-16 code units.</summary>
     public const int MaximumIdentifierLength = 256;
 
@@ -34,13 +37,25 @@ public sealed record TicketScope
     public static string RequireIdentifier(string value, string parameterName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(value, parameterName);
-        if (value.Length > MaximumIdentifierLength || value.AsSpan().ContainsAnyInRange('\0', '\u001F') || value.AsSpan().ContainsAnyInRange('\u007F', '\u009F'))
+        var span = value.AsSpan();
+        if (span.Length > MaximumIdentifierLength || span.ContainsAny(ControlChars))
             throw new ArgumentException("Identifiers must contain at most 256 characters and no control characters.", parameterName);
 
         // Serializers replace isolated surrogates, which would collapse distinct identifiers into the same stored/hash identity.
-        if (!Utf16.IsValid(value))
+        if (span.ContainsAnyInRange('\uD800', '\uDFFF') && !Utf16.IsValid(span))
             throw new ArgumentException("Identifiers must contain well-formed Unicode.", parameterName);
 
         return value;
+    }
+
+    private static SearchValues<char> CreateControlChars()
+    {
+        Span<char> chars = stackalloc char[65];
+        var index = 0;
+        for (var c = '\0'; c <= '\u001F'; c++)
+            chars[index++] = c;
+        for (var c = '\u007F'; c <= '\u009F'; c++)
+            chars[index++] = c;
+        return SearchValues.Create(chars);
     }
 }

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using TicketFlow.Conversations;
 using TicketFlow.Core;
@@ -119,10 +120,21 @@ public sealed record NegatedCondition : AutomationCondition
 /// <summary>The conversation status is one of <see cref="Statuses"/>.</summary>
 public sealed record StatusIsCondition : AutomationCondition
 {
+    private readonly byte statusMask;
+
     public StatusIsCondition(params IEnumerable<ConversationStatusKind> statuses)
-        : base(1, 1) => Statuses = [.. AutomationText.Distinct(statuses, 5, Enum.IsDefined, nameof(statuses), allowEmpty: false).Order()];
+        : base(1, 1)
+    {
+        Statuses = [.. AutomationText.Distinct(statuses, 5, Enum.IsDefined, nameof(statuses), allowEmpty: false).Order()];
+        byte mask = 0;
+        for (var i = 0; i < Statuses.Count; i++)
+            mask |= (byte)(1 << (int)Statuses[i]);
+        statusMask = mask;
+    }
 
     public IReadOnlyList<ConversationStatusKind> Statuses { get; }
+
+    public bool Matches(ConversationStatusKind status) => (statusMask & (1 << (int)status)) != 0;
 
     public bool Equals(StatusIsCondition? other) => other is not null && Statuses.SequenceEqual(other.Statuses);
 
@@ -286,24 +298,36 @@ public sealed record AttributeCondition : AutomationCondition
 {
     public const int MaximumKeyLength = 64;
 
+    private readonly string[] valuesArray;
+
     public AttributeCondition(ConditionTarget target, string key, AttributeOperator op, params IEnumerable<string> values)
         : base(1, 1)
     {
         Target = AutomationText.Defined(target, nameof(target));
         Key = AutomationText.RequireToken(key, MaximumKeyLength, nameof(key), "Attribute keys");
         Operator = AutomationText.Defined(op, nameof(op));
-        Values = op switch
+        valuesArray = op switch
         {
-            AttributeOperator.Exists => RequireValues(values, 0, 0, nameof(values)),
+            AttributeOperator.Exists => [.. RequireValues(values, 0, 0, nameof(values))],
             AttributeOperator.In => [.. RequireValues(values, 1, MaximumValues, nameof(values)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)],
-            _ => RequireValues(values, 1, 1, nameof(values)),
+            _ => [.. RequireValues(values, 1, 1, nameof(values))],
         };
+        Values = valuesArray;
+        if (op is AttributeOperator.GreaterThan or AttributeOperator.LessThan && valuesArray.Length == 1
+            && decimal.TryParse(valuesArray[0], NumberStyles.Number, CultureInfo.InvariantCulture, out var numeric))
+            NumericValue = numeric;
     }
 
     public ConditionTarget Target { get; }
     public string Key { get; }
     public AttributeOperator Operator { get; }
     public IReadOnlyList<string> Values { get; }
+    public decimal? NumericValue { get; }
+
+    public bool ContainsValue(string value) =>
+        valuesArray.Length <= 8
+            ? Array.IndexOf(valuesArray, value) >= 0
+            : Array.BinarySearch(valuesArray, value, StringComparer.Ordinal) >= 0;
 
     public bool Equals(AttributeCondition? other) =>
         other is not null && Target == other.Target && Key == other.Key && Operator == other.Operator && Values.SequenceEqual(other.Values, StringComparer.Ordinal);
@@ -351,7 +375,7 @@ public sealed record MessageContentCondition : AutomationCondition
         {
             try
             {
-                Regex = new Regex(value, RegexOptions.CultureInvariant | (ignoreCase ? RegexOptions.IgnoreCase : RegexOptions.None), Timeout);
+                Regex = new Regex(value, RegexOptions.Compiled | RegexOptions.CultureInvariant | (ignoreCase ? RegexOptions.IgnoreCase : RegexOptions.None), Timeout);
             }
             catch (ArgumentException error)
             {

@@ -92,11 +92,12 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
 
     private async Task DispatchAsync(TicketScope scope, ConversationId conversationId, MessageId messageId, CancellationToken cancellationToken)
     {
-        var row = await conversationStore.GetMessageAsync(scope, conversationId, messageId, cancellationToken).ConfigureAwait(false);
-        if (row is null || row.Direction != MessageDirection.Outgoing)
-            return;
-        var stored = await conversationStore.GetAsync(scope, conversationId, cancellationToken).ConfigureAwait(false);
-        if (stored is null)
+        var rowTask = conversationStore.GetMessageAsync(scope, conversationId, messageId, cancellationToken);
+        var storedTask = conversationStore.GetAsync(scope, conversationId, cancellationToken);
+        await Task.WhenAll(rowTask, storedTask).ConfigureAwait(false);
+        var row = rowTask.Result;
+        var stored = storedTask.Result;
+        if (row is null || row.Direction != MessageDirection.Outgoing || stored is null)
             return;
         var inbox = await inboxes.GetAsync(scope, stored.Conversation.Inbox, cancellationToken).ConfigureAwait(false);
         if (inbox is null)
@@ -125,11 +126,19 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
         if (existing is { Dispatch: { State: ChannelDispatchState.RetryScheduled, NextAttemptAt: { } due } scheduled } && due > now)
             throw new ChannelDispatchRetryException(scheduled.Code ?? "retry-scheduled", due - now);
         var attempts = existing?.Dispatch.Attempts ?? 0;
-        var events = await conversationStore.ReadTimelineAsync(scope, conversationId, row.Sequence - 1, 1, includeNotes: false, cancellationToken).ConfigureAwait(false);
+        var supportsThreading = channel.Capabilities.Has(ChannelFeatures.Threading);
+        var eventsTask = conversationStore.ReadTimelineAsync(scope, conversationId, row.Sequence - 1, 1, includeNotes: false, cancellationToken);
+        var stateTask = states.GetAsync(scope, conversationId, cancellationToken);
+        var referencesTask = supportsThreading ? threads.ListAsync(scope, conversationId, cancellationToken) : null;
+        if (referencesTask is not null)
+            await Task.WhenAll(eventsTask, stateTask, referencesTask).ConfigureAwait(false);
+        else
+            await Task.WhenAll(eventsTask, stateTask).ConfigureAwait(false);
+        var events = eventsTask.Result;
         if (events.Count != 1 || events[0].Event.Value is not MessageEvent { Direction: MessageDirection.Outgoing } outgoing || outgoing.Id != messageId)
             return;
 
-        var state = await states.GetAsync(scope, conversationId, cancellationToken).ConfigureAwait(false);
+        var state = stateTask.Result;
         var recipient = await RecipientAsync(scope, stored.Conversation, state?.State, channel, cancellationToken).ConfigureAwait(false);
         string? refusal = null;
         if (recipient is null)
@@ -145,10 +154,32 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
             return;
         }
 
-        var references = await threads.ListAsync(scope, conversationId, cancellationToken).ConfigureAwait(false);
-        var chain = references.Select(reference => reference.Reference.Reference).ToList();
-        if (chain.Count > options.MaximumReplyReferences)
-            chain = [chain[0], .. chain[^(options.MaximumReplyReferences - 1)..]];
+        IReadOnlyList<string> chain;
+        if (referencesTask is not null)
+        {
+            var references = referencesTask.Result;
+            var maxRefs = options.MaximumReplyReferences;
+            if (references.Count == 0)
+                chain = [];
+            else if (references.Count <= maxRefs)
+            {
+                var list = new string[references.Count];
+                for (var i = 0; i < references.Count; i++)
+                    list[i] = references[i].Reference.Reference;
+                chain = list;
+            }
+            else
+            {
+                var list = new string[maxRefs];
+                list[0] = references[0].Reference.Reference;
+                var tailStart = references.Count - (maxRefs - 1);
+                for (var i = 1; i < maxRefs; i++)
+                    list[i] = references[tailStart + i - 1].Reference.Reference;
+                chain = list;
+            }
+        }
+        else
+            chain = [];
         var inReplyTo = state?.State.LastIncomingExternalId ?? (chain.Count > 0 ? chain[^1] : null);
         var request = new OutboundChannelMessage(scope, stored.Conversation.Inbox, binding, conversationId, messageId, stored.Conversation.Contact, recipient!,
             outgoing.Body, outgoing.ContentType, ChannelAuthorization.IdempotencyKey(scope, binding.Kind.Value, conversationId.Value, messageId.Value),
@@ -176,7 +207,8 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
         switch (result)
         {
             case ChannelSendAccepted accepted:
-                if (ChannelText.NormalizeReference(accepted.ThreadReference ?? accepted.ExternalMessageId) is { } reference)
+                if ((supportsThreading || accepted.ThreadReference is not null)
+                    && ChannelText.NormalizeReference(accepted.ThreadReference ?? accepted.ExternalMessageId) is { } reference)
                     await threads.AddAsync(scope, stored.Conversation.Inbox, conversationId, [new ChannelMessageReference(reference, MessageDirection.Outgoing, messageId)],
                         time.GetUtcNow(), cancellationToken).ConfigureAwait(false);
                 await FinishAsync(scope, current, attempts, ChannelDispatchState.Accepted, accepted.ExternalMessageId, null, cancellationToken).ConfigureAwait(false);
@@ -247,12 +279,21 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
         var contact = await contacts.GetAsync(scope, conversation.Contact, cancellationToken).ConfigureAwait(false);
         if (contact is null || contact.Contact.Blocked)
             return null;
-        foreach (var kind in channel.RecipientKinds)
+        for (var k = 0; k < channel.RecipientKinds.Count; k++)
         {
-            var identity = contact.Contact.Identities.Where(item => item.Address.Kind == kind)
-                .OrderByDescending(item => item.Verification.IsVerified).FirstOrDefault();
-            if (identity is not null)
-                return ChannelRecipient.From(identity.Address);
+            var kind = channel.RecipientKinds[k];
+            ContactIdentity? best = null;
+            for (var i = 0; i < contact.Contact.Identities.Count; i++)
+            {
+                var item = contact.Contact.Identities[i];
+                if (item.Address.Kind != kind)
+                    continue;
+                if (item.Verification.IsVerified)
+                    return ChannelRecipient.From(item.Address);
+                best ??= item;
+            }
+            if (best is not null)
+                return ChannelRecipient.From(best.Address);
         }
         return null;
     }

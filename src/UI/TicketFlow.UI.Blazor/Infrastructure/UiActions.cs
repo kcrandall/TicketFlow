@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Globalization;
 using Microsoft.AspNetCore.Http;
 using TicketFlow.Core;
@@ -52,13 +53,13 @@ public delegate Task<UiActionResult> UiActionHandler(UiActionContext context);
 /// <summary>The registry of form actions, keyed by the posted <c>_action</c> value.</summary>
 public static partial class UiActions
 {
-    private static readonly Dictionary<string, UiActionHandler> Handlers = Build();
+    private static readonly FrozenDictionary<string, UiActionHandler> Handlers = Build();
 
     public static UiActionHandler? Find(string? name) => name is not null && Handlers.TryGetValue(name, out var handler) ? handler : null;
 
     public static IReadOnlyCollection<string> Names => Handlers.Keys;
 
-    private static Dictionary<string, UiActionHandler> Build()
+    private static FrozenDictionary<string, UiActionHandler> Build()
     {
         var handlers = new Dictionary<string, UiActionHandler>(StringComparer.Ordinal);
         RegisterConversations(handlers);
@@ -67,7 +68,7 @@ public static partial class UiActions
         RegisterOperations(handlers);
         RegisterContent(handlers);
         RegisterAccess(handlers);
-        return handlers;
+        return handlers.ToFrozenDictionary(StringComparer.Ordinal);
     }
 
     /// <summary>Runs <paramref name="handler"/>, mapping input and domain validation exceptions to an invalid outcome (messages only when TicketFlow produced them).</summary>
@@ -90,7 +91,8 @@ public static partial class UiActions
 
     private static string FirstLine(string message)
     {
-        var line = message.Split('\n')[0];
+        var newline = message.IndexOf('\n');
+        var line = newline < 0 ? message : message[..newline];
         var parameter = line.IndexOf(" (Parameter", StringComparison.Ordinal);
         return parameter > 0 ? line[..parameter] : line;
     }

@@ -112,6 +112,7 @@ public static class ConversationOutboxRowCodec
     {
         Guid guid => guid,
         string text when Guid.TryParse(text, out var guid) => guid,
+        JsonElement { ValueKind: JsonValueKind.String } element when element.TryGetGuid(out var guid) => guid,
         JsonElement { ValueKind: JsonValueKind.String } element when Guid.TryParse(element.GetString(), out var guid) => guid,
         _ => throw new FormatException($"Outbox column '{column}' must be a UUID."),
     };
@@ -149,6 +150,7 @@ public static class ConversationOutboxRowCodec
         string text => ParseInstantString(text, column),
         long epoch => FromEpoch(epoch, column),
         int epoch => FromEpoch(epoch, column),
+        JsonElement { ValueKind: JsonValueKind.String } element when element.TryGetDateTimeOffset(out var dt) => dt.ToUniversalTime(),
         JsonElement { ValueKind: JsonValueKind.String } element => ParseInstantString(element.GetString()!, column),
         JsonElement { ValueKind: JsonValueKind.Number } element when element.TryGetInt64(out var epoch) => FromEpoch(epoch, column),
         _ => throw new FormatException($"Outbox column '{column}' must be a timestamp."),

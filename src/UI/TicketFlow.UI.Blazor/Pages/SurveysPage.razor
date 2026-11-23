@@ -92,31 +92,50 @@
 
     protected override async Task OnInitializedAsync()
     {
-        await LoadWorkspaceAsync();
         if (Service<ISurveyService>() is not { } service)
+        {
+            await LoadInboxesAsync();
             return;
-        if (await service.ListSurveysAsync(Actor, Aborted) is SurveySucceeded<IReadOnlyList<StoredSurvey>> list)
-            surveys = [.. list.Value];
+        }
         var to = Now;
         var from = to.AddDays(-30);
-        if (await service.AggregateAsync(Actor, new SurveyAggregateQuery(SurveyKind.Csat, from, to), Aborted) is SurveySucceeded<SurveyAggregateResult> total)
+        var inboxesTask = LoadInboxesAsync();
+        var surveysTask = service.ListSurveysAsync(Actor, Aborted);
+        var totalTask = service.AggregateAsync(Actor, new SurveyAggregateQuery(SurveyKind.Csat, from, to), Aborted);
+        var agentsTask = service.AggregateAsync(Actor, new SurveyAggregateQuery(SurveyKind.Csat, from, to, groupBy: SurveyDimension.Agent), Aborted);
+        var responsesTask = service.ListResponsesAsync(Actor, new SurveyResponseQuery(from, to, limit: 50), Aborted);
+        await Task.WhenAll(inboxesTask, surveysTask, totalTask, agentsTask, responsesTask);
+
+        if (await surveysTask is SurveySucceeded<IReadOnlyList<StoredSurvey>> list)
+            surveys = [.. list.Value];
+        if (await totalTask is SurveySucceeded<SurveyAggregateResult> total)
             foreach (var row in total.Value.Rows)
                 (csatResponses, csatPositive, csatNegative, csatScore) = (csatResponses + row.Responses, csatPositive + row.Positive, csatNegative + row.Negative, csatScore + row.ScoreSum);
-        if (await service.AggregateAsync(Actor, new SurveyAggregateQuery(SurveyKind.Csat, from, to, groupBy: SurveyDimension.Agent), Aborted) is SurveySucceeded<SurveyAggregateResult> agents)
-        {
-            await Session.LoadUsersAsync(agents.Value.Rows.Where(row => row.Group is not null).Select(row => (UserId?)new UserId(row.Group!)));
-            byAgent = [.. agents.Value.Rows.Where(row => row.Responses > 0).OrderByDescending(row => row.Positive * 100.0 / row.Responses)
-                .Select((row, index) => new BarList.Item(row.Group is null ? "Unassigned" : Session.UserName(new UserId(row.Group)), row.Positive * 100.0 / row.Responses,
-                    $"{UiFormat.Percent(row.Positive * 100.0 / row.Responses)} · {row.Responses}", $"var(--chart-{index % 5 + 1})"))];
-        }
-        if (await service.ListResponsesAsync(Actor, new SurveyResponseQuery(from, to, limit: 50), Aborted) is SurveySucceeded<SurveyResponseViewPage> page)
+
+        var agentRows = await agentsTask is SurveySucceeded<SurveyAggregateResult> agents ? agents.Value.Rows : [];
+        if (await responsesTask is SurveySucceeded<SurveyResponseViewPage> page)
         {
             responses = [.. page.Value.Items.Take(8)];
-            distribution = [.. Enumerable.Range(1, 5).Reverse().Select(score => new BarList.Item($"{score} ★", page.Value.Items.Count(item => item.Response.Kind == SurveyKind.Csat && item.Response.Score == score),
-                page.Value.Items.Count(item => item.Response.Kind == SurveyKind.Csat && item.Response.Score == score).ToString(CultureInfo.InvariantCulture),
-                score >= 4 ? "var(--success)" : score == 3 ? "var(--warning)" : "var(--destructive)"))];
-            await LoadContactsAsync(page.Value.Items.Select(item => item.Response.Contact));
-            await Session.LoadUsersAsync(page.Value.Items.Select(item => item.Response.Agent));
+            Span<int> scoreCounts = stackalloc int[6];
+            foreach (var item in page.Value.Items)
+                if (item.Response.Kind == SurveyKind.Csat && item.Response.Score is >= 1 and <= 5)
+                    scoreCounts[item.Response.Score]++;
+            distribution = new List<BarList.Item>(5);
+            for (var score = 5; score >= 1; score--)
+                distribution.Add(new BarList.Item($"{score} ★", scoreCounts[score], scoreCounts[score].ToString(CultureInfo.InvariantCulture),
+                    score >= 4 ? "var(--success)" : score == 3 ? "var(--warning)" : "var(--destructive)"));
         }
+
+        // Load only the 8 rendered response contacts/agents + agent breakdown users in parallel.
+        var usersToLoad = agentRows.Where(row => row.Group is not null).Select(row => (UserId?)new UserId(row.Group!))
+            .Concat(responses.Select(item => item.Response.Agent));
+        await Task.WhenAll(
+            LoadContactsAsync(responses.Select(item => item.Response.Contact)),
+            Session.LoadUsersAsync(usersToLoad));
+
+        if (agentRows.Count > 0)
+            byAgent = [.. agentRows.Where(row => row.Responses > 0).OrderByDescending(row => row.Positive * 100.0 / row.Responses)
+                .Select((row, index) => new BarList.Item(row.Group is null ? "Unassigned" : Session.UserName(new UserId(row.Group)), row.Positive * 100.0 / row.Responses,
+                    $"{UiFormat.Percent(row.Positive * 100.0 / row.Responses)} · {row.Responses}", $"var(--chart-{index % 5 + 1})"))];
     }
 }

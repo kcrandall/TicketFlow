@@ -71,9 +71,28 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IEventLog.MaximumRead);
         lock (gate)
-            return Task.FromResult<IReadOnlyList<StoredIntegrationEvent>>(logs.TryGetValue(scope, out var log)
-                ? [.. log.Events.Values.Where(stored => stored.Sequence > afterSequence).Take(limit)]
-                : []);
+        {
+            if (!logs.TryGetValue(scope, out var log) || log.Events.Count == 0)
+                return Task.FromResult<IReadOnlyList<StoredIntegrationEvent>>([]);
+            var keys = log.Events.Keys;
+            int low = 0, high = keys.Count;
+            while (low < high)
+            {
+                var mid = (low + high) >> 1;
+                if (keys[mid] <= afterSequence)
+                    low = mid + 1;
+                else
+                    high = mid;
+            }
+            if (low >= keys.Count)
+                return Task.FromResult<IReadOnlyList<StoredIntegrationEvent>>([]);
+            var count = Math.Min(limit, keys.Count - low);
+            var values = log.Events.Values;
+            var result = new StoredIntegrationEvent[count];
+            for (var i = 0; i < count; i++)
+                result[i] = values[low + i];
+            return Task.FromResult<IReadOnlyList<StoredIntegrationEvent>>(result);
+        }
     }
 
     public Task<EventLogHead> GetHeadAsync(TicketScope scope, CancellationToken cancellationToken = default)
@@ -193,6 +212,27 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
             return Task.FromResult(subscriptions.TryGetValue((scope, Require(id)), out var entry) ? entry.State : null);
     }
 
+    public Task<(StoredEventSubscription Subscription, EventDeliveryState State)?> GetWithStateAsync(TicketScope scope, EventSubscriptionId id, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        lock (gate)
+            return Task.FromResult<(StoredEventSubscription, EventDeliveryState)?>(subscriptions.TryGetValue((scope, Require(id)), out var entry) ? (entry.Subscription, entry.State) : null);
+    }
+
+    public Task<IReadOnlyList<(StoredEventSubscription Subscription, EventDeliveryState State)>> ListWithStateAsync(TicketScope scope, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        lock (gate)
+        {
+            var result = new List<(StoredEventSubscription Subscription, EventDeliveryState State)>();
+            foreach (var entry in subscriptions.Values)
+                if (entry.Subscription.Scope == scope)
+                    result.Add((entry.Subscription, entry.State));
+            result.Sort(static (a, b) => StringComparer.Ordinal.Compare(a.Subscription.Subscription.Id.Value, b.Subscription.Subscription.Id.Value));
+            return Task.FromResult<IReadOnlyList<(StoredEventSubscription, EventDeliveryState)>>(result);
+        }
+    }
+
     public Task<IReadOnlyList<EventDeliveryClaim>> ClaimAsync(DateTimeOffset now, int limit, TimeSpan lease, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
@@ -208,7 +248,7 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
             {
                 entry.Fence++;
                 entry.LeaseUntil = EventText.Instant(now + lease);
-                claims.Add(new EventDeliveryClaim(entry.Subscription, entry.State, entry.Fence, entry.LeaseUntil.Value));
+                claims.Add(new EventDeliveryClaim(entry.Subscription, entry.State, entry.Fence, entry.LeaseUntil.Value) { HeadSequence = Head(entry.Subscription.Scope).Last });
             }
             return Task.FromResult<IReadOnlyList<EventDeliveryClaim>>(claims);
         }

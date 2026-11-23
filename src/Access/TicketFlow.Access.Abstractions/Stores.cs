@@ -100,6 +100,18 @@ public interface IAccessGrantStore
     Task<AccessWriteResult<StoredAccessGrant>> UpdateAsync(AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default);
 
     Task<AccessWriteResult<StoredAccessGrant>> DeleteAsync(AccessPartition partition, GrantId id, long expectedRevision, CancellationToken cancellationToken = default);
+
+    /// <summary>Deletes multiple revision-fenced grants in one batch, returning those that were removed.</summary>
+    async Task<IReadOnlyList<StoredAccessGrant>> DeleteManyAsync(AccessPartition partition, IReadOnlyList<(GrantId Id, long ExpectedRevision)> targets, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        ArgumentNullException.ThrowIfNull(targets);
+        var removed = new List<StoredAccessGrant>(targets.Count);
+        for (var i = 0; i < targets.Count; i++)
+            if (await DeleteAsync(partition, targets[i].Id, targets[i].ExpectedRevision, cancellationToken).ConfigureAwait(false) is { Value: AccessWriteApplied<StoredAccessGrant> applied })
+                removed.Add(applied.Value);
+        return removed;
+    }
 }
 
 /// <summary>

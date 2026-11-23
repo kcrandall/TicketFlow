@@ -91,19 +91,26 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
     {
         if (!await PermittedAsync(actor, EventPermissions.Read, cancellationToken).ConfigureAwait(false))
             return new EventRefused(EventRefusal.Forbidden);
-        var current = await store.GetAsync(actor.Scope, id, cancellationToken).ConfigureAwait(false);
-        if (current is null)
+        var rowTask = store.GetWithStateAsync(actor.Scope, id, cancellationToken);
+        var headTask = log.GetHeadAsync(actor.Scope, cancellationToken);
+        await Task.WhenAll(rowTask, headTask).ConfigureAwait(false);
+        if (rowTask.Result is not { } row)
             return EventNotFound.Instance;
-        return new EventSucceeded<EventSubscriptionView>(await ViewAsync(current, cancellationToken).ConfigureAwait(false));
+        return new EventSucceeded<EventSubscriptionView>(new EventSubscriptionView(row.Subscription, row.State, headTask.Result));
     }
 
     public async Task<EventResult<IReadOnlyList<EventSubscriptionView>>> ListAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
     {
         if (!await PermittedAsync(actor, EventPermissions.Read, cancellationToken).ConfigureAwait(false))
             return new EventRefused(EventRefusal.Forbidden);
-        var views = new List<EventSubscriptionView>();
-        foreach (var stored in await store.ListAsync(actor.Scope, cancellationToken).ConfigureAwait(false))
-            views.Add(await ViewAsync(stored, cancellationToken).ConfigureAwait(false));
+        var listTask = store.ListWithStateAsync(actor.Scope, cancellationToken);
+        var headTask = log.GetHeadAsync(actor.Scope, cancellationToken);
+        await Task.WhenAll(listTask, headTask).ConfigureAwait(false);
+        var rows = listTask.Result;
+        var head = headTask.Result;
+        var views = new EventSubscriptionView[rows.Count];
+        for (var i = 0; i < rows.Count; i++)
+            views[i] = new EventSubscriptionView(rows[i].Subscription, rows[i].State, head);
         return new EventSucceeded<IReadOnlyList<EventSubscriptionView>>(views);
     }
 
@@ -119,7 +126,7 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
         var head = await log.GetHeadAsync(actor.Scope, cancellationToken).ConfigureAwait(false);
         if (!await store.ReplayAsync(actor.Scope, id, Math.Min(afterSequence, head.Last), time.GetUtcNow(), cancellationToken).ConfigureAwait(false))
             return EventNotFound.Instance;
-        return new EventSucceeded<EventSubscriptionView>(await ViewAsync(current, cancellationToken).ConfigureAwait(false));
+        return new EventSucceeded<EventSubscriptionView>(await ViewAsync(current, head, cancellationToken).ConfigureAwait(false));
     }
 
     public async Task<EventResult<IReadOnlyList<EventDeadLetter>>> ListDeadLettersAsync(PrincipalRef actor, EventSubscriptionId id, long afterSequence = 0, int limit = 50,
@@ -165,17 +172,19 @@ public sealed class EventSubscriptionService : IEventSubscriptionService
 
     private async Task<EventResult<EventSubscriptionView>> ViewAsync(EventWriteResult<StoredEventSubscription> result, CancellationToken cancellationToken) => result switch
     {
-        EventWriteApplied<StoredEventSubscription> applied => new EventSucceeded<EventSubscriptionView>(await ViewAsync(applied.Value, cancellationToken).ConfigureAwait(false)),
+        EventWriteApplied<StoredEventSubscription> applied => new EventSucceeded<EventSubscriptionView>(await ViewAsync(applied.Value, head: null, cancellationToken).ConfigureAwait(false)),
         EventWriteNotFound => EventNotFound.Instance,
         EventWriteConflict conflict => new EventConflict(conflict.CurrentRevision),
         EventWriteRejected rejected => new EventRefused(EventRefusal.Rejected, rejected.Reason.ToString()),
     };
 
-    private async Task<EventSubscriptionView> ViewAsync(StoredEventSubscription stored, CancellationToken cancellationToken)
+    private async Task<EventSubscriptionView> ViewAsync(StoredEventSubscription stored, EventLogHead? head, CancellationToken cancellationToken)
     {
-        var fresh = await store.GetAsync(stored.Scope, stored.Subscription.Id, cancellationToken).ConfigureAwait(false) ?? stored;
-        return new EventSubscriptionView(fresh, await store.GetStateAsync(stored.Scope, stored.Subscription.Id, cancellationToken).ConfigureAwait(false),
-            await log.GetHeadAsync(stored.Scope, cancellationToken).ConfigureAwait(false));
+        var rowTask = store.GetWithStateAsync(stored.Scope, stored.Subscription.Id, cancellationToken);
+        var headTask = head is null ? log.GetHeadAsync(stored.Scope, cancellationToken) : Task.FromResult(head);
+        await Task.WhenAll(rowTask, headTask).ConfigureAwait(false);
+        var row = rowTask.Result;
+        return new EventSubscriptionView(row?.Subscription ?? stored, row?.State, headTask.Result);
     }
 }
 

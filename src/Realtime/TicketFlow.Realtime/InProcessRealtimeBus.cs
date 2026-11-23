@@ -10,14 +10,20 @@ public sealed class InProcessRealtimeBus : IRealtimeBus
 {
     private ImmutableArray<Func<RealtimePublication, CancellationToken, Task>> handlers = [];
 
-    public async Task PublishAsync(RealtimePublication publication, CancellationToken cancellationToken = default)
+    public Task PublishAsync(RealtimePublication publication, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(publication);
-        foreach (var handler in handlers)
+        var current = handlers;
+        return current.IsEmpty ? Task.CompletedTask : PublishCoreAsync(current, publication, cancellationToken);
+    }
+
+    private static async Task PublishCoreAsync(ImmutableArray<Func<RealtimePublication, CancellationToken, Task>> current, RealtimePublication publication, CancellationToken cancellationToken)
+    {
+        for (var i = 0; i < current.Length; i++)
         {
             try
             {
-                await handler(publication, cancellationToken).ConfigureAwait(false);
+                await current[i](publication, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {

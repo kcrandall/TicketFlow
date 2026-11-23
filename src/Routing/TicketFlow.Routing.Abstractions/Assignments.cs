@@ -159,19 +159,82 @@ public sealed record RoutingReservationRequest
     public RoutingCandidate? Select(IReadOnlyDictionary<UserId, int> loads, string? cursor)
     {
         ArgumentNullException.ThrowIfNull(loads);
-        var open = Candidates.Where(candidate => loads.GetValueOrDefault(candidate.Agent) < candidate.Capacity).ToList();
-        if (open.Count == 0)
-            return null;
-        if (Preferred is { } preferred && open.FirstOrDefault(candidate => candidate.Agent == preferred) is { } sticky)
-            return sticky;
-        // Rotation order: identifiers after the cursor first, then wrap around.
-        var rotation = cursor is null ? open : [.. open.Where(c => string.CompareOrdinal(c.Agent.Value, cursor) > 0), .. open.Where(c => string.CompareOrdinal(c.Agent.Value, cursor) <= 0)];
-        return Selection switch
+        var count = Candidates.Count;
+        if (Preferred is { } preferred)
         {
-            RoutingSelection.RoundRobin => rotation[0],
-            RoutingSelection.LeastBusy => rotation.MinBy(candidate => (double)loads.GetValueOrDefault(candidate.Agent) / candidate.Capacity),
-            _ => throw new InvalidOperationException("Unknown selection."),
-        };
+            var idx = BinarySearchAgent(preferred.Value);
+            if (idx >= 0)
+            {
+                var sticky = Candidates[idx];
+                if (loads.GetValueOrDefault(sticky.Agent) < sticky.Capacity)
+                    return sticky;
+            }
+        }
+        var start = cursor is null ? 0 : FindFirstAfter(cursor);
+        if (Selection == RoutingSelection.RoundRobin)
+        {
+            for (var i = 0; i < count; i++)
+            {
+                var candidate = Candidates[(start + i) % count];
+                if (loads.GetValueOrDefault(candidate.Agent) < candidate.Capacity)
+                    return candidate;
+            }
+            return null;
+        }
+        if (Selection == RoutingSelection.LeastBusy)
+        {
+            RoutingCandidate? best = null;
+            long bestLoad = 0;
+            long bestCap = 1;
+            for (var i = 0; i < count; i++)
+            {
+                var candidate = Candidates[(start + i) % count];
+                var load = loads.GetValueOrDefault(candidate.Agent);
+                if (load >= candidate.Capacity)
+                    continue;
+                if (best is null || (long)load * bestCap < bestLoad * candidate.Capacity)
+                {
+                    best = candidate;
+                    bestLoad = load;
+                    bestCap = candidate.Capacity;
+                    if (load == 0)
+                        return best;
+                }
+            }
+            return best;
+        }
+        throw new InvalidOperationException("Unknown selection.");
+    }
+
+    private int BinarySearchAgent(string agentId)
+    {
+        int lo = 0, hi = Candidates.Count - 1;
+        while (lo <= hi)
+        {
+            var mid = lo + ((hi - lo) >> 1);
+            var cmp = StringComparer.Ordinal.Compare(Candidates[mid].Agent.Value, agentId);
+            if (cmp == 0)
+                return mid;
+            if (cmp < 0)
+                lo = mid + 1;
+            else
+                hi = mid - 1;
+        }
+        return -1;
+    }
+
+    private int FindFirstAfter(string cursor)
+    {
+        int lo = 0, hi = Candidates.Count;
+        while (lo < hi)
+        {
+            var mid = lo + ((hi - lo) >> 1);
+            if (StringComparer.Ordinal.Compare(Candidates[mid].Agent.Value, cursor) <= 0)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        return lo == Candidates.Count ? 0 : lo;
     }
 }
 

@@ -34,6 +34,8 @@ public sealed class BusinessCalendarCalculator
     private static readonly long Day = TimeSpan.TicksPerDay;
     private readonly BusinessCalendar calendar;
     private readonly TimeZoneInfo zone;
+    private readonly bool supportsDst;
+    private readonly long baseOffsetTicks;
 
     /// <summary>Resolves <see cref="BusinessCalendar.TimeZoneId"/> on this host.</summary>
     /// <exception cref="TimeZoneNotFoundException">The zone is unknown on this host.</exception>
@@ -47,6 +49,8 @@ public sealed class BusinessCalendarCalculator
     {
         this.calendar = calendar ?? throw new ArgumentNullException(nameof(calendar));
         zone = timeZone ?? throw new ArgumentNullException(nameof(timeZone));
+        supportsDst = timeZone.SupportsDaylightSavingTime;
+        baseOffsetTicks = timeZone.BaseUtcOffset.Ticks;
     }
 
     public BusinessCalendar Calendar => calendar;
@@ -57,8 +61,17 @@ public sealed class BusinessCalendarCalculator
     public bool IsOpen(DateTimeOffset at)
     {
         var start = Require(at, nameof(at));
-        foreach (var _ in Scan(start, start + 1))
-            return true;
+        var offset = supportsDst ? Offset(start) : baseOffsetTicks;
+        var localTicks = start + offset;
+        var dayNumber = (int)(localTicks / Day);
+        var timeOfDay = localTicks - dayNumber * Day;
+        var spans = calendar.HoursOn(DateOnly.FromDayNumber(dayNumber));
+        for (var i = 0; i < spans.Count; i++)
+        {
+            var span = spans[i];
+            if (timeOfDay >= span.Start.Ticks && timeOfDay < span.End.Ticks)
+                return true;
+        }
         return false;
     }
 
@@ -163,33 +176,114 @@ public sealed class BusinessCalendarCalculator
 
     /// <summary>
     /// Yields open pieces (UTC ticks, half-open, ordered, possibly adjacent) within [<paramref name="from"/>, <paramref name="limit"/>).
-    /// UTC time is walked in segments of constant offset (at most one day each). Within a segment local time is linear, so the open
-    /// local spans of each local date intersected with the segment map back to UTC in order. Gap times have no UTC instant and are
-    /// never produced; overlap times belong to two segments and are produced in both.
+    /// UTC time is walked in segments of constant offset (at most one day each for DST zones, or one single segment for fixed-offset zones).
+    /// Allocation-free struct enumerator.
     /// </summary>
-    private IEnumerable<(long Start, long End)> Scan(long from, long limit)
+    private IntervalEnumerable Scan(long from, long limit) => new(this, from, limit);
+
+    private readonly struct IntervalEnumerable(BusinessCalendarCalculator calculator, long from, long limit)
     {
-        var cursor = from;
-        while (cursor < limit)
+        public IntervalEnumerator GetEnumerator() => new(calculator, from, limit);
+    }
+
+    private struct IntervalEnumerator
+    {
+        private readonly BusinessCalendarCalculator calculator;
+        private readonly long limit;
+        private long cursor;
+        private long cursorOffset;
+        private bool hasCursorOffset;
+        private long segmentOffset;
+        private long localStart;
+        private long localEnd;
+        private int dayNumber;
+        private long dayStart;
+        private IReadOnlyList<BusinessHours>? currentSpans;
+        private int spanIndex;
+        private (long Start, long End) current;
+
+        public IntervalEnumerator(BusinessCalendarCalculator calculator, long from, long limit)
         {
-            var offset = Offset(cursor);
-            var segmentEnd = Math.Min(cursor + Day, limit);
-            if (Offset(segmentEnd) != offset)
-                segmentEnd = FindTransition(cursor, segmentEnd, offset);
-            var localStart = cursor + offset;
-            var localEnd = segmentEnd + offset;
-            var date = DateOnly.FromDateTime(new DateTime(localStart, DateTimeKind.Unspecified));
-            for (var dayStart = date.ToDateTime(TimeOnly.MinValue).Ticks; dayStart < localEnd; dayStart += Day, date = date.AddDays(1))
+            this.calculator = calculator;
+            this.limit = limit;
+            cursor = from;
+            cursorOffset = calculator.baseOffsetTicks;
+            hasCursorOffset = !calculator.supportsDst;
+            segmentOffset = 0;
+            localStart = 0;
+            localEnd = 0;
+            dayNumber = 0;
+            dayStart = 0;
+            currentSpans = null;
+            spanIndex = 0;
+            current = default;
+        }
+
+        public readonly (long Start, long End) Current => current;
+
+        public bool MoveNext()
+        {
+            while (true)
             {
-                foreach (var hours in calendar.HoursOn(date))
+                if (currentSpans is not null)
                 {
-                    var open = Math.Max(dayStart + hours.Start.Ticks, localStart);
-                    var close = Math.Min(dayStart + hours.End.Ticks, localEnd);
-                    if (open < close)
-                        yield return (open - offset, close - offset);
+                    while (spanIndex < currentSpans.Count)
+                    {
+                        var hours = currentSpans[spanIndex++];
+                        var open = Math.Max(dayStart + hours.Start.Ticks, localStart);
+                        var close = Math.Min(dayStart + hours.End.Ticks, localEnd);
+                        if (open < close)
+                        {
+                            current = (open - segmentOffset, close - segmentOffset);
+                            return true;
+                        }
+                    }
+                    dayStart += Day;
+                    dayNumber++;
+                    if (dayStart < localEnd)
+                    {
+                        currentSpans = calculator.calendar.HoursOn(DateOnly.FromDayNumber(dayNumber));
+                        spanIndex = 0;
+                        continue;
+                    }
+                    currentSpans = null;
                 }
+
+                if (cursor >= limit)
+                    return false;
+
+                long offset;
+                long segmentEnd;
+                if (!calculator.supportsDst)
+                {
+                    offset = calculator.baseOffsetTicks;
+                    segmentEnd = limit;
+                }
+                else
+                {
+                    offset = hasCursorOffset ? cursorOffset : calculator.Offset(cursor);
+                    segmentEnd = Math.Min(cursor + Day, limit);
+                    var endOffset = calculator.Offset(segmentEnd);
+                    if (endOffset != offset)
+                    {
+                        segmentEnd = calculator.FindTransition(cursor, segmentEnd, offset);
+                        cursorOffset = calculator.Offset(segmentEnd);
+                    }
+                    else
+                        cursorOffset = endOffset;
+                    hasCursorOffset = true;
+                }
+
+                segmentOffset = offset;
+                localStart = cursor + offset;
+                localEnd = segmentEnd + offset;
+                cursor = segmentEnd;
+
+                dayNumber = (int)(localStart / Day);
+                dayStart = dayNumber * Day;
+                currentSpans = calculator.calendar.HoursOn(DateOnly.FromDayNumber(dayNumber));
+                spanIndex = 0;
             }
-            cursor = segmentEnd;
         }
     }
 

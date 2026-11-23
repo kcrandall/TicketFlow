@@ -1,3 +1,5 @@
+using System.Data;
+using System.Runtime.CompilerServices;
 using Npgsql;
 using NpgsqlTypes;
 using TicketFlow.Core;
@@ -44,6 +46,17 @@ public sealed partial class PostgresSurveyStore : ISurveyStore
         ArgumentNullException.ThrowIfNull(scope);
         await using var command = source.CreateCommand($"SELECT {SurveyColumns} FROM tf_survey_definitions WHERE {ScopeKeyWhere} ORDER BY survey_id COLLATE \"C\" LIMIT {SurveyLimits.MaximumSurveysPerWorkspace}");
         AddScope(command, scope);
+        return await ReadListAsync(command, reader => ReadSurvey(reader, scope), cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<StoredSurvey>> ListEnabledSurveysAsync(TicketScope scope, SurveyTrigger trigger, InboxId? inbox, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        await using var command = source.CreateCommand(
+            $"SELECT {SurveyColumns} FROM tf_survey_definitions WHERE {ScopeKeyWhere} AND enabled AND trigger=@trigger AND (inbox_id IS NULL OR inbox_id=@inbox) ORDER BY survey_id COLLATE \"C\" LIMIT {SurveyLimits.MaximumSurveysPerWorkspace}");
+        AddScope(command, scope);
+        command.Parameters.Add(new NpgsqlParameter<short>("trigger", NpgsqlDbType.Smallint) { TypedValue = (short)trigger });
+        AddText(command, "inbox", inbox?.Value);
         return await ReadListAsync(command, reader => ReadSurvey(reader, scope), cancellationToken).ConfigureAwait(false);
     }
 
@@ -169,7 +182,8 @@ public sealed partial class PostgresSurveyStore : ISurveyStore
     private static T Enum<T>(short value)
         where T : struct, System.Enum
     {
-        var result = (T)(object)(int)value;
+        int raw = value;
+        var result = Unsafe.As<int, T>(ref raw);
         return System.Enum.IsDefined(result) ? result : throw new FormatException($"Unknown {typeof(T).Name} value.");
     }
 
@@ -207,7 +221,7 @@ public sealed partial class PostgresSurveyStore : ISurveyStore
     private static async Task<T?> ReadSingleAsync<T>(NpgsqlCommand command, Func<NpgsqlDataReader, T> read, CancellationToken cancellationToken)
         where T : class
     {
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? read(reader) : null;
     }
 

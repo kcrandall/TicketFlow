@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text.Unicode;
 
 namespace TicketFlow.Workspaces;
@@ -5,16 +6,13 @@ namespace TicketFlow.Workspaces;
 /// <summary>Shared validation for bounded workspace tokens and free text.</summary>
 internal static class WorkspaceText
 {
+    private static readonly SearchValues<char> TokenChars = SearchValues.Create("abcdefghijklmnopqrstuvwxyz0123456789-_.");
+    private static readonly SearchValues<char> ControlChars = CreateControlChars(allowLineBreaksAndTabs: false);
+    private static readonly SearchValues<char> MessageDisallowedControlChars = CreateControlChars(allowLineBreaksAndTabs: true);
+
     /// <summary>Validates a lowercase token: starts with a-z, then a-z, 0-9, '-', '_' or '.'.</summary>
-    public static bool IsToken(ReadOnlySpan<char> value, int maximumLength)
-    {
-        if (value.IsEmpty || value.Length > maximumLength || value[0] is not (>= 'a' and <= 'z'))
-            return false;
-        foreach (var character in value)
-            if (character is not ((>= 'a' and <= 'z') or (>= '0' and <= '9') or '-' or '_' or '.'))
-                return false;
-        return true;
-    }
+    public static bool IsToken(ReadOnlySpan<char> value, int maximumLength) =>
+        !value.IsEmpty && value.Length <= maximumLength && value[0] is >= 'a' and <= 'z' && !value.ContainsAnyExcept(TokenChars);
 
     public static string RequireToken(string value, int maximumLength, string parameterName, string description)
     {
@@ -30,7 +28,8 @@ internal static class WorkspaceText
         ArgumentNullException.ThrowIfNull(value, parameterName);
         if (string.IsNullOrWhiteSpace(value))
             throw new ArgumentException("A non-blank value is required.", parameterName);
-        if (value.Length > maximumLength || value.AsSpan().ContainsAnyInRange('\0', '\u001F') || value.AsSpan().ContainsAnyInRange('\u007F', '\u009F') || !Utf16.IsValid(value))
+        var span = value.AsSpan();
+        if (span.Length > maximumLength || span.ContainsAny(ControlChars) || (span.ContainsAnyInRange('\uD800', '\uDFFF') && !Utf16.IsValid(span)))
             throw new ArgumentException($"Values must contain at most {maximumLength} characters, no control characters and well-formed Unicode.", parameterName);
         return value;
     }
@@ -41,11 +40,21 @@ internal static class WorkspaceText
         ArgumentNullException.ThrowIfNull(value, parameterName);
         if (string.IsNullOrWhiteSpace(value))
             throw new ArgumentException("A non-blank value is required.", parameterName);
-        var invalid = value.Length > maximumLength || !Utf16.IsValid(value);
-        foreach (var character in value)
-            invalid |= character is (< ' ' and not '\n' and not '\r' and not '\t') or (>= '\u007F' and <= '\u009F');
-        if (invalid)
+        var span = value.AsSpan();
+        if (span.Length > maximumLength || span.ContainsAny(MessageDisallowedControlChars) || (span.ContainsAnyInRange('\uD800', '\uDFFF') && !Utf16.IsValid(span)))
             throw new ArgumentException($"Messages must contain at most {maximumLength} characters, no control characters other than line breaks and tabs, and well-formed Unicode.", parameterName);
         return value;
+    }
+
+    private static SearchValues<char> CreateControlChars(bool allowLineBreaksAndTabs)
+    {
+        Span<char> chars = stackalloc char[65];
+        var index = 0;
+        for (var c = '\0'; c <= '\u001F'; c++)
+            if (!allowLineBreaksAndTabs || c is not ('\n' or '\r' or '\t'))
+                chars[index++] = c;
+        for (var c = '\u007F'; c <= '\u009F'; c++)
+            chars[index++] = c;
+        return SearchValues.Create(chars[..index]);
     }
 }

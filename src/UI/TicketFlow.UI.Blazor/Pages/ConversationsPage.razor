@@ -110,9 +110,11 @@
 
     protected override async Task OnInitializedAsync()
     {
-        await LoadWorkspaceAsync();
         if (Service<IConversationService>() is not { } service)
+        {
+            await LoadWorkspaceAsync();
             return;
+        }
         ConversationStatusKind? status = (Query("status") ?? "open") switch
         {
             "pending" => ConversationStatusKind.Pending,
@@ -131,16 +133,25 @@
         }
         catch (ArgumentException)
         {
+            await LoadWorkspaceAsync();
             error = UiOutcome.Invalid("One of the filters is not valid.");
             return;
         }
-        switch (await service.ListAsync(Actor, query, Query("cursor"), Aborted))
+        var workspaceTask = LoadWorkspaceAsync();
+        var listTask = service.ListAsync(Actor, query, Query("cursor"), Aborted);
+        var slaTask = Service<ISlaService>()?.ListAsync(Actor, new SlaRiskQuery(SlaRiskFilter.AtRiskOrBreached, limit: SlaRiskQuery.MaximumLimit), null, Aborted);
+        if (slaTask is not null)
+            await Task.WhenAll(workspaceTask, listTask, slaTask);
+        else
+            await Task.WhenAll(workspaceTask, listTask);
+
+        switch (await listTask)
         {
             case ConversationListPage page:
                 next = page.NextCursor;
                 // SLA badges come from one risk-list read (only at-risk and breached clocks are badged), not a status read per row.
                 var risk = new Dictionary<ConversationId, SlaStatusView>();
-                if (Service<ISlaService>() is { } sla && await sla.ListAsync(Actor, new SlaRiskQuery(SlaRiskFilter.AtRiskOrBreached, limit: SlaRiskQuery.MaximumLimit), null, Aborted) is SlaValue<SlaRiskPage> riskPage)
+                if (slaTask is not null && await slaTask is SlaValue<SlaRiskPage> riskPage)
                     foreach (var item in riskPage.Value.Items)
                         risk[item.Conversation] = item;
                 foreach (var conversation in page.Conversations)
@@ -150,8 +161,9 @@
                 error = UiOutcome.Refused(refused.Reason, refused.Errors);
                 break;
         }
-        await LoadContactsAsync(rows.Select(row => row.Conversation.Contact));
-        await Session.LoadUsersAsync(rows.Select(row => row.Conversation.Assignee));
+        await Task.WhenAll(
+            LoadContactsAsync(rows.Select(row => row.Conversation.Contact)),
+            Session.LoadUsersAsync(rows.Select(row => row.Conversation.Assignee)));
     }
 
     /// <summary>A one-line state summary from the list projection itself (no per-row timeline reads).</summary>

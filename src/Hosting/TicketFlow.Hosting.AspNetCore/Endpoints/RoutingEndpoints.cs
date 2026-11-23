@@ -18,8 +18,12 @@ internal static class RoutingEndpoints
             var size = TicketFlowHttp.PageSize(limit);
             return Map(http, await service.ListAsync(actor.Principal, cursor is null ? null : new UserId(TicketFlowHttp.DecodeCursor(cursor, 1)[0]), size + 1, http.RequestAborted), profiles =>
             {
-                var page = profiles.Take(size).ToList();
-                return TicketFlowHttp.Ok(http, new PageResponse<AgentProfileResponse>([.. page.Select(profile => Dto(profile, time))], profiles.Count > size ? TicketFlowHttp.EncodeCursor(page[^1].Agent.Value) : null));
+                var now = time.GetUtcNow();
+                var count = Math.Min(profiles.Count, size);
+                var items = new AgentProfileResponse[count];
+                for (var i = 0; i < count; i++)
+                    items[i] = Dto(profiles[i], now);
+                return TicketFlowHttp.Ok(http, new PageResponse<AgentProfileResponse>(items, profiles.Count > size ? TicketFlowHttp.EncodeCursor(profiles[count - 1].Agent.Value) : null));
             });
         }).WithName("ListAgents").Produces<PageResponse<AgentProfileResponse>>();
         group.MapGet("/routing/agents/me", async (TicketFlowActor actor, [FromServices] IAgentAvailabilityService service, [FromServices] TimeProvider time, HttpContext http) =>
@@ -144,9 +148,11 @@ internal static class RoutingEndpoints
         }, refused.Errors),
     };
 
-    private static AgentProfileResponse Dto(StoredAgentProfile profile, [FromServices] TimeProvider time) => new(
+    private static AgentProfileResponse Dto(StoredAgentProfile profile, TimeProvider time) => Dto(profile, time.GetUtcNow());
+
+    private static AgentProfileResponse Dto(StoredAgentProfile profile, DateTimeOffset now) => new(
         profile.Agent.Value,
-        TicketFlowHttp.Token(profile.Presence.EffectiveStatus(time.GetUtcNow())),
+        TicketFlowHttp.Token(profile.Presence.EffectiveStatus(now)),
         profile.Presence.ChangedAt,
         profile.Presence.LastHeartbeatAt,
         profile.Presence.ExpiresAt,

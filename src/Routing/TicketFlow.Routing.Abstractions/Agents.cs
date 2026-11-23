@@ -83,13 +83,33 @@ public sealed record AgentRoutingSettings
 
     public int CapacityFor(ChannelKind kind) => Capacities.TryGetValue(kind, out var capacity) ? capacity : DefaultCapacity;
 
-    public int? SkillLevel(string name) => Skills.FirstOrDefault(skill => skill.Name == name)?.Level;
+    public int? SkillLevel(string name)
+    {
+        int lo = 0, hi = Skills.Count - 1;
+        while (lo <= hi)
+        {
+            var mid = lo + ((hi - lo) >> 1);
+            var cmp = StringComparer.Ordinal.Compare(Skills[mid].Name, name);
+            if (cmp == 0)
+                return Skills[mid].Level;
+            if (cmp < 0)
+                lo = mid + 1;
+            else
+                hi = mid - 1;
+        }
+        return null;
+    }
 
     /// <summary>True when the agent holds every required skill at or above its level.</summary>
     public bool HasSkills(IReadOnlyDictionary<string, int> required)
     {
         ArgumentNullException.ThrowIfNull(required);
-        return required.All(pair => SkillLevel(pair.Key) is { } level && level >= pair.Value);
+        if (required.Count == 0)
+            return true;
+        foreach (var (name, minLevel) in required)
+            if (SkillLevel(name) is not { } level || level < minLevel)
+                return false;
+        return true;
     }
 
     public bool Equals(AgentRoutingSettings? other) =>
@@ -195,6 +215,17 @@ public sealed record AvailableAgentQuery
         Limit = limit;
     }
 
+    private AvailableAgentQuery(ChannelKind channel, IReadOnlyList<UserId>? agents, IReadOnlyDictionary<string, int> requiredSkills, UserId? after, int limit)
+    {
+        if (after == default(UserId))
+            throw new ArgumentException("The cursor must be initialized when supplied.", nameof(after));
+        Channel = channel;
+        Agents = agents;
+        RequiredSkills = requiredSkills;
+        After = after;
+        Limit = limit;
+    }
+
     public ChannelKind Channel { get; }
 
     /// <summary>Allowed agents in identifier order, or <see langword="null"/> for any agent.</summary>
@@ -211,7 +242,24 @@ public sealed record AvailableAgentQuery
     {
         ArgumentNullException.ThrowIfNull(profile);
         var settings = profile.Settings;
-        return settings.CapacityFor(Channel) > 0 && (Agents is null || Agents.Contains(settings.Agent)) && settings.HasSkills(RequiredSkills);
+        return settings.CapacityFor(Channel) > 0 && (Agents is null || ContainsAgent(Agents, settings.Agent)) && settings.HasSkills(RequiredSkills);
+    }
+
+    private static bool ContainsAgent(IReadOnlyList<UserId> agents, UserId target)
+    {
+        int lo = 0, hi = agents.Count - 1;
+        while (lo <= hi)
+        {
+            var mid = lo + ((hi - lo) >> 1);
+            var cmp = StringComparer.Ordinal.Compare(agents[mid].Value, target.Value);
+            if (cmp == 0)
+                return true;
+            if (cmp < 0)
+                lo = mid + 1;
+            else
+                hi = mid - 1;
+        }
+        return false;
     }
 }
 

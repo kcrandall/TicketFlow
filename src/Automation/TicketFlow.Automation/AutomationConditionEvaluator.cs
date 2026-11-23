@@ -23,7 +23,7 @@ public static class AutomationConditionEvaluator
             AllOfCondition all => All(all.Items, context),
             AnyOfCondition any => Any(any.Items, context),
             NegatedCondition negated => Evaluate(negated.Operand, context) is { } value ? !value : null,
-            StatusIsCondition status => status.Statuses.Contains(conversation.Status.Kind),
+            StatusIsCondition status => status.Matches(conversation.Status.Kind),
             PriorityCondition priority => priority.Comparison switch
             {
                 PriorityComparison.Equal => conversation.Priority == priority.Priority,
@@ -32,11 +32,11 @@ public static class AutomationConditionEvaluator
                 PriorityComparison.AtMost => conversation.Priority <= priority.Priority,
                 _ => null,
             },
-            InboxIsCondition inbox => inbox.Inboxes.Contains(conversation.Inbox),
-            TeamIsCondition team => conversation.Team is { } teamId ? team.Teams.Contains(teamId) : team.OrNone,
-            AssigneeIsCondition assignee => conversation.Assignee is { } user ? assignee.Users.Contains(user) : assignee.OrUnassigned,
+            InboxIsCondition inbox => Contains(inbox.Inboxes, conversation.Inbox),
+            TeamIsCondition team => conversation.Team is { } teamId ? Contains(team.Teams, teamId) : team.OrNone,
+            AssigneeIsCondition assignee => conversation.Assignee is { } user ? Contains(assignee.Users, user) : assignee.OrUnassigned,
             HasLabelsCondition labels => Labels(labels, labels.Target == ConditionTarget.Conversation ? conversation.Labels : context.Contact?.Labels),
-            ChannelKindIsCondition channel => context.Channel is { } kind ? channel.Kinds.Contains(kind) : null,
+            ChannelKindIsCondition channel => context.Channel is { } kind ? Contains(channel.Kinds, kind) : null,
             AttributeCondition attribute => Attribute(attribute, context),
             MessageContentCondition message => Message(message, context.Message),
             BusinessHoursCondition hours => BusinessHours(hours, context),
@@ -44,12 +44,20 @@ public static class AutomationConditionEvaluator
         };
     }
 
+    private static bool Contains<T>(IReadOnlyList<T> items, T target) where T : IEquatable<T>
+    {
+        for (var i = 0; i < items.Count; i++)
+            if (items[i].Equals(target))
+                return true;
+        return false;
+    }
+
     private static bool? All(IReadOnlyList<AutomationCondition> items, AutomationContext context)
     {
         var unknown = false;
-        foreach (var item in items)
+        for (var i = 0; i < items.Count; i++)
         {
-            switch (Evaluate(item, context))
+            switch (Evaluate(items[i], context))
             {
                 case false:
                     return false;
@@ -64,9 +72,9 @@ public static class AutomationConditionEvaluator
     private static bool? Any(IReadOnlyList<AutomationCondition> items, AutomationContext context)
     {
         var unknown = false;
-        foreach (var item in items)
+        for (var i = 0; i < items.Count; i++)
         {
-            switch (Evaluate(item, context))
+            switch (Evaluate(items[i], context))
             {
                 case true:
                     return true;
@@ -82,13 +90,27 @@ public static class AutomationConditionEvaluator
     {
         if (labels is null)
             return null;
-        return condition.Match switch
+        var wanted = condition.Labels;
+        switch (condition.Match)
         {
-            LabelMatch.All => condition.Labels.All(labels.Contains),
-            LabelMatch.Any => condition.Labels.Any(labels.Contains),
-            LabelMatch.None => !condition.Labels.Any(labels.Contains),
-            _ => null,
-        };
+            case LabelMatch.All:
+                for (var i = 0; i < wanted.Count; i++)
+                    if (!Contains(labels, wanted[i]))
+                        return false;
+                return true;
+            case LabelMatch.Any:
+                for (var i = 0; i < wanted.Count; i++)
+                    if (Contains(labels, wanted[i]))
+                        return true;
+                return false;
+            case LabelMatch.None:
+                for (var i = 0; i < wanted.Count; i++)
+                    if (Contains(labels, wanted[i]))
+                        return false;
+                return true;
+            default:
+                return null;
+        }
     }
 
     private static bool? Attribute(AttributeCondition condition, AutomationContext context)
@@ -111,20 +133,28 @@ public static class AutomationConditionEvaluator
             AttributeOperator.Exists => true,
             AttributeOperator.Equal => fact.Scalar is { } scalar ? scalar == value : null,
             AttributeOperator.NotEqual => fact.Scalar is { } scalar ? scalar != value : null,
-            AttributeOperator.In => fact.Scalar is { } scalar ? condition.Values.Contains(scalar, StringComparer.Ordinal) : null,
+            AttributeOperator.In => fact.Scalar is { } scalar ? condition.ContainsValue(scalar) : null,
             AttributeOperator.Contains => fact.Kind == AutomationAttributeKind.List
-                ? fact.Items!.Contains(value!, StringComparer.Ordinal)
+                ? ContainsOrdinal(fact.Items!, value!)
                 : fact.Kind == AutomationAttributeKind.Text ? fact.Scalar!.Contains(value!, StringComparison.OrdinalIgnoreCase) : null,
-            AttributeOperator.GreaterThan => Compare(fact, value!) is { } order ? order > 0 : null,
-            AttributeOperator.LessThan => Compare(fact, value!) is { } order ? order < 0 : null,
+            AttributeOperator.GreaterThan => Compare(fact, value!, condition.NumericValue) is { } order ? order > 0 : null,
+            AttributeOperator.LessThan => Compare(fact, value!, condition.NumericValue) is { } order ? order < 0 : null,
             _ => null,
         };
     }
 
-    private static int? Compare(AutomationAttributeFact fact, string value) => fact.Kind switch
+    private static bool ContainsOrdinal(IReadOnlyList<string> items, string target)
     {
-        AutomationAttributeKind.Number => decimal.TryParse(fact.Scalar, NumberStyles.Number, CultureInfo.InvariantCulture, out var left)
-            && decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out var right) ? left.CompareTo(right) : null,
+        for (var i = 0; i < items.Count; i++)
+            if (string.Equals(items[i], target, StringComparison.Ordinal))
+                return true;
+        return false;
+    }
+
+    private static int? Compare(AutomationAttributeFact fact, string value, decimal? numericValue) => fact.Kind switch
+    {
+        AutomationAttributeKind.Number => numericValue is { } right
+            && decimal.TryParse(fact.Scalar, NumberStyles.Number, CultureInfo.InvariantCulture, out var left) ? left.CompareTo(right) : null,
         AutomationAttributeKind.Date or AutomationAttributeKind.Text => string.CompareOrdinal(fact.Scalar, value),
         AutomationAttributeKind.Boolean or AutomationAttributeKind.List => null,
         _ => null,
@@ -134,18 +164,20 @@ public static class AutomationConditionEvaluator
     {
         if (message is null)
             return null;
-        var body = message.Body.Length > MessageContentCondition.MaximumInputLength ? message.Body[..MessageContentCondition.MaximumInputLength] : message.Body;
+        var body = message.Body.Length > MessageContentCondition.MaximumInputLength
+            ? message.Body.AsSpan(0, MessageContentCondition.MaximumInputLength)
+            : message.Body.AsSpan();
         var comparison = condition.IgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         switch (condition.Operator)
         {
             case MessageTextOperator.Contains:
-                return body.Contains(condition.Value, comparison);
+                return body.Contains(condition.Value.AsSpan(), comparison);
             case MessageTextOperator.NotContains:
-                return !body.Contains(condition.Value, comparison);
+                return !body.Contains(condition.Value.AsSpan(), comparison);
             case MessageTextOperator.StartsWith:
-                return body.StartsWith(condition.Value, comparison);
+                return body.StartsWith(condition.Value.AsSpan(), comparison);
             case MessageTextOperator.EndsWith:
-                return body.EndsWith(condition.Value, comparison);
+                return body.EndsWith(condition.Value.AsSpan(), comparison);
             case MessageTextOperator.Matches:
                 try
                 {

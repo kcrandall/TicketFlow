@@ -69,16 +69,35 @@
 
     protected override async Task OnInitializedAsync()
     {
-        await LoadWorkspaceAsync();
+        await LoadInboxesAsync();
+        if (Inboxes.Count == 0)
+            return;
         var endpoints = Service<IChannelEndpointService>();
         var widgets = Service<ILiveChatWidgetService>();
-        foreach (var inbox in Inboxes)
+        var endpointTasks = new Task<ChannelResult<StoredChannelEndpoint>>?[Inboxes.Count];
+        var widgetTasks = new Task<LiveChatResult<StoredLiveChatWidget>>?[Inboxes.Count];
+        var pending = new List<Task>(Inboxes.Count * 2);
+        for (var i = 0; i < Inboxes.Count; i++)
         {
-            var binding = inbox.Inbox.Channel;
-            StoredChannelEndpoint? endpoint = endpoints is not null && await endpoints.GetAsync(Actor, binding.Kind, binding.ConfigurationId, Aborted) is ChannelValue<StoredChannelEndpoint> found ? found.Value : null;
-            StoredLiveChatWidget? widget = widgets is not null && binding.Kind.Value == "livechat"
-                && await widgets.GetAsync(Actor, binding.ConfigurationId, Aborted) is LiveChatValue<StoredLiveChatWidget> stored ? stored.Value : null;
-            items.Add(new Item(inbox, endpoint, widget));
+            var binding = Inboxes[i].Inbox.Channel;
+            if (endpoints is not null)
+            {
+                endpointTasks[i] = endpoints.GetAsync(Actor, binding.Kind, binding.ConfigurationId, Aborted);
+                pending.Add(endpointTasks[i]!);
+            }
+            if (widgets is not null && binding.Kind.Value == "livechat")
+            {
+                widgetTasks[i] = widgets.GetAsync(Actor, binding.ConfigurationId, Aborted);
+                pending.Add(widgetTasks[i]!);
+            }
+        }
+        if (pending.Count > 0)
+            await Task.WhenAll(pending);
+        for (var i = 0; i < Inboxes.Count; i++)
+        {
+            StoredChannelEndpoint? endpoint = endpointTasks[i] is { } et && await et is ChannelValue<StoredChannelEndpoint> found ? found.Value : null;
+            StoredLiveChatWidget? widget = widgetTasks[i] is { } wt && await wt is LiveChatValue<StoredLiveChatWidget> stored ? stored.Value : null;
+            items.Add(new Item(Inboxes[i], endpoint, widget));
         }
     }
 }

@@ -65,7 +65,7 @@ public static class IntegrationEventCodec
             if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("v", out var version) || EventJson.Long(version) != PayloadVersion)
                 throw new FormatException("Unsupported payload version.");
             var reader = new EventDataReader(root);
-            var data = Read(type, reader);
+            var data = Read(type, ref reader);
             reader.Done();
             if (data.Type != type)
                 throw new FormatException("The payload type does not match.");
@@ -103,27 +103,31 @@ public static class IntegrationEventCodec
         return EventJson.Write(writer =>
         {
             writer.WriteStartObject();
-            writer.WriteString("specversion", "1.0");
-            writer.WriteString("id", @event.Id.ToString("D"));
-            writer.WriteString("source", options.Source);
-            writer.WriteString("type", @event.Type);
-            writer.WriteString("time", EventJson.FormatInstant(@event.Time));
-            writer.WriteString("subject", @event.Subject);
-            writer.WriteString("datacontenttype", "application/json");
-            writer.WriteString("dataschema", options.SchemaPrefix + @event.Type);
-            writer.WriteString("sequence", stored.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            writer.WriteString("tenantid", scope.TenantId);
-            writer.WriteString("projectid", scope.ProjectId);
-            writer.WriteString("environmentid", scope.EnvironmentId);
-            writer.WriteString("appid", scope.AppId);
-            writer.WriteString("workspaceid", scope.WorkspaceId.Value);
-            writer.WriteString("privacy", PrivacyName(privacy));
+            writer.WriteString("specversion"u8, "1.0"u8);
+            Span<char> guidChars = stackalloc char[36];
+            @event.Id.TryFormat(guidChars, out _, "D");
+            writer.WriteString("id"u8, guidChars);
+            writer.WriteString("source"u8, options.Source);
+            writer.WriteString("type"u8, @event.Type);
+            EventJson.WriteInstant(writer, "time"u8, @event.Time);
+            writer.WriteString("subject"u8, @event.Subject);
+            writer.WriteString("datacontenttype"u8, "application/json"u8);
+            writer.WriteString("dataschema"u8, options.SchemaPrefix + @event.Type);
+            Span<char> seqChars = stackalloc char[20];
+            stored.Sequence.TryFormat(seqChars, out var seqLen, default, System.Globalization.CultureInfo.InvariantCulture);
+            writer.WriteString("sequence"u8, seqChars[..seqLen]);
+            writer.WriteString("tenantid"u8, scope.TenantId);
+            writer.WriteString("projectid"u8, scope.ProjectId);
+            writer.WriteString("environmentid"u8, scope.EnvironmentId);
+            writer.WriteString("appid"u8, scope.AppId);
+            writer.WriteString("workspaceid"u8, scope.WorkspaceId.Value);
+            writer.WriteString("privacy"u8, PrivacyName(privacy));
             if (@event.Actor is { } actor)
             {
-                writer.WriteString("actorkind", actor.Kind);
-                writer.WriteString("actorid", actor.Id);
+                writer.WriteString("actorkind"u8, actor.Kind);
+                writer.WriteString("actorid"u8, actor.Id);
             }
-            writer.WriteStartObject("data");
+            writer.WriteStartObject("data"u8);
             WriteData(new EventDataWriter(writer, privacy != EventPrivacy.IdsOnly), @event.Data);
             if (content is not null)
                 WriteContent(writer, content);
@@ -382,52 +386,50 @@ public static class IntegrationEventCodec
         w.Id("inbox", inbox.Value);
     }
 
-    private static IntegrationEventData Read(string type, EventDataReader r)
+    private static IntegrationEventData Read(string type, ref EventDataReader r)
     {
-        ConversationId C() => new(r.String("conversation"));
-        InboxId I() => new(r.String("inbox"));
-        UserId? U(string name) => r.OptionalString(name) is { } value ? new UserId(value) : null;
-        TeamId? T(string name) => r.OptionalString(name) is { } value ? new TeamId(value) : null;
-        InboxId? OI(string name) => r.OptionalString(name) is { } value ? new InboxId(value) : null;
-        Guid G(string name) => Guid.TryParseExact(r.String(name), "D", out var value) ? value : throw new FormatException("Expected a UUID.");
+        static UserId? U(ref EventDataReader r, string name) => r.OptionalString(name) is { } value ? new UserId(value) : null;
+        static TeamId? T(ref EventDataReader r, string name) => r.OptionalString(name) is { } value ? new TeamId(value) : null;
+        static InboxId? OI(ref EventDataReader r, string name) => r.OptionalString(name) is { } value ? new InboxId(value) : null;
+        static Guid G(ref EventDataReader r, string name) => Guid.TryParseExact(r.String(name), "D", out var value) ? value : throw new FormatException("Expected a UUID.");
         return type switch
         {
-            IntegrationEventTypes.ConversationCreated => new ConversationCreatedData(C(), I(), new ContactId(r.String("contact")), U("assignee"), T("team"), r.String("status"),
+            IntegrationEventTypes.ConversationCreated => new ConversationCreatedData(new(r.String("conversation")), new(r.String("inbox")), new ContactId(r.String("contact")), U(ref r, "assignee"), T(ref r, "team"), r.String("status"),
                 r.String("priority"), r.Labels("labels"), r.OptionalString("channel")),
-            IntegrationEventTypes.ConversationStatusChanged => new ConversationStatusChangedData(C(), I(), r.String("previous"), r.String("current"), r.OptionalInstant("snoozedUntil")),
-            IntegrationEventTypes.ConversationAssigned => new ConversationAssignedData(C(), I(), U("previous"), U("current")),
-            IntegrationEventTypes.ConversationTeamChanged => new ConversationTeamChangedData(C(), I(), T("previous"), T("current")),
-            IntegrationEventTypes.ConversationPriorityChanged => new ConversationPriorityChangedData(C(), I(), r.String("previous"), r.String("current")),
-            IntegrationEventTypes.ConversationLabelsChanged => new ConversationLabelsChangedData(C(), I(), r.Labels("added"), r.Labels("removed")),
-            IntegrationEventTypes.ConversationMessageReceived => new ConversationMessageReceivedData(C(), I(), new MessageId(r.String("message")), new ContactId(r.String("contact")),
+            IntegrationEventTypes.ConversationStatusChanged => new ConversationStatusChangedData(new(r.String("conversation")), new(r.String("inbox")), r.String("previous"), r.String("current"), r.OptionalInstant("snoozedUntil")),
+            IntegrationEventTypes.ConversationAssigned => new ConversationAssignedData(new(r.String("conversation")), new(r.String("inbox")), U(ref r, "previous"), U(ref r, "current")),
+            IntegrationEventTypes.ConversationTeamChanged => new ConversationTeamChangedData(new(r.String("conversation")), new(r.String("inbox")), T(ref r, "previous"), T(ref r, "current")),
+            IntegrationEventTypes.ConversationPriorityChanged => new ConversationPriorityChangedData(new(r.String("conversation")), new(r.String("inbox")), r.String("previous"), r.String("current")),
+            IntegrationEventTypes.ConversationLabelsChanged => new ConversationLabelsChangedData(new(r.String("conversation")), new(r.String("inbox")), r.Labels("added"), r.Labels("removed")),
+            IntegrationEventTypes.ConversationMessageReceived => new ConversationMessageReceivedData(new(r.String("conversation")), new(r.String("inbox")), new MessageId(r.String("message")), new ContactId(r.String("contact")),
                 r.Long("timelineSequence"), r.String("contentType"), r.Int("attachmentCount")),
-            IntegrationEventTypes.ConversationMessageSent => new ConversationMessageSentData(C(), I(), new MessageId(r.String("message")), r.Actor("sender"),
+            IntegrationEventTypes.ConversationMessageSent => new ConversationMessageSentData(new(r.String("conversation")), new(r.String("inbox")), new MessageId(r.String("message")), r.Actor("sender"),
                 r.Long("timelineSequence"), r.String("contentType"), r.Int("attachmentCount")),
-            IntegrationEventTypes.ConversationNoteAdded => new ConversationNoteAddedData(C(), I(), new MessageId(r.String("note")), r.Actor("author")),
-            IntegrationEventTypes.ConversationResolved => new ConversationResolvedData(C(), I(), r.String("status")),
-            IntegrationEventTypes.ConversationReopened => new ConversationReopenedData(C(), I(), r.String("previous"), r.String("current")),
-            IntegrationEventTypes.ConversationDeleted => new ConversationDeletedData(C(), I()),
+            IntegrationEventTypes.ConversationNoteAdded => new ConversationNoteAddedData(new(r.String("conversation")), new(r.String("inbox")), new MessageId(r.String("note")), r.Actor("author")),
+            IntegrationEventTypes.ConversationResolved => new ConversationResolvedData(new(r.String("conversation")), new(r.String("inbox")), r.String("status")),
+            IntegrationEventTypes.ConversationReopened => new ConversationReopenedData(new(r.String("conversation")), new(r.String("inbox")), r.String("previous"), r.String("current")),
+            IntegrationEventTypes.ConversationDeleted => new ConversationDeletedData(new(r.String("conversation")), new(r.String("inbox"))),
             IntegrationEventTypes.ContactCreated => new ContactCreatedData(new ContactId(r.String("contact"))),
             IntegrationEventTypes.ContactUpdated => new ContactUpdatedData(new ContactId(r.String("contact"))),
             IntegrationEventTypes.ContactDeleted => new ContactDeletedData(new ContactId(r.String("contact"))),
-            IntegrationEventTypes.ContactMerged => new ContactMergedData(new ContactId(r.String("contact")), new ContactId(r.String("target")), G("merge")),
-            IntegrationEventTypes.ContactUnmerged => new ContactUnmergedData(new ContactId(r.String("contact")), new ContactId(r.String("target")), G("merge")),
+            IntegrationEventTypes.ContactMerged => new ContactMergedData(new ContactId(r.String("contact")), new ContactId(r.String("target")), G(ref r, "merge")),
+            IntegrationEventTypes.ContactUnmerged => new ContactUnmergedData(new ContactId(r.String("contact")), new ContactId(r.String("target")), G(ref r, "merge")),
             IntegrationEventTypes.ContactIdentityLinked => new ContactIdentityLinkedData(new ContactId(r.String("contact")), r.String("identityKind"), r.Bool("verified")),
-            IntegrationEventTypes.SlaApplied => new SlaAppliedData(C(), I(), r.String("policy"), r.String("key"), r.String("basis"), r.OptionalString("calendar"),
+            IntegrationEventTypes.SlaApplied => new SlaAppliedData(new(r.String("conversation")), new(r.String("inbox")), r.String("policy"), r.String("key"), r.String("basis"), r.OptionalString("calendar"),
                 r.OptionalDuration("firstResponseTarget"), r.OptionalDuration("nextResponseTarget"), r.OptionalDuration("resolutionTarget"), r.Instant("at")),
-            IntegrationEventTypes.SlaWarning => new SlaWarningData(C(), I(), r.String("policy"), r.String("key"), r.String("metric"), r.Int("cycle"), r.Int("thresholdPercent"),
+            IntegrationEventTypes.SlaWarning => new SlaWarningData(new(r.String("conversation")), new(r.String("inbox")), r.String("policy"), r.String("key"), r.String("metric"), r.Int("cycle"), r.Int("thresholdPercent"),
                 r.Duration("target"), r.Instant("at"), r.OptionalInstant("dueAt")),
-            IntegrationEventTypes.SlaBreached => new SlaBreachedData(C(), I(), r.String("policy"), r.String("key"), r.String("metric"), r.Int("cycle"), r.Duration("target"),
+            IntegrationEventTypes.SlaBreached => new SlaBreachedData(new(r.String("conversation")), new(r.String("inbox")), r.String("policy"), r.String("key"), r.String("metric"), r.Int("cycle"), r.Duration("target"),
                 r.Instant("at")),
-            IntegrationEventTypes.SlaMet => new SlaMetData(C(), I(), r.String("policy"), r.String("key"), r.String("metric"), r.Int("cycle"), r.Duration("target"),
+            IntegrationEventTypes.SlaMet => new SlaMetData(new(r.String("conversation")), new(r.String("inbox")), r.String("policy"), r.String("key"), r.String("metric"), r.Int("cycle"), r.Duration("target"),
                 r.Duration("elapsed"), r.Bool("breached"), r.Instant("at")),
-            IntegrationEventTypes.RoutingAssigned => new RoutingAssignedData(C(), I(), new UserId(r.String("agent")), r.Long("revision")),
-            IntegrationEventTypes.RoutingQueued => new RoutingQueuedData(C(), I(), new InboxId(r.String("targetInbox")), r.String("reason")),
-            IntegrationEventTypes.RoutingOverflowed => new RoutingOverflowedData(C(), I(), T("targetTeam"), OI("targetInbox")),
-            IntegrationEventTypes.RoutingQueueWaitExceeded => new RoutingQueueWaitExceededData(C(), I(), new InboxId(r.String("targetInbox"))),
+            IntegrationEventTypes.RoutingAssigned => new RoutingAssignedData(new(r.String("conversation")), new(r.String("inbox")), new UserId(r.String("agent")), r.Long("revision")),
+            IntegrationEventTypes.RoutingQueued => new RoutingQueuedData(new(r.String("conversation")), new(r.String("inbox")), new InboxId(r.String("targetInbox")), r.String("reason")),
+            IntegrationEventTypes.RoutingOverflowed => new RoutingOverflowedData(new(r.String("conversation")), new(r.String("inbox")), T(ref r, "targetTeam"), OI(ref r, "targetInbox")),
+            IntegrationEventTypes.RoutingQueueWaitExceeded => new RoutingQueueWaitExceededData(new(r.String("conversation")), new(r.String("inbox")), new InboxId(r.String("targetInbox"))),
             IntegrationEventTypes.SurveyResponded => new SurveyRespondedData(new ConversationId(r.String("conversation")), new ContactId(r.String("contact")), r.String("survey"),
-                r.String("invitation"), OI("inbox"), T("team"), U("agent"), r.String("kind"), r.Int("score"), r.Instant("respondedAt")),
-            IntegrationEventTypes.ChannelDeliveryStatus => new ChannelDeliveryStatusData(C(), I(), new MessageId(r.String("message")), r.String("state")),
+                r.String("invitation"), OI(ref r, "inbox"), T(ref r, "team"), U(ref r, "agent"), r.String("kind"), r.Int("score"), r.Instant("respondedAt")),
+            IntegrationEventTypes.ChannelDeliveryStatus => new ChannelDeliveryStatusData(new(r.String("conversation")), new(r.String("inbox")), new MessageId(r.String("message")), r.String("state")),
             _ => throw new FormatException("Unknown event type."),
         };
     }

@@ -56,7 +56,7 @@ else
 
     <div class="tf-conversation">
         <div class="tf-card" id="tf-conversation" data-conversation="@conversation.Id.Value" data-workspace="@Session.Scope.WorkspaceId.Value"
-             data-hub="@(Session.Options.EnableRealtime ? Session.Http.Request.PathBase + Session.Options.RealtimeHubPath : null)" data-users="@UsersJson">
+             data-hub="@(Session.Options.EnableRealtime ? Session.Http.Request.PathBase + Session.Options.RealtimeHubPath : null)" data-users="@(Session.Options.EnableRealtime ? UsersJson : null)">
             @if (lockHolder is not null)
             {
                 <div class="tf-card__content" style="padding-bottom:0">
@@ -437,25 +437,37 @@ else
                 return;
         }
         var loaded = conversation!;
-        await LoadWorkspaceAsync();
-        long after = 0;
-        for (var page = 0; page < 10; page++)
-        {
-            if (await service.ReadTimelineAsync(Actor, id, after, 100, Aborted) is not TimelinePage events)
-                break;
-            timeline.AddRange(events.Events);
-            if (events.NextAfterSequence is not { } next)
-                break;
-            after = next;
-        }
-        if (Service<ISlaService>() is { } slaService && await slaService.GetStatusAsync(Actor, id, Aborted) is SlaValue<SlaStatusView> status)
+        var workspaceTask = LoadWorkspaceAsync();
+        var timelineTask = LoadTimelineAsync(service, id);
+        var slaTask = Service<ISlaService>()?.GetStatusAsync(Actor, id, Aborted);
+        var contactTask = Service<IContactService>()?.GetAsync(Actor, loaded.Contact, Aborted);
+        var availabilityTask = Service<IAgentAvailabilityService>()?.ListAsync(Actor, null, 100, Aborted);
+        var macroTask = Service<IMacroService>()?.ListAsync(Actor, Aborted);
+        var cannedTask = Service<ICannedResponseService>()?.ListAsync(Actor, new CannedResponseQuery(null, null, 50), Aborted);
+        var collisions = Service<IConversationCollisionService>();
+        var lockTask = collisions?.GetReplyLockAsync(Actor, id, Aborted);
+        var activityTask = collisions?.ListActivityAsync(Actor, id, Aborted);
+
+        var pending = new List<Task>(9) { workspaceTask, timelineTask };
+        if (slaTask is not null) pending.Add(slaTask);
+        if (contactTask is not null) pending.Add(contactTask);
+        if (availabilityTask is not null) pending.Add(availabilityTask);
+        if (macroTask is not null) pending.Add(macroTask);
+        if (cannedTask is not null) pending.Add(cannedTask);
+        if (lockTask is not null) pending.Add(lockTask);
+        if (activityTask is not null) pending.Add(activityTask);
+        await Task.WhenAll(pending);
+
+        if (slaTask is not null && await slaTask is SlaValue<SlaStatusView> status)
             sla = status.Value;
-        if (Service<IContactService>() is { } contacts && await contacts.GetAsync(Actor, loaded.Contact, Aborted) is ContactApplied<ContactView> found)
+        if (contactTask is not null && await contactTask is ContactApplied<ContactView> found)
+        {
             contact = found.Value;
-        await LoadContactsAsync([loaded.Contact]);
+            SeedContact(contact);
+        }
 
         var people = new HashSet<string>(StringComparer.Ordinal);
-        if (Service<IAgentAvailabilityService>() is { } availability && await availability.ListAsync(Actor, null, 100, Aborted) is RoutingValue<IReadOnlyList<StoredAgentProfile>> profiles)
+        if (availabilityTask is not null && await availabilityTask is RoutingValue<IReadOnlyList<StoredAgentProfile>> profiles)
             foreach (var profile in profiles.Value)
                 people.Add(profile.Agent.Value);
         // Assignee options: agents with routing profiles, the current assignee and participants (no per-team member reads).
@@ -467,17 +479,15 @@ else
             people.Add(me.Value);
         agents = [.. people.Order(StringComparer.Ordinal)];
 
-        if (Service<IMacroService>() is { } macroService && await macroService.ListAsync(Actor, Aborted) is AutomationValue<IReadOnlyList<StoredMacro>> macroList)
+        if (macroTask is not null && await macroTask is AutomationValue<IReadOnlyList<StoredMacro>> macroList)
             macros = [.. macroList.Value];
-        if (Service<ICannedResponseService>() is { } cannedService && await cannedService.ListAsync(Actor, new CannedResponseQuery(null, null, 50), Aborted) is AutomationValue<CannedResponsePage> cannedPage)
+        if (cannedTask is not null && await cannedTask is AutomationValue<CannedResponsePage> cannedPage)
             canned = [.. cannedPage.Value.Responses];
-        if (Service<IConversationCollisionService>() is { } collisions)
-        {
-            if (await collisions.GetReplyLockAsync(Actor, id, Aborted) is RoutingValue<ReplyLock?> { Value: { } held } && held.Holder != Session.UserId)
-                lockHolder = held.Holder.Value;
-            if (await collisions.ListActivityAsync(Actor, id, Aborted) is RoutingValue<IReadOnlyList<ConversationPresence>> presence)
-                viewers = [.. presence.Value.Where(item => item.User != Session.UserId).Select(item => item.User.Value)];
-        }
+        if (lockTask is not null && await lockTask is RoutingValue<ReplyLock?> { Value: { } held } && held.Holder != Session.UserId)
+            lockHolder = held.Holder.Value;
+        if (activityTask is not null && await activityTask is RoutingValue<IReadOnlyList<ConversationPresence>> presence)
+            viewers = [.. presence.Value.Where(item => item.User != Session.UserId).Select(item => item.User.Value)];
+
         assistAvailable = Session.Has<IAssistService>() && Session.Can(AssistPermissions.Use);
         if (Session.PageStateAs<ComposerState>() is { } state)
         {
@@ -491,6 +501,20 @@ else
         viewers = [.. viewers.Select(user => Session.UserName(new UserId(user)))];
         if (lockHolder is not null)
             lockHolder = Session.UserName(new UserId(lockHolder));
+    }
+
+    private async Task LoadTimelineAsync(IConversationService service, ConversationId id)
+    {
+        long after = 0;
+        for (var page = 0; page < 10; page++)
+        {
+            if (await service.ReadTimelineAsync(Actor, id, after, 100, Aborted) is not TimelinePage events)
+                break;
+            timeline.AddRange(events.Events);
+            if (events.NextAfterSequence is not { } next)
+                break;
+            after = next;
+        }
     }
 
     private string UsersJson => System.Text.Json.JsonSerializer.Serialize(agents.ToDictionary(agent => agent, agent => Session.UserName(new UserId(agent))));

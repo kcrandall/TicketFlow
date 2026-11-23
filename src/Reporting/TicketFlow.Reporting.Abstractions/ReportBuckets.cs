@@ -48,6 +48,8 @@ public static class ReportBuckets
     public static DateTimeOffset BucketStart(TimeZoneInfo zone, DateTimeOffset at, ReportGranularity granularity)
     {
         ArgumentNullException.ThrowIfNull(zone);
+        if (IsUtc(zone))
+            return UtcBucketStart(at, granularity);
         switch (granularity)
         {
             case ReportGranularity.Hour:
@@ -76,6 +78,8 @@ public static class ReportBuckets
     public static DateTimeOffset NextBucket(TimeZoneInfo zone, DateTimeOffset start, ReportGranularity granularity)
     {
         ArgumentNullException.ThrowIfNull(zone);
+        if (IsUtc(zone))
+            return UtcNextBucket(start, granularity);
         switch (granularity)
         {
             case ReportGranularity.Hour:
@@ -112,15 +116,18 @@ public static class ReportBuckets
         if (to <= from)
             throw new ArgumentException("The range must be non-empty.", nameof(to));
         ArgumentOutOfRangeException.ThrowIfLessThan(maximumBuckets, 1);
-        var boundaries = new List<DateTimeOffset> { BucketStart(zone, from, granularity) };
-        while (boundaries[^1] < to)
+        var isUtc = IsUtc(zone);
+        var current = isUtc ? UtcBucketStart(from, granularity) : BucketStart(zone, from, granularity);
+        var boundaries = new List<DateTimeOffset> { current };
+        while (current < to)
         {
             if (boundaries.Count > maximumBuckets)
                 throw new ArgumentException($"The range spans more than {maximumBuckets} buckets.", nameof(to));
-            var next = NextBucket(zone, boundaries[^1], granularity);
-            if (next <= boundaries[^1])
+            var next = isUtc ? UtcNextBucket(current, granularity) : NextBucket(zone, current, granularity);
+            if (next <= current)
                 throw new InvalidOperationException("Bucket boundaries must increase.");
             boundaries.Add(next);
+            current = next;
         }
         return boundaries;
     }
@@ -163,4 +170,47 @@ public static class ReportBuckets
     }
 
     private static DateTime Local(TimeZoneInfo zone, DateTimeOffset at) => TimeZoneInfo.ConvertTime(at, zone).DateTime;
+
+    private static bool IsUtc(TimeZoneInfo zone) =>
+        ReferenceEquals(zone, TimeZoneInfo.Utc)
+        || (zone.BaseUtcOffset == TimeSpan.Zero && !zone.SupportsDaylightSavingTime && zone.Id is "UTC" or "Etc/UTC");
+
+    private static DateTimeOffset UtcBucketStart(DateTimeOffset at, ReportGranularity granularity)
+    {
+        var utcTicks = at.UtcTicks;
+        switch (granularity)
+        {
+            case ReportGranularity.Hour:
+                return new DateTimeOffset(utcTicks - utcTicks % TimeSpan.TicksPerHour, TimeSpan.Zero);
+            case ReportGranularity.Day:
+                return new DateTimeOffset(utcTicks - utcTicks % TimeSpan.TicksPerDay, TimeSpan.Zero);
+            case ReportGranularity.Week:
+                var date = new DateTime(utcTicks - utcTicks % TimeSpan.TicksPerDay, DateTimeKind.Utc);
+                return new DateTimeOffset(date.AddDays(-(((int)date.DayOfWeek + 6) % 7)), TimeSpan.Zero);
+            case ReportGranularity.Month:
+                var utc = at.UtcDateTime;
+                return new DateTimeOffset(new DateTime(utc.Year, utc.Month, 1, 0, 0, 0, DateTimeKind.Utc), TimeSpan.Zero);
+            default:
+                throw new ArgumentOutOfRangeException(nameof(granularity));
+        }
+    }
+
+    private static DateTimeOffset UtcNextBucket(DateTimeOffset start, ReportGranularity granularity)
+    {
+        var utcTicks = start.UtcTicks;
+        switch (granularity)
+        {
+            case ReportGranularity.Hour:
+                return new DateTimeOffset(utcTicks - utcTicks % TimeSpan.TicksPerHour + TimeSpan.TicksPerHour, TimeSpan.Zero);
+            case ReportGranularity.Day:
+                return new DateTimeOffset(utcTicks - utcTicks % TimeSpan.TicksPerDay + TimeSpan.TicksPerDay, TimeSpan.Zero);
+            case ReportGranularity.Week:
+                return new DateTimeOffset(utcTicks - utcTicks % TimeSpan.TicksPerDay + TimeSpan.TicksPerDay * 7, TimeSpan.Zero);
+            case ReportGranularity.Month:
+                var utc = start.UtcDateTime;
+                return new DateTimeOffset(new DateTime(utc.Year, utc.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(1), TimeSpan.Zero);
+            default:
+                throw new ArgumentOutOfRangeException(nameof(granularity));
+        }
+    }
 }

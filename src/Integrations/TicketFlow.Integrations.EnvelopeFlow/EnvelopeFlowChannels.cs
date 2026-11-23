@@ -108,7 +108,7 @@ public sealed class EnvelopeFlowSmsChannel(ISmsTransport transport, IEnvelopeFlo
 
     public ChannelKind Kind => EnvelopeFlowChannelKinds.Sms;
 
-    public ChannelCapabilities Capabilities => new((transport.Capabilities.DeliveryReceipts ? ChannelFeatures.DeliveryReceipts : ChannelFeatures.None)
+    public ChannelCapabilities Capabilities { get; } = new((transport.Capabilities.DeliveryReceipts ? ChannelFeatures.DeliveryReceipts : ChannelFeatures.None)
         | (transport.Capabilities.ReadReceipts ? ChannelFeatures.ReadReceipts : ChannelFeatures.None), maximumBodyLength: 1600);
 
     public IReadOnlyList<ContactIdentityKind> RecipientKinds { get; } = [ContactIdentityKind.Phone];

@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using TicketFlow.Access;
 using TicketFlow.Core;
 
@@ -10,6 +11,8 @@ namespace TicketFlow.Conversations;
 /// </summary>
 internal sealed class ConversationMasking
 {
+    public static ConversationMasking Empty { get; } = new(FrozenDictionary<string, ConversationAttributeDefinition>.Empty, []);
+
     private readonly IReadOnlyDictionary<string, ConversationAttributeDefinition> definitions;
     private readonly HashSet<FieldPath> policyFields;
 
@@ -24,13 +27,30 @@ internal sealed class ConversationMasking
     public static async Task<ConversationMasking> LoadAsync(TicketScope scope, Permission permission, IConversationAttributeDefinitionStore definitionStore,
         IAccessFieldPolicyStore policyStore, CancellationToken cancellationToken)
     {
-        var definitions = (await definitionStore.ListAsync(scope, cancellationToken).ConfigureAwait(false))
-            .ToDictionary(stored => stored.Definition.Key, stored => stored.Definition, StringComparer.Ordinal);
-        var policies = (await policyStore.ListAsync(scope, cancellationToken).ConfigureAwait(false))
-            .Where(stored => stored.Policy.AppliesTo.Contains(permission))
-            .Select(stored => stored.Policy.Field)
-            .ToHashSet();
-        return new(definitions, policies);
+        var definitionsTask = definitionStore.ListAsync(scope, cancellationToken);
+        var policiesTask = policyStore.ListAsync(scope, cancellationToken);
+        await Task.WhenAll(definitionsTask, policiesTask).ConfigureAwait(false);
+        var storedDefs = definitionsTask.Result;
+        var definitions = new Dictionary<string, ConversationAttributeDefinition>(storedDefs.Count, StringComparer.Ordinal);
+        foreach (var stored in storedDefs)
+            definitions[stored.Definition.Key] = stored.Definition;
+        return new(definitions, BuildPolicyFields(policiesTask.Result, permission));
+    }
+
+    public static async Task<ConversationMasking> LoadAsync(TicketScope scope, Permission permission,
+        IReadOnlyDictionary<string, ConversationAttributeDefinition> definitions, IAccessFieldPolicyStore policyStore, CancellationToken cancellationToken)
+    {
+        var storedPolicies = await policyStore.ListAsync(scope, cancellationToken).ConfigureAwait(false);
+        return new(definitions, BuildPolicyFields(storedPolicies, permission));
+    }
+
+    private static HashSet<FieldPath> BuildPolicyFields(IReadOnlyList<StoredAccessFieldPolicy> storedPolicies, Permission permission)
+    {
+        var fields = new HashSet<FieldPath>();
+        foreach (var stored in storedPolicies)
+            if (stored.Policy.AppliesTo.Contains(permission))
+                fields.Add(stored.Policy.Field);
+        return fields;
     }
 
     public ConversationView Project(StoredConversation stored, AccessDecision decision)
@@ -43,13 +63,21 @@ internal sealed class ConversationMasking
             var masked = masks.IsMasked(ConversationFieldPaths.Channel, alwaysMask: false, out var revealable);
             thread = new ChannelThreadView(reference.Channel, masked ? null : reference.ExternalThreadId, masked, revealable);
         }
-        var attributes = new List<ConversationAttributeView>();
-        foreach (var key in conversation.AttributeKeys)
+        IReadOnlyList<ConversationAttributeView> attributes;
+        if (conversation.AttributeKeys.Count == 0 || definitions.Count == 0)
+            attributes = [];
+        else
         {
-            if (!definitions.TryGetValue(key, out var definition))
-                continue;
-            var masked = masks.IsMasked(definition.Field, definition.Sensitive && !policyFields.Contains(definition.Field), out var revealable);
-            attributes.Add(new(key, definition.Type, definition.Sensitive, masked ? (ConversationAttributeValue?)null : conversation.Attributes[key], masked, revealable));
+            var list = new List<ConversationAttributeView>(conversation.AttributeKeys.Count);
+            foreach (var key in conversation.AttributeKeys)
+            {
+                if (!definitions.TryGetValue(key, out var definition))
+                    continue;
+                var field = definition.Field;
+                var masked = masks.IsMasked(field, definition.Sensitive && !policyFields.Contains(field), out var revealable);
+                list.Add(new(key, definition.Type, definition.Sensitive, masked ? (ConversationAttributeValue?)null : conversation.Attributes[key], masked, revealable));
+            }
+            attributes = list;
         }
         return new ConversationView(conversation.Id, stored.Revision, conversation.Inbox, conversation.Contact, conversation.Status, conversation.Priority,
             conversation.Assignee, conversation.Team, conversation.Labels, attributes, conversation.Participants, thread, conversation.CreatedAt,
@@ -57,74 +85,123 @@ internal sealed class ConversationMasking
             conversation.LastSequence, masks.Fields);
     }
 
-    public TimelineEventView Project(TimelineEvent timelineEvent, AccessDecision decision)
+    public TimelineEventView Project(TimelineEvent timelineEvent, AccessDecision decision) => timelineEvent.Event switch
     {
-        var masks = new Masks(decision);
-        switch (timelineEvent.Event)
-        {
-            case MessageEvent message when message.ExternalId is not null:
-                if (masks.IsMasked(ConversationFieldPaths.Channel, alwaysMask: false, out _))
-                    return new(timelineEvent.WithEvent(message.WithDelivery(message.Delivery, null)), masks.Fields);
-                break;
-            case AttributeChanged attribute:
-                var defined = definitions.TryGetValue(attribute.Key, out var definition);
-                var fail = !defined || (definition!.Sensitive && !policyFields.Contains(definition.Field));
-                if (masks.IsMasked(ConversationFieldPaths.Attribute(attribute.Key), fail, out _))
-                    return new(timelineEvent.WithEvent(new AttributeChanged(attribute.Key, null, null)), masks.Fields);
-                break;
-            case MessageEvent:
-            case NoteEvent:
-            case AssignmentChanged:
-            case TeamChanged:
-            case StatusChanged:
-            case PriorityChanged:
-            case LabelsChanged:
-            case ParticipantChanged:
-            case ContactChanged:
-            case SystemEvent:
-            case ExtensionEvent:
-                break;
-        }
-        return new(timelineEvent, []);
+        MessageEvent message when message.ExternalId is not null => ProjectMessage(timelineEvent, message, decision),
+        AttributeChanged attribute => ProjectAttribute(timelineEvent, attribute, decision),
+        MessageEvent or NoteEvent or AssignmentChanged or TeamChanged or StatusChanged or PriorityChanged or LabelsChanged
+            or ParticipantChanged or ContactChanged or SystemEvent or ExtensionEvent => new(timelineEvent, []),
+    };
+
+    private static TimelineEventView ProjectMessage(TimelineEvent timelineEvent, MessageEvent message, AccessDecision decision)
+    {
+        if (decision is AccessAllowed)
+            return new(timelineEvent, []);
+        var (masked, revealable) = CheckFieldMask(decision, ConversationFieldPaths.Channel, alwaysMask: false);
+        return masked
+            ? new(timelineEvent.WithEvent(message.WithDelivery(message.Delivery, null)), [new MaskedField(ConversationFieldPaths.Channel, revealable)])
+            : new(timelineEvent, []);
+    }
+
+    private TimelineEventView ProjectAttribute(TimelineEvent timelineEvent, AttributeChanged attribute, AccessDecision decision)
+    {
+        var defined = definitions.TryGetValue(attribute.Key, out var definition);
+        var field = defined ? definition!.Field : ConversationFieldPaths.Attribute(attribute.Key);
+        var fail = !defined || (definition!.Sensitive && !policyFields.Contains(field));
+        var (masked, revealable) = CheckFieldMask(decision, field, fail);
+        return masked
+            ? new(timelineEvent.WithEvent(new AttributeChanged(attribute.Key, null, null)), [new MaskedField(field, revealable)])
+            : new(timelineEvent, []);
+    }
+
+    private static (bool Masked, bool Revealable) CheckFieldMask(AccessDecision decision, FieldPath field, bool alwaysMask) => decision switch
+    {
+        AccessAllowed => (alwaysMask, false),
+        AccessMasked masked => FindMaskedField(masked, field, alwaysMask),
+        AccessDenied => (true, false),
+    };
+
+    private static (bool Masked, bool Revealable) FindMaskedField(AccessMasked masked, FieldPath field, bool alwaysMask)
+    {
+        for (var i = 0; i < masked.Fields.Count; i++)
+            if (masked.Fields[i].Field == field)
+                return (true, masked.Fields[i].Revealable);
+        return (alwaysMask, false);
     }
 
     /// <summary>Tracks the masked fields of one projection.</summary>
-    private sealed class Masks
+    private struct Masks
     {
-        private readonly Dictionary<FieldPath, bool> decided = [];
-        private readonly SortedDictionary<FieldPath, bool> used = new();
+        private readonly AccessMasked? decided;
         private readonly bool maskAll;
+        private List<MaskedField>? used;
 
         public Masks(AccessDecision decision)
         {
             switch (decision)
             {
                 case AccessAllowed:
+                    decided = null;
+                    maskAll = false;
                     break;
                 case AccessMasked masked:
-                    foreach (var field in masked.Fields)
-                        decided[field.Field] = field.Revealable;
+                    decided = masked;
+                    maskAll = false;
                     break;
                 case AccessDenied:
+                    decided = null;
                     maskAll = true;
                     break;
             }
+            used = null;
         }
 
-        public IReadOnlyList<MaskedField> Fields => [.. used.Select(pair => new MaskedField(pair.Key, pair.Value))];
+        public IReadOnlyList<MaskedField> Fields
+        {
+            get
+            {
+                if (used is null || used.Count == 0)
+                    return [];
+                if (used.Count > 1)
+                    used.Sort(static (a, b) => a.Field.CompareTo(b.Field));
+                return used;
+            }
+        }
 
         public bool IsMasked(FieldPath field, bool alwaysMask, out bool revealable)
         {
-            if (decided.TryGetValue(field, out revealable))
+            if (decided is not null)
             {
-                used[field] = revealable;
-                return true;
+                var fields = decided.Fields;
+                for (var i = 0; i < fields.Count; i++)
+                {
+                    if (fields[i].Field == field)
+                    {
+                        revealable = fields[i].Revealable;
+                        Record(field, revealable);
+                        return true;
+                    }
+                }
             }
             revealable = false;
             if (!maskAll && !alwaysMask)
                 return false;
-            used[field] = false;
+            Record(field, false);
             return true;
+        }
+
+        private void Record(FieldPath field, bool revealable)
+        {
+            used ??= [];
+            for (var i = 0; i < used.Count; i++)
+            {
+                if (used[i].Field == field)
+                {
+                    used[i] = new MaskedField(field, revealable);
+                    return;
+                }
+            }
+            used.Add(new MaskedField(field, revealable));
         }
     }
 }

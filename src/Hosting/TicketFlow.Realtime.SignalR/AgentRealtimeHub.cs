@@ -1,3 +1,5 @@
+using System.Collections.Frozen;
+using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.SignalR;
 using TicketFlow.Core;
 
@@ -52,7 +54,7 @@ public sealed class AgentRealtimeHub(IRealtimeSubscriptions subscriptions, IReal
         return await subscriptions.SubscribeAsync(Context.ConnectionId, topic, Context.ConnectionAborted).ConfigureAwait(false) switch
         {
             RealtimeSubscribed => HubResult.Success(),
-            RealtimeSubscriptionRefused refused => HubResult.Failure(RealtimeWireFormat.Token(refused.Reason.ToString())),
+            RealtimeSubscriptionRefused refused => HubResult.Failure(RealtimeWireFormat.Token(refused.Reason)),
         };
     }
 
@@ -83,6 +85,8 @@ public sealed class AgentRealtimeHub(IRealtimeSubscriptions subscriptions, IReal
         return Map(await actions.MarkReadAsync(principal, id, upToSequence, Context.ConnectionAborted).ConfigureAwait(false));
     }
 
+    private static readonly ConditionalWeakTable<TicketFlowSignalROptions, OriginCache> AllowedOriginCache = new();
+
     /// <summary>True when the agent hub accepts a connection with this Origin header under <paramref name="options"/>.</summary>
     public static bool OriginAllowed(string? origin, TicketFlowSignalROptions options)
     {
@@ -91,7 +95,44 @@ public sealed class AgentRealtimeHub(IRealtimeSubscriptions subscriptions, IReal
         if (options.AgentAllowedOrigins.Count == 0)
             return true;
         var normalized = TicketFlow.Channels.LiveChat.LiveChatOrigin.Normalize(origin);
-        return normalized is not null && options.AgentAllowedOrigins.Any(allowed => string.Equals(TicketFlow.Channels.LiveChat.LiveChatOrigin.Normalize(allowed), normalized, StringComparison.Ordinal));
+        if (normalized is null)
+            return false;
+        var cache = AllowedOriginCache.GetOrCreateValue(options);
+        return cache.GetNormalized(options.AgentAllowedOrigins).Contains(normalized);
+    }
+
+    private sealed class OriginCache
+    {
+        private sealed record Snapshot(string[] Raw, FrozenSet<string> Normalized);
+        private volatile Snapshot? cached;
+
+        public FrozenSet<string> GetNormalized(IList<string> origins)
+        {
+            var current = cached;
+            if (current is not null && Matches(current.Raw, origins))
+                return current.Normalized;
+            var snapshot = new string[origins.Count];
+            var normalized = new HashSet<string>(origins.Count, StringComparer.Ordinal);
+            for (var i = 0; i < origins.Count; i++)
+            {
+                snapshot[i] = origins[i];
+                if (TicketFlow.Channels.LiveChat.LiveChatOrigin.Normalize(origins[i]) is { } value)
+                    normalized.Add(value);
+            }
+            var frozen = normalized.ToFrozenSet(StringComparer.Ordinal);
+            cached = new Snapshot(snapshot, frozen);
+            return frozen;
+        }
+
+        private static bool Matches(string[] snapshot, IList<string> origins)
+        {
+            if (snapshot.Length != origins.Count)
+                return false;
+            for (var i = 0; i < snapshot.Length; i++)
+                if (!string.Equals(snapshot[i], origins[i], StringComparison.Ordinal))
+                    return false;
+            return true;
+        }
     }
 
     private PrincipalRef? Principal() => Context.Items.TryGetValue(PrincipalKey, out var value) && value is PrincipalRef principal ? principal : (PrincipalRef?)null;
@@ -129,6 +170,6 @@ public sealed class AgentRealtimeHub(IRealtimeSubscriptions subscriptions, IReal
     private static HubResult Map(RealtimeActionResult result) => result switch
     {
         RealtimeActionApplied => HubResult.Success(),
-        RealtimeSubscriptionRefused refused => HubResult.Failure(RealtimeWireFormat.Token(refused.Reason.ToString())),
+        RealtimeSubscriptionRefused refused => HubResult.Failure(RealtimeWireFormat.Token(refused.Reason)),
     };
 }

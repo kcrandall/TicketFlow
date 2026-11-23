@@ -1,9 +1,10 @@
 @* Horizontal bar list (label, bar, value) for rankings and breakdowns. *@
 <div class="tf-barlist">
+    @{ var max = ComputeMax(); }
     @foreach (var item in Items)
     {
         <div class="tf-barlist__row" title="@item.Label: @item.Display">
-            <div class="tf-barlist__bar" style="width:@Width(item.Value);background:@(item.Color ?? "var(--chart-1)")"></div>
+            <div class="tf-barlist__bar" style="width:@Width(item.Value, max);background:@(item.Color ?? "var(--chart-1)")"></div>
             <span class="tf-barlist__label">@item.Label</span>
             <span class="tf-barlist__value">@item.Display</span>
         </div>
@@ -19,9 +20,15 @@
 
     [Parameter, EditorRequired] public IReadOnlyList<Item> Items { get; set; } = [];
 
-    private string Width(double value)
+    private double ComputeMax()
     {
-        var max = Items.Count == 0 ? 1 : Math.Max(1, Items.Max(item => item.Value));
-        return (Math.Max(2, value / max * 100)).ToString("0.#", CultureInfo.InvariantCulture) + "%";
+        var max = 1.0;
+        for (var i = 0; i < Items.Count; i++)
+            if (Items[i].Value > max)
+                max = Items[i].Value;
+        return max;
     }
+
+    private static string Width(double value, double max) =>
+        Math.Max(2, value / max * 100).ToString("0.#", CultureInfo.InvariantCulture) + "%";
 }

@@ -179,52 +179,93 @@ else if (stats is not null)
     protected override async Task OnInitializedAsync()
     {
         var (from, to) = UiFormat.Range(null, null, Now);
-        if (Service<IReportingService>() is { } reporting && Session.CanAny(AccessPermissions.ReportView, ReportPermissions.ViewOwn))
-        {
-            if (await reporting.GetOverviewAsync(Actor, new ReportQuery(from, to), Aborted) is ReportSucceeded<ReportOverview> current)
-                overview = current.Value;
-            if (await reporting.GetOverviewAsync(Actor, new ReportQuery(from.AddDays(-14), from), Aborted) is ReportSucceeded<ReportOverview> before)
-                previous = before.Value;
-            if (await reporting.GetTrendsAsync(Actor, new ReportTrendQuery(new ReportQuery(from, to), [ReportMetric.ConversationCreated, ReportMetric.ConversationResolved], ReportGranularity.Day), Aborted)
-                is ReportSucceeded<ReportTrend> series)
-                trend = UiCharts.Daily(series.Value, [(ReportMetric.ConversationCreated, "Created"), (ReportMetric.ConversationResolved, "Resolved")]);
-            if (await reporting.GetTrendsAsync(Actor, new ReportTrendQuery(new ReportQuery(from, to), [ReportMetric.ConversationCreated], ReportGranularity.Month, ReportDimension.Channel), Aborted)
-                is ReportSucceeded<ReportTrend> byChannel)
-                channels = [.. byChannel.Value.Points.GroupBy(point => point.Group ?? "other").Select(group => (group.Key, Count: group.Sum(point => point.Count)))
-                    .OrderByDescending(pair => pair.Count).Take(5).Select((pair, index) => new BarList.Item(UiFormat.Channel(pair.Key), pair.Count, pair.Count.ToString(CultureInfo.InvariantCulture), $"var(--chart-{index + 1})"))];
-        }
+        var reporting = Service<IReportingService>() is { } rep && Session.CanAny(AccessPermissions.ReportView, ReportPermissions.ViewOwn) ? rep : null;
+        var conversationService = Service<IConversationService>() is { } conv && Session.Can(AccessPermissions.ConversationRead) ? conv : null;
+        var slaService = Service<ISlaService>() is { } sla && Session.CanAny(SlaPermissions.Read, AccessPermissions.ConversationRead) ? sla : null;
 
-        if (Service<IConversationService>() is { } service && Session.Can(AccessPermissions.ConversationRead))
+        // Wave 1: fire all independent reporting, conversation, and SLA queries in parallel.
+        var overviewTask = reporting?.GetOverviewAsync(Actor, new ReportQuery(from, to), Aborted);
+        var previousTask = reporting?.GetOverviewAsync(Actor, new ReportQuery(from.AddDays(-14), from), Aborted);
+        var trendTask = reporting?.GetTrendsAsync(Actor, new ReportTrendQuery(new ReportQuery(from, to), [ReportMetric.ConversationCreated, ReportMetric.ConversationResolved], ReportGranularity.Day), Aborted);
+        var channelTask = reporting?.GetTrendsAsync(Actor, new ReportTrendQuery(new ReportQuery(from, to), [ReportMetric.ConversationCreated], ReportGranularity.Month, ReportDimension.Channel), Aborted);
+
+        var mineBacklogTask = conversationService is not null && Session.UserId is { } me ? OpenBacklogAsync(new ReportFilter(agent: me)) : null;
+        var urgentBacklogTask = conversationService is not null ? OpenBacklogAsync(new ReportFilter(priority: ConversationPriority.Urgent)) : null;
+        var highBacklogTask = conversationService is not null ? OpenBacklogAsync(new ReportFilter(priority: ConversationPriority.High)) : null;
+        var unassignedTask = conversationService?.ListAsync(Actor, new ConversationListQuery(status: ConversationStatusKind.Open, unassigned: true), null, Aborted);
+        var recentTask = conversationService?.ListAsync(Actor, new ConversationListQuery(status: ConversationStatusKind.Open, limit: 6), null, Aborted);
+        var slaTask = slaService?.ListAsync(Actor, new SlaRiskQuery(SlaRiskFilter.AtRiskOrBreached, limit: 6), null, Aborted);
+
+        var pending = new List<Task>(10);
+        if (overviewTask is not null) pending.Add(overviewTask);
+        if (previousTask is not null) pending.Add(previousTask);
+        if (trendTask is not null) pending.Add(trendTask);
+        if (channelTask is not null) pending.Add(channelTask);
+        if (mineBacklogTask is not null) pending.Add(mineBacklogTask);
+        if (urgentBacklogTask is not null) pending.Add(urgentBacklogTask);
+        if (highBacklogTask is not null) pending.Add(highBacklogTask);
+        if (unassignedTask is not null) pending.Add(unassignedTask);
+        if (recentTask is not null) pending.Add(recentTask);
+        if (slaTask is not null) pending.Add(slaTask);
+        if (pending.Count > 0)
+            await Task.WhenAll(pending);
+
+        if (overviewTask is not null && await overviewTask is ReportSucceeded<ReportOverview> current)
+            overview = current.Value;
+        if (previousTask is not null && await previousTask is ReportSucceeded<ReportOverview> before)
+            previous = before.Value;
+        if (trendTask is not null && await trendTask is ReportSucceeded<ReportTrend> series)
+            trend = UiCharts.Daily(series.Value, [(ReportMetric.ConversationCreated, "Created"), (ReportMetric.ConversationResolved, "Resolved")]);
+        if (channelTask is not null && await channelTask is ReportSucceeded<ReportTrend> byChannel)
+            channels = [.. byChannel.Value.Points.GroupBy(point => point.Group ?? "other").Select(group => (group.Key, Count: group.Sum(point => point.Count)))
+                .OrderByDescending(pair => pair.Count).Take(5).Select((pair, index) => new BarList.Item(UiFormat.Channel(pair.Key), pair.Count, pair.Count.ToString(CultureInfo.InvariantCulture), $"var(--chart-{index + 1})"))];
+
+        if (conversationService is not null)
         {
-            // Counts come from reporting's open backlog (store-side); without reporting, one bounded page per count, shown as "N+".
-            async Task<Count> BoundedAsync(ConversationListQuery query) =>
-                await service.ListAsync(Actor, query, null, Aborted) is ConversationListPage page
+            static Count FromPage(ConversationListResult result) =>
+                result is ConversationListPage page
                     ? new Count(page.Conversations.Count, page.Conversations.Count + (page.NextCursor is null ? "" : "+")) : Count.Of(0);
-            var open = await OpenBacklogAsync() is { } backlog ? Count.Of(backlog) : await BoundedAsync(new ConversationListQuery(status: ConversationStatusKind.Open));
-            var mine = Session.UserId is not { } me ? Count.Of(0)
-                : await OpenBacklogAsync(new ReportFilter(agent: me)) is { } own ? Count.Of(own) : await BoundedAsync(new ConversationListQuery(status: ConversationStatusKind.Open, assignee: me));
-            var unassigned = await BoundedAsync(new ConversationListQuery(status: ConversationStatusKind.Open, unassigned: true));
-            var urgent = await OpenBacklogAsync(new ReportFilter(priority: ConversationPriority.Urgent)) is { } urgentCount && await OpenBacklogAsync(new ReportFilter(priority: ConversationPriority.High)) is { } highCount
+            // Reuse overview.OpenBacklog when reporting succeeded instead of running a duplicate overview query.
+            var openFallbackTask = overview is null ? conversationService.ListAsync(Actor, new ConversationListQuery(status: ConversationStatusKind.Open), null, Aborted) : null;
+            var mineBacklog = mineBacklogTask is not null ? await mineBacklogTask : null;
+            var mineFallbackTask = mineBacklog is null && Session.UserId is { } myId
+                ? conversationService.ListAsync(Actor, new ConversationListQuery(status: ConversationStatusKind.Open, assignee: myId), null, Aborted)
+                : null;
+            if (openFallbackTask is not null && mineFallbackTask is not null)
+                await Task.WhenAll(openFallbackTask, mineFallbackTask);
+            var open = overview is not null ? Count.Of(overview.OpenBacklog) : FromPage(await openFallbackTask!);
+            var mine = Session.UserId is null ? Count.Of(0)
+                : mineBacklog is { } own ? Count.Of(own) : FromPage(await mineFallbackTask!);
+            var unassigned = FromPage(await unassignedTask!);
+            var urgent = await urgentBacklogTask! is { } urgentCount && await highBacklogTask! is { } highCount
                 ? Count.Of(urgentCount + highCount) : Count.Of(0);
             stats = new Stats(open, mine, unassigned, urgent);
-            if (await service.ListAsync(Actor, new ConversationListQuery(status: ConversationStatusKind.Open, limit: 6), null, Aborted) is ConversationListPage recentPage)
+            if (await recentTask! is ConversationListPage recentPage)
                 recent = [.. recentPage.Conversations];
             foreach (var item in recent ?? [])
                 conversations[item.Id] = item;
         }
 
-        if (Service<ISlaService>() is { } sla && Session.CanAny(SlaPermissions.Read, AccessPermissions.ConversationRead))
-            if (await sla.ListAsync(Actor, new SlaRiskQuery(SlaRiskFilter.AtRiskOrBreached, limit: 6), null, Aborted) is SlaValue<SlaRiskPage> page)
+        if (slaTask is not null && await slaTask is SlaValue<SlaRiskPage> slaPage)
+        {
+            risk = [.. slaPage.Value.Items];
+            if (Service<IConversationService>() is { } lookupService)
             {
-                risk = [.. page.Value.Items];
-                if (Service<IConversationService>() is { } conversationService)
-                    foreach (var item in risk.Where(item => !conversations.ContainsKey(item.Conversation)))
-                        if (await conversationService.GetAsync(Actor, item.Conversation, Aborted) is ConversationView view)
+                var missingTasks = risk.Where(item => !conversations.ContainsKey(item.Conversation))
+                    .Select(item => lookupService.GetAsync(Actor, item.Conversation, Aborted))
+                    .ToArray();
+                if (missingTasks.Length > 0)
+                {
+                    foreach (var result in await Task.WhenAll(missingTasks))
+                        if (result is ConversationView view)
                             conversations[view.Id] = view;
+                }
             }
+        }
 
-        await LoadContactsAsync(conversations.Values.Select(item => item.Contact));
-        await Session.LoadUsersAsync(conversations.Values.Select(item => item.Assignee));
+        await Task.WhenAll(
+            LoadContactsAsync(conversations.Values.Select(item => item.Contact)),
+            Session.LoadUsersAsync(conversations.Values.Select(item => item.Assignee)));
     }
 
     private static string MetricLabel(SlaStatusView status) =>

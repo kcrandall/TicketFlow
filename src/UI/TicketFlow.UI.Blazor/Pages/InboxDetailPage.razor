@@ -82,9 +82,12 @@ else
         if (await service.GetAsync(Actor, new InboxId(Id), Aborted) is not WorkspaceSucceeded<StoredInbox> found)
             return;
         inbox = found.Value;
-        (calendars, slaNames, routingNames) = await InboxFields.LoadOptionsAsync(Session);
-        if (Service<IAccessAdministrator>() is { } administrator
-            && await administrator.ListGrantsAsync(Actor, new InboxGrantScope(Session.Scope.WorkspaceId, inbox.Inbox.Id), 50, null, Aborted) is AccessListed<IReadOnlyList<StoredAccessGrant>> listed)
+        var optionsTask = InboxFields.LoadOptionsAsync(Session);
+        var grantsTask = Service<IAccessAdministrator>()?.ListGrantsAsync(Actor, new InboxGrantScope(Session.Scope.WorkspaceId, inbox.Inbox.Id), 50, null, Aborted);
+        if (grantsTask is not null)
+            await Task.WhenAll(optionsTask, grantsTask);
+        (calendars, slaNames, routingNames) = await optionsTask;
+        if (grantsTask is not null && await grantsTask is AccessListed<IReadOnlyList<StoredAccessGrant>> listed)
             foreach (var grant in listed.Value)
                 if (grant.Grant.Subject.Value is UserId user)
                     agents.Add((user, grant.Grant.Role.Value));

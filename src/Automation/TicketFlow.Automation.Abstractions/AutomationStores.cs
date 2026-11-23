@@ -40,6 +40,14 @@ public union AutomationWriteResult<T>(AutomationWriteApplied<T>, AutomationWrite
 /// </summary>
 public sealed record AutomationScheduleClaim(TicketScope Scope, AutomationRuleId Rule, DateTimeOffset DueAt, long Fence, DateTimeOffset LeaseUntil)
 {
+    /// <summary>Optional snapshot of the claimed rule returned inline by the store to avoid a follow-up read.</summary>
+    public StoredAutomationRule? Snapshot { get; init; }
+
+    public bool Equals(AutomationScheduleClaim? other) =>
+        other is not null && Scope == other.Scope && Rule == other.Rule && DueAt == other.DueAt && Fence == other.Fence && LeaseUntil == other.LeaseUntil;
+
+    public override int GetHashCode() => HashCode.Combine(Scope, Rule, DueAt, Fence, LeaseUntil);
+
     public override string ToString() => $"AutomationScheduleClaim {{ Rule = {Rule}, Fence = {Fence} }}";
 }
 
@@ -193,6 +201,13 @@ public interface IAutomationExecutionStore
     Task<bool> SetCheckpointAsync(TicketScope scope, string name, long value, long? expected, CancellationToken cancellationToken = default);
 }
 
+/// <summary>Optional fast-path implemented by execution stores that can index only newly produced sequences during progress updates.</summary>
+public interface IIncrementalAutomationExecutionStore
+{
+    Task<AutomationWriteResult<StoredAutomationExecution>> UpdateProgressAsync(TicketScope scope, AutomationExecution execution, long expectedRevision,
+        IReadOnlyList<long> newSequences, CancellationToken cancellationToken = default);
+}
+
 /// <summary>Workspace macros. Scope-confined; create at revision 1; compare-and-set update/delete; ≤ <see cref="MaximumMacrosPerWorkspace"/>, atomically.</summary>
 public interface IMacroStore
 {
@@ -202,6 +217,22 @@ public interface IMacroStore
 
     /// <summary>Macros ordered by identifier (ordinal).</summary>
     Task<IReadOnlyList<StoredMacro>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Shared macros plus personal macros owned by <paramref name="owner"/> (when supplied), ordered by identifier (ordinal).
+    /// </summary>
+    async Task<IReadOnlyList<StoredMacro>> ListVisibleAsync(TicketScope scope, UserId? owner, CancellationToken cancellationToken = default)
+    {
+        var all = await ListAsync(scope, cancellationToken).ConfigureAwait(false);
+        var visible = new List<StoredMacro>(all.Count);
+        for (var i = 0; i < all.Count; i++)
+        {
+            var stored = all[i];
+            if (stored.Macro.Visibility == MacroVisibility.Shared || (owner is { } userId && stored.Macro.Owner == userId))
+                visible.Add(stored);
+        }
+        return visible;
+    }
 
     Task<AutomationWriteResult<StoredMacro>> CreateAsync(TicketScope scope, Macro macro, CancellationToken cancellationToken = default);
 

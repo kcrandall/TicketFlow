@@ -53,10 +53,24 @@ public sealed class RealtimeAgentActions(IConversationStore conversations, IAcce
 
     private async Task PublishAsync(StoredConversation stored, RealtimeEvent realtimeEvent, CancellationToken cancellationToken)
     {
-        await publisher.PublishAsync(new RealtimePublication(new ConversationTopic(stored.Scope, stored.Conversation.Id), realtimeEvent), cancellationToken).ConfigureAwait(false);
-        foreach (var directory in directories)
-            foreach (var session in (await directory.ListSessionsAsync(stored.Scope, stored.Conversation.Id, cancellationToken).ConfigureAwait(false)).Take(IVisitorSessionDirectory.MaximumSessions))
-                await publisher.PublishAsync(new RealtimePublication(new VisitorSessionTopic(stored.Scope, session), realtimeEvent), cancellationToken).ConfigureAwait(false);
+        var convTask = publisher.PublishAsync(new RealtimePublication(new ConversationTopic(stored.Scope, stored.Conversation.Id), realtimeEvent), cancellationToken);
+        if (directories.Count == 0)
+        {
+            await convTask.ConfigureAwait(false);
+            return;
+        }
+        List<Task>? tasks = null;
+        for (var d = 0; d < directories.Count; d++)
+        {
+            var sessions = await directories[d].ListSessionsAsync(stored.Scope, stored.Conversation.Id, cancellationToken).ConfigureAwait(false);
+            var limit = Math.Min(sessions.Count, IVisitorSessionDirectory.MaximumSessions);
+            for (var i = 0; i < limit; i++)
+                (tasks ??= [convTask]).Add(publisher.PublishAsync(new RealtimePublication(new VisitorSessionTopic(stored.Scope, sessions[i]), realtimeEvent), cancellationToken));
+        }
+        if (tasks is not null)
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        else
+            await convTask.ConfigureAwait(false);
     }
 
     private static RealtimeActor Actor(PrincipalRef actor) => actor.Value is UserPrincipal user ? new AgentActor(user.UserId) : SupportActor.Instance;

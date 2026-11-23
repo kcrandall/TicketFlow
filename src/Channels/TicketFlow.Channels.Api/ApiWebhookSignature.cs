@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Buffers.Text;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -70,10 +72,14 @@ public static class ApiWebhookSignature
         if (body.Length > MaximumBodyBytes)
             throw new ArgumentException("The body exceeds the signing bound.", nameof(body));
         _ = DateTimeOffset.FromUnixTimeSeconds(timestamp);
-        using var hmac = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, key);
-        hmac.AppendData(Encoding.UTF8.GetBytes("v1\n" + timestamp.ToString(CultureInfo.InvariantCulture) + "\n" + deliveryId + "\n"));
-        hmac.AppendData(body);
-        return "v1=" + Convert.ToHexStringLower(hmac.GetHashAndReset());
+        Span<byte> hash = stackalloc byte[32];
+        ComputeHash(key, deliveryId, timestamp, body, hash);
+        Span<char> output = stackalloc char[67];
+        output[0] = 'v';
+        output[1] = '1';
+        output[2] = '=';
+        Convert.TryToHexStringLower(hash, output[3..], out _);
+        return new string(output);
     }
 
     /// <summary>Verifies header values against the body. Never throws for attacker-controlled input.</summary>
@@ -85,21 +91,23 @@ public static class ApiWebhookSignature
         if (age <= TimeSpan.Zero || age > TimeSpan.FromHours(1) || future < TimeSpan.Zero || future > TimeSpan.FromMinutes(5))
             throw new ArgumentOutOfRangeException(nameof(maximumAge), "Replay windows are at most 1 hour and skew at most 5 minutes.");
         if (key.Length is < MinimumKeyBytes or > MaximumKeyBytes || deliveryId is null || !IsDeliveryId(deliveryId) || timestamp is null
-            || timestamp.Length is 0 or > 12 || !timestamp.All(char.IsAsciiDigit) || !long.TryParse(timestamp, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds)
+            || timestamp.Length is 0 or > 12 || !IsAllAsciiDigits(timestamp) || !long.TryParse(timestamp, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds)
             || signature is null || signature.Length != 67 || !signature.StartsWith("v1=", StringComparison.Ordinal) || body.Length > MaximumBodyBytes)
             return new ApiWebhookRejected(ApiWebhookRejection.Malformed);
         DateTimeOffset signedAt;
-        byte[] supplied;
+        Span<byte> supplied = stackalloc byte[32];
         try
         {
             signedAt = DateTimeOffset.FromUnixTimeSeconds(seconds);
-            supplied = Convert.FromHexString(signature.AsSpan(3));
+            if (Convert.FromHexString(signature.AsSpan(3), supplied, out _, out var written) != OperationStatus.Done || written != 32)
+                return new ApiWebhookRejected(ApiWebhookRejection.Malformed);
         }
-        catch (Exception error) when (error is ArgumentOutOfRangeException or FormatException)
+        catch (ArgumentOutOfRangeException)
         {
             return new ApiWebhookRejected(ApiWebhookRejection.Malformed);
         }
-        var expected = Convert.FromHexString(Create(key, deliveryId, seconds, body).AsSpan(3));
+        Span<byte> expected = stackalloc byte[32];
+        ComputeHash(key, deliveryId, seconds, body, expected);
         if (!CryptographicOperations.FixedTimeEquals(expected, supplied))
             return new ApiWebhookRejected(ApiWebhookRejection.SignatureMismatch);
         if (signedAt < now - age)
@@ -109,7 +117,41 @@ public static class ApiWebhookSignature
         return new ApiWebhookVerified(deliveryId, signedAt);
     }
 
-    internal static bool IsDeliveryId(string value) => value.Length is > 0 and <= MaximumDeliveryIdLength && value.All(character => character is >= '!' and <= '~');
+    private static void ComputeHash(ReadOnlySpan<byte> key, string deliveryId, long timestamp, ReadOnlySpan<byte> body, Span<byte> destination)
+    {
+        // "v1\n" (3) + timestamp (<=20) + "\n" (1) + deliveryId (<=200 ASCII) + "\n" (1) <= 225 bytes.
+        Span<byte> prefix = stackalloc byte[256];
+        prefix[0] = (byte)'v';
+        prefix[1] = (byte)'1';
+        prefix[2] = (byte)'\n';
+        Utf8Formatter.TryFormat(timestamp, prefix[3..], out var tsLen);
+        var pos = 3 + tsLen;
+        prefix[pos++] = (byte)'\n';
+        pos += Encoding.ASCII.GetBytes(deliveryId.AsSpan(), prefix[pos..]);
+        prefix[pos++] = (byte)'\n';
+        using var hmac = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, key);
+        hmac.AppendData(prefix[..pos]);
+        hmac.AppendData(body);
+        hmac.GetHashAndReset(destination);
+    }
+
+    private static bool IsAllAsciiDigits(string value)
+    {
+        for (var i = 0; i < value.Length; i++)
+            if (!char.IsAsciiDigit(value[i]))
+                return false;
+        return true;
+    }
+
+    internal static bool IsDeliveryId(string value)
+    {
+        if (value.Length is 0 or > MaximumDeliveryIdLength)
+            return false;
+        for (var i = 0; i < value.Length; i++)
+            if (value[i] is < '!' or > '~')
+                return false;
+        return true;
+    }
 
     private static void RequireDeliveryId(string deliveryId)
     {
@@ -128,7 +170,7 @@ public static class ApiWebhookSignature
 public sealed class ApiWebhookReplayGuard
 {
     private readonly Lock gate = new();
-    private readonly Dictionary<(string Id, DateTimeOffset At), DateTimeOffset> seen = [];
+    private readonly HashSet<(string Id, DateTimeOffset At)> seen = [];
     private readonly PriorityQueue<(string Id, DateTimeOffset At), DateTimeOffset> expiry = new();
     private readonly TimeSpan retention;
     private readonly int capacity;
@@ -154,12 +196,9 @@ public sealed class ApiWebhookReplayGuard
                 seen.Remove(oldest);
             }
             var entry = (verified.DeliveryId, verified.SignedAt);
-            if (seen.ContainsKey(entry))
-                return new ApiWebhookRejected(ApiWebhookRejection.Replayed);
-            if (seen.Count >= capacity)
+            if (seen.Count >= capacity || !seen.Add(entry))
                 return new ApiWebhookRejected(ApiWebhookRejection.Replayed);
             var expires = verified.SignedAt + retention;
-            seen[entry] = expires;
             expiry.Enqueue(entry, expires);
         }
         return verified;

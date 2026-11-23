@@ -86,24 +86,37 @@ public sealed class ContactLinkingService : IContactLinkingService
     private async Task<ContactLinkResult?> LinkOnceAsync(PrincipalRef actor, TicketScope scope, ContactLinkRequest request, CancellationToken cancellationToken)
     {
         var account = request.Account.Address;
+        var decisions = await evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Link, ContactPermissions.Read], cancellationToken).ConfigureAwait(false);
         StoredContact? subject;
+        var subjectLinkPermitted = false;
         if (request.Contact is { } id)
         {
             var named = await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
             if (named is null)
                 return ContactRefused.NotFound;
-            if (!await PermittedAsync(actor, ContactPermissions.Link, ContactAccess.Resource(named), cancellationToken).ConfigureAwait(false))
+            if (!(await decisions.DecideAsync(ContactPermissions.Link, ContactAccess.Resource(named), cancellationToken).ConfigureAwait(false)).IsPermitted)
                 return ContactRefused.Forbidden;
             subject = await LiveAsync(scope, named, cancellationToken).ConfigureAwait(false);
             if (subject is null)
                 return ContactRefused.NotFound;
+            subjectLinkPermitted = subject.Id == named.Id;
         }
         else
         {
-            var owners = (await store.FindByIdentityAsync(scope, request.Evidence!, cancellationToken).ConfigureAwait(false))
-                .Select(owner => owner.Contact).Distinct().OrderBy(contact => contact.Value, StringComparer.Ordinal).ToList();
-            if (owners.Count > 1)
-                return await AmbiguousAsync(actor, scope, owners, cancellationToken).ConfigureAwait(false);
+            var rawOwners = await store.FindByIdentityAsync(scope, request.Evidence!, cancellationToken).ConfigureAwait(false);
+            var owners = new List<ContactId>(rawOwners.Count);
+            if (rawOwners.Count > 0)
+            {
+                var seenOwners = new HashSet<ContactId>();
+                foreach (var owner in rawOwners)
+                    if (seenOwners.Add(owner.Contact))
+                        owners.Add(owner.Contact);
+                if (owners.Count > 1)
+                {
+                    owners.Sort(static (a, b) => string.CompareOrdinal(a.Value, b.Value));
+                    return await AmbiguousAsync(actor, scope, owners, cancellationToken).ConfigureAwait(false);
+                }
+            }
             subject = owners.Count == 0 ? null : await store.GetAsync(scope, owners[0], cancellationToken).ConfigureAwait(false);
             if (owners.Count == 1 && (subject is null || subject.Contact.MergedInto is not null))
                 return null;
@@ -114,11 +127,11 @@ public sealed class ContactLinkingService : IContactLinkingService
         {
             if (holder is null)
                 return ContactRefused.NotFound;
-            return await PermittedAsync(actor, ContactPermissions.Link, ContactAccess.Resource(holder), cancellationToken).ConfigureAwait(false)
+            return (await decisions.DecideAsync(ContactPermissions.Link, ContactAccess.Resource(holder), cancellationToken).ConfigureAwait(false)).IsPermitted
                 ? new ContactAlreadyLinked(await ViewAsync(actor, holder, cancellationToken).ConfigureAwait(false))
                 : ContactRefused.Forbidden;
         }
-        if (!await PermittedAsync(actor, ContactPermissions.Link, ContactAccess.Resource(subject), cancellationToken).ConfigureAwait(false))
+        if (!subjectLinkPermitted && !(await decisions.DecideAsync(ContactPermissions.Link, ContactAccess.Resource(subject), cancellationToken).ConfigureAwait(false)).IsPermitted)
             return ContactRefused.Forbidden;
         if (holder?.Id == subject.Id)
             return new ContactAlreadyLinked(await ViewAsync(actor, subject, cancellationToken).ConfigureAwait(false));
@@ -159,7 +172,7 @@ public sealed class ContactLinkingService : IContactLinkingService
             throw new InvalidOperationException("Unknown write outcome.");
         }
 
-        if (!await PermittedAsync(actor, ContactPermissions.Link, ContactAccess.Resource(holder), cancellationToken).ConfigureAwait(false))
+        if (!(await decisions.DecideAsync(ContactPermissions.Link, ContactAccess.Resource(holder), cancellationToken).ConfigureAwait(false)).IsPermitted)
             return ContactRefused.Forbidden;
         // Like the auto-merge and accept paths: never combine two different verified accounts of one namespace.
         if (SharesNamespaceWithOtherAccount(subject.Contact, holder.Contact))
@@ -282,10 +295,10 @@ public sealed class ContactLinkingService : IContactLinkingService
                 break;
             }
             var now = Now;
-            var identities = new List<ContactIdentity> { new(request.Account.Address, new IdentityVerified(request.VerificationSource, now)) };
+            var identities = new List<ContactIdentity>(request.Claims.Count + 1) { new(request.Account.Address, new IdentityVerified(request.VerificationSource, now)) };
             foreach (var claim in request.Claims)
             {
-                var verified = claim.Verified && await HolderAsync(scope, claim.Address, cancellationToken).ConfigureAwait(false) is null;
+                var verified = claim.Verified && await HolderIdAsync(scope, claim.Address, cancellationToken).ConfigureAwait(false) is null;
                 identities.Add(new ContactIdentity(claim.Address, verified ? new IdentityVerified(request.VerificationSource, now) : new IdentityClaimed(request.VerificationSource, now)));
             }
             var contact = new Contact(options.IdFactory(), new ContactProfile(request.DisplayName), identities, [], [], false, now, now);
@@ -343,8 +356,8 @@ public sealed class ContactLinkingService : IContactLinkingService
                     continue;
                 if (claim.Verified)
                 {
-                    var holder = await HolderAsync(scope, claim.Address, cancellationToken).ConfigureAwait(false);
-                    if (holder is not null && holder.Id != account.Id)
+                    var holderId = await HolderIdAsync(scope, claim.Address, cancellationToken).ConfigureAwait(false);
+                    if (holderId is { } existingHolder && existingHolder != account.Id)
                     {
                         if (existing is null)
                         {
@@ -424,11 +437,23 @@ public sealed class ContactLinkingService : IContactLinkingService
 
         if (candidates.Count == 0)
             return account;
-        var decisions = await evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Link], cancellationToken).ConfigureAwait(false);
-        foreach (var (candidateId, evidence) in candidates.Take(IContactStore.MaximumIdentityOwners))
+        var limitedCandidates = new List<KeyValuePair<string, List<(ContactIdentityAddress Address, bool Qualifies)>>>(Math.Min(candidates.Count, IContactStore.MaximumIdentityOwners));
+        var candidateIds = new List<ContactId>(Math.Min(candidates.Count, IContactStore.MaximumIdentityOwners));
+        foreach (var entry in candidates)
         {
-            var candidate = await store.GetAsync(scope, new ContactId(candidateId), cancellationToken).ConfigureAwait(false);
-            if (candidate is null || candidate.Contact.MergedInto is not null)
+            if (limitedCandidates.Count == IContactStore.MaximumIdentityOwners)
+                break;
+            limitedCandidates.Add(entry);
+            candidateIds.Add(new ContactId(entry.Key));
+        }
+        var decisionsTask = evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Link], cancellationToken);
+        var loadedTask = store.GetManyAsync(scope, candidateIds, cancellationToken);
+        await Task.WhenAll(decisionsTask, loadedTask).ConfigureAwait(false);
+        var decisions = decisionsTask.Result;
+        var loaded = loadedTask.Result;
+        foreach (var (candidateKey, evidence) in limitedCandidates)
+        {
+            if (!loaded.TryGetValue(new ContactId(candidateKey), out var candidate) || candidate.Contact.MergedInto is not null)
                 continue;
             var qualifies = rules is not null && evidence.Count(item => item.Qualifies) >= rules.MinimumMatchingIdentities
                 && (!rules.RequireUnverifiedCandidate || !candidate.Contact.Identities.Any(identity => identity.Verification.IsVerified))
@@ -565,14 +590,20 @@ public sealed class ContactLinkingService : IContactLinkingService
             return (null, null, null, ContactRefused.NotFound);
         if (stored.Revision != expectedRevision)
             return (null, null, null, new ContactRefused(ContactRefusal.Conflict, [], stored.Revision));
-        var candidate = await store.GetAsync(scope, stored.Suggestion.Candidate, cancellationToken).ConfigureAwait(false);
-        var account = await store.GetAsync(scope, stored.Suggestion.Account, cancellationToken).ConfigureAwait(false);
-        if (candidate is null || account is null)
+        var loadedTask = store.GetManyAsync(scope, [stored.Suggestion.Candidate, stored.Suggestion.Account], cancellationToken);
+        var decisionsTask = evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Read, ContactPermissions.Link], cancellationToken);
+        await Task.WhenAll(loadedTask, decisionsTask).ConfigureAwait(false);
+        var loaded = loadedTask.Result;
+        if (!loaded.TryGetValue(stored.Suggestion.Candidate, out var candidate) || !loaded.TryGetValue(stored.Suggestion.Account, out var account))
             return (null, null, null, ContactRefused.NotFound);
-        foreach (var permission in new[] { ContactPermissions.Read, ContactPermissions.Link })
-            if (!await PermittedAsync(actor, permission, ContactAccess.Resource(candidate), cancellationToken).ConfigureAwait(false)
-                || !await PermittedAsync(actor, permission, ContactAccess.Resource(account), cancellationToken).ConfigureAwait(false))
-                return (null, null, null, ContactRefused.Forbidden);
+        var decisions = decisionsTask.Result;
+        var candidateResource = ContactAccess.Resource(candidate);
+        var accountResource = ContactAccess.Resource(account);
+        if (!(await decisions.DecideAsync(ContactPermissions.Read, candidateResource, cancellationToken).ConfigureAwait(false)).IsPermitted
+            || !(await decisions.DecideAsync(ContactPermissions.Read, accountResource, cancellationToken).ConfigureAwait(false)).IsPermitted
+            || !(await decisions.DecideAsync(ContactPermissions.Link, candidateResource, cancellationToken).ConfigureAwait(false)).IsPermitted
+            || !(await decisions.DecideAsync(ContactPermissions.Link, accountResource, cancellationToken).ConfigureAwait(false)).IsPermitted)
+            return (null, null, null, ContactRefused.Forbidden);
         if (stored.Suggestion.Status != ContactLinkSuggestionStatus.Pending)
             return (null, null, null, ContactRefused.Invalid("The suggestion is not pending."));
         return (stored, candidate, account, null);
@@ -617,10 +648,18 @@ public sealed class ContactLinkingService : IContactLinkingService
 
     private async Task<ContactLinkResult> AmbiguousAsync(PrincipalRef actor, TicketScope scope, IEnumerable<ContactId> candidates, CancellationToken cancellationToken)
     {
-        var readable = new List<ContactId>();
-        foreach (var candidate in candidates)
-            if (await store.GetAsync(scope, candidate, cancellationToken).ConfigureAwait(false) is { } stored
-                && await PermittedAsync(actor, ContactPermissions.Read, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
+        var ids = candidates is IReadOnlyCollection<ContactId> col ? col : [.. candidates];
+        if (ids.Count == 0)
+            return ContactRefused.Forbidden;
+        var loadedTask = store.GetManyAsync(scope, ids, cancellationToken);
+        var decisionsTask = evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Read], cancellationToken);
+        await Task.WhenAll(loadedTask, decisionsTask).ConfigureAwait(false);
+        var loaded = loadedTask.Result;
+        var decisions = decisionsTask.Result;
+        var readable = new List<ContactId>(loaded.Count);
+        foreach (var candidate in ids)
+            if (loaded.TryGetValue(candidate, out var stored)
+                && (await decisions.DecideAsync(ContactPermissions.Read, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false)).IsPermitted)
                 readable.Add(candidate);
         return readable.Count == 0 ? ContactRefused.Forbidden : new ContactLinkConflict(ContactLinkConflictReason.AmbiguousEvidence, readable);
     }
@@ -640,11 +679,20 @@ public sealed class ContactLinkingService : IContactLinkingService
         return current;
     }
 
-    private async Task<StoredContact?> HolderAsync(TicketScope scope, ContactIdentityAddress address, CancellationToken cancellationToken)
+    private async Task<ContactId?> HolderIdAsync(TicketScope scope, ContactIdentityAddress address, CancellationToken cancellationToken)
     {
         var owners = await store.FindByIdentityAsync(scope, address, cancellationToken).ConfigureAwait(false);
-        return owners.FirstOrDefault(owner => owner.Verification.IsVerified) is { } verified
-            ? await store.GetAsync(scope, verified.Contact, cancellationToken).ConfigureAwait(false)
+        foreach (var owner in owners)
+            if (owner.Verification.IsVerified)
+                return owner.Contact;
+        return null;
+    }
+
+    private async Task<StoredContact?> HolderAsync(TicketScope scope, ContactIdentityAddress address, CancellationToken cancellationToken)
+    {
+        var holderId = await HolderIdAsync(scope, address, cancellationToken).ConfigureAwait(false);
+        return holderId is { } id
+            ? await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false)
             : null;
     }
 
@@ -675,9 +723,10 @@ public sealed class ContactLinkingService : IContactLinkingService
 
     private async Task<ContactView> ViewAsync(PrincipalRef actor, StoredContact stored, CancellationToken cancellationToken)
     {
-        var decision = await evaluator.AuthorizeAsync(new AccessRequest(actor, ContactPermissions.Read, ContactAccess.Resource(stored)), cancellationToken).ConfigureAwait(false);
-        var masking = await ContactMasking.LoadAsync(stored.Scope, ContactPermissions.Read, definitions, policies, cancellationToken).ConfigureAwait(false);
-        return masking.Project(stored, decision);
+        var decisionTask = evaluator.AuthorizeAsync(new AccessRequest(actor, ContactPermissions.Read, ContactAccess.Resource(stored)), cancellationToken);
+        var maskingTask = ContactMasking.LoadAsync(stored.Scope, ContactPermissions.Read, definitions, policies, cancellationToken);
+        await Task.WhenAll(decisionTask, maskingTask).ConfigureAwait(false);
+        return maskingTask.Result.Project(stored, decisionTask.Result);
     }
 
     private async Task NotifyAsync(IReadOnlyList<ContactChange> changes, CancellationToken cancellationToken)

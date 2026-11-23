@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -18,35 +19,84 @@ public static class AccessConditionCodec
     /// <summary>Maximum encoded size in UTF-8 bytes.</summary>
     public const int MaximumEncodedBytes = 64 * 1024;
 
+    private const int MaximumPooledBufferCapacity = 16 * 1024;
+
+    [ThreadStatic]
+    private static ArrayBufferWriter<byte>? cachedBuffer;
+
+    [ThreadStatic]
+    private static Utf8JsonWriter? cachedWriter;
+
     public static string Serialize(AccessCondition condition)
     {
         ArgumentNullException.ThrowIfNull(condition);
-        using var buffer = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(buffer))
+        var buffer = cachedBuffer;
+        if (buffer is null)
+            cachedBuffer = buffer = new ArrayBufferWriter<byte>(256);
+        else
+            buffer.ResetWrittenCount();
+
+        var writer = cachedWriter;
+        if (writer is null)
+            cachedWriter = writer = new Utf8JsonWriter(buffer);
+        else
+            writer.Reset(buffer);
+
+        try
         {
             writer.WriteStartObject();
-            writer.WriteNumber("v", FormatVersion);
-            writer.WritePropertyName("c");
+            writer.WriteNumber("v"u8, FormatVersion);
+            writer.WritePropertyName("c"u8);
             Write(writer, condition);
             writer.WriteEndObject();
+            writer.Flush();
+            return Encoding.UTF8.GetString(buffer.WrittenSpan);
         }
-        return Encoding.UTF8.GetString(buffer.ToArray());
+        finally
+        {
+            if (buffer.Capacity > MaximumPooledBufferCapacity)
+                cachedBuffer = null;
+            else
+                buffer.ResetWrittenCount();
+        }
     }
 
     /// <exception cref="FormatException">The payload is malformed, oversized, of an unknown version or violates condition bounds.</exception>
     public static AccessCondition Deserialize(string json)
     {
         ArgumentNullException.ThrowIfNull(json);
-        if (Encoding.UTF8.GetByteCount(json) > MaximumEncodedBytes)
+        if (json.Length > MaximumEncodedBytes / 3 && Encoding.UTF8.GetByteCount(json) > MaximumEncodedBytes)
             throw new FormatException("The encoded condition is too large.");
         try
         {
             using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = AccessCondition.MaximumDepth * 2 + 4 });
             var root = document.RootElement;
-            RequireProperties(root, "v", "c");
-            if (root.GetProperty("v").GetInt32() != FormatVersion)
+            if (root.ValueKind != JsonValueKind.Object)
+                throw new FormatException("Expected an object.");
+            JsonElement vProp = default, cProp = default;
+            var seen = 0u;
+            foreach (var property in root.EnumerateObject())
+            {
+                if (property.NameEquals("v"u8))
+                {
+                    if ((seen & 1u) != 0) throw new FormatException("Missing or duplicate condition property.");
+                    seen |= 1u;
+                    vProp = property.Value;
+                }
+                else if (property.NameEquals("c"u8))
+                {
+                    if ((seen & 2u) != 0) throw new FormatException("Missing or duplicate condition property.");
+                    seen |= 2u;
+                    cProp = property.Value;
+                }
+                else
+                    throw new FormatException("Unexpected condition property.");
+            }
+            if (seen != 3u)
+                throw new FormatException("Missing or duplicate condition property.");
+            if (vProp.GetInt32() != FormatVersion)
                 throw new FormatException("Unsupported condition format version.");
-            return Read(root.GetProperty("c"), 1);
+            return Read(cProp, 1);
         }
         catch (Exception error) when (error is JsonException or InvalidOperationException or ArgumentException or KeyNotFoundException)
         {
@@ -60,55 +110,62 @@ public static class AccessConditionCodec
         switch (condition)
         {
             case AndCondition and:
-                writer.WriteString("op", "and");
+                writer.WriteString("op"u8, "and"u8);
                 WriteItems(writer, and.Operands);
                 break;
             case OrCondition or:
-                writer.WriteString("op", "or");
+                writer.WriteString("op"u8, "or"u8);
                 WriteItems(writer, or.Operands);
                 break;
             case NotCondition not:
-                writer.WriteString("op", "not");
-                writer.WritePropertyName("item");
+                writer.WriteString("op"u8, "not"u8);
+                writer.WritePropertyName("item"u8);
                 Write(writer, not.Operand);
                 break;
             case AssigneeIsSelfCondition:
-                writer.WriteString("op", "assignee-self");
+                writer.WriteString("op"u8, "assignee-self"u8);
                 break;
             case TeamInPrincipalTeamsCondition:
-                writer.WriteString("op", "team-in-principal");
+                writer.WriteString("op"u8, "team-in-principal"u8);
                 break;
             case AttributeEqualsCondition equals:
-                writer.WriteString("op", "attr-eq");
-                writer.WriteString("key", equals.Key);
-                writer.WriteString("value", equals.Value);
+                writer.WriteString("op"u8, "attr-eq"u8);
+                writer.WriteString("key"u8, equals.Key);
+                writer.WriteString("value"u8, equals.Value);
                 break;
             case AttributeInCondition @in:
-                writer.WriteString("op", "attr-in");
-                writer.WriteString("key", @in.Key);
-                writer.WriteStartArray("values");
+                writer.WriteString("op"u8, "attr-in"u8);
+                writer.WriteString("key"u8, @in.Key);
+                writer.WriteStartArray("values"u8);
                 foreach (var value in @in.Values)
                     writer.WriteStringValue(value);
                 writer.WriteEndArray();
                 break;
             case HasLabelCondition label:
-                writer.WriteString("op", "label");
-                writer.WriteString("label", label.Label.Value);
+                writer.WriteString("op"u8, "label"u8);
+                writer.WriteString("label"u8, label.Label.Value);
                 break;
             case TimeWindowCondition window:
-                writer.WriteString("op", "time");
-                writer.WriteString("start", window.StartUtc.ToString("HH:mm:ss", CultureInfo.InvariantCulture));
-                writer.WriteString("end", window.EndUtc.ToString("HH:mm:ss", CultureInfo.InvariantCulture));
+                writer.WriteString("op"u8, "time"u8);
+                WriteTime(writer, "start"u8, window.StartUtc);
+                WriteTime(writer, "end"u8, window.EndUtc);
                 break;
         }
         writer.WriteEndObject();
     }
 
+    private static void WriteTime(Utf8JsonWriter writer, ReadOnlySpan<byte> propertyName, TimeOnly value)
+    {
+        Span<char> chars = stackalloc char[8];
+        value.TryFormat(chars, out _, "HH:mm:ss", CultureInfo.InvariantCulture);
+        writer.WriteString(propertyName, chars);
+    }
+
     private static void WriteItems(Utf8JsonWriter writer, IReadOnlyList<AccessCondition> items)
     {
-        writer.WriteStartArray("items");
-        foreach (var item in items)
-            Write(writer, item);
+        writer.WriteStartArray("items"u8);
+        for (var i = 0; i < items.Count; i++)
+            Write(writer, items[i]);
         writer.WriteEndArray();
     }
 
@@ -118,73 +175,113 @@ public static class AccessConditionCodec
             throw new FormatException("The encoded condition is too deep.");
         if (node.ValueKind != JsonValueKind.Object)
             throw new FormatException("Condition nodes must be objects.");
-        var op = node.GetProperty("op").GetString();
-        switch (op)
+        if (!node.TryGetProperty("op"u8, out var opProp))
+            throw new FormatException("Missing or duplicate condition property.");
+
+        if (opProp.ValueEquals("and"u8))
         {
-            case "and":
-                RequireProperties(node, "op", "items");
-                return new AndCondition(ReadItems(node, depth));
-            case "or":
-                RequireProperties(node, "op", "items");
-                return new OrCondition(ReadItems(node, depth));
-            case "not":
-                RequireProperties(node, "op", "item");
-                return new NotCondition(Read(node.GetProperty("item"), depth + 1));
-            case "assignee-self":
-                RequireProperties(node, "op");
-                return new AssigneeIsSelfCondition();
-            case "team-in-principal":
-                RequireProperties(node, "op");
-                return new TeamInPrincipalTeamsCondition();
-            case "attr-eq":
-                RequireProperties(node, "op", "key", "value");
-                return new AttributeEqualsCondition(String(node, "key"), String(node, "value"));
-            case "attr-in":
-                RequireProperties(node, "op", "key", "values");
-                var values = node.GetProperty("values");
-                if (values.ValueKind != JsonValueKind.Array || values.GetArrayLength() > AccessCondition.MaximumValues)
-                    throw new FormatException("Attribute value lists must be bounded arrays.");
-                return new AttributeInCondition(String(node, "key"), values.EnumerateArray().Select(value => value.GetString() ?? throw new FormatException("Values must be strings.")).ToArray());
-            case "label":
-                RequireProperties(node, "op", "label");
-                return new HasLabelCondition(new LabelId(String(node, "label")));
-            case "time":
-                RequireProperties(node, "op", "start", "end");
-                return new TimeWindowCondition(Time(node, "start"), Time(node, "end"));
-            default:
-                throw new FormatException("Unknown condition discriminator.");
+            RequireProperties(node, "op", "items");
+            return new AndCondition(ReadItems(node, depth));
         }
+        if (opProp.ValueEquals("or"u8))
+        {
+            RequireProperties(node, "op", "items");
+            return new OrCondition(ReadItems(node, depth));
+        }
+        if (opProp.ValueEquals("not"u8))
+        {
+            RequireProperties(node, "op", "item");
+            return new NotCondition(Read(node.GetProperty("item"u8), depth + 1));
+        }
+        if (opProp.ValueEquals("assignee-self"u8))
+        {
+            RequireProperties(node, "op");
+            return new AssigneeIsSelfCondition();
+        }
+        if (opProp.ValueEquals("team-in-principal"u8))
+        {
+            RequireProperties(node, "op");
+            return new TeamInPrincipalTeamsCondition();
+        }
+        if (opProp.ValueEquals("attr-eq"u8))
+        {
+            RequireProperties(node, "op", "key", "value");
+            return new AttributeEqualsCondition(String(node, "key"u8), String(node, "value"u8));
+        }
+        if (opProp.ValueEquals("attr-in"u8))
+        {
+            RequireProperties(node, "op", "key", "values");
+            var values = node.GetProperty("values"u8);
+            if (values.ValueKind != JsonValueKind.Array)
+                throw new FormatException("Attribute value lists must be bounded arrays.");
+            var count = values.GetArrayLength();
+            if (count > AccessCondition.MaximumValues)
+                throw new FormatException("Attribute value lists must be bounded arrays.");
+            var items = new string[count];
+            var index = 0;
+            foreach (var value in values.EnumerateArray())
+                items[index++] = value.ValueKind == JsonValueKind.String ? value.GetString()! : throw new FormatException("Values must be strings.");
+            return new AttributeInCondition(String(node, "key"u8), items);
+        }
+        if (opProp.ValueEquals("label"u8))
+        {
+            RequireProperties(node, "op", "label");
+            return new HasLabelCondition(new LabelId(String(node, "label"u8)));
+        }
+        if (opProp.ValueEquals("time"u8))
+        {
+            RequireProperties(node, "op", "start", "end");
+            return new TimeWindowCondition(Time(node, "start"u8), Time(node, "end"u8));
+        }
+        throw new FormatException("Unknown condition discriminator.");
     }
 
-    private static List<AccessCondition> ReadItems(JsonElement node, int depth)
+    private static AccessCondition[] ReadItems(JsonElement node, int depth)
     {
-        var items = node.GetProperty("items");
-        if (items.ValueKind != JsonValueKind.Array || items.GetArrayLength() > AccessCondition.MaximumNodes)
+        var items = node.GetProperty("items"u8);
+        if (items.ValueKind != JsonValueKind.Array)
             throw new FormatException("Condition operands must be bounded arrays.");
-        return [.. items.EnumerateArray().Select(item => Read(item, depth + 1))];
+        var count = items.GetArrayLength();
+        if (count > AccessCondition.MaximumNodes)
+            throw new FormatException("Condition operands must be bounded arrays.");
+        var result = new AccessCondition[count];
+        var index = 0;
+        foreach (var item in items.EnumerateArray())
+            result[index++] = Read(item, depth + 1);
+        return result;
     }
 
-    private static string String(JsonElement node, string name)
+    private static string String(JsonElement node, ReadOnlySpan<byte> name)
     {
         var value = node.GetProperty(name);
         return value.ValueKind == JsonValueKind.String ? value.GetString()! : throw new FormatException("Expected a string.");
     }
 
-    private static TimeOnly Time(JsonElement node, string name) =>
+    private static TimeOnly Time(JsonElement node, ReadOnlySpan<byte> name) =>
         TimeOnly.ParseExact(String(node, name), "HH:mm:ss", CultureInfo.InvariantCulture);
 
-    private static void RequireProperties(JsonElement node, params string[] names)
+    private static void RequireProperties(JsonElement node, params ReadOnlySpan<string> names)
     {
         if (node.ValueKind != JsonValueKind.Object)
             throw new FormatException("Expected an object.");
-        var count = 0;
+        var seen = 0u;
         foreach (var property in node.EnumerateObject())
         {
-            if (Array.IndexOf(names, property.Name) < 0)
+            var matched = -1;
+            for (var i = 0; i < names.Length; i++)
+                if (property.NameEquals(names[i]))
+                {
+                    matched = i;
+                    break;
+                }
+            if (matched < 0)
                 throw new FormatException("Unexpected condition property.");
-            count++;
+            var bit = 1u << matched;
+            if ((seen & bit) != 0)
+                throw new FormatException("Missing or duplicate condition property.");
+            seen |= bit;
         }
-        if (count != names.Length)
+        if (seen != (1u << names.Length) - 1u)
             throw new FormatException("Missing or duplicate condition property.");
     }
 }

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using System.Text.Unicode;
 
@@ -6,16 +7,21 @@ namespace TicketFlow.Conversations;
 /// <summary>Shared validation for bounded conversation tokens, free text, bodies and timestamps.</summary>
 internal static class ConversationText
 {
+    private static readonly SearchValues<char> TokenChars = SearchValues.Create("abcdefghijklmnopqrstuvwxyz0123456789-_");
+    private static readonly SearchValues<char> ControlChars = SearchValues.Create(
+        "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\u0008\u0009\u000A\u000B\u000C\u000D\u000E\u000F" +
+        "\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001A\u001B\u001C\u001D\u001E\u001F" +
+        "\u007F\u0080\u0081\u0082\u0083\u0084\u0085\u0086\u0087\u0088\u0089\u008A\u008B\u008C\u008D\u008E\u008F" +
+        "\u0090\u0091\u0092\u0093\u0094\u0095\u0096\u0097\u0098\u0099\u009A\u009B\u009C\u009D\u009E\u009F");
+    private static readonly SearchValues<char> BodyInvalidControls = SearchValues.Create(
+        "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\u0008\u000B\u000C\u000E\u000F" +
+        "\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001A\u001B\u001C\u001D\u001E\u001F" +
+        "\u007F\u0080\u0081\u0082\u0083\u0084\u0085\u0086\u0087\u0088\u0089\u008A\u008B\u008C\u008D\u008E\u008F" +
+        "\u0090\u0091\u0092\u0093\u0094\u0095\u0096\u0097\u0098\u0099\u009A\u009B\u009C\u009D\u009E\u009F");
+
     /// <summary>A lowercase token: starts with a-z, then a-z, 0-9, '-' or '_'.</summary>
-    public static bool IsToken(ReadOnlySpan<char> value, int maximumLength)
-    {
-        if (value.IsEmpty || value.Length > maximumLength || value[0] is not (>= 'a' and <= 'z'))
-            return false;
-        foreach (var character in value)
-            if (character is not ((>= 'a' and <= 'z') or (>= '0' and <= '9') or '-' or '_'))
-                return false;
-        return true;
-    }
+    public static bool IsToken(ReadOnlySpan<char> value, int maximumLength) =>
+        !value.IsEmpty && value.Length <= maximumLength && value[0] is >= 'a' and <= 'z' && !value.ContainsAnyExcept(TokenChars);
 
     public static string RequireToken(string value, int maximumLength, string parameterName, string description)
     {
@@ -29,15 +35,22 @@ internal static class ConversationText
     public static string RequireDottedName(string value, int maximumLength, string parameterName, string description)
     {
         ArgumentNullException.ThrowIfNull(value, parameterName);
-        var segments = value.Split('.');
-        if (value.Length > maximumLength || segments.Length > 8 || segments.Any(segment => !IsToken(segment, 64)))
+        if (value.Length == 0 || value.Length > maximumLength)
             throw new ArgumentException($"{description} must be 1-8 dot-separated lowercase tokens and at most {maximumLength} characters.", parameterName);
+        var span = value.AsSpan();
+        var segments = 0;
+        foreach (var range in span.Split('.'))
+        {
+            segments++;
+            if (segments > 8 || !IsToken(span[range], 64))
+                throw new ArgumentException($"{description} must be 1-8 dot-separated lowercase tokens and at most {maximumLength} characters.", parameterName);
+        }
         return value;
     }
 
     /// <summary>True when the text has no C0/C1 control characters and is well-formed UTF-16.</summary>
     public static bool IsClean(ReadOnlySpan<char> value) =>
-        !value.ContainsAnyInRange('\0', '\u001F') && !value.ContainsAnyInRange('\u007F', '\u009F') && Utf16.IsValid(value);
+        !value.ContainsAny(ControlChars) && (!value.ContainsAnyInRange('\uD800', '\uDFFF') || Utf16.IsValid(value));
 
     /// <summary>Validates bounded free text without control characters and with well-formed UTF-16.</summary>
     public static string RequireText(string value, int maximumLength, string parameterName, bool allowEmpty = false)
@@ -62,12 +75,12 @@ internal static class ConversationText
         ArgumentNullException.ThrowIfNull(value, parameterName);
         if (!allowEmpty && string.IsNullOrWhiteSpace(value))
             throw new ArgumentException("A non-blank body is required.", parameterName);
-        if (value.Length > maximumUtf8Bytes || !Utf16.IsValid(value))
+        var span = value.AsSpan();
+        if (span.Length > maximumUtf8Bytes || (span.ContainsAnyInRange('\uD800', '\uDFFF') && !Utf16.IsValid(span)))
             throw new ArgumentException($"Bodies must be well-formed Unicode of at most {maximumUtf8Bytes} UTF-8 bytes.", parameterName);
-        foreach (var character in value)
-            if (character is (< ' ' and not '\t' and not '\n' and not '\r') or (>= '\u007F' and <= '\u009F'))
-                throw new ArgumentException("Bodies cannot contain control characters other than tab and line breaks.", parameterName);
-        if (Encoding.UTF8.GetByteCount(value) > maximumUtf8Bytes)
+        if (span.ContainsAny(BodyInvalidControls))
+            throw new ArgumentException("Bodies cannot contain control characters other than tab and line breaks.", parameterName);
+        if (span.Length > maximumUtf8Bytes / 3 && Encoding.UTF8.GetByteCount(span) > maximumUtf8Bytes)
             throw new ArgumentException($"Bodies must be well-formed Unicode of at most {maximumUtf8Bytes} UTF-8 bytes.", parameterName);
         return value;
     }

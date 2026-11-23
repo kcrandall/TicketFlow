@@ -1,4 +1,5 @@
 using System.Buffers.Text;
+using System.Collections.Frozen;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -16,6 +17,16 @@ namespace TicketFlow.Hosting.AspNetCore;
 /// </summary>
 public static class TicketFlowHttp
 {
+    private static readonly string[] SmallETags = BuildSmallETags();
+
+    private static string[] BuildSmallETags()
+    {
+        var tags = new string[257];
+        for (var i = 0; i < tags.Length; i++)
+            tags[i] = "\"" + i.ToString(CultureInfo.InvariantCulture) + "\"";
+        return tags;
+    }
+
     /// <summary>
     /// Header that marks a body-less authenticated POST (heartbeat, unmerge, publish, assist summary, ...) as a deliberate API call. POSTs
     /// without a JSON content type and without this header are refused (400 <c>json-or-header-required</c>) as CSRF protection.
@@ -26,11 +37,12 @@ public static class TicketFlowHttp
     public const string ProblemTypePrefix = "urn:ticketflow:problem:";
 
     /// <summary>The strong entity tag of a revision: the decimal revision in quotes.</summary>
-    public static string ETag(long revision) => "\"" + revision.ToString(CultureInfo.InvariantCulture) + "\"";
+    public static string ETag(long revision) =>
+        (ulong)revision < (ulong)SmallETags.Length ? SmallETags[revision] : "\"" + revision.ToString(CultureInfo.InvariantCulture) + "\"";
 
     /// <summary><c>If-None-Match: *</c>: the request may only create the record.</summary>
     internal static bool IsCreateOnly(HttpContext httpContext) =>
-        httpContext.Request.Headers.IfNoneMatch is { Count: 1 } values && values[0]?.Trim() == "*";
+        httpContext.Request.Headers.IfNoneMatch is { Count: 1 } values && values[0] is { } raw && raw.AsSpan().Trim() is "*";
 
     /// <summary>
     /// Parses <c>If-Match: "7"</c> (a weak <c>W/"7"</c> is accepted too: the revision is the only validator). Missing →
@@ -45,12 +57,12 @@ public static class TicketFlowHttp
             return true;
         if (values.Count != 1 || values[0] is not { } header)
             return false;
-        header = header.Trim();
-        if (header.StartsWith("W/", StringComparison.Ordinal))
-            header = header[2..];
-        if (header.Length < 3 || header[0] != '"' || header[^1] != '"')
+        var span = header.AsSpan().Trim();
+        if (span.StartsWith("W/", StringComparison.Ordinal))
+            span = span[2..];
+        if (span.Length < 3 || span[0] != '"' || span[^1] != '"')
             return false;
-        if (!long.TryParse(header.AsSpan(1, header.Length - 2), NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) || parsed < 1)
+        if (!long.TryParse(span[1..^1], NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) || parsed < 1)
             return false;
         revision = parsed;
         return true;
@@ -96,8 +108,12 @@ public static class TicketFlowHttp
             Title = Title(status),
         };
         problem.Extensions["code"] = code;
-        if (errors?.ToArray() is { Length: > 0 } list)
-            problem.Extensions["errors"] = list;
+        if (errors is not null)
+        {
+            var list = errors as string[] ?? [.. errors];
+            if (list.Length > 0)
+                problem.Extensions["errors"] = list;
+        }
         if (currentRevision is { } revision)
             problem.Extensions["currentRevision"] = revision;
         if (extensions is not null)
@@ -146,23 +162,56 @@ public static class TicketFlowHttp
     internal static IResult Forbidden() => Problem(StatusCodes.Status403Forbidden, "forbidden");
 
     /// <summary>The camelCase token of an enum value, for example <c>firstResponse</c>.</summary>
-    internal static string Token<T>(T value) where T : struct, Enum
-    {
-        var name = value.ToString();
-        return name.Length == 0 || !char.IsUpper(name[0]) ? name : char.ToLowerInvariant(name[0]) + name[1..];
-    }
+    internal static string Token<T>(T value) where T : struct, Enum => EnumTokenCache<T>.Token(value);
 
-    internal static string? Token<T>(T? value) where T : struct, Enum => value is { } some ? Token(some) : null;
+    internal static string? Token<T>(T? value) where T : struct, Enum => value is { } some ? EnumTokenCache<T>.Token(some) : null;
 
     /// <summary>Parses a defined enum token (case-insensitive, names only). Unknown values throw <see cref="ArgumentException"/> (422).</summary>
     internal static T Parse<T>(string? value, string name) where T : struct, Enum
     {
-        if (value is null || value.Length is 0 or > 64 || !value.All(char.IsAsciiLetter) || !Enum.TryParse<T>(value, ignoreCase: true, out var parsed) || !Enum.IsDefined(parsed))
-            throw new ArgumentException($"'{name}' must be one of: {string.Join(", ", Enum.GetValues<T>().Select(item => Token(item)))}.", name);
-        return parsed;
+        if (value is not null && EnumTokenCache<T>.TryParse(value, out var parsed))
+            return parsed;
+        throw new ArgumentException($"'{name}' must be one of: {EnumTokenCache<T>.AllowedList}.", name);
     }
 
     internal static T? ParseOptional<T>(string? value, string name) where T : struct, Enum => value is null ? null : Parse<T>(value, name);
+
+    private static class EnumTokenCache<T> where T : struct, Enum
+    {
+        private static readonly FrozenDictionary<T, string> ToToken;
+        private static readonly FrozenDictionary<string, T> FromToken;
+        public static readonly string AllowedList;
+
+        static EnumTokenCache()
+        {
+            var values = Enum.GetValues<T>();
+            var toToken = new Dictionary<T, string>(values.Length);
+            var fromToken = new Dictionary<string, T>(values.Length, StringComparer.OrdinalIgnoreCase);
+            var names = new string[values.Length];
+            for (var i = 0; i < values.Length; i++)
+            {
+                var value = values[i];
+                var name = value.ToString();
+                var token = name.Length == 0 || !char.IsUpper(name[0]) ? name : char.ToLowerInvariant(name[0]) + name[1..];
+                toToken[value] = token;
+                fromToken[token] = value;
+                names[i] = token;
+            }
+            ToToken = toToken.ToFrozenDictionary();
+            FromToken = fromToken.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
+            AllowedList = string.Join(", ", names);
+        }
+
+        public static string Token(T value)
+        {
+            if (ToToken.TryGetValue(value, out var token))
+                return token;
+            var name = value.ToString();
+            return name.Length == 0 || !char.IsUpper(name[0]) ? name : char.ToLowerInvariant(name[0]) + name[1..];
+        }
+
+        public static bool TryParse(string value, out T parsed) => FromToken.TryGetValue(value, out parsed);
+    }
 
     /// <summary>Default and maximum page sizes of collection endpoints.</summary>
     internal const int DefaultPageSize = 50;
@@ -183,14 +232,24 @@ public static class TicketFlowHttp
     {
         var size = PageSize(limit);
         var after = cursor is null ? null : DecodeCursor(cursor, 1)[0];
-        var ordered = items.Select(item => (Key: key(item), Item: item)).Where(entry => after is null || string.CompareOrdinal(entry.Key, after) > 0)
-            .OrderBy(entry => entry.Key, StringComparer.Ordinal).Take(size + 1).ToList();
-        var page = ordered.Take(size).ToList();
-        return new PageResponse<TOut>([.. page.Select(entry => project(entry.Item))], ordered.Count > size ? EncodeCursor(page[^1].Key) : null);
+        var filtered = new List<(string Key, TIn Item)>();
+        foreach (var item in items)
+        {
+            var itemKey = key(item);
+            if (after is null || string.CompareOrdinal(itemKey, after) > 0)
+                filtered.Add((itemKey, item));
+        }
+        filtered.Sort(static (left, right) => string.CompareOrdinal(left.Key, right.Key));
+        var hasMore = filtered.Count > size;
+        var count = hasMore ? size : filtered.Count;
+        var output = new TOut[count];
+        for (var i = 0; i < count; i++)
+            output[i] = project(filtered[i].Item);
+        return new PageResponse<TOut>(output, hasMore ? EncodeCursor(filtered[count - 1].Key) : null);
     }
 
     /// <summary>Encodes cursor parts as an opaque base64url token.</summary>
-    internal static string EncodeCursor(params string[] parts) => Base64Url.EncodeToString(JsonSerializer.SerializeToUtf8Bytes(parts));
+    internal static string EncodeCursor(params string[] parts) => Base64Url.EncodeToString(JsonSerializer.SerializeToUtf8Bytes(parts, TicketFlowHttpJsonContext.Default.StringArray));
 
     /// <summary>Decodes a token from <see cref="EncodeCursor"/> with exactly <paramref name="count"/> parts; malformed tokens throw <see cref="ArgumentException"/>.</summary>
     internal static string[] DecodeCursor(string cursor, int count)
@@ -199,9 +258,12 @@ public static class TicketFlowHttp
         {
             if (cursor.Length > 4096)
                 throw new FormatException();
-            var parts = JsonSerializer.Deserialize<string[]>(Base64Url.DecodeFromChars(cursor));
-            if (parts is null || parts.Length != count || parts.Any(part => part is null))
+            var parts = JsonSerializer.Deserialize(Base64Url.DecodeFromChars(cursor), TicketFlowHttpJsonContext.Default.StringArray);
+            if (parts is null || parts.Length != count)
                 throw new FormatException();
+            for (var i = 0; i < parts.Length; i++)
+                if (parts[i] is null)
+                    throw new FormatException();
             return parts;
         }
         catch (Exception error) when (error is FormatException or JsonException)

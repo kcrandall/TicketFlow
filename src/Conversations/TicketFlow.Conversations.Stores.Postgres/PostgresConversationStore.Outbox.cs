@@ -1,3 +1,4 @@
+using System.Data;
 using Npgsql;
 using NpgsqlTypes;
 using TicketFlow.Core;
@@ -6,8 +7,6 @@ namespace TicketFlow.Conversations.Stores.Postgres;
 
 public sealed partial class PostgresConversationStore
 {
-    private const string EntryColumns = "sequence, entry_id, tenant_id, project_id, environment_id, app_id, workspace_id, conversation_id, inbox_id, format_version, kind, revision, payload, occurred_at";
-
     public async Task RegisterConsumerAsync(string consumer, CancellationToken cancellationToken = default)
     {
         IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
@@ -18,7 +17,7 @@ public sealed partial class PostgresConversationStore
         await using (var exists = new NpgsqlCommand("SELECT count(*) FILTER (WHERE consumer=@consumer), count(*) FROM tf_conversation_outbox_consumers", connection, transaction))
         {
             AddText(exists, "consumer", consumer);
-            await using var reader = await exists.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            await using var reader = await exists.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
             if (reader.GetInt64(0) > 0)
                 return;
@@ -44,6 +43,25 @@ public sealed partial class PostgresConversationStore
         return consumers;
     }
 
+    private const string ClaimSql = """
+        WITH candidates AS (
+            SELECT d.sequence FROM tf_conversation_outbox_deliveries d
+            WHERE d.consumer=@consumer AND d.state=0 AND d.available_at<=@now AND (d.lease_until IS NULL OR d.lease_until<=@now)
+              AND NOT EXISTS (SELECT 1 FROM tf_conversation_outbox_deliveries p
+                  WHERE p.consumer=d.consumer AND p.conversation_key=d.conversation_key AND p.state=0 AND p.sequence<d.sequence)
+            ORDER BY d.sequence LIMIT @limit FOR UPDATE OF d SKIP LOCKED),
+        updated AS (
+            UPDATE tf_conversation_outbox_deliveries d SET fence=d.fence+1, attempts=d.attempts+1, lease_until=@until
+            FROM candidates c WHERE d.consumer=@consumer AND d.sequence=c.sequence
+            RETURNING d.sequence, d.fence, d.attempts, d.lease_until)
+        SELECT o.sequence, o.entry_id, o.tenant_id, o.project_id, o.environment_id, o.app_id, o.workspace_id, o.conversation_id, o.inbox_id,
+            o.format_version, o.kind, o.revision, o.payload, o.occurred_at,
+            u.fence, u.attempts, u.lease_until
+        FROM updated u
+        JOIN tf_conversation_outbox o ON o.sequence = u.sequence
+        ORDER BY u.sequence
+        """;
+
     public async Task<IReadOnlyList<ConversationOutboxClaim>> ClaimAsync(string consumer, int limit, TimeSpan lease, CancellationToken cancellationToken = default)
     {
         IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
@@ -52,55 +70,115 @@ public sealed partial class PostgresConversationStore
         if (lease <= TimeSpan.Zero || lease > IConversationOutbox.MaximumLease)
             throw new ArgumentOutOfRangeException(nameof(lease), "Leases are positive and at most one hour.");
         var now = time.GetUtcNow();
-        await using var connection = await source.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         // A delivery is claimable only when no earlier pending delivery of the same conversation exists for the consumer (ordered
-        // per conversation); SKIP LOCKED keeps concurrent claimers from blocking or double-claiming.
-        var claimed = new List<(long Sequence, long Fence, int Attempts, DateTimeOffset LeaseUntil)>();
-        await using (var claim = new NpgsqlCommand("""
-            WITH candidates AS (
-                SELECT d.sequence FROM tf_conversation_outbox_deliveries d
-                WHERE d.consumer=@consumer AND d.state=0 AND d.available_at<=@now AND (d.lease_until IS NULL OR d.lease_until<=@now)
-                  AND NOT EXISTS (SELECT 1 FROM tf_conversation_outbox_deliveries p
-                      WHERE p.consumer=d.consumer AND p.conversation_key=d.conversation_key AND p.state=0 AND p.sequence<d.sequence)
-                ORDER BY d.sequence LIMIT @limit FOR UPDATE OF d SKIP LOCKED)
-            UPDATE tf_conversation_outbox_deliveries d SET fence=d.fence+1, attempts=d.attempts+1, lease_until=@until
-            FROM candidates c WHERE d.consumer=@consumer AND d.sequence=c.sequence
-            RETURNING d.sequence, d.fence, d.attempts, d.lease_until
-            """, connection, transaction))
-        {
-            AddText(claim, "consumer", consumer);
-            AddInstant(claim, "now", now);
-            AddInstant(claim, "until", now + lease);
-            claim.Parameters.AddWithValue("limit", limit);
-            await using var reader = await claim.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                claimed.Add((reader.GetInt64(0), reader.GetInt64(1), reader.GetInt32(2), reader.GetFieldValue<DateTimeOffset>(3)));
-        }
-        var entries = new Dictionary<long, ConversationOutboxEntry>();
-        if (claimed.Count > 0)
-        {
-            await using var load = new NpgsqlCommand($"SELECT {EntryColumns} FROM tf_conversation_outbox WHERE sequence = ANY(@sequences)", connection, transaction);
-            load.Parameters.Add(new NpgsqlParameter("sequences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { Value = claimed.Select(item => item.Sequence).ToArray() });
-            await using var reader = await load.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                var entry = ReadEntry(reader);
-                entries[entry.Sequence] = entry;
-            }
-        }
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return [.. claimed.OrderBy(item => item.Sequence).Select(item => new ConversationOutboxClaim(entries[item.Sequence], consumer, item.Fence, item.Attempts, item.LeaseUntil))];
+        // per conversation); SKIP LOCKED keeps concurrent claimers from blocking or double-claiming. Single auto-committed CTE.
+        await using var command = source.CreateCommand(ClaimSql);
+        AddText(command, "consumer", consumer);
+        AddInstant(command, "now", now);
+        AddInstant(command, "until", now + lease);
+        AddInt32(command, "limit", limit);
+        var claims = new List<ConversationOutboxClaim>(Math.Min(limit, 32));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            claims.Add(new ConversationOutboxClaim(ReadEntry(reader), consumer, reader.GetInt64(14), reader.GetInt32(15), reader.GetFieldValue<DateTimeOffset>(16)));
+        return claims;
     }
 
     public Task<bool> AcknowledgeAsync(string consumer, long sequence, long fence, CancellationToken cancellationToken = default) =>
         CompleteAsync(consumer, sequence, fence, "state=1, completed_at=@now, lease_until=NULL", requireLease: true, null, cancellationToken);
 
+    public async Task<int> AcknowledgeBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> items, CancellationToken cancellationToken = default)
+    {
+        IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
+        ArgumentNullException.ThrowIfNull(items);
+        if (items.Count == 0)
+            return 0;
+        if (items.Count == 1)
+            return await AcknowledgeAsync(consumer, items[0].Sequence, items[0].Fence, cancellationToken).ConfigureAwait(false) ? 1 : 0;
+        var sequences = new long[items.Count];
+        var fences = new long[items.Count];
+        for (var i = 0; i < items.Count; i++)
+        {
+            sequences[i] = items[i].Sequence;
+            fences[i] = items[i].Fence;
+        }
+        await using var command = source.CreateCommand("""
+            UPDATE tf_conversation_outbox_deliveries d
+            SET state=1, completed_at=@now, lease_until=NULL
+            FROM unnest(@sequences, @fences) AS item(sequence, fence)
+            WHERE d.consumer=@consumer AND d.sequence=item.sequence AND d.state=0 AND d.fence=item.fence AND d.fence > 0 AND d.lease_until > @now
+            """);
+        AddText(command, "consumer", consumer);
+        command.Parameters.Add(new NpgsqlParameter<long[]>("sequences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { TypedValue = sequences });
+        command.Parameters.Add(new NpgsqlParameter<long[]>("fences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { TypedValue = fences });
+        AddInstant(command, "now", time.GetUtcNow());
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public Task<bool> ReleaseAsync(string consumer, long sequence, long fence, DateTimeOffset retryAt, CancellationToken cancellationToken = default) =>
         CompleteAsync(consumer, sequence, fence, "lease_until=NULL, available_at=@retry", requireLease: true, retryAt, cancellationToken);
 
+    public async Task<int> ReleaseBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence, DateTimeOffset RetryAt)> items, CancellationToken cancellationToken = default)
+    {
+        IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
+        ArgumentNullException.ThrowIfNull(items);
+        if (items.Count == 0)
+            return 0;
+        if (items.Count == 1)
+            return await ReleaseAsync(consumer, items[0].Sequence, items[0].Fence, items[0].RetryAt, cancellationToken).ConfigureAwait(false) ? 1 : 0;
+        var sequences = new long[items.Count];
+        var fences = new long[items.Count];
+        var retries = new DateTimeOffset[items.Count];
+        for (var i = 0; i < items.Count; i++)
+        {
+            sequences[i] = items[i].Sequence;
+            fences[i] = items[i].Fence;
+            retries[i] = items[i].RetryAt;
+        }
+        await using var command = source.CreateCommand("""
+            UPDATE tf_conversation_outbox_deliveries d
+            SET lease_until=NULL, available_at=item.retry
+            FROM unnest(@sequences, @fences, @retries) AS item(sequence, fence, retry)
+            WHERE d.consumer=@consumer AND d.sequence=item.sequence AND d.state=0 AND d.fence=item.fence AND d.fence > 0 AND d.lease_until > @now
+            """);
+        AddText(command, "consumer", consumer);
+        command.Parameters.Add(new NpgsqlParameter<long[]>("sequences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { TypedValue = sequences });
+        command.Parameters.Add(new NpgsqlParameter<long[]>("fences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { TypedValue = fences });
+        command.Parameters.Add(new NpgsqlParameter<DateTimeOffset[]>("retries", NpgsqlDbType.Array | NpgsqlDbType.TimestampTz) { TypedValue = retries });
+        AddInstant(command, "now", time.GetUtcNow());
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public Task<bool> DeadLetterAsync(string consumer, long sequence, long fence, CancellationToken cancellationToken = default) =>
         CompleteAsync(consumer, sequence, fence, "state=2, completed_at=@now, lease_until=NULL", requireLease: false, null, cancellationToken);
+
+    public async Task<int> DeadLetterBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> items, CancellationToken cancellationToken = default)
+    {
+        IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
+        ArgumentNullException.ThrowIfNull(items);
+        if (items.Count == 0)
+            return 0;
+        if (items.Count == 1)
+            return await DeadLetterAsync(consumer, items[0].Sequence, items[0].Fence, cancellationToken).ConfigureAwait(false) ? 1 : 0;
+        var sequences = new long[items.Count];
+        var fences = new long[items.Count];
+        for (var i = 0; i < items.Count; i++)
+        {
+            sequences[i] = items[i].Sequence;
+            fences[i] = items[i].Fence;
+        }
+        await using var command = source.CreateCommand("""
+            UPDATE tf_conversation_outbox_deliveries d
+            SET state=2, completed_at=@now, lease_until=NULL
+            FROM unnest(@sequences, @fences) AS item(sequence, fence)
+            WHERE d.consumer=@consumer AND d.sequence=item.sequence AND d.state=0 AND d.fence=item.fence AND d.fence > 0
+            """);
+        AddText(command, "consumer", consumer);
+        command.Parameters.Add(new NpgsqlParameter<long[]>("sequences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { TypedValue = sequences });
+        command.Parameters.Add(new NpgsqlParameter<long[]>("fences", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { TypedValue = fences });
+        AddInstant(command, "now", time.GetUtcNow());
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
 
     public async Task<int> PruneAsync(DateTimeOffset olderThan, int limit, CancellationToken cancellationToken = default)
     {
@@ -111,10 +189,10 @@ public sealed partial class PostgresConversationStore
                 SELECT o.sequence FROM tf_conversation_outbox o
                 WHERE o.occurred_at < @before
                   AND NOT EXISTS (SELECT 1 FROM tf_conversation_outbox_deliveries d WHERE d.sequence=o.sequence AND d.state=0)
-                ORDER BY o.sequence LIMIT @limit)
+                ORDER BY o.occurred_at, o.sequence LIMIT @limit)
             """);
         AddInstant(command, "before", olderThan);
-        command.Parameters.AddWithValue("limit", limit);
+        AddInt32(command, "limit", limit);
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -126,21 +204,12 @@ public sealed partial class PostgresConversationStore
             WHERE consumer=@consumer AND sequence=@sequence AND state=0 AND fence=@fence AND fence > 0{(requireLease ? " AND lease_until > @now" : "")}
             """);
         AddText(command, "consumer", consumer);
-        command.Parameters.AddWithValue("sequence", sequence);
-        command.Parameters.AddWithValue("fence", fence);
+        AddInt64(command, "sequence", sequence);
+        AddInt64(command, "fence", fence);
         AddInstant(command, "now", time.GetUtcNow());
         if (retryAt is { } retry)
             AddInstant(command, "retry", retry);
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
-    }
-
-    /// <summary>Appends the change and a pending delivery for every registered consumer inside the caller's transaction.</summary>
-    private async Task<ConversationOutboxEntry> AppendAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, ConversationChange change, CancellationToken cancellationToken)
-    {
-        await using var batch = new NpgsqlBatch(connection, transaction);
-        batch.BatchCommands.Add(AppendCommand(change));
-        var sequence = await ExecuteBatchAsync(batch, cancellationToken).ConfigureAwait(false) ?? throw new InvalidOperationException("The outbox entry was not written.");
-        return new ConversationOutboxEntry(sequence, change);
     }
 
     /// <summary>One statement: the outbox entry plus a pending delivery per registered consumer, returning the entry sequence.</summary>
@@ -159,25 +228,32 @@ public sealed partial class PostgresConversationStore
             SELECT sequence FROM entry
             """);
         var parameters = command.Parameters;
-        parameters.AddWithValue("entry", change.Id);
+        AddGuid(parameters, "entry", change.Id);
         AddScope(parameters, change.Scope);
         AddText(parameters, "conversation", change.Conversation.Value);
         AddText(parameters, "inbox", change.Inbox.Value);
-        parameters.AddWithValue("kind", (short)change.Kind);
-        parameters.AddWithValue("revision", change.Revision);
+        AddInt16(parameters, "kind", (short)change.Kind);
+        AddInt64(parameters, "revision", change.Revision);
         AddText(parameters, "payload", ConversationJsonCodec.SerializeChangePayload(change));
         AddInstant(parameters, "occurred", change.OccurredAt);
         AddInstant(parameters, "now", time.GetUtcNow());
         return command;
     }
 
-    private static ConversationOutboxEntry ReadEntry(NpgsqlDataReader reader) => Decode(() =>
+    private static ConversationOutboxEntry ReadEntry(NpgsqlDataReader reader)
     {
-        if (reader.GetInt16(9) != 1)
-            throw new FormatException("Unsupported outbox format version.");
-        var scope = new TicketScope(reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), new WorkspaceId(reader.GetString(6)));
-        var change = ConversationJsonCodec.DeserializeChange(reader.GetString(12), reader.GetGuid(1), scope, new ConversationId(reader.GetString(7)),
-            new InboxId(reader.GetString(8)), reader.GetInt64(11), Defined((ConversationChangeKind)reader.GetInt16(10)), reader.GetFieldValue<DateTimeOffset>(13));
-        return new ConversationOutboxEntry(reader.GetInt64(0), change);
-    }, "outbox entry");
+        try
+        {
+            if (reader.GetInt16(9) != 1)
+                throw new FormatException("Unsupported outbox format version.");
+            var scope = new TicketScope(reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), new WorkspaceId(reader.GetString(6)));
+            var change = ConversationJsonCodec.DeserializeChange(reader.GetString(12), reader.GetGuid(1), scope, new ConversationId(reader.GetString(7)),
+                new InboxId(reader.GetString(8)), reader.GetInt64(11), Defined((ConversationChangeKind)reader.GetInt16(10)), reader.GetFieldValue<DateTimeOffset>(13));
+            return new ConversationOutboxEntry(reader.GetInt64(0), change);
+        }
+        catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            throw new InvalidOperationException("A stored conversation outbox entry is invalid or incompatible.", error);
+        }
+    }
 }

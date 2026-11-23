@@ -23,6 +23,8 @@ public sealed record ConversationAttributeDefinition
     public const int MaximumKeyLength = 64;
     public const int MaximumDisplayNameLength = 128;
 
+    private readonly FieldPath fieldPath;
+
     public ConversationAttributeDefinition(string key, ConversationAttributeType type, bool sensitive = false, string? displayName = null)
     {
         if (!Enum.IsDefined(type))
@@ -31,6 +33,7 @@ public sealed record ConversationAttributeDefinition
         Type = type;
         Sensitive = sensitive;
         DisplayName = ConversationText.OptionalText(displayName, MaximumDisplayNameLength, nameof(displayName));
+        fieldPath = ConversationFieldPaths.Attribute(Key);
     }
 
     /// <summary>Lowercase token (a-z, 0-9, '-', '_', starting with a letter), at most 64 characters.</summary>
@@ -41,7 +44,7 @@ public sealed record ConversationAttributeDefinition
     public string? DisplayName { get; }
 
     /// <summary>The Access field path masking this attribute.</summary>
-    public FieldPath Field => ConversationFieldPaths.Attribute(Key);
+    public FieldPath Field => fieldPath;
 
     public static string RequireKey(string key, string parameterName) =>
         ConversationText.RequireToken(key, MaximumKeyLength, parameterName, "Attribute keys");
@@ -90,23 +93,39 @@ public sealed record ConversationListValue
     public ConversationListValue(IEnumerable<string> items)
     {
         ArgumentNullException.ThrowIfNull(items);
-        var snapshot = new List<string>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var capacity = items.TryGetNonEnumeratedCount(out var count) ? Math.Min(count, MaximumItems) : 0;
+        var snapshot = capacity > 0 ? new List<string>(capacity) : [];
+        var seen = capacity > 1 ? new HashSet<string>(capacity, StringComparer.Ordinal) : null;
         foreach (var item in items)
         {
             ConversationText.RequireText(item, MaximumItemLength, nameof(items));
-            if (!seen.Add(item))
+            if (snapshot.Count == 1)
+            {
+                if (string.Equals(snapshot[0], item, StringComparison.Ordinal))
+                    throw new ArgumentException("List items must be distinct.", nameof(items));
+                seen ??= new HashSet<string>(StringComparer.Ordinal) { snapshot[0] };
+                seen.Add(item);
+            }
+            else if (seen is not null && !seen.Add(item))
                 throw new ArgumentException("List items must be distinct.", nameof(items));
             if (snapshot.Count == MaximumItems)
                 throw new ArgumentException($"Lists can contain at most {MaximumItems} items.", nameof(items));
             snapshot.Add(item);
         }
-        Items = snapshot.AsReadOnly();
+        Items = snapshot.Count == 0 ? [] : snapshot.AsReadOnly();
     }
 
     public IReadOnlyList<string> Items { get; }
 
-    public bool Equals(ConversationListValue? other) => other is not null && Items.SequenceEqual(other.Items, StringComparer.Ordinal);
+    public bool Equals(ConversationListValue? other)
+    {
+        if (other is null || Items.Count != other.Items.Count)
+            return false;
+        for (var i = 0; i < Items.Count; i++)
+            if (!string.Equals(Items[i], other.Items[i], StringComparison.Ordinal))
+                return false;
+        return true;
+    }
 
     public override int GetHashCode() => Items.Count;
 

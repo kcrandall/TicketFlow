@@ -153,6 +153,25 @@ public interface IMailboxCheckpointStore
     /// <summary>Checks whether <paramref name="messageId"/> has already been recorded for this mailbox folder.</summary>
     Task<bool> HasSeenMessageIdAsync(TicketScope scope, string configurationId, string folder, string messageId, CancellationToken cancellationToken = default);
 
+    /// <summary>Returns the subset of <paramref name="messageIds"/> already recorded for this mailbox folder.</summary>
+    async Task<IReadOnlySet<string>> FindSeenMessageIdsAsync(TicketScope scope, string configurationId, string folder, IReadOnlyList<string> messageIds,
+        CancellationToken cancellationToken = default)
+    {
+        var found = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < messageIds.Count; i++)
+            if (await HasSeenMessageIdAsync(scope, configurationId, folder, messageIds[i], cancellationToken).ConfigureAwait(false))
+                found.Add(messageIds[i]);
+        return found;
+    }
+
+    /// <summary>Atomically records <paramref name="messageId"/> as seen and advances the checkpoint.</summary>
+    async Task RecordAndSaveCheckpointAsync(TicketScope scope, string configurationId, string folder, string messageId, MailboxCheckpoint checkpoint,
+        CancellationToken cancellationToken = default)
+    {
+        await TryRecordMessageIdAsync(scope, configurationId, folder, messageId, checkpoint.UpdatedAt, cancellationToken).ConfigureAwait(false);
+        await SaveCheckpointAsync(scope, configurationId, folder, checkpoint, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Prunes seen <c>Message-Id</c> records older than <paramref name="olderThan"/> (at most <paramref name="limit"/>).</summary>
     Task<int> PruneSeenMessageIdsAsync(DateTimeOffset olderThan, int limit, CancellationToken cancellationToken = default);
 }
@@ -193,6 +212,38 @@ public sealed class InMemoryMailboxCheckpointStore : IMailboxCheckpointStore
         lock (gate)
             return Task.FromResult(seen.ContainsKey((scope, configurationId, folder, messageId)));
     }
+
+    public Task<IReadOnlySet<string>> FindSeenMessageIdsAsync(TicketScope scope, string configurationId, string folder, IReadOnlyList<string> messageIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(messageIds);
+        if (messageIds.Count == 0)
+            return Task.FromResult<IReadOnlySet<string>>(EmptySeen);
+        lock (gate)
+        {
+            var found = new HashSet<string>(StringComparer.Ordinal);
+            for (var i = 0; i < messageIds.Count; i++)
+                if (seen.ContainsKey((scope, configurationId, folder, messageIds[i])))
+                    found.Add(messageIds[i]);
+            return Task.FromResult<IReadOnlySet<string>>(found);
+        }
+    }
+
+    public Task RecordAndSaveCheckpointAsync(TicketScope scope, string configurationId, string folder, string messageId, MailboxCheckpoint checkpoint,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        lock (gate)
+        {
+            seen.TryAdd((scope, configurationId, folder, messageId), checkpoint.UpdatedAt.ToUniversalTime());
+            checkpoints[(scope, configurationId, folder)] = checkpoint;
+        }
+        return Task.CompletedTask;
+    }
+
+    private static readonly HashSet<string> EmptySeen = new(StringComparer.Ordinal);
 
     public Task<int> PruneSeenMessageIdsAsync(DateTimeOffset olderThan, int limit, CancellationToken cancellationToken = default)
     {

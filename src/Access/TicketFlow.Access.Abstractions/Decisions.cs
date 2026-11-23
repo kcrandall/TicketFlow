@@ -15,9 +15,21 @@ public sealed record AccessMasked
     {
         ArgumentNullException.ThrowIfNull(fields);
         Permission = permission;
-        Fields = [.. fields.OrderBy(field => field.Field)];
-        if (Fields.Count == 0)
+        var list = fields is ICollection<MaskedField> col ? new List<MaskedField>(col.Count) : new List<MaskedField>();
+        var sorted = true;
+        MaskedField? previous = null;
+        foreach (var field in fields)
+        {
+            if (previous is not null && previous.Field.CompareTo(field.Field) > 0)
+                sorted = false;
+            list.Add(field);
+            previous = field;
+        }
+        if (list.Count == 0)
             throw new ArgumentException("A masked decision lists at least one field.", nameof(fields));
+        if (!sorted)
+            list.Sort(static (left, right) => left.Field.CompareTo(right.Field));
+        Fields = list.AsReadOnly();
         UsedBreakGlass = usedBreakGlass;
     }
 

@@ -61,7 +61,19 @@ public static class ContactMerger
             }
         }
 
-        var addedLabels = source.Labels.Where(label => !target.Labels.Contains(label)).ToList();
+        var addedLabels = new List<LabelId>();
+        if (source.Labels.Count > 0)
+        {
+            if (target.Labels.Count == 0)
+                addedLabels.AddRange(source.Labels);
+            else
+            {
+                var targetLabels = new HashSet<LabelId>(target.Labels);
+                foreach (var label in source.Labels)
+                    if (!targetLabels.Contains(label))
+                        addedLabels.Add(label);
+            }
+        }
         var filled = new List<ContactProfileField>();
         var profile = new ContactProfile(
             Fill(target.Profile.DisplayName, source.Profile.DisplayName, ContactProfileField.DisplayName, filled),
@@ -71,7 +83,8 @@ public static class ContactMerger
             Fill(target.Profile.Company, source.Profile.Company, ContactProfileField.Company, filled));
         var blockedChanged = !target.Blocked && source.Blocked;
 
-        var merged = target.With(profile, identities.Values, attributes, target.Labels.Concat(addedLabels), target.Blocked || source.Blocked, Later(target.UpdatedAt, at));
+        var mergedLabels = addedLabels.Count == 0 ? target.Labels : target.Labels.Concat(addedLabels);
+        var merged = target.With(profile, identities.Values, attributes, mergedLabels, target.Blocked || source.Blocked, Later(target.UpdatedAt, at));
         var record = new ContactMergeRecord(mergeId, target.Id, source.Id, at, actor, source, moved, replaced, attributeChanges, addedLabels, filled, blockedChanged);
         return new(merged, source.Tombstone(target.Id, at), record);
     }
@@ -100,7 +113,18 @@ public static class ContactMerger
                 attributes.Remove(change.Key);
         }
 
-        var labels = target.Labels.Where(label => !record.AddedLabels.Contains(label));
+        IEnumerable<LabelId> labels;
+        if (record.AddedLabels.Count == 0 || target.Labels.Count == 0)
+            labels = target.Labels;
+        else
+        {
+            var addedSet = new HashSet<LabelId>(record.AddedLabels);
+            var remaining = new List<LabelId>(target.Labels.Count);
+            foreach (var label in target.Labels)
+                if (!addedSet.Contains(label))
+                    remaining.Add(label);
+            labels = remaining;
+        }
         var profile = target.Profile;
         var source = snapshot.Profile;
         profile = new ContactProfile(

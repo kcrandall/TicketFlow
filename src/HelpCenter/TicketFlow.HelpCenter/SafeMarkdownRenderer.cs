@@ -92,11 +92,29 @@ public sealed class SafeMarkdownRenderer : IArticleRenderer
         {
             text = markdown;
         }
-        var builder = new StringBuilder(Math.Min(text.Length, ArticleTranslation.MaximumBodyLength));
-        foreach (var character in text)
+        var limit = Math.Min(text.Length, ArticleTranslation.MaximumBodyLength);
+        var clean = true;
+        for (var i = 0; i < limit; i++)
+        {
+            var c = text[i];
+            if (c is (< ' ' and not '\n' and not '\r' and not '\t') or (>= '\u007F' and <= '\u009F'))
+            {
+                clean = false;
+                break;
+            }
+        }
+        if (clean)
+        {
+            if (limit < text.Length && limit > 0 && char.IsHighSurrogate(text[limit - 1]))
+                limit--;
+            return limit == text.Length ? text.Trim() : text.AsSpan(0, limit).Trim().ToString();
+        }
+        var builder = new StringBuilder(limit);
+        for (var i = 0; i < text.Length; i++)
         {
             if (builder.Length == ArticleTranslation.MaximumBodyLength)
                 break;
+            var character = text[i];
             if (character is (< ' ' and not '\n' and not '\r' and not '\t') or (>= '\u007F' and <= '\u009F'))
                 continue;
             builder.Append(character);

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using TicketFlow.Access;
 using TicketFlow.Core;
 using static TicketFlow.HelpCenter.HelpCenterGuards;
@@ -11,11 +12,14 @@ namespace TicketFlow.HelpCenter;
 /// </summary>
 public sealed class HelpCenterPublicReader : IHelpCenterPublicReader, IHelpCenterSearch
 {
+    private const int MaximumCachedRenders = 2048;
+
     private readonly IHelpCenterStore store;
     private readonly IArticleFeedbackStore feedback;
     private readonly IArticleRenderer renderer;
     private readonly IAccessEvaluator evaluator;
     private readonly TimeProvider clock;
+    private readonly ConcurrentDictionary<RenderCacheKey, (string Body, string Html)> renderCache = new();
 
     public HelpCenterPublicReader(IHelpCenterStore store, IArticleFeedbackStore feedback, IArticleRenderer renderer, IAccessEvaluator evaluator, TimeProvider clock)
     {
@@ -37,7 +41,7 @@ public sealed class HelpCenterPublicReader : IHelpCenterPublicReader, IHelpCente
         if (await ResolveAsync(scope, portal, locale, cancellationToken).ConfigureAwait(false) is not { } resolved)
             return [];
         var collections = await store.ListCollectionsAsync(scope, resolved.Id, cancellationToken).ConfigureAwait(false);
-        var result = new List<PublicCollection>();
+        var result = new List<PublicCollection>(collections.Count);
         foreach (var stored in collections)
         {
             var collection = stored.Collection;
@@ -53,8 +57,7 @@ public sealed class HelpCenterPublicReader : IHelpCenterPublicReader, IHelpCente
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, HelpCenterLimits.MaximumPageSize);
         if (await ResolveAsync(scope, portal, locale, cancellationToken).ConfigureAwait(false) is not { } resolved)
             return new PublicArticlePage([], null);
-        var page = await store.ListPublishedAsync(scope, new PublishedArticleQuery(resolved.Id, locale, collection, limit, after), cancellationToken).ConfigureAwait(false);
-        return new PublicArticlePage([.. page.Items.Select(item => new PublicArticleSummary(item.Article, item.Collection, item.Position, item.Content.Title, item.Content.Slug, item.Content.Excerpt, item.PublishedAt))], page.Next);
+        return await store.ListPublishedSummariesAsync(scope, new PublishedArticleQuery(resolved.Id, locale, collection, limit, after), cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<PublicArticle?> GetArticleAsync(TicketScope scope, HelpCenterSlug portal, HelpCenterLocale locale, HelpCenterSlug article, CancellationToken cancellationToken = default)
@@ -67,9 +70,25 @@ public sealed class HelpCenterPublicReader : IHelpCenterPublicReader, IHelpCente
         if (published is null)
             return null;
         var content = published.Content;
+        var html = RenderCached(published);
         return new PublicArticle(published.Article, published.Portal, published.Collection, content.Locale, content.Title, content.Slug, content.Excerpt, content.Tags,
-            renderer.Render(content.Body).Html, published.RevisionNumber, published.PublishedAt);
+            html, published.RevisionNumber, published.PublishedAt);
     }
+
+    private string RenderCached(PublishedArticle published)
+    {
+        var content = published.Content;
+        var key = new RenderCacheKey(published.Scope, published.Article, published.RevisionNumber, content.Locale);
+        if (renderCache.TryGetValue(key, out var cached) && string.Equals(cached.Body, content.Body, StringComparison.Ordinal))
+            return cached.Html;
+        var html = renderer.Render(content.Body).Html;
+        if (renderCache.Count >= MaximumCachedRenders)
+            renderCache.Clear();
+        renderCache[key] = (content.Body, html);
+        return html;
+    }
+
+    private readonly record struct RenderCacheKey(TicketScope Scope, ArticleId Article, int RevisionNumber, HelpCenterLocale Locale);
 
     public async Task<IReadOnlyList<ArticleSnippet>> SearchAsync(TicketScope scope, HelpCenterSlug portal, HelpCenterLocale locale, string query, int limit = 10, CancellationToken cancellationToken = default)
     {
@@ -114,8 +133,7 @@ public sealed class HelpCenterPublicReader : IHelpCenterPublicReader, IHelpCente
         var visitor = VisitorHash.Create(scope, visitorKey);
         if (await ResolveAsync(scope, portal, null, cancellationToken).ConfigureAwait(false) is not { } resolved)
             return FeedbackArticleNotFound.Instance;
-        var stored = await store.GetArticleAsync(scope, article, cancellationToken).ConfigureAwait(false);
-        if (stored is null || stored.Record.State != ArticleState.Published || stored.Record.Article.Portal != resolved.Id)
+        if (!await store.IsArticlePublishedInPortalAsync(scope, resolved.Id, article, cancellationToken).ConfigureAwait(false))
             return FeedbackArticleNotFound.Instance;
         return await record(visitor, cancellationToken).ConfigureAwait(false);
     }

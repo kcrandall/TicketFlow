@@ -52,8 +52,9 @@ public sealed class RoutingTools(TicketFlowToolContext context)
         context.RunAsync(workspace, async principal =>
         {
             var after = cursor is null ? (UserId?)null : new UserId(TicketFlowToolJson.DecodeCursor(cursor, 1)[0]);
+            var now = Now();
             return Map(await context.Service<IAgentAvailabilityService>().ListAsync(principal, after, limit, cancellationToken), profiles => new ToolPage<AgentProfileOutput>(
-                [.. profiles.Select(Profile)], profiles.Count >= limit && profiles.Count > 0 ? TicketFlowToolJson.EncodeCursor(profiles[^1].Agent.Value) : null));
+                [.. profiles.Select(profile => Profile(profile, now))], profiles.Count >= limit && profiles.Count > 0 ? TicketFlowToolJson.EncodeCursor(profiles[^1].Agent.Value) : null));
         }, cancellationToken);
 
     [McpServerTool(Name = "routing_get_agent", Title = "Get agent", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(AgentProfileOutput))]
@@ -127,14 +128,15 @@ public sealed class RoutingTools(TicketFlowToolContext context)
         ? principal.Value is UserPrincipal user ? user.UserId : throw new ArgumentException("'me' requires a user principal.", nameof(agentId))
         : new UserId(agentId);
 
-    private AgentProfileOutput Profile(StoredAgentProfile profile)
-    {
-        var now = (context.Services.GetService<TimeProvider>() ?? TimeProvider.System).GetUtcNow();
-        return new AgentProfileOutput(profile.Agent.Value, TicketFlowToolJson.Token(profile.Presence.EffectiveStatus(now)), profile.Presence.ChangedAt,
+    private DateTimeOffset Now() => (context.Services.GetService<TimeProvider>() ?? TimeProvider.System).GetUtcNow();
+
+    private AgentProfileOutput Profile(StoredAgentProfile profile) => Profile(profile, Now());
+
+    private static AgentProfileOutput Profile(StoredAgentProfile profile, DateTimeOffset now) =>
+        new(profile.Agent.Value, TicketFlowToolJson.Token(profile.Presence.EffectiveStatus(now)), profile.Presence.ChangedAt,
             profile.Presence.ExpiresAt, profile.Settings.DefaultCapacity,
             profile.Settings.Capacities.ToDictionary(pair => pair.Key.Value, pair => pair.Value, StringComparer.Ordinal),
             [.. profile.Settings.Skills.Select(skill => new AgentSkillOutput(skill.Name, skill.Level))], profile.ReassignmentPending, profile.Revision);
-    }
 
     internal static object Map<T>(RoutingResult<T> result, Func<T, object> success) => result switch
     {

@@ -285,7 +285,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
                 && ((existing.State == RoutingAssignmentState.Reserved && existing.CountsAt(now))
                     || (existing.State == RoutingAssignmentState.Assigned && existing.ConversationRevision > request.ConversationRevision)))
                 return Task.FromResult<RoutingReservationResult>(new RoutingAlreadyReserved(existing));
-            var loads = request.Candidates.ToDictionary(candidate => candidate.Agent, candidate => LoadLocked(scope, candidate.Agent, request.Channel, request.Conversation, now));
+            var loads = ComputeLoadsLocked(scope, request.Candidates, request.Channel, request.Conversation, now);
             var chosen = request.Select(loads, cursors.GetValueOrDefault((scope, request.CursorKey)));
             if (chosen is null)
                 return Task.FromResult<RoutingReservationResult>(RoutingNoCapacity.Instance);
@@ -295,7 +295,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
                 now + request.Lease, request.ConversationRevision, now);
             assignments[(scope, request.Conversation)] = reservation;
             cursors[(scope, request.CursorKey)] = chosen.Agent.Value;
-            return Task.FromResult<RoutingReservationResult>(new RoutingReserved(reservation, loads[chosen.Agent] + 1));
+            return Task.FromResult<RoutingReservationResult>(new RoutingReserved(reservation, loads.GetValueOrDefault(chosen.Agent) + 1));
         }
     }
 
@@ -415,9 +415,19 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
             return Task.FromResult(cursors.GetValueOrDefault((scope, cursorKey)));
     }
 
-    private int LoadLocked(TicketScope scope, UserId agent, ChannelKind channel, ConversationId excluded, DateTimeOffset now) =>
-        assignments.Count(pair => pair.Key.Scope == scope && pair.Value.Agent == agent && pair.Value.Channel == channel && pair.Key.Conversation != excluded
-            && pair.Value.CountsAt(now));
+    private Dictionary<UserId, int> ComputeLoadsLocked(TicketScope scope, IReadOnlyList<RoutingCandidate> candidates, ChannelKind channel, ConversationId excluded, DateTimeOffset now)
+    {
+        var loads = new Dictionary<UserId, int>(candidates.Count);
+        for (var i = 0; i < candidates.Count; i++)
+            loads[candidates[i].Agent] = 0;
+        foreach (var (key, value) in assignments)
+        {
+            if (key.Scope == scope && value.Channel == channel && key.Conversation != excluded && value.CountsAt(now)
+                && loads.TryGetValue(value.Agent, out var current))
+                loads[value.Agent] = current + 1;
+        }
+        return loads;
+    }
 
     // ---- Queue ----
 
@@ -648,22 +658,57 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         lock (gate)
         {
             var removed = 0;
-            foreach (var (key, entries) in presence.ToList())
+            List<(TicketScope, ConversationId)>? emptyPresence = null;
+            List<string>? expiredUsers = null;
+            foreach (var (key, entries) in presence)
             {
-                foreach (var user in entries.Where(pair => pair.Value.ExpiresAt <= now).Select(pair => pair.Key).ToList())
+                if (removed >= limit)
+                    break;
+                expiredUsers?.Clear();
+                foreach (var (user, item) in entries)
                 {
-                    if (removed >= limit)
-                        break;
-                    entries.Remove(user);
-                    removed++;
+                    if (item.ExpiresAt <= now)
+                    {
+                        expiredUsers ??= [];
+                        expiredUsers.Add(user);
+                        if (removed + expiredUsers.Count >= limit)
+                            break;
+                    }
                 }
-                if (entries.Count == 0)
-                    presence.Remove(key);
+                if (expiredUsers is { Count: > 0 })
+                {
+                    for (var i = 0; i < expiredUsers.Count; i++)
+                        entries.Remove(expiredUsers[i]);
+                    removed += expiredUsers.Count;
+                    if (entries.Count == 0)
+                    {
+                        emptyPresence ??= [];
+                        emptyPresence.Add(key);
+                    }
+                }
             }
-            foreach (var key in locks.Where(pair => pair.Value.ExpiresAt <= now).Select(pair => pair.Key).Take(Math.Max(0, limit - removed)).ToList())
+            if (emptyPresence is not null)
+                for (var i = 0; i < emptyPresence.Count; i++)
+                    presence.Remove(emptyPresence[i]);
+            if (removed < limit)
             {
-                locks.Remove(key);
-                removed++;
+                List<(TicketScope, ConversationId)>? expiredLocks = null;
+                foreach (var (key, item) in locks)
+                {
+                    if (item.ExpiresAt <= now)
+                    {
+                        expiredLocks ??= [];
+                        expiredLocks.Add(key);
+                        if (removed + expiredLocks.Count >= limit)
+                            break;
+                    }
+                }
+                if (expiredLocks is not null)
+                {
+                    for (var i = 0; i < expiredLocks.Count; i++)
+                        locks.Remove(expiredLocks[i]);
+                    removed += expiredLocks.Count;
+                }
             }
             return Task.FromResult(removed);
         }

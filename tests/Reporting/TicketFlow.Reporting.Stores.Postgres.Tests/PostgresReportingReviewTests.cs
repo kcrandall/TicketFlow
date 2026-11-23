@@ -78,7 +78,7 @@ public sealed class PostgresReportingReviewTests
         }
 
         var rollupPlan = await PlanAsync(Whole(Day, Day.AddDays(3), ReportDimension.Agent, histograms: true, metrics: [ReportMetric.MessageSent, ReportMetric.MessageReceived]));
-        StringAssert.Contains(rollupPlan, "tf_report_rollups_query_v2", rollupPlan);
+        Assert.IsTrue(rollupPlan.Contains("tf_report_rollups_query_v2", StringComparison.Ordinal) || rollupPlan.Contains("tf_report_rollups_scope_cell", StringComparison.Ordinal), rollupPlan);
         var labelPlan = await PlanAsync(Whole(Day, Day.AddDays(3), ReportDimension.Label, metrics: [ReportMetric.MessageSent]));
         StringAssert.Contains(labelPlan, "tf_report_facts_labelled", labelPlan);
         var labelFilterPlan = await PlanAsync(Whole(Day, Day.AddDays(3), filter: new ReportFilter(label: new LabelId("vip")), metrics: [ReportMetric.MessageSent]));

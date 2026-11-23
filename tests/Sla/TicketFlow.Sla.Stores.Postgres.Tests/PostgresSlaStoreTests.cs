@@ -111,7 +111,7 @@ public sealed class PostgresSlaStoreTests
         await using var database = await Database.CreateAsync();
         await database.Competing.InitializeAsync();
         var inspection = await new PostgresMigrationRunner(database.Storage.First, PostgresSlaMigrations.Catalog).InspectAsync();
-        Assert.AreEqual(2, inspection.CurrentVersion);
+        Assert.AreEqual(3, inspection.CurrentVersion);
         Assert.AreEqual("ticketflow.sla", inspection.Component);
     }
 }

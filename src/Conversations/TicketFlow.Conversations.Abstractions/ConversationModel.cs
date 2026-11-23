@@ -1,3 +1,5 @@
+using System.Collections.Frozen;
+using System.Collections.ObjectModel;
 using TicketFlow.Core;
 
 namespace TicketFlow.Conversations;
@@ -164,6 +166,9 @@ public sealed record Conversation
     public const int MaximumParticipants = 64;
     public const int MaximumRedirects = 16;
 
+    private static readonly IReadOnlyDictionary<string, ConversationAttributeValue> EmptyAttributes = FrozenDictionary<string, ConversationAttributeValue>.Empty;
+    private readonly IReadOnlyList<string> attributeKeys;
+
     public Conversation(
         ConversationId id,
         InboxId inbox,
@@ -201,9 +206,9 @@ public sealed record Conversation
         Priority = priority;
         Assignee = assignee;
         Team = team;
-        Labels = Sorted(labels, MaximumLabels, label => label.Value, label => label != default, nameof(labels));
-        Attributes = SnapshotAttributes(attributes);
-        Participants = Sorted(participants, MaximumParticipants, user => user.Value, user => user != default, nameof(participants));
+        Labels = SortedLabels(labels, nameof(labels));
+        (Attributes, attributeKeys) = SnapshotAttributes(attributes);
+        Participants = SortedUsers(participants, nameof(participants));
         ChannelThread = channelThread;
         CreatedAt = ConversationText.Instant(createdAt);
         LastActivityAt = ConversationText.Instant(lastActivityAt);
@@ -214,10 +219,51 @@ public sealed record Conversation
         if (LastActivityAt < CreatedAt)
             throw new ArgumentException("Last activity cannot precede creation.", nameof(lastActivityAt));
         LastSequence = lastSequence;
-        ContactRedirects = [.. contactRedirects ?? []];
-        if (ContactRedirects.Count > MaximumRedirects || ContactRedirects.Any(redirect => redirect is null)
-            || ContactRedirects.Select(redirect => redirect.Merge).Distinct().Count() != ContactRedirects.Count)
-            throw new ArgumentException($"A conversation carries at most {MaximumRedirects} distinct contact redirects.", nameof(contactRedirects));
+        ContactRedirects = NormalizeRedirects(contactRedirects, nameof(contactRedirects));
+    }
+
+    private Conversation(
+        ConversationId id,
+        InboxId inbox,
+        ContactId contact,
+        ConversationStatus status,
+        ConversationPriority priority,
+        UserId? assignee,
+        TeamId? team,
+        IReadOnlyList<LabelId> labels,
+        IReadOnlyDictionary<string, ConversationAttributeValue> attributes,
+        IReadOnlyList<string> attributeKeys,
+        IReadOnlyList<UserId> participants,
+        ChannelThreadRef? channelThread,
+        DateTimeOffset createdAt,
+        DateTimeOffset lastActivityAt,
+        DateTimeOffset? waitingSince,
+        DateTimeOffset? firstReplyAt,
+        DateTimeOffset? lastIncomingAt,
+        DateTimeOffset? lastOutgoingAt,
+        long lastSequence,
+        IReadOnlyList<ContactRedirect> contactRedirects)
+    {
+        Id = id;
+        Inbox = inbox;
+        Contact = contact;
+        Status = status;
+        Priority = priority;
+        Assignee = assignee;
+        Team = team;
+        Labels = labels;
+        Attributes = attributes;
+        this.attributeKeys = attributeKeys;
+        Participants = participants;
+        ChannelThread = channelThread;
+        CreatedAt = createdAt;
+        LastActivityAt = lastActivityAt;
+        WaitingSince = waitingSince;
+        FirstReplyAt = firstReplyAt;
+        LastIncomingAt = lastIncomingAt;
+        LastOutgoingAt = lastOutgoingAt;
+        LastSequence = lastSequence;
+        ContactRedirects = contactRedirects;
     }
 
     public ConversationId Id { get; }
@@ -235,7 +281,7 @@ public sealed record Conversation
     public IReadOnlyDictionary<string, ConversationAttributeValue> Attributes { get; }
 
     /// <summary>Attribute keys in ordinal order.</summary>
-    public IReadOnlyList<string> AttributeKeys => [.. Attributes.Keys.Order(StringComparer.Ordinal)];
+    public IReadOnlyList<string> AttributeKeys => attributeKeys;
 
     /// <summary>Users following the conversation, in ordinal order.</summary>
     public IReadOnlyList<UserId> Participants { get; }
@@ -268,47 +314,159 @@ public sealed record Conversation
         Optional<DateTimeOffset?> lastIncomingAt = default,
         Optional<DateTimeOffset?> lastOutgoingAt = default,
         long? lastSequence = null,
-        IEnumerable<ContactRedirect>? contactRedirects = null) =>
-        new(Id, Inbox, contact ?? Contact, status ?? Status, priority ?? Priority,
-            assignee.HasValue ? assignee.Value : Assignee, team.HasValue ? team.Value : Team,
-            labels ?? Labels, attributes ?? Attributes, participants ?? Participants, ChannelThread, CreatedAt, lastActivityAt ?? LastActivityAt,
-            waitingSince.HasValue ? waitingSince.Value : WaitingSince, firstReplyAt.HasValue ? firstReplyAt.Value : FirstReplyAt,
-            lastIncomingAt.HasValue ? lastIncomingAt.Value : LastIncomingAt, lastOutgoingAt.HasValue ? lastOutgoingAt.Value : LastOutgoingAt,
-            lastSequence ?? LastSequence, contactRedirects ?? ContactRedirects);
+        IEnumerable<ContactRedirect>? contactRedirects = null)
+    {
+        var nextContact = contact ?? Contact;
+        if (nextContact == default)
+            throw new ArgumentException("Conversation, inbox and contact identifiers are required.");
+        var nextStatus = status ?? Status;
+        if (nextStatus.Value is null)
+            throw new ArgumentException("A status is required.", nameof(status));
+        var nextPriority = priority ?? Priority;
+        if (!Enum.IsDefined(nextPriority))
+            throw new ArgumentOutOfRangeException(nameof(priority));
+        var nextAssignee = assignee.HasValue ? assignee.Value : Assignee;
+        var nextTeam = team.HasValue ? team.Value : Team;
+        if (nextAssignee == default(UserId) || nextTeam == default(TeamId))
+            throw new ArgumentException("Assignee and team must be initialized when supplied.");
+        var nextSequence = lastSequence ?? LastSequence;
+        ArgumentOutOfRangeException.ThrowIfNegative(nextSequence);
+        var nextLastActivity = lastActivityAt is { } la ? ConversationText.Instant(la) : LastActivityAt;
+        if (nextLastActivity < CreatedAt)
+            throw new ArgumentException("Last activity cannot precede creation.", nameof(lastActivityAt));
+        var nextLabels = labels is null || ReferenceEquals(labels, Labels) ? Labels : SortedLabels(labels, nameof(labels));
+        var (nextAttributes, nextKeys) = attributes is null || ReferenceEquals(attributes, Attributes) ? (Attributes, attributeKeys) : SnapshotAttributes(attributes);
+        var nextParticipants = participants is null || ReferenceEquals(participants, Participants) ? Participants : SortedUsers(participants, nameof(participants));
+        var nextRedirects = contactRedirects is null || ReferenceEquals(contactRedirects, ContactRedirects) ? ContactRedirects : NormalizeRedirects(contactRedirects, nameof(contactRedirects));
+        return new(Id, Inbox, nextContact, nextStatus, nextPriority, nextAssignee, nextTeam, nextLabels, nextAttributes, nextKeys, nextParticipants,
+            ChannelThread, CreatedAt, nextLastActivity,
+            waitingSince.HasValue ? ConversationText.Instant(waitingSince.Value) : WaitingSince,
+            firstReplyAt.HasValue ? ConversationText.Instant(firstReplyAt.Value) : FirstReplyAt,
+            lastIncomingAt.HasValue ? ConversationText.Instant(lastIncomingAt.Value) : LastIncomingAt,
+            lastOutgoingAt.HasValue ? ConversationText.Instant(lastOutgoingAt.Value) : LastOutgoingAt,
+            nextSequence, nextRedirects);
+    }
 
-    public bool Equals(Conversation? other) =>
-        other is not null && Id == other.Id && Inbox == other.Inbox && Contact == other.Contact && Status.Equals(other.Status)
-        && Priority == other.Priority && Assignee == other.Assignee && Team == other.Team && Labels.SequenceEqual(other.Labels)
-        && Attributes.Count == other.Attributes.Count
-        && Attributes.All(pair => other.Attributes.TryGetValue(pair.Key, out var value) && value.Equals(pair.Value))
-        && Participants.SequenceEqual(other.Participants) && Equals(ChannelThread, other.ChannelThread) && CreatedAt == other.CreatedAt
-        && LastActivityAt == other.LastActivityAt && WaitingSince == other.WaitingSince && FirstReplyAt == other.FirstReplyAt
-        && LastIncomingAt == other.LastIncomingAt && LastOutgoingAt == other.LastOutgoingAt && LastSequence == other.LastSequence
-        && ContactRedirects.SequenceEqual(other.ContactRedirects);
+    public bool Equals(Conversation? other)
+    {
+        if (other is null || Id != other.Id || Inbox != other.Inbox || Contact != other.Contact || !Status.Equals(other.Status)
+            || Priority != other.Priority || Assignee != other.Assignee || Team != other.Team
+            || Labels.Count != other.Labels.Count || Attributes.Count != other.Attributes.Count
+            || Participants.Count != other.Participants.Count || ContactRedirects.Count != other.ContactRedirects.Count
+            || !Equals(ChannelThread, other.ChannelThread) || CreatedAt != other.CreatedAt
+            || LastActivityAt != other.LastActivityAt || WaitingSince != other.WaitingSince || FirstReplyAt != other.FirstReplyAt
+            || LastIncomingAt != other.LastIncomingAt || LastOutgoingAt != other.LastOutgoingAt || LastSequence != other.LastSequence)
+            return false;
+        for (var i = 0; i < Labels.Count; i++)
+            if (Labels[i] != other.Labels[i])
+                return false;
+        for (var i = 0; i < Participants.Count; i++)
+            if (Participants[i] != other.Participants[i])
+                return false;
+        for (var i = 0; i < ContactRedirects.Count; i++)
+            if (ContactRedirects[i] != other.ContactRedirects[i])
+                return false;
+        for (var i = 0; i < attributeKeys.Count; i++)
+        {
+            var key = attributeKeys[i];
+            if (!string.Equals(key, other.attributeKeys[i], StringComparison.Ordinal) || !Attributes[key].Equals(other.Attributes[key]))
+                return false;
+        }
+        return true;
+    }
 
     public override int GetHashCode() => HashCode.Combine(Id, Inbox, Contact, LastSequence);
 
     public override string ToString() => $"Conversation {{ Id = {Id}, Status = {Status.Kind} }}";
 
-    private static IReadOnlyList<T> Sorted<T>(IEnumerable<T> values, int maximum, Func<T, string> key, Func<T, bool> valid, string parameterName)
+    private static IReadOnlyList<LabelId> SortedLabels(IEnumerable<LabelId> values, string parameterName)
     {
         ArgumentNullException.ThrowIfNull(values, parameterName);
-        var snapshot = new SortedDictionary<string, T>(StringComparer.Ordinal);
+        if (values is ICollection<LabelId> { Count: 0 } or IReadOnlyCollection<LabelId> { Count: 0 })
+            return [];
+        var list = values.TryGetNonEnumeratedCount(out var count) ? new List<LabelId>(Math.Min(count, MaximumLabels)) : [];
         foreach (var value in values)
         {
-            if (!valid(value))
+            if (value == default)
                 throw new ArgumentException("Values must be initialized.", parameterName);
-            snapshot[key(value)] = value;
-            if (snapshot.Count > maximum)
-                throw new ArgumentException($"At most {maximum} values are allowed.", parameterName);
+            list.Add(value);
         }
-        return [.. snapshot.Values];
+        if (list.Count == 0)
+            return [];
+        if (list.Count == 1)
+            return list.AsReadOnly();
+        list.Sort(static (a, b) => string.CompareOrdinal(a.Value, b.Value));
+        var write = 1;
+        for (var read = 1; read < list.Count; read++)
+            if (!string.Equals(list[read].Value, list[write - 1].Value, StringComparison.Ordinal))
+                list[write++] = list[read];
+        if (write > MaximumLabels)
+            throw new ArgumentException($"At most {MaximumLabels} values are allowed.", parameterName);
+        if (write < list.Count)
+            list.RemoveRange(write, list.Count - write);
+        return list.AsReadOnly();
     }
 
-    private static IReadOnlyDictionary<string, ConversationAttributeValue> SnapshotAttributes(IEnumerable<KeyValuePair<string, ConversationAttributeValue>> attributes)
+    private static IReadOnlyList<UserId> SortedUsers(IEnumerable<UserId> values, string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(values, parameterName);
+        if (values is ICollection<UserId> { Count: 0 } or IReadOnlyCollection<UserId> { Count: 0 })
+            return [];
+        var list = values.TryGetNonEnumeratedCount(out var count) ? new List<UserId>(Math.Min(count, MaximumParticipants)) : [];
+        foreach (var value in values)
+        {
+            if (value == default)
+                throw new ArgumentException("Values must be initialized.", parameterName);
+            list.Add(value);
+        }
+        if (list.Count == 0)
+            return [];
+        if (list.Count == 1)
+            return list.AsReadOnly();
+        list.Sort(static (a, b) => string.CompareOrdinal(a.Value, b.Value));
+        var write = 1;
+        for (var read = 1; read < list.Count; read++)
+            if (!string.Equals(list[read].Value, list[write - 1].Value, StringComparison.Ordinal))
+                list[write++] = list[read];
+        if (write > MaximumParticipants)
+            throw new ArgumentException($"At most {MaximumParticipants} values are allowed.", parameterName);
+        if (write < list.Count)
+            list.RemoveRange(write, list.Count - write);
+        return list.AsReadOnly();
+    }
+
+    private static IReadOnlyList<ContactRedirect> NormalizeRedirects(IEnumerable<ContactRedirect>? redirects, string parameterName)
+    {
+        if (redirects is null)
+            return [];
+        if (redirects is ICollection<ContactRedirect> { Count: 0 } or IReadOnlyCollection<ContactRedirect> { Count: 0 })
+            return [];
+        ContactRedirect[] list = [.. redirects];
+        if (list.Length == 0)
+            return [];
+        if (list.Length > MaximumRedirects)
+            throw new ArgumentException($"A conversation carries at most {MaximumRedirects} distinct contact redirects.", parameterName);
+        for (var i = 0; i < list.Length; i++)
+        {
+            if (list[i] is null)
+                throw new ArgumentException($"A conversation carries at most {MaximumRedirects} distinct contact redirects.", parameterName);
+            for (var j = i + 1; j < list.Length; j++)
+                if (list[j] is not null && list[i].Merge == list[j].Merge)
+                    throw new ArgumentException($"A conversation carries at most {MaximumRedirects} distinct contact redirects.", parameterName);
+        }
+        return list;
+    }
+
+    private static (IReadOnlyDictionary<string, ConversationAttributeValue> Attributes, IReadOnlyList<string> Keys) SnapshotAttributes(
+        IEnumerable<KeyValuePair<string, ConversationAttributeValue>> attributes)
     {
         ArgumentNullException.ThrowIfNull(attributes);
-        var snapshot = new Dictionary<string, ConversationAttributeValue>(StringComparer.Ordinal);
+        if (attributes is ICollection<KeyValuePair<string, ConversationAttributeValue>> { Count: 0 } or IReadOnlyCollection<KeyValuePair<string, ConversationAttributeValue>> { Count: 0 })
+            return (EmptyAttributes, []);
+        var capacity = attributes.TryGetNonEnumeratedCount(out var count) ? Math.Min(count, MaximumAttributes) : 0;
+        var snapshot = capacity > 0
+            ? new Dictionary<string, ConversationAttributeValue>(capacity, StringComparer.Ordinal)
+            : new Dictionary<string, ConversationAttributeValue>(StringComparer.Ordinal);
         foreach (var (key, value) in attributes)
         {
             ConversationAttributeDefinition.RequireKey(key, nameof(attributes));
@@ -319,7 +477,13 @@ public sealed record Conversation
             if (snapshot.Count > MaximumAttributes)
                 throw new ArgumentException($"A conversation can carry at most {MaximumAttributes} attributes.", nameof(attributes));
         }
-        return snapshot.AsReadOnly();
+        if (snapshot.Count == 0)
+            return (EmptyAttributes, []);
+        var keys = new string[snapshot.Count];
+        snapshot.Keys.CopyTo(keys, 0);
+        if (keys.Length > 1)
+            Array.Sort(keys, StringComparer.Ordinal);
+        return (new ReadOnlyDictionary<string, ConversationAttributeValue>(snapshot), keys);
     }
 }
 

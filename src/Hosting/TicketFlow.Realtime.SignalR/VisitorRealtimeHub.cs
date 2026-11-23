@@ -77,16 +77,19 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             return HubResult.Failure("limit-reached");
         Context.Items[ContextKey] = session;
 
-        var widget = await visitors.GetSessionWidgetAsync(session, Context.ConnectionAborted).ConfigureAwait(false);
-        var conversations = await visitors.ListConversationsAsync(session, Context.ConnectionAborted).ConfigureAwait(false);
-        return HubResult.Success(new Dictionary<string, object?>
+        var widgetTask = visitors.GetSessionWidgetAsync(session, Context.ConnectionAborted);
+        var conversationsTask = visitors.ListConversationsAsync(session, Context.ConnectionAborted);
+        await Task.WhenAll(widgetTask, conversationsTask).ConfigureAwait(false);
+        var widget = await widgetTask.ConfigureAwait(false);
+        var conversations = await conversationsTask.ConfigureAwait(false);
+        return HubResult.Success(new Dictionary<string, object?>(6)
         {
             ["token"] = issued,
             ["visitorId"] = session.Session.Session.VisitorId,
             ["verified"] = session.Session.Session.Identity is not null,
             ["prechatAnswered"] = session.Session.Session.Prechat.Count > 0,
             ["widget"] = widget.Value is LiveChatValue<LiveChatWidgetState> state ? Widget(state.Value) : null,
-            ["conversations"] = conversations.Value is LiveChatValue<IReadOnlyList<VisitorConversationView>> list ? list.Value.Select(Conversation).ToList() : [],
+            ["conversations"] = conversations.Value is LiveChatValue<IReadOnlyList<VisitorConversationView>> list ? Conversations(list.Value) : [],
         });
     }
 
@@ -119,7 +122,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             return HubResult.Failure("unauthenticated");
         return await visitors.SendMessageAsync(session, new VisitorMessageDraft(clientMessageId ?? string.Empty, text, attachments), Context.ConnectionAborted).ConfigureAwait(false) switch
         {
-            LiveChatValue<VisitorMessageAccepted> accepted => HubResult.Success(new Dictionary<string, object?>
+            LiveChatValue<VisitorMessageAccepted> accepted => HubResult.Success(new Dictionary<string, object?>(5)
             {
                 ["conversation"] = accepted.Value.Conversation.Value,
                 ["message"] = accepted.Value.Message.Value,
@@ -137,7 +140,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             return HubResult.Failure("unauthenticated");
         return await visitors.ListConversationsAsync(session, Context.ConnectionAborted).ConfigureAwait(false) switch
         {
-            LiveChatValue<IReadOnlyList<VisitorConversationView>> list => HubResult.Success(list.Value.Select(Conversation).ToList()),
+            LiveChatValue<IReadOnlyList<VisitorConversationView>> list => HubResult.Success(Conversations(list.Value)),
             LiveChatRefused refused => Failure(refused),
         };
     }
@@ -151,23 +154,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             return HubResult.Failure("invalid");
         return await visitors.ReadMessagesAsync(session, id, afterSequence, limit <= 0 ? 50 : limit, Context.ConnectionAborted).ConfigureAwait(false) switch
         {
-            LiveChatValue<VisitorMessagePage> page => HubResult.Success(new Dictionary<string, object?>
-            {
-                ["conversation"] = page.Value.Conversation.Value,
-                ["readSequence"] = page.Value.ReadSequence,
-                ["next"] = page.Value.NextAfterSequence,
-                ["messages"] = page.Value.Messages.Select(message => new Dictionary<string, object?>
-                {
-                    ["message"] = message.Message.Value,
-                    ["sequence"] = message.Sequence,
-                    ["direction"] = RealtimeWireFormat.Token(message.Direction.ToString()),
-                    ["body"] = message.Body,
-                    ["contentType"] = RealtimeWireFormat.Token(message.ContentType.ToString()),
-                    ["attachments"] = message.Attachments.Select(RealtimeWireFormat.Attachment).ToList(),
-                    ["at"] = message.At,
-                    ["delivery"] = RealtimeWireFormat.Token(message.Delivery.ToString()),
-                }).ToList(),
-            }),
+            LiveChatValue<VisitorMessagePage> page => HubResult.Success(BuildMessagePage(page.Value)),
             LiveChatRefused refused => Failure(refused),
         };
     }
@@ -247,7 +234,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         LiveChatRefused refused => Failure(refused),
     };
 
-    private static HubResult Failure(LiveChatRefused refused) => new(false, RealtimeWireFormat.Token(refused.Reason.ToString()), refused.Errors.Count > 0 ? refused.Errors : null);
+    private static HubResult Failure(LiveChatRefused refused) => new(false, RealtimeWireFormat.Token(refused.Reason), refused.Errors.Count > 0 ? refused.Errors : null);
 
     private static ConversationId? Id(string? value)
     {
@@ -261,7 +248,44 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         }
     }
 
-    private static Dictionary<string, object?> Conversation(VisitorConversationView view) => new()
+    private static Dictionary<string, object?>[] Conversations(IReadOnlyList<VisitorConversationView> list)
+    {
+        if (list.Count == 0)
+            return [];
+        var result = new Dictionary<string, object?>[list.Count];
+        for (var i = 0; i < list.Count; i++)
+            result[i] = Conversation(list[i]);
+        return result;
+    }
+
+    private static Dictionary<string, object?> BuildMessagePage(VisitorMessagePage page)
+    {
+        var messages = new Dictionary<string, object?>[page.Messages.Count];
+        for (var i = 0; i < page.Messages.Count; i++)
+        {
+            var message = page.Messages[i];
+            messages[i] = new Dictionary<string, object?>(8)
+            {
+                ["message"] = message.Message.Value,
+                ["sequence"] = message.Sequence,
+                ["direction"] = RealtimeWireFormat.Token(message.Direction),
+                ["body"] = message.Body,
+                ["contentType"] = RealtimeWireFormat.Token(message.ContentType),
+                ["attachments"] = RealtimeWireFormat.BuildAttachments(message.Attachments),
+                ["at"] = message.At,
+                ["delivery"] = RealtimeWireFormat.Token(message.Delivery),
+            };
+        }
+        return new Dictionary<string, object?>(4)
+        {
+            ["conversation"] = page.Conversation.Value,
+            ["readSequence"] = page.ReadSequence,
+            ["next"] = page.NextAfterSequence,
+            ["messages"] = messages,
+        };
+    }
+
+    private static Dictionary<string, object?> Conversation(VisitorConversationView view) => new(5)
     {
         ["conversation"] = view.Conversation.Value,
         ["closed"] = view.Closed,
@@ -270,24 +294,33 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         ["lastActivityAt"] = view.LastActivityAt,
     };
 
-    private static Dictionary<string, object?> Widget(LiveChatWidgetState state) => new()
+    private static Dictionary<string, object?> Widget(LiveChatWidgetState state)
     {
-        ["themeRef"] = state.ThemeRef,
-        ["greeting"] = state.GreetingMessage,
-        ["online"] = state.Online,
-        ["awayMessage"] = state.AwayMessage,
-        ["deflection"] = state.DeflectionEnabled,
-        ["requireVerified"] = state.RequireVerifiedIdentity,
-        ["attachments"] = state.Attachments is { } policy
-            ? new Dictionary<string, object?> { ["maxBytes"] = policy.MaximumBytes, ["types"] = policy.AllowedMediaTypes }
-            : null,
-        ["prechat"] = state.PrechatFields.Select(field => new Dictionary<string, object?>
+        var prechat = new Dictionary<string, object?>[state.PrechatFields.Count];
+        for (var i = 0; i < state.PrechatFields.Count; i++)
         {
-            ["key"] = field.Key,
-            ["label"] = field.Label,
-            ["kind"] = RealtimeWireFormat.Token(field.Kind.ToString()),
-            ["required"] = field.Required,
-            ["maxLength"] = field.MaximumLength,
-        }).ToList(),
-    };
+            var field = state.PrechatFields[i];
+            prechat[i] = new Dictionary<string, object?>(5)
+            {
+                ["key"] = field.Key,
+                ["label"] = field.Label,
+                ["kind"] = RealtimeWireFormat.Token(field.Kind),
+                ["required"] = field.Required,
+                ["maxLength"] = field.MaximumLength,
+            };
+        }
+        return new Dictionary<string, object?>(8)
+        {
+            ["themeRef"] = state.ThemeRef,
+            ["greeting"] = state.GreetingMessage,
+            ["online"] = state.Online,
+            ["awayMessage"] = state.AwayMessage,
+            ["deflection"] = state.DeflectionEnabled,
+            ["requireVerified"] = state.RequireVerifiedIdentity,
+            ["attachments"] = state.Attachments is { } policy
+                ? new Dictionary<string, object?>(2) { ["maxBytes"] = policy.MaximumBytes, ["types"] = policy.AllowedMediaTypes }
+                : null,
+            ["prechat"] = prechat,
+        };
+    }
 }

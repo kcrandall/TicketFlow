@@ -95,20 +95,23 @@ public static class TicketFlowBlazorUIEndpointExtensions
         var antiforgery = http.RequestServices.GetRequiredService<IAntiforgery>();
         if (!await antiforgery.IsRequestValidAsync(http))
             return TypedResults.Problem(statusCode: StatusCodes.Status400BadRequest, title: "The form expired. Reload the page and try again.");
-        var session = await TicketFlowUISession.ResolveAsync(http);
-        if (session.State == UiSessionState.Unauthenticated)
+        if (http.User.Identity?.IsAuthenticated != true)
             return TypedResults.Unauthorized();
         var form = await http.Request.ReadFormAsync(http.RequestAborted);
-        var route = UiRoutes.Match(session.Path);
-        var returnTo = UiUrls.SafeReturn(session.Options.BasePath, form["_return"].ToString() is { Length: > 0 } posted ? posted : http.Request.Path + http.Request.QueryString);
+        var options = http.RequestServices.GetRequiredService<IOptions<TicketFlowBlazorUIOptions>>().Value;
+        var returnTo = UiUrls.SafeReturn(options.BasePath, form["_return"].ToString() is { Length: > 0 } posted ? posted : http.Request.Path + http.Request.QueryString);
 
         if (form["_action"].ToString() == "theme.set")
         {
-            var theme = TicketFlowThemePreference.Parse($"{form["theme"]}.{form["mode"]}", session.Options.Themes);
+            var theme = TicketFlowThemePreference.Parse($"{form["theme"]}.{form["mode"]}", options.Themes);
             if (theme is not null)
-                UiTheme.Write(http, session.Options, theme);
+                UiTheme.Write(http, options, theme);
             return TypedResults.Redirect(returnTo);
         }
+        var session = await TicketFlowUISession.ResolveAsync(http);
+        if (session.State == UiSessionState.Unauthenticated)
+            return TypedResults.Unauthorized();
+        var route = UiRoutes.Match(session.Path);
         // Authorization of the page comes first and never depends on the posted form: a section the viewer cannot open renders
         // "Access denied" (403) and its action does not run. Services still authorize the command itself.
         if (route is null || !UiNavigation.Allows(session, route))
@@ -171,23 +174,59 @@ public static class TicketFlowBlazorUIEndpointExtensions
 
     private static async Task<IResult> ExportAsync(HttpContext http, string? from, string? to)
     {
-        var session = await TicketFlowUISession.ResolveAsync(http);
+        var session = await TicketFlowUISession.ResolvePrincipalAsync(http);
         if (session.State == UiSessionState.Unauthenticated)
             return SignIn(http, session.Options);
         if (session.State != UiSessionState.Ready || session.Service<IReportingService>() is not { } reporting)
             return TypedResults.Forbid();
         var (start, end) = UiFormat.Range(from, to, TimeProvider.System.GetUtcNow());
-        var buffer = new StringWriter(System.Globalization.CultureInfo.InvariantCulture);
-        return await reporting.ExportAsync(session.Principal, new ReportExportQuery(new ReportQuery(start, end), 100_000), buffer, http.RequestAborted) switch
+        var fileName = $"ticketflow-report-{start:yyyyMMdd}-{end:yyyyMMdd}.csv";
+        await using var writer = new LazyCsvResponseWriter(http, fileName);
+        switch (await reporting.ExportAsync(session.Principal, new ReportExportQuery(new ReportQuery(start, end), 100_000), writer, http.RequestAborted))
         {
-            ReportSucceeded<ReportExportSummary> => Csv(http, buffer.ToString(), start, end),
-            ReportRefused => TypedResults.Forbid(),
-        };
+            case ReportSucceeded<ReportExportSummary>:
+                writer.EnsureStarted();
+                await writer.FlushAsync(http.RequestAborted);
+                return TypedResults.Empty;
+            case ReportRefused:
+                return TypedResults.Forbid();
+        }
+        return TypedResults.Forbid();
     }
 
-    private static IResult Csv(HttpContext http, string csv, DateTimeOffset from, DateTimeOffset to)
+    private sealed class LazyCsvResponseWriter(HttpContext http, string fileName) : TextWriter
     {
-        http.Response.Headers.CacheControl = "no-store";
-        return TypedResults.File(System.Text.Encoding.UTF8.GetBytes(csv), "text/csv", $"ticketflow-report-{from:yyyyMMdd}-{to:yyyyMMdd}.csv");
+        private static readonly System.Text.UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
+        private StreamWriter? inner;
+
+        public override System.Text.Encoding Encoding => Utf8NoBom;
+
+        public void EnsureStarted()
+        {
+            if (inner is not null)
+                return;
+            http.Response.Headers.CacheControl = "no-store";
+            http.Response.ContentType = "text/csv; charset=utf-8";
+            http.Response.Headers.ContentDisposition = $"attachment; filename=\"{fileName}\"";
+            inner = new StreamWriter(http.Response.Body, Utf8NoBom, bufferSize: 16_384, leaveOpen: true);
+        }
+
+        private StreamWriter Writer()
+        {
+            EnsureStarted();
+            return inner!;
+        }
+
+        public override void Write(char value) => Writer().Write(value);
+        public override void Write(string? value) => Writer().Write(value);
+        public override void Write(char[] buffer, int index, int count) => Writer().Write(buffer, index, count);
+        public override void Write(ReadOnlySpan<char> buffer) => Writer().Write(buffer);
+        public override Task WriteAsync(string? value) => Writer().WriteAsync(value);
+        public override Task WriteAsync(ReadOnlyMemory<char> buffer, CancellationToken cancellationToken = default) => Writer().WriteAsync(buffer, cancellationToken);
+        public override Task WriteLineAsync(string? value) => Writer().WriteLineAsync(value);
+        public override Task FlushAsync() => inner is null ? Task.CompletedTask : inner.FlushAsync();
+        public override Task FlushAsync(CancellationToken cancellationToken) => inner is null ? Task.CompletedTask : inner.FlushAsync(cancellationToken);
+
+        public override ValueTask DisposeAsync() => inner is null ? ValueTask.CompletedTask : inner.DisposeAsync();
     }
 }

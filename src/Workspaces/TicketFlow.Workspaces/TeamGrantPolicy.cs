@@ -22,15 +22,33 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
     public Task<IReadOnlyList<StoredAccessGrant>> TeamGrantsAsync(PrincipalRef actor, TeamId team, CancellationToken cancellationToken) =>
         grants.ListForSubjectsAsync(AccessPartition.From(actor.Scope), actor.Scope.WorkspaceId, [team], cancellationToken);
 
+    public async Task<WorkspaceRefused?> CheckMembershipChangeAsync(PrincipalRef actor, TeamId team, IReadOnlyCollection<UserId> added, IReadOnlyCollection<UserId> removed, CancellationToken cancellationToken)
+    {
+        if (added.Count == 0 && removed.Count == 0)
+            return null;
+        var teamGrants = await TeamGrantsAsync(actor, team, cancellationToken).ConfigureAwait(false);
+        if (added.Count > 0 && await CheckAdditionsWithTeamGrantsAsync(actor, team, added, teamGrants, cancellationToken).ConfigureAwait(false) is { } escalation)
+            return escalation;
+        if (removed.Count > 0 && await CheckRemovalsWithTeamGrantsAsync(actor, team, removed, teamGrants, cancellationToken).ConfigureAwait(false) is { } lifted)
+            return lifted;
+        return null;
+    }
+
     public async Task<WorkspaceRefused?> CheckAdditionsAsync(PrincipalRef actor, TeamId team, IReadOnlyCollection<UserId> added, CancellationToken cancellationToken)
     {
         if (added.Count == 0)
             return null;
+        var teamGrants = await TeamGrantsAsync(actor, team, cancellationToken).ConfigureAwait(false);
+        return await CheckAdditionsWithTeamGrantsAsync(actor, team, added, teamGrants, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<WorkspaceRefused?> CheckAdditionsWithTeamGrantsAsync(PrincipalRef actor, TeamId team, IReadOnlyCollection<UserId> added, IReadOnlyList<StoredAccessGrant> teamGrants, CancellationToken cancellationToken)
+    {
         var teamResource = new AccessResource(actor.Scope, team: team);
-        var conferrals = (await TeamGrantsAsync(actor, team, cancellationToken).ConfigureAwait(false))
-            .Where(entry => entry.Grant.Effect == GrantEffect.Allow)
-            .Select(entry => new GrantConferral(entry.Grant))
-            .ToList();
+        var conferrals = new List<GrantConferral>(teamGrants.Count);
+        for (var i = 0; i < teamGrants.Count; i++)
+            if (teamGrants[i].Grant.Effect == GrantEffect.Allow)
+                conferrals.Add(new GrantConferral(teamGrants[i].Grant));
         foreach (var grant in await MemberGrantsAsync(actor, added, cancellationToken).ConfigureAwait(false))
             if (grant.Effect == GrantEffect.Allow && UsesPrincipalTeams(grant.Condition))
                 conferrals.Add(new GrantConferral(grant, teamResource));
@@ -40,15 +58,16 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
         return null;
     }
 
-    public async Task<WorkspaceRefused?> CheckRemovalsAsync(PrincipalRef actor, TeamId team, IReadOnlyCollection<UserId> removed, CancellationToken cancellationToken)
+    private async Task<WorkspaceRefused?> CheckRemovalsWithTeamGrantsAsync(PrincipalRef actor, TeamId team, IReadOnlyCollection<UserId> removed, IReadOnlyList<StoredAccessGrant> teamGrants, CancellationToken cancellationToken)
     {
-        if (removed.Count == 0)
-            return null;
         var now = time.GetUtcNow();
-        var revoked = (await TeamGrantsAsync(actor, team, cancellationToken).ConfigureAwait(false))
-            .Select(entry => entry.Grant)
-            .Where(grant => grant.Effect == GrantEffect.Deny && Live(grant, now))
-            .ToList();
+        var revoked = new List<AccessGrant>(teamGrants.Count);
+        for (var i = 0; i < teamGrants.Count; i++)
+        {
+            var grant = teamGrants[i].Grant;
+            if (grant.Effect == GrantEffect.Deny && Live(grant, now))
+                revoked.Add(grant);
+        }
         foreach (var grant in await MemberGrantsAsync(actor, removed, cancellationToken).ConfigureAwait(false))
             if (grant.Effect == GrantEffect.Deny && Live(grant, now) && UsesPrincipalTeams(grant.Condition))
                 revoked.Add(grant);
@@ -64,10 +83,14 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
     }
 
     /// <summary>Revokes grants through the administrator (authorized and audited). Concurrently changed or removed grants are skipped.</summary>
-    public async Task RevokeAsync(PrincipalRef actor, IEnumerable<StoredAccessGrant> stored, CancellationToken cancellationToken)
+    public Task RevokeAsync(PrincipalRef actor, IReadOnlyList<StoredAccessGrant> stored, CancellationToken cancellationToken)
     {
-        foreach (var entry in stored)
-            await administrator.RevokeGrantAsync(actor, entry.Grant.Id, entry.Revision, cancellationToken).ConfigureAwait(false);
+        if (stored.Count == 0)
+            return Task.CompletedTask;
+        var targets = new (GrantId Id, long ExpectedRevision)[stored.Count];
+        for (var i = 0; i < stored.Count; i++)
+            targets[i] = (stored[i].Grant.Id, stored[i].Revision);
+        return administrator.RevokeGrantsAsync(actor, targets, cancellationToken);
     }
 
     public static WorkspaceRefused? Refuse(AccessCheckResult result) => result switch

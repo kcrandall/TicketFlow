@@ -99,6 +99,8 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
 {
     private readonly Lock gate = new();
     private readonly Dictionary<(AccessPartition Partition, GrantId Id), StoredAccessGrant> grants = [];
+    private readonly Dictionary<(AccessPartition Partition, GrantSubject Subject), HashSet<GrantId>> bySubject = [];
+    private readonly Dictionary<(AccessPartition Partition, GrantScope Scope), HashSet<GrantId>> byTarget = [];
 
     public InMemoryAccessGrantStore(int maximumEntries = 10_000)
     {
@@ -121,13 +123,26 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
         ArgumentNullException.ThrowIfNull(subjects);
         if (subjects.Count > AccessLimits.MaximumSubjectsPerQuery)
             throw new ArgumentException($"At most {AccessLimits.MaximumSubjectsPerQuery} subjects can be queried.", nameof(subjects));
-        var wanted = subjects.ToHashSet();
         lock (gate)
         {
-            return Task.FromResult<IReadOnlyList<StoredAccessGrant>>([.. grants.Values
-                .Where(entry => entry.Grant.Partition == partition && wanted.Contains(entry.Grant.Subject)
-                    && (entry.Grant.Workspace is not { } named || named == workspace))
-                .OrderBy(entry => entry.Grant.Id.Value, StringComparer.Ordinal)]);
+            var result = new List<StoredAccessGrant>();
+            HashSet<GrantSubject>? seenSubjects = subjects.Count > 1 ? [] : null;
+            foreach (var subject in subjects)
+            {
+                if (seenSubjects is not null && !seenSubjects.Add(subject))
+                    continue;
+                if (!bySubject.TryGetValue((partition, subject), out var ids))
+                    continue;
+                foreach (var id in ids)
+                {
+                    var entry = grants[(partition, id)];
+                    if (entry.Grant.Workspace is not { } named || named == workspace)
+                        result.Add(entry);
+                }
+            }
+            if (result.Count > 1)
+                result.Sort(static (left, right) => string.CompareOrdinal(left.Grant.Id.Value, right.Grant.Id.Value));
+            return Task.FromResult<IReadOnlyList<StoredAccessGrant>>(result);
         }
     }
 
@@ -137,11 +152,17 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
         AccessGrantTargets.Validate(target, limit, after);
         lock (gate)
         {
-            return Task.FromResult<IReadOnlyList<StoredAccessGrant>>([.. grants.Values
-                .Where(entry => entry.Grant.Partition == partition && entry.Grant.Scope == target
-                    && (after is not { } cursor || string.CompareOrdinal(entry.Grant.Id.Value, cursor.Value) > 0))
-                .OrderBy(entry => entry.Grant.Id.Value, StringComparer.Ordinal)
-                .Take(limit)]);
+            if (!byTarget.TryGetValue((partition, target), out var ids) || ids.Count == 0)
+                return Task.FromResult<IReadOnlyList<StoredAccessGrant>>([]);
+            var matching = new List<StoredAccessGrant>(Math.Min(ids.Count, limit));
+            foreach (var id in ids)
+                if (after is not { } cursor || string.CompareOrdinal(id.Value, cursor.Value) > 0)
+                    matching.Add(grants[(partition, id)]);
+            if (matching.Count > 1)
+                matching.Sort(static (left, right) => string.CompareOrdinal(left.Grant.Id.Value, right.Grant.Id.Value));
+            if (matching.Count > limit)
+                matching.RemoveRange(limit, matching.Count - limit);
+            return Task.FromResult<IReadOnlyList<StoredAccessGrant>>(matching);
         }
     }
 
@@ -156,6 +177,7 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
                 return Result(new AccessWriteRejected(AccessWriteRejection.CapacityExceeded));
             var stored = new StoredAccessGrant(grant, 1);
             grants.Add((grant.Partition, grant.Id), stored);
+            IndexGrant(grant);
             return Result(new AccessWriteApplied<StoredAccessGrant>(stored));
         }
     }
@@ -172,8 +194,10 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
                 return Result(new AccessWriteConflict(existing.Revision));
             if (!existing.Grant.Subject.Equals(grant.Subject) && CountForSubject(grant.Partition, grant.Subject, grant.Id) >= AccessLimits.MaximumGrantsPerSubject)
                 return Result(new AccessWriteRejected(AccessWriteRejection.CapacityExceeded));
+            UnindexGrant(existing.Grant);
             var stored = new StoredAccessGrant(grant, checked(existing.Revision + 1));
             grants[(grant.Partition, grant.Id)] = stored;
+            IndexGrant(grant);
             return Result(new AccessWriteApplied<StoredAccessGrant>(stored));
         }
     }
@@ -189,12 +213,76 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
             if (existing.Revision != expectedRevision)
                 return Result(new AccessWriteConflict(existing.Revision));
             grants.Remove((partition, id));
+            UnindexGrant(existing.Grant);
             return Result(new AccessWriteApplied<StoredAccessGrant>(existing));
         }
     }
 
-    private int CountForSubject(AccessPartition partition, GrantSubject subject, GrantId? except) =>
-        grants.Values.Count(entry => entry.Grant.Partition == partition && entry.Grant.Subject.Equals(subject) && entry.Grant.Id != except);
+    public Task<IReadOnlyList<StoredAccessGrant>> DeleteManyAsync(AccessPartition partition, IReadOnlyList<(GrantId Id, long ExpectedRevision)> targets, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        ArgumentNullException.ThrowIfNull(targets);
+        lock (gate)
+        {
+            var removed = new List<StoredAccessGrant>(targets.Count);
+            for (var i = 0; i < targets.Count; i++)
+            {
+                var (id, expectedRevision) = targets[i];
+                ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
+                if (grants.TryGetValue((partition, id), out var existing) && existing.Revision == expectedRevision)
+                {
+                    grants.Remove((partition, id));
+                    UnindexGrant(existing.Grant);
+                    removed.Add(existing);
+                }
+            }
+            return Task.FromResult<IReadOnlyList<StoredAccessGrant>>(removed);
+        }
+    }
+
+    private void IndexGrant(AccessGrant grant)
+    {
+        var subjectKey = (grant.Partition, grant.Subject);
+        if (!bySubject.TryGetValue(subjectKey, out var subjectIds))
+            bySubject[subjectKey] = subjectIds = [];
+        subjectIds.Add(grant.Id);
+
+        if (grant.Scope is not TenantGrantScope)
+        {
+            var targetKey = (grant.Partition, grant.Scope);
+            if (!byTarget.TryGetValue(targetKey, out var targetIds))
+                byTarget[targetKey] = targetIds = [];
+            targetIds.Add(grant.Id);
+        }
+    }
+
+    private void UnindexGrant(AccessGrant grant)
+    {
+        var subjectKey = (grant.Partition, grant.Subject);
+        if (bySubject.TryGetValue(subjectKey, out var subjectIds))
+        {
+            subjectIds.Remove(grant.Id);
+            if (subjectIds.Count == 0)
+                bySubject.Remove(subjectKey);
+        }
+        if (grant.Scope is not TenantGrantScope)
+        {
+            var targetKey = (grant.Partition, grant.Scope);
+            if (byTarget.TryGetValue(targetKey, out var targetIds))
+            {
+                targetIds.Remove(grant.Id);
+                if (targetIds.Count == 0)
+                    byTarget.Remove(targetKey);
+            }
+        }
+    }
+
+    private int CountForSubject(AccessPartition partition, GrantSubject subject, GrantId? except)
+    {
+        if (!bySubject.TryGetValue((partition, subject), out var ids))
+            return 0;
+        return except is { } excluded && ids.Contains(excluded) ? ids.Count - 1 : ids.Count;
+    }
 
     private static Task<AccessWriteResult<StoredAccessGrant>> Result(AccessWriteResult<StoredAccessGrant> result) => Task.FromResult(result);
 }
@@ -242,9 +330,10 @@ internal sealed class InMemoryScopedTable<TKey, TValue>
     where TValue : class
 {
     private readonly Lock gate = new();
-    private readonly Dictionary<(TicketScope Scope, TKey Key), TValue> entries = [];
+    private readonly Dictionary<TicketScope, Dictionary<TKey, TValue>> scopes = [];
     private readonly int maximumEntries;
     private readonly int maximumPerScope;
+    private int count;
 
     public InMemoryScopedTable(int maximumEntries, int maximumPerScope)
     {
@@ -256,25 +345,35 @@ internal sealed class InMemoryScopedTable<TKey, TValue>
     public TValue? Get(TicketScope scope, TKey key)
     {
         lock (gate)
-            return entries.GetValueOrDefault((scope, key));
+            return scopes.TryGetValue(scope, out var entries) ? entries.GetValueOrDefault(key) : null;
     }
 
     public List<TValue> List(TicketScope scope)
     {
         lock (gate)
-            return [.. entries.Where(pair => pair.Key.Scope == scope).Select(pair => pair.Value)];
+            return scopes.TryGetValue(scope, out var entries) ? [.. entries.Values] : [];
     }
 
     public AccessWriteResult<TValue> Create(TicketScope scope, TKey key, Func<long, TValue> create, Func<TValue, long> revision)
     {
         lock (gate)
         {
-            if (entries.TryGetValue((scope, key), out var existing))
-                return new AccessWriteConflict(revision(existing));
-            if (entries.Count >= maximumEntries || entries.Keys.Count(entry => entry.Scope == scope) >= maximumPerScope)
-                return new AccessWriteRejected(AccessWriteRejection.CapacityExceeded);
+            if (scopes.TryGetValue(scope, out var entries))
+            {
+                if (entries.TryGetValue(key, out var existing))
+                    return new AccessWriteConflict(revision(existing));
+                if (count >= maximumEntries || entries.Count >= maximumPerScope)
+                    return new AccessWriteRejected(AccessWriteRejection.CapacityExceeded);
+            }
+            else
+            {
+                if (count >= maximumEntries)
+                    return new AccessWriteRejected(AccessWriteRejection.CapacityExceeded);
+                scopes[scope] = entries = [];
+            }
             var created = create(1);
-            entries.Add((scope, key), created);
+            entries.Add(key, created);
+            count++;
             return new AccessWriteApplied<TValue>(created);
         }
     }
@@ -283,12 +382,12 @@ internal sealed class InMemoryScopedTable<TKey, TValue>
     {
         lock (gate)
         {
-            if (!entries.TryGetValue((scope, key), out var existing))
+            if (!scopes.TryGetValue(scope, out var entries) || !entries.TryGetValue(key, out var existing))
                 return AccessWriteNotFound.Instance;
             if (revision(existing) != expectedRevision)
                 return new AccessWriteConflict(revision(existing));
             var updated = create(checked(expectedRevision + 1));
-            entries[(scope, key)] = updated;
+            entries[key] = updated;
             return new AccessWriteApplied<TValue>(updated);
         }
     }
@@ -297,11 +396,14 @@ internal sealed class InMemoryScopedTable<TKey, TValue>
     {
         lock (gate)
         {
-            if (!entries.TryGetValue((scope, key), out var existing))
+            if (!scopes.TryGetValue(scope, out var entries) || !entries.TryGetValue(key, out var existing))
                 return AccessWriteNotFound.Instance;
             if (revision(existing) != expectedRevision)
                 return new AccessWriteConflict(revision(existing));
-            entries.Remove((scope, key));
+            entries.Remove(key);
+            count--;
+            if (entries.Count == 0)
+                scopes.Remove(scope);
             return new AccessWriteApplied<TValue>(existing);
         }
     }

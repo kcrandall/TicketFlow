@@ -45,9 +45,8 @@ public sealed class AccessAdministrator : IAccessAdministrator
         ArgumentNullException.ThrowIfNull(role);
         var change = new Change(AccessAuditKind.RoleCreated, actor, Role: role.Id);
         var workspace = new AccessResource(actor.Scope);
-        var refusal = await AuthorizeAsync(actor, AccessPermissions.AccessManage, workspace, cancellationToken).ConfigureAwait(false)
-            ?? ValidateRole(role)
-            ?? await RequireHeldAsync(actor, role.Permissions, workspace, tenantAllowsOnly: false, cancellationToken).ConfigureAwait(false);
+        var (refusal, context) = await AuthorizeWithContextAsync(actor, AccessPermissions.AccessManage, workspace, cancellationToken).ConfigureAwait(false);
+        refusal ??= ValidateRole(role) ?? RequireHeld(context!, role.Permissions, workspace, tenantAllowsOnly: false);
         if (refusal is not null)
             return await RefuseAsync<StoredAccessRole>(change, refusal, cancellationToken).ConfigureAwait(false);
         return await CompleteAsync(change, await roles.CreateAsync(actor.Scope, role, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
@@ -63,13 +62,13 @@ public sealed class AccessAdministrator : IAccessAdministrator
         ArgumentNullException.ThrowIfNull(role);
         var change = new Change(AccessAuditKind.RoleUpdated, actor, Role: role.Id);
         var workspace = new AccessResource(actor.Scope);
-        var refusal = await AuthorizeAsync(actor, AccessPermissions.AccessManage, workspace, cancellationToken).ConfigureAwait(false)
-            ?? ValidateRole(role) ?? ValidateRevision(expectedRevision);
+        var (refusal, context) = await AuthorizeWithContextAsync(actor, AccessPermissions.AccessManage, workspace, cancellationToken).ConfigureAwait(false);
+        refusal ??= ValidateRole(role) ?? ValidateRevision(expectedRevision);
         if (refusal is null)
         {
             var existing = await roles.GetAsync(actor.Scope, role.Id, cancellationToken).ConfigureAwait(false);
             refusal = Fence(existing?.Revision, expectedRevision)
-                ?? await RequireHeldAsync(actor, existing!.Role.Permissions.Concat(role.Permissions), workspace, tenantAllowsOnly: false, cancellationToken).ConfigureAwait(false);
+                ?? RequireHeld(context!, existing!.Role.Permissions.Concat(role.Permissions), workspace, tenantAllowsOnly: false);
         }
         if (refusal is not null)
             return await RefuseAsync<StoredAccessRole>(change, refusal, cancellationToken).ConfigureAwait(false);
@@ -83,14 +82,14 @@ public sealed class AccessAdministrator : IAccessAdministrator
             throw new ArgumentException("A role identifier is required.", nameof(role));
         var change = new Change(AccessAuditKind.RoleDeleted, actor, Role: role);
         var workspace = new AccessResource(actor.Scope);
-        var refusal = await AuthorizeAsync(actor, AccessPermissions.AccessManage, workspace, cancellationToken).ConfigureAwait(false)
-            ?? (BuiltInRoles.IsBuiltIn(role) ? new Refusal(AccessChangeRefusal.Rejected, ["Built-in roles are immutable."]) : null)
+        var (refusal, context) = await AuthorizeWithContextAsync(actor, AccessPermissions.AccessManage, workspace, cancellationToken).ConfigureAwait(false);
+        refusal ??= (BuiltInRoles.IsBuiltIn(role) ? new Refusal(AccessChangeRefusal.Rejected, ["Built-in roles are immutable."]) : null)
             ?? ValidateRevision(expectedRevision);
         if (refusal is null)
         {
             var existing = await roles.GetAsync(actor.Scope, role, cancellationToken).ConfigureAwait(false);
             refusal = Fence(existing?.Revision, expectedRevision)
-                ?? await RequireHeldAsync(actor, existing!.Role.Permissions, workspace, tenantAllowsOnly: false, cancellationToken).ConfigureAwait(false);
+                ?? RequireHeld(context!, existing!.Role.Permissions, workspace, tenantAllowsOnly: false);
         }
         if (refusal is not null)
             return await RefuseAsync<StoredAccessRole>(change, refusal, cancellationToken).ConfigureAwait(false);
@@ -102,7 +101,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(grant);
         var change = GrantChange(AccessAuditKind.GrantCreated, actor, grant);
-        var refusal = await AuthorizeGrantAsync(actor, grant, cancellationToken).ConfigureAwait(false);
+        var refusal = await AuthorizeGrantAsync(actor, grant, context: null, cancellationToken).ConfigureAwait(false);
         if (refusal is not null)
             return await RefuseAsync<StoredAccessGrant>(change, refusal, cancellationToken).ConfigureAwait(false);
         return await CompleteAsync(change, await grants.CreateAsync(grant, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
@@ -114,6 +113,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         ArgumentNullException.ThrowIfNull(grant);
         var change = GrantChange(AccessAuditKind.GrantUpdated, actor, grant);
         var refusal = ValidateRevision(expectedRevision);
+        AccessContext? context = null;
         if (refusal is null && grant.Partition == AccessPartition.From(actor.Scope))
         {
             var existing = await grants.GetAsync(grant.Partition, grant.Id, cancellationToken).ConfigureAwait(false);
@@ -122,9 +122,9 @@ public sealed class AccessAdministrator : IAccessAdministrator
             else if (existing!.Grant.Kind == GrantKind.BreakGlass)
                 refusal = new(AccessChangeRefusal.Invalid, ["Break-glass grants cannot be modified; revoke them instead."]);
             else
-                refusal = await AuthorizeTargetAsync(actor, existing.Grant, cancellationToken).ConfigureAwait(false);
+                (refusal, context) = await AuthorizeTargetWithContextAsync(actor, existing.Grant, context, cancellationToken).ConfigureAwait(false);
         }
-        refusal ??= await AuthorizeGrantAsync(actor, grant, cancellationToken).ConfigureAwait(false);
+        refusal ??= await AuthorizeGrantAsync(actor, grant, context, cancellationToken).ConfigureAwait(false);
         if (refusal is not null)
             return await RefuseAsync<StoredAccessGrant>(change, refusal, cancellationToken).ConfigureAwait(false);
         return await CompleteAsync(change, await grants.UpdateAsync(grant, expectedRevision, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
@@ -142,13 +142,80 @@ public sealed class AccessAdministrator : IAccessAdministrator
         {
             var existing = await grants.GetAsync(partition, grant, cancellationToken).ConfigureAwait(false);
             refusal = Fence(existing?.Revision, expectedRevision)
-                ?? await AuthorizeTargetAsync(actor, existing!.Grant, cancellationToken).ConfigureAwait(false);
+                ?? (await AuthorizeTargetWithContextAsync(actor, existing!.Grant, context: null, cancellationToken).ConfigureAwait(false)).Refusal;
             if (existing is not null)
                 change = GrantChange(AccessAuditKind.GrantRevoked, actor, existing.Grant);
         }
         if (refusal is not null)
             return await RefuseAsync<StoredAccessGrant>(change, refusal, cancellationToken).ConfigureAwait(false);
         return await CompleteAsync(change, await grants.DeleteAsync(partition, grant, expectedRevision, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<AccessChangeResult<StoredAccessGrant>>> RevokeGrantsAsync(PrincipalRef actor, IReadOnlyList<(GrantId Id, long ExpectedRevision)> targets, CancellationToken cancellationToken = default)
+    {
+        RequireActor(actor);
+        ArgumentNullException.ThrowIfNull(targets);
+        if (targets.Count == 0)
+            return [];
+        if (targets.Count == 1)
+            return [await RevokeGrantAsync(actor, targets[0].Id, targets[0].ExpectedRevision, cancellationToken).ConfigureAwait(false)];
+
+        var partition = AccessPartition.From(actor.Scope);
+        var results = new AccessChangeResult<StoredAccessGrant>[targets.Count];
+        var toDelete = new List<(int Index, StoredAccessGrant Existing, Change Change)>(targets.Count);
+        AccessContext? context = null;
+
+        for (var i = 0; i < targets.Count; i++)
+        {
+            var (grantId, expectedRevision) = targets[i];
+            if (!grantId.IsInitialized)
+                throw new ArgumentException("A grant identifier is required.", nameof(targets));
+            var change = new Change(AccessAuditKind.GrantRevoked, actor, Grant: grantId);
+            var refusal = ValidateRevision(expectedRevision);
+            StoredAccessGrant? existing = null;
+            if (refusal is null)
+            {
+                existing = await grants.GetAsync(partition, grantId, cancellationToken).ConfigureAwait(false);
+                refusal = Fence(existing?.Revision, expectedRevision);
+                if (existing is not null)
+                {
+                    change = GrantChange(AccessAuditKind.GrantRevoked, actor, existing.Grant);
+                    if (refusal is null)
+                        (refusal, context) = await AuthorizeTargetWithContextAsync(actor, existing.Grant, context, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            if (refusal is not null)
+                results[i] = await RefuseAsync<StoredAccessGrant>(change, refusal, cancellationToken).ConfigureAwait(false);
+            else
+                toDelete.Add((i, existing!, change));
+        }
+
+        if (toDelete.Count > 0)
+        {
+            var batch = new (GrantId Id, long ExpectedRevision)[toDelete.Count];
+            for (var i = 0; i < toDelete.Count; i++)
+                batch[i] = (toDelete[i].Existing.Grant.Id, toDelete[i].Existing.Revision);
+            var removed = await grants.DeleteManyAsync(partition, batch, cancellationToken).ConfigureAwait(false);
+            var removedById = new Dictionary<GrantId, StoredAccessGrant>(removed.Count);
+            for (var i = 0; i < removed.Count; i++)
+                removedById[removed[i].Grant.Id] = removed[i];
+
+            for (var i = 0; i < toDelete.Count; i++)
+            {
+                var (index, existing, change) = toDelete[i];
+                if (removedById.TryGetValue(existing.Grant.Id, out var deleted))
+                    results[index] = await AppliedAsync(change, deleted, cancellationToken).ConfigureAwait(false);
+                else
+                {
+                    var current = await grants.GetAsync(partition, existing.Grant.Id, cancellationToken).ConfigureAwait(false);
+                    var miss = current is null
+                        ? new Refusal(AccessChangeRefusal.NotFound, ["The record does not exist."])
+                        : new Refusal(AccessChangeRefusal.Conflict, ["The record changed concurrently."], CurrentRevision: current.Revision);
+                    results[index] = await RefuseAsync<StoredAccessGrant>(change, miss, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+        return results;
     }
 
     public async Task<AccessChangeResult<StoredAccessFieldPolicy>> CreateFieldPolicyAsync(PrincipalRef actor, AccessFieldPolicy policy, CancellationToken cancellationToken = default)
@@ -242,6 +309,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         AccessContext? context = null;
         Dictionary<RoleId, AccessRole>? custom = null;
         var missing = new SortedSet<string>(StringComparer.Ordinal);
+        Dictionary<(Permission, AccessResource, bool), bool>? decisionCache = null;
         foreach (var conferral in items)
         {
             var grant = conferral.Grant;
@@ -264,14 +332,41 @@ public sealed class AccessAdministrator : IAccessAdministrator
             if (role is null)
                 continue;
             context ??= await engine.LoadAsync(actor, actor.Scope, cancellationToken).ConfigureAwait(false);
-            var permissions = role.IncludesAllPermissions ? engine.Catalog.Definitions.Select(definition => definition.Permission) : role.Permissions;
-            foreach (var permission in permissions)
-                if (!AccessEngine.Evaluate(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: grant.Scope is TenantGrantScope).Allowed)
-                    missing.Add(permission.Value);
+            var tenantOnly = grant.Scope is TenantGrantScope;
+            if (items.Count > 1)
+                decisionCache ??= [];
+            if (role.IncludesAllPermissions)
+            {
+                var defs = engine.Catalog.Definitions;
+                for (var i = 0; i < defs.Count; i++)
+                    CheckPermission(defs[i].Permission, context, target, tenantOnly, missing, decisionCache);
+            }
+            else
+            {
+                foreach (var permission in role.Permissions)
+                    CheckPermission(permission, context, target, tenantOnly, missing, decisionCache);
+            }
         }
         return missing.Count == 0
             ? AccessCheckPassed.Instance
             : Refused([.. missing.Select(permission => $"The actor does not hold '{permission}' on the target.")], AccessDenialReason.NoMatchingGrant);
+    }
+
+    private static void CheckPermission(Permission permission, AccessContext context, AccessResource target, bool tenantOnly, SortedSet<string> missing, Dictionary<(Permission, AccessResource, bool), bool>? cache)
+    {
+        if (missing.Contains(permission.Value))
+            return;
+        if (cache is not null)
+        {
+            var key = (permission, target, tenantOnly);
+            if (!cache.TryGetValue(key, out var allowed))
+                cache[key] = allowed = AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly).Allowed;
+            if (!allowed)
+                missing.Add(permission.Value);
+            return;
+        }
+        if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly).Allowed)
+            missing.Add(permission.Value);
     }
 
     public async Task<AccessCheckResult> CheckCanRevokeAsync(PrincipalRef actor, IEnumerable<AccessGrant> grants, CancellationToken cancellationToken = default)
@@ -283,13 +378,14 @@ public sealed class AccessAdministrator : IAccessAdministrator
         if (engine.Precheck(actor, AccessPermissions.AccessManage, actor.Scope) is { } reason)
             return Refused(["The actor is not authorized."], reason);
         var context = await engine.LoadAsync(actor, actor.Scope, cancellationToken).ConfigureAwait(false);
-        foreach (var grant in items)
+        for (var i = 0; i < items.Count; i++)
         {
+            var grant = items[i];
             if (!InActorScope(actor, grant))
                 return Refused(["The grant is outside the actor's scope."], AccessDenialReason.ScopeMismatch);
             var tenant = grant.Scope is TenantGrantScope;
             var permission = tenant ? AccessPermissions.AccessManageTenant : AccessPermissions.AccessManage;
-            var result = AccessEngine.Evaluate(context, permission, AccessEngine.Target(actor.Scope, grant.Scope), includeBreakGlass: false, tenantAllowsOnly: tenant);
+            var result = AccessEngine.EvaluateSimple(context, permission, AccessEngine.Target(actor.Scope, grant.Scope), includeBreakGlass: false, tenantAllowsOnly: tenant);
             if (result.Denial is { } denial)
                 return Refused([$"Permission '{permission}' is required on the grant's target."], denial);
         }
@@ -407,43 +503,56 @@ public sealed class AccessAdministrator : IAccessAdministrator
     }
 
     /// <remarks>With <c>tenantAllowsOnly</c>, only tenant-scoped allow grants count (tenant administration authority).</remarks>
-    private async Task<Refusal?> AuthorizeAsync(PrincipalRef actor, Permission permission, AccessResource resource, CancellationToken cancellationToken, bool tenantAllowsOnly = false)
+    private async Task<Refusal?> AuthorizeAsync(PrincipalRef actor, Permission permission, AccessResource resource, CancellationToken cancellationToken, bool tenantAllowsOnly = false) =>
+        (await AuthorizeWithContextAsync(actor, permission, resource, cancellationToken, tenantAllowsOnly).ConfigureAwait(false)).Refusal;
+
+    private async Task<(Refusal? Refusal, AccessContext? Context)> AuthorizeWithContextAsync(PrincipalRef actor, Permission permission, AccessResource resource, CancellationToken cancellationToken, bool tenantAllowsOnly = false, AccessContext? context = null)
     {
         if (engine.Precheck(actor, permission, resource.Scope) is { } reason)
-            return new(AccessChangeRefusal.Forbidden, ["The actor is not authorized."], reason);
-        var context = await engine.LoadAsync(actor, resource.Scope, cancellationToken).ConfigureAwait(false);
-        var result = AccessEngine.Evaluate(context, permission, resource, includeBreakGlass: false, tenantAllowsOnly);
-        return result.Denial is { } denial ? new(AccessChangeRefusal.Forbidden, ["The actor is not authorized."], denial) : null;
+            return (new(AccessChangeRefusal.Forbidden, ["The actor is not authorized."], reason), context);
+        context ??= await engine.LoadAsync(actor, resource.Scope, cancellationToken).ConfigureAwait(false);
+        var result = AccessEngine.EvaluateSimple(context, permission, resource, includeBreakGlass: false, tenantAllowsOnly);
+        return (result.Denial is { } denial ? new(AccessChangeRefusal.Forbidden, ["The actor is not authorized."], denial) : null, context);
     }
 
     /// <summary>No escalation: the actor must already hold every listed permission on the target from standard (never break-glass) grants.</summary>
-    private async Task<Refusal?> RequireHeldAsync(PrincipalRef actor, IEnumerable<Permission> permissions, AccessResource target, bool tenantAllowsOnly, CancellationToken cancellationToken)
+    private static Refusal? RequireHeld(AccessContext context, IEnumerable<Permission> permissions, AccessResource target, bool tenantAllowsOnly)
     {
-        var context = await engine.LoadAsync(actor, actor.Scope, cancellationToken).ConfigureAwait(false);
-        var missing = permissions.Distinct()
-            .Where(permission => !AccessEngine.Evaluate(context, permission, target, includeBreakGlass: false, tenantAllowsOnly).Allowed)
-            .Order().ToList();
-        return missing.Count == 0
-            ? null
-            : new(AccessChangeRefusal.Forbidden, [.. missing.Select(permission => $"The actor does not hold '{permission}' on the target.")], AccessDenialReason.NoMatchingGrant);
+        HashSet<Permission>? checkedPerms = null;
+        List<Permission>? missing = null;
+        foreach (var permission in permissions)
+        {
+            if (checkedPerms is not null && !checkedPerms.Add(permission))
+                continue;
+            checkedPerms ??= [permission];
+            if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly).Allowed)
+                (missing ??= []).Add(permission);
+        }
+        if (missing is null)
+            return null;
+        missing.Sort();
+        var errors = new string[missing.Count];
+        for (var i = 0; i < missing.Count; i++)
+            errors[i] = $"The actor does not hold '{missing[i]}' on the target.";
+        return new(AccessChangeRefusal.Forbidden, errors, AccessDenialReason.NoMatchingGrant);
     }
 
     /// <summary>
     /// Authorizes management of a grant's target. Tenant grants need <c>access:manage-tenant</c> from a tenant-scoped grant; a
     /// workspace-scoped Owner cannot manage tenant grants.
     /// </summary>
-    private async Task<Refusal?> AuthorizeTargetAsync(PrincipalRef actor, AccessGrant grant, CancellationToken cancellationToken)
+    private Task<(Refusal? Refusal, AccessContext? Context)> AuthorizeTargetWithContextAsync(PrincipalRef actor, AccessGrant grant, AccessContext? context, CancellationToken cancellationToken)
     {
         if (grant.Partition != AccessPartition.From(actor.Scope) || (grant.Workspace is { } workspace && workspace != actor.Scope.WorkspaceId))
-            return new(AccessChangeRefusal.Forbidden, ["The grant is outside the actor's scope."], AccessDenialReason.ScopeMismatch);
+            return Task.FromResult<(Refusal?, AccessContext?)>((new(AccessChangeRefusal.Forbidden, ["The grant is outside the actor's scope."], AccessDenialReason.ScopeMismatch), context));
         var tenant = grant.Scope is TenantGrantScope;
         var permission = tenant ? AccessPermissions.AccessManageTenant : AccessPermissions.AccessManage;
-        return await AuthorizeAsync(actor, permission, AccessEngine.Target(actor.Scope, grant.Scope), cancellationToken, tenantAllowsOnly: tenant).ConfigureAwait(false);
+        return AuthorizeWithContextAsync(actor, permission, AccessEngine.Target(actor.Scope, grant.Scope), cancellationToken, tenantAllowsOnly: tenant, context: context);
     }
 
-    private async Task<Refusal?> AuthorizeGrantAsync(PrincipalRef actor, AccessGrant grant, CancellationToken cancellationToken)
+    private async Task<Refusal?> AuthorizeGrantAsync(PrincipalRef actor, AccessGrant grant, AccessContext? context, CancellationToken cancellationToken)
     {
-        var refusal = await AuthorizeTargetAsync(actor, grant, cancellationToken).ConfigureAwait(false);
+        var (refusal, loadedContext) = await AuthorizeTargetWithContextAsync(actor, grant, context, cancellationToken).ConfigureAwait(false);
         if (refusal is not null)
             return refusal;
         if (grant.Kind == GrantKind.BreakGlass)
@@ -455,7 +564,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         if (grant.Effect == GrantEffect.Deny)
             return null;
         var granted = role!.IncludesAllPermissions ? engine.Catalog.Definitions.Select(definition => definition.Permission) : role.Permissions;
-        return await RequireHeldAsync(actor, granted, AccessEngine.Target(actor.Scope, grant.Scope), grant.Scope is TenantGrantScope, cancellationToken).ConfigureAwait(false);
+        return RequireHeld(loadedContext!, granted, AccessEngine.Target(actor.Scope, grant.Scope), grant.Scope is TenantGrantScope);
     }
 
     private async Task<AccessChangeResult<T>> RefuseAsync<T>(Change change, Refusal refusal, CancellationToken cancellationToken, long? currentRevision = null)

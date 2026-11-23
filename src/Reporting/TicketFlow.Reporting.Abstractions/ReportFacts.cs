@@ -1,3 +1,6 @@
+using System.Buffers;
+using System.Security.Cryptography;
+using System.Text;
 using TicketFlow.Conversations;
 using TicketFlow.Core;
 
@@ -26,6 +29,16 @@ public sealed record ReportDimensions
         Labels = Snapshot(labels);
     }
 
+    internal ReportDimensions(InboxId inbox, TeamId? team, UserId? agent, string? channel, ConversationPriority priority, IReadOnlyList<LabelId> validatedLabels)
+    {
+        Inbox = inbox;
+        Team = team;
+        Agent = agent;
+        Channel = channel;
+        Priority = priority;
+        Labels = validatedLabels;
+    }
+
     public InboxId Inbox { get; }
     public TeamId? Team { get; }
 
@@ -38,7 +51,12 @@ public sealed record ReportDimensions
     /// <summary>Distinct labels in ordinal order.</summary>
     public IReadOnlyList<LabelId> Labels { get; }
 
-    public ReportDimensions WithAgent(UserId? agent) => new(Inbox, Team, agent, Channel, Priority, Labels);
+    public ReportDimensions WithAgent(UserId? agent)
+    {
+        if (agent == default(UserId))
+            throw new ArgumentException("Inbox, team and agent identifiers must be initialized when supplied.");
+        return new(Inbox, Team, agent, Channel, Priority, Labels);
+    }
 
     public bool Equals(ReportDimensions? other) =>
         other is not null && Inbox == other.Inbox && Team == other.Team && Agent == other.Agent && Channel == other.Channel && Priority == other.Priority
@@ -48,9 +66,53 @@ public sealed record ReportDimensions
 
     internal static IReadOnlyList<LabelId> Snapshot(IEnumerable<LabelId>? labels)
     {
-        IReadOnlyList<LabelId> snapshot = [.. (labels ?? []).Distinct().OrderBy(label => label.Value, StringComparer.Ordinal)];
-        if (snapshot.Count > MaximumLabels || snapshot.Any(label => label == default))
+        if (labels is null)
+            return [];
+        if (labels is IReadOnlyList<LabelId> list)
+        {
+            var count = list.Count;
+            if (count == 0)
+                return [];
+            if (count == 1)
+            {
+                var only = list[0];
+                if (only == default)
+                    throw new ArgumentException($"At most {MaximumLabels} initialized labels are allowed.", nameof(labels));
+                return [only];
+            }
+            if (count <= MaximumLabels)
+            {
+                var ordered = true;
+                var prev = list[0];
+                if (prev == default)
+                    throw new ArgumentException($"At most {MaximumLabels} initialized labels are allowed.", nameof(labels));
+                for (var i = 1; i < count; i++)
+                {
+                    var cur = list[i];
+                    if (cur == default)
+                        throw new ArgumentException($"At most {MaximumLabels} initialized labels are allowed.", nameof(labels));
+                    if (string.CompareOrdinal(prev.Value, cur.Value) >= 0)
+                    {
+                        ordered = false;
+                        break;
+                    }
+                    prev = cur;
+                }
+                if (ordered)
+                {
+                    var copy = new LabelId[count];
+                    for (var i = 0; i < count; i++)
+                        copy[i] = list[i];
+                    return copy;
+                }
+            }
+        }
+        IReadOnlyList<LabelId> snapshot = [.. labels.Distinct().OrderBy(label => label.Value, StringComparer.Ordinal)];
+        if (snapshot.Count > MaximumLabels)
             throw new ArgumentException($"At most {MaximumLabels} initialized labels are allowed.", nameof(labels));
+        for (var i = 0; i < snapshot.Count; i++)
+            if (snapshot[i] == default)
+                throw new ArgumentException($"At most {MaximumLabels} initialized labels are allowed.", nameof(labels));
         return snapshot;
     }
 }
@@ -106,18 +168,52 @@ public sealed record ReportFact
 /// <summary>Deterministic source identifiers for facts that have no timeline event of their own.</summary>
 public static class ReportFactIds
 {
+    private static ReadOnlySpan<byte> CreatedPrefix => "tf-report-created-v1\u001F"u8;
+
     /// <summary>The source of a conversation's <see cref="ReportMetric.ConversationCreated"/> fact: a name-based UUID over the scope and conversation.</summary>
     public static Guid Created(TicketScope scope, ConversationId conversation)
     {
         ArgumentNullException.ThrowIfNull(scope);
         if (conversation == default)
             throw new ArgumentException("A conversation identifier is required.", nameof(conversation));
-        var text = string.Join('\u001F', "tf-report-created-v1", scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value, conversation.Value);
-        Span<byte> hash = stackalloc byte[32];
-        System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text), hash);
-        hash[6] = (byte)((hash[6] & 0x0F) | 0x80);   // RFC 9562 version 8 (custom)
-        hash[8] = (byte)((hash[8] & 0x3F) | 0x80);   // RFC 9562 variant
-        return new Guid(hash[..16], bigEndian: true);
+        var workspace = scope.WorkspaceId.Value;
+        var conv = conversation.Value;
+        var maxBytes = CreatedPrefix.Length
+            + Encoding.UTF8.GetMaxByteCount(scope.TenantId.Length) + 1
+            + Encoding.UTF8.GetMaxByteCount(scope.ProjectId.Length) + 1
+            + Encoding.UTF8.GetMaxByteCount(scope.EnvironmentId.Length) + 1
+            + Encoding.UTF8.GetMaxByteCount(scope.AppId.Length) + 1
+            + Encoding.UTF8.GetMaxByteCount(workspace.Length) + 1
+            + Encoding.UTF8.GetMaxByteCount(conv.Length);
+        byte[]? rented = null;
+        var buffer = maxBytes <= 512 ? stackalloc byte[maxBytes] : (rented = ArrayPool<byte>.Shared.Rent(maxBytes)).AsSpan(0, maxBytes);
+        try
+        {
+            var pos = 0;
+            CreatedPrefix.CopyTo(buffer);
+            pos += CreatedPrefix.Length;
+            pos += Encoding.UTF8.GetBytes(scope.TenantId, buffer[pos..]);
+            buffer[pos++] = 0x1F;
+            pos += Encoding.UTF8.GetBytes(scope.ProjectId, buffer[pos..]);
+            buffer[pos++] = 0x1F;
+            pos += Encoding.UTF8.GetBytes(scope.EnvironmentId, buffer[pos..]);
+            buffer[pos++] = 0x1F;
+            pos += Encoding.UTF8.GetBytes(scope.AppId, buffer[pos..]);
+            buffer[pos++] = 0x1F;
+            pos += Encoding.UTF8.GetBytes(workspace, buffer[pos..]);
+            buffer[pos++] = 0x1F;
+            pos += Encoding.UTF8.GetBytes(conv, buffer[pos..]);
+            Span<byte> hash = stackalloc byte[32];
+            SHA256.HashData(buffer[..pos], hash);
+            hash[6] = (byte)((hash[6] & 0x0F) | 0x80);   // RFC 9562 version 8 (custom)
+            hash[8] = (byte)((hash[8] & 0x3F) | 0x80);   // RFC 9562 variant
+            return new Guid(hash[..16], bigEndian: true);
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 }
 
@@ -203,9 +299,13 @@ public sealed record ReportProjection
     {
         State = state ?? throw new ArgumentNullException(nameof(state));
         ArgumentNullException.ThrowIfNull(facts);
-        Facts = [.. facts];
-        if (Facts.Count > MaximumFacts || Facts.Any(fact => fact is null || fact.Conversation != state.Conversation))
+        ReportFact[] copy = [.. facts];
+        if (copy.Length > MaximumFacts)
             throw new ArgumentException($"A projection carries at most {MaximumFacts} facts of its conversation.", nameof(facts));
+        for (var i = 0; i < copy.Length; i++)
+            if (copy[i] is null || copy[i].Conversation != state.Conversation)
+                throw new ArgumentException($"A projection carries at most {MaximumFacts} facts of its conversation.", nameof(facts));
+        Facts = copy;
     }
 
     public ReportConversationState State { get; }

@@ -24,13 +24,15 @@
             var y = Top + (PlotHeight * line / 3.0);
             <line x1="0" x2="@Width" y1="@F(y)" y2="@F(y)" class="tf-chart__grid" />
         }
+        @{ var max = ComputeMax(); }
         @for (var index = Series.Count - 1; index >= 0; index--)
         {
-            var points = Points(Series[index].Values);
+            var points = Points(Series[index].Values, max);
             if (points.Count == 0)
                 continue;
-            <path d="@Area(points)" fill="url(#@($"{Id}-fill-{index}"))" />
-            <path d="@Line(points)" fill="none" stroke="var(--chart-@(index + 1))" stroke-width="2" vector-effect="non-scaling-stroke" />
+            var line = Line(points);
+            <path d="@Area(line, points)" fill="url(#@($"{Id}-fill-{index}"))" />
+            <path d="@line" fill="none" stroke="var(--chart-@(index + 1))" stroke-width="2" vector-effect="non-scaling-stroke" />
         }
         @for (var bucket = 0; bucket < Labels.Count; bucket++)
         {
@@ -60,30 +62,52 @@
     private const double Width = 1000;
     private const double Top = 8;
     private double PlotHeight => Height - Top - 4;
-    private double Max => Math.Max(1, Series.SelectMany(series => series.Values).DefaultIfEmpty(0).Max() * 1.15);
     private double Step => Labels.Count > 1 ? Width / (Labels.Count - 1) : Width;
     private int LabelEvery => Math.Max(1, (int)Math.Ceiling(Labels.Count / 8.0));
 
+    private double ComputeMax()
+    {
+        var max = 0.0;
+        for (var s = 0; s < Series.Count; s++)
+        {
+            var values = Series[s].Values;
+            for (var i = 0; i < values.Count; i++)
+                if (values[i] > max)
+                    max = values[i];
+        }
+        return Math.Max(1, max * 1.15);
+    }
+
     private double X(int index) => Labels.Count > 1 ? index * Width / (Labels.Count - 1) : Width / 2;
 
-    private List<(double X, double Y)> Points(IReadOnlyList<double> values) =>
-        [.. values.Take(Labels.Count).Select((value, index) => (X(index), Top + PlotHeight - (value / Max * PlotHeight)))];
+    private List<(double X, double Y)> Points(IReadOnlyList<double> values, double max)
+    {
+        var count = Math.Min(values.Count, Labels.Count);
+        var points = new List<(double X, double Y)>(count);
+        var plotHeight = PlotHeight;
+        for (var i = 0; i < count; i++)
+            points.Add((X(i), Top + plotHeight - (values[i] / max * plotHeight)));
+        return points;
+    }
 
     private static string F(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
 
     private string Line(List<(double X, double Y)> points)
     {
-        var path = new System.Text.StringBuilder($"M{F(points[0].X)},{F(points[0].Y)}");
+        var path = new System.Text.StringBuilder(points.Count * 28);
+        path.Append('M').Append(F(points[0].X)).Append(',').Append(F(points[0].Y));
         for (var index = 1; index < points.Count; index++)
         {
             var (x0, y0) = points[index - 1];
             var (x1, y1) = points[index];
-            var mid = (x0 + x1) / 2;
-            path.Append($" C{F(mid)},{F(y0)} {F(mid)},{F(y1)} {F(x1)},{F(y1)}");
+            var mid = F((x0 + x1) / 2);
+            path.Append(" C").Append(mid).Append(',').Append(F(y0))
+                .Append(' ').Append(mid).Append(',').Append(F(y1))
+                .Append(' ').Append(F(x1)).Append(',').Append(F(y1));
         }
         return path.ToString();
     }
 
-    private string Area(List<(double X, double Y)> points) =>
-        $"{Line(points)} L{F(points[^1].X)},{F(Height)} L{F(points[0].X)},{F(Height)} Z";
+    private string Area(string line, List<(double X, double Y)> points) =>
+        $"{line} L{F(points[^1].X)},{F(Height)} L{F(points[0].X)},{F(Height)} Z";
 }

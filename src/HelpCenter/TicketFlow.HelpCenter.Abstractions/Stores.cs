@@ -67,11 +67,38 @@ public interface IHelpCenterStore
     /// <summary>Revisions newest first, at most <paramref name="limit"/> (1-100), with numbers below <paramref name="before"/> when supplied.</summary>
     Task<HelpCenterPage<ArticleRevision>> ListRevisionsAsync(TicketScope scope, ArticleId article, int limit, int? before = null, CancellationToken cancellationToken = default);
 
+    /// <summary>The highest revision number for <paramref name="article"/>, or 0 when never published.</summary>
+    async Task<int> GetLatestRevisionNumberAsync(TicketScope scope, ArticleId article, CancellationToken cancellationToken = default)
+    {
+        var latest = await ListRevisionsAsync(scope, article, 1, null, cancellationToken).ConfigureAwait(false);
+        return latest.Items.Count == 0 ? 0 : latest.Items[0].Number;
+    }
+
+    /// <summary>True when <paramref name="article"/> belongs to <paramref name="portal"/> and is currently published.</summary>
+    async Task<bool> IsArticlePublishedInPortalAsync(TicketScope scope, PortalId portal, ArticleId article, CancellationToken cancellationToken = default)
+    {
+        var stored = await GetArticleAsync(scope, article, cancellationToken).ConfigureAwait(false);
+        return stored is not null && stored.Record.State == ArticleState.Published && stored.Record.Article.Portal == portal;
+    }
+
     Task<PublishedArticle?> GetPublishedAsync(TicketScope scope, PortalId portal, HelpCenterLocale locale, HelpCenterSlug slug, CancellationToken cancellationToken = default);
 
     Task<PublishedArticle?> GetPublishedByIdAsync(TicketScope scope, ArticleId article, HelpCenterLocale locale, CancellationToken cancellationToken = default);
 
     Task<PublishedArticlePage> ListPublishedAsync(TicketScope scope, PublishedArticleQuery query, CancellationToken cancellationToken = default);
+
+    /// <summary>Lists published article summaries without fetching bodies or tags.</summary>
+    async Task<PublicArticlePage> ListPublishedSummariesAsync(TicketScope scope, PublishedArticleQuery query, CancellationToken cancellationToken = default)
+    {
+        var page = await ListPublishedAsync(scope, query, cancellationToken).ConfigureAwait(false);
+        var items = new PublicArticleSummary[page.Items.Count];
+        for (var i = 0; i < items.Length; i++)
+        {
+            var item = page.Items[i];
+            items[i] = new PublicArticleSummary(item.Article, item.Collection, item.Position, item.Content.Title, item.Content.Slug, item.Content.Excerpt, item.PublishedAt);
+        }
+        return new PublicArticlePage(items, page.Next);
+    }
 
     Task<IReadOnlyList<ArticleSnippet>> SearchAsync(TicketScope scope, HelpCenterSearchQuery query, CancellationToken cancellationToken = default);
 }

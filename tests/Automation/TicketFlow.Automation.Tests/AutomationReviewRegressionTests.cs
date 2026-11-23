@@ -66,7 +66,7 @@ public sealed class AutomationReviewRegressionTests
         Assert.AreEqual(2, log["executions.FindManyAsync"], "One record lookup per occurrence.");
         Assert.AreEqual(0, log["executions.FindAsync"]);
         Assert.AreEqual(0, log["executions.BeginAsync"]);
-        Assert.AreEqual(2, log["inboxes.GetAsync"], "One context per occurrence, not per rule.");
+        Assert.AreEqual(0, log["inboxes.GetAsync"], "No inbox read when no rule condition or action needs inbox/calendar data.");
         Assert.AreEqual(2, log["conversations.ReadTimelineAsync"], "One timeline read per change.");
         Assert.AreEqual(0, (await fixture.ExecutionsAsync()).Count);
     }

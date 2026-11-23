@@ -90,9 +90,7 @@ public sealed class AutomationTools(TicketFlowToolContext context)
             var request = new AutomationDryRunRequest(new ConversationId(conversationId), @event, rules?.Select(rule => new AutomationRuleId(rule)).ToList(), null, messageBody);
             return Map(await context.Service<IAutomationRuleService>().DryRunAsync(principal, request, cancellationToken), result => new DryRunOutput(
                 result.Conversation.Value,
-                [.. result.Rules.Select(preview => new RulePreviewOutput(preview.Rule.Value, preview.Name, TicketFlowToolJson.Token(preview.Match),
-                    [.. preview.Actions.Select(action => new ActionPreviewOutput(action.Index, Json(AutomationCodec.SerializeActions([action.Action])).GetProperty("actions")[0],
-                        context.UntrustedOrNull(ToolViews.Template, action.RenderedText), action.Note))]))],
+                [.. result.Rules.Select(RulePreview)],
                 result.Stopped?.Value,
                 result.EvaluatedAt));
         }, cancellationToken);
@@ -223,6 +221,24 @@ public sealed class AutomationTools(TicketFlowToolContext context)
         AutomationActionRefused refused => new("refused", null, TicketFlowToolJson.Token(refused.Reason)),
         AutomationActionFailed failed => new("failed", null, failed.Code),
     };
+
+    private RulePreviewOutput RulePreview(AutomationRulePreview preview)
+    {
+        if (preview.Actions.Count == 0)
+            return new RulePreviewOutput(preview.Rule.Value, preview.Name, TicketFlowToolJson.Token(preview.Match), []);
+        var rawActions = new AutomationAction[preview.Actions.Count];
+        for (var i = 0; i < preview.Actions.Count; i++)
+            rawActions[i] = preview.Actions[i].Action;
+        using var document = JsonDocument.Parse(AutomationCodec.SerializeActions(rawActions));
+        var array = document.RootElement.GetProperty("actions");
+        var outputs = new ActionPreviewOutput[preview.Actions.Count];
+        for (var i = 0; i < preview.Actions.Count; i++)
+        {
+            var action = preview.Actions[i];
+            outputs[i] = new ActionPreviewOutput(action.Index, array[i].Clone(), context.UntrustedOrNull(ToolViews.Template, action.RenderedText), action.Note);
+        }
+        return new RulePreviewOutput(preview.Rule.Value, preview.Name, TicketFlowToolJson.Token(preview.Match), outputs);
+    }
 
     private static AutomationRuleOutput RuleOutput(StoredAutomationRule stored) =>
         new(stored.Rule.Id.Value, stored.Rule.Name, stored.Rule.Enabled, stored.Rule.Priority, stored.Revision, Json(AutomationCodec.SerializeRule(stored.Rule)));

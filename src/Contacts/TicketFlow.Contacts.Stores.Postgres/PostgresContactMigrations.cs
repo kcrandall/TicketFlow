@@ -130,5 +130,11 @@ public static class PostgresContactMigrations
         ALTER TABLE tf_contact_changes DROP CONSTRAINT tf_contact_changes_kind_check;
         ALTER TABLE tf_contact_changes ADD CONSTRAINT tf_contact_changes_kind_check CHECK (kind BETWEEN 1 AND 7);
         CREATE INDEX tf_contact_link_suggestions_decided ON tf_contact_link_suggestions (updated_at) WHERE status <> 1;
+        """),
+        new(5, "perf-covering-indexes", """
+        CREATE INDEX tf_contacts_merged_id ON tf_contacts (merged_key, contact_id) WHERE merged_key IS NOT NULL;
+        CREATE INDEX tf_contact_identities_lookup_ord ON tf_contact_identities (identity_key, verified DESC, contact_id);
+        CREATE INDEX tf_contact_identities_search_ns ON tf_contact_identities (scope_key, kind, namespace, value, contact_id);
+        CREATE INDEX tf_contact_attribute_definitions_scope_key ON tf_contact_attribute_definitions (scope_key, attribute_key);
         """)]);
 }

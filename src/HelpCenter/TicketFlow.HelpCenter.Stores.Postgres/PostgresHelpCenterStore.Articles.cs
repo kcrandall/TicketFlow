@@ -90,15 +90,19 @@ public sealed partial class PostgresHelpCenterStore
         var existing = await ArticleStateAsync(connection, transaction, scope, article.Id, cancellationToken).ConfigureAwait(false);
         if (Miss<StoredArticle>(existing?.Revision, expectedRevision) is { } miss)
             return miss;
-        if (existing!.Value.Portal != article.Portal.Value || await InvalidReferencesAsync(connection, transaction, scope, article, cancellationToken).ConfigureAwait(false))
+        var current = existing!.Value;
+        if (current.Portal != article.Portal.Value || await InvalidReferencesAsync(connection, transaction, scope, article, cancellationToken).ConfigureAwait(false))
             return new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidReference);
-        var latest = await ScalarAsync<int>(connection, transaction, $"SELECT coalesce(max(number), 0) FROM tf_helpcenter_revisions WHERE {ArticleKeyWhere}",
-            command => BindArticleKey(command, scope, article.Id), cancellationToken).ConfigureAwait(false);
-        if (appendRevision is not null && (appendRevision.Article != article.Id || appendRevision.Number != latest + 1))
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidRevision);
-        var available = latest + (appendRevision is null ? 0 : 1);
-        if (record.PublishedRevision is { } live && live > available)
-            return new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidRevision);
+        if (appendRevision is not null || record.PublishedRevision != current.PublishedRevision)
+        {
+            var latest = await ScalarAsync<int>(connection, transaction, $"SELECT coalesce(max(number), 0) FROM tf_helpcenter_revisions WHERE {ArticleKeyWhere}",
+                command => BindArticleKey(command, scope, article.Id), cancellationToken).ConfigureAwait(false);
+            if (appendRevision is not null && (appendRevision.Article != article.Id || appendRevision.Number != latest + 1))
+                return new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidRevision);
+            var available = latest + (appendRevision is null ? 0 : 1);
+            if (record.PublishedRevision is { } live && live > available)
+                return new HelpCenterWriteRejected(HelpCenterWriteRejection.InvalidRevision);
+        }
 
         if (appendRevision is not null)
         {
@@ -125,25 +129,47 @@ public sealed partial class PostgresHelpCenterStore
             await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        await using (var clear = new NpgsqlCommand($"DELETE FROM tf_helpcenter_published WHERE {ArticleKeyWhere}", connection, transaction))
+        var wasPublished = current.State == ArticleState.Published;
+        var nowPublished = record.State == ArticleState.Published;
+        if (!wasPublished && !nowPublished)
         {
-            BindArticleKey(clear, scope, article.Id);
-            await clear.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            // Draft/Archived edit: no published rows exist before or after.
         }
-        if (record.State == ArticleState.Published)
+        else if (wasPublished && nowPublished && appendRevision is null && record.PublishedRevision == current.PublishedRevision)
         {
-            var revision = appendRevision is not null && appendRevision.Number == record.PublishedRevision
-                ? appendRevision
-                : await LoadRevisionAsync(connection, transaction, scope, article.Id, record.PublishedRevision!.Value, cancellationToken).ConfigureAwait(false);
-            try
+            // Draft-only edit of an already-published article: only update collection/position if they changed.
+            if (current.Collection != article.Collection?.Value || current.Position != article.Position)
             {
-                foreach (var translation in revision!.Translations)
-                    await InsertPublishedAsync(connection, transaction, scope, record, revision, translation, cancellationToken).ConfigureAwait(false);
+                await using var syncMeta = new NpgsqlCommand(
+                    $"UPDATE tf_helpcenter_published SET collection_id=@collection, position=@position WHERE {ArticleKeyWhere}", connection, transaction);
+                BindArticleKey(syncMeta, scope, article.Id);
+                AddText(syncMeta, "collection", article.Collection?.Value);
+                syncMeta.Parameters.AddWithValue("position", article.Position);
+                await syncMeta.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
-            catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == "tf_helpcenter_published_slug")
+        }
+        else
+        {
+            if (wasPublished)
             {
-                // The transaction is aborted; disposing it rolls back the revision insert and article update.
-                return new HelpCenterWriteRejected(HelpCenterWriteRejection.SlugConflict);
+                await using var clear = new NpgsqlCommand($"DELETE FROM tf_helpcenter_published WHERE {ArticleKeyWhere}", connection, transaction);
+                BindArticleKey(clear, scope, article.Id);
+                await clear.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            if (nowPublished)
+            {
+                var revision = appendRevision is not null && appendRevision.Number == record.PublishedRevision
+                    ? appendRevision
+                    : await LoadRevisionAsync(connection, transaction, scope, article.Id, record.PublishedRevision!.Value, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await InsertPublishedBatchAsync(connection, transaction, scope, record, revision!, cancellationToken).ConfigureAwait(false);
+                }
+                catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == "tf_helpcenter_published_slug")
+                {
+                    // The transaction is aborted; disposing it rolls back the revision insert and article update.
+                    return new HelpCenterWriteRejected(HelpCenterWriteRejection.SlugConflict);
+                }
             }
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -197,12 +223,90 @@ public sealed partial class PostgresHelpCenterStore
         return rows.Count > limit ? new(rows[..limit], true) : new(rows, false);
     }
 
+    public async Task<int> GetLatestRevisionNumberAsync(TicketScope scope, ArticleId article, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        Require(article.IsInitialized, nameof(article));
+        await using var command = source.CreateCommand($"SELECT coalesce(max(number), 0) FROM tf_helpcenter_revisions WHERE {ArticleKeyWhere}");
+        BindArticleKey(command, scope, article);
+        return (int)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+    }
+
+    public async Task<bool> IsArticlePublishedInPortalAsync(TicketScope scope, PortalId portal, ArticleId article, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        Require(portal.IsInitialized && article.IsInitialized, nameof(article));
+        await using var command = source.CreateCommand($"SELECT 1 FROM tf_helpcenter_articles WHERE {ArticleKeyWhere} AND portal_id=@portal AND state=2");
+        BindArticleKey(command, scope, article);
+        AddText(command, "portal", portal.Value);
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
+    }
+
     private static async Task<ArticleRevision?> LoadRevisionAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, TicketScope scope, ArticleId article, int number, CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand($"SELECT {RevisionColumns} FROM tf_helpcenter_revisions WHERE {ArticleKeyWhere} AND number=@number", connection, transaction);
         BindArticleKey(command, scope, article);
         command.Parameters.AddWithValue("number", number);
         return await ReadSingleAsync(command, reader => ReadRevision(reader, article), cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task InsertPublishedBatchAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, TicketScope scope, ArticleRecord record, ArticleRevision revision, CancellationToken cancellationToken)
+    {
+        var translations = revision.Translations;
+        if (translations.Count == 1)
+        {
+            await InsertPublishedAsync(connection, transaction, scope, record, revision, translations[0], cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        var article = record.Article;
+        var n = translations.Count;
+        var locales = new string[n];
+        var slugs = new string[n];
+        var titles = new string[n];
+        var excerpts = new string?[n];
+        var tagsJson = new string[n];
+        var tagsTexts = new string[n];
+        var bodies = new string[n];
+        var plains = new string[n];
+        var configs = new string[n];
+        for (var i = 0; i < n; i++)
+        {
+            var t = translations[i];
+            var content = t.Content;
+            locales[i] = content.Locale.Value;
+            slugs[i] = content.Slug.Value;
+            titles[i] = content.Title;
+            excerpts[i] = content.Excerpt;
+            tagsJson[i] = content.Tags.Count == 0 ? "[]" : System.Text.Json.JsonSerializer.Serialize(content.Tags);
+            tagsTexts[i] = string.Join(' ', content.Tags.Select(tag => tag.Replace('-', ' ').Replace('_', ' ')));
+            bodies[i] = content.Body;
+            plains[i] = t.PlainText;
+            configs[i] = HelpCenterSearchConfiguration.ForLocale(content.Locale);
+        }
+        await using var insert = new NpgsqlCommand($"""
+            INSERT INTO tf_helpcenter_published({ScopeColumns}, article_id, portal_id, collection_id, locale, slug, position, revision_number, published_at,
+                title, excerpt, tags, tags_text, body, plain_text, ts_config)
+            SELECT {ScopeParameters}, @article, @portal, @collection, r.locale, r.slug, @position, @number, @published_at,
+                r.title, r.excerpt, ARRAY(SELECT jsonb_array_elements_text(r.tags)), r.tags_text, r.body, r.plain, r.config::regconfig
+            FROM unnest(@locales, @slugs, @titles, @excerpts, @tags, @tags_texts, @bodies, @plains, @configs)
+                AS r(locale, slug, title, excerpt, tags, tags_text, body, plain, config)
+            """, connection, transaction);
+        BindArticleKey(insert, scope, article.Id);
+        AddText(insert, "portal", article.Portal.Value);
+        AddText(insert, "collection", article.Collection?.Value);
+        insert.Parameters.AddWithValue("position", article.Position);
+        insert.Parameters.AddWithValue("number", revision.Number);
+        insert.Parameters.AddWithValue("published_at", revision.PublishedAt);
+        insert.Parameters.Add(new NpgsqlParameter<string[]>("locales", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = locales });
+        insert.Parameters.Add(new NpgsqlParameter<string[]>("slugs", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = slugs });
+        insert.Parameters.Add(new NpgsqlParameter<string[]>("titles", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = titles });
+        insert.Parameters.Add(new NpgsqlParameter<string?[]>("excerpts", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = excerpts });
+        insert.Parameters.Add(new NpgsqlParameter<string[]>("tags", NpgsqlDbType.Array | NpgsqlDbType.Jsonb) { TypedValue = tagsJson });
+        insert.Parameters.Add(new NpgsqlParameter<string[]>("tags_texts", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = tagsTexts });
+        insert.Parameters.Add(new NpgsqlParameter<string[]>("bodies", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = bodies });
+        insert.Parameters.Add(new NpgsqlParameter<string[]>("plains", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = plains });
+        insert.Parameters.Add(new NpgsqlParameter<string[]>("configs", NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = configs });
+        await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task InsertPublishedAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, TicketScope scope, ArticleRecord record, ArticleRevision revision, PublishedTranslation translation, CancellationToken cancellationToken)
@@ -233,14 +337,17 @@ public sealed partial class PostgresHelpCenterStore
         await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private readonly record struct ArticleRow(long Revision, string Portal);
+    private readonly record struct ArticleRow(long Revision, string Portal, ArticleState State, int? PublishedRevision, string? Collection, int Position);
 
     private static async Task<ArticleRow?> ArticleStateAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, TicketScope scope, ArticleId id, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand($"SELECT revision, portal_id FROM tf_helpcenter_articles WHERE {ArticleKeyWhere}", connection, transaction);
+        await using var command = new NpgsqlCommand($"SELECT revision, portal_id, state, published_revision, collection_id, position FROM tf_helpcenter_articles WHERE {ArticleKeyWhere}", connection, transaction);
         BindArticleKey(command, scope, id);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? new ArticleRow(reader.GetInt64(0), reader.GetString(1)) : null;
+        await using var reader = await command.ExecuteReaderAsync(System.Data.CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ? new ArticleRow(reader.GetInt64(0), reader.GetString(1), (ArticleState)reader.GetInt16(2),
+                reader.IsDBNull(3) ? null : reader.GetInt32(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetInt32(5))
+            : null;
     }
 
     private static async Task<bool> InvalidReferencesAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, TicketScope scope, Article article, CancellationToken cancellationToken)

@@ -61,7 +61,7 @@ public sealed class AgentAvailabilityService : IAgentAvailabilityService
         if (!await RoutingGuards.PermittedAsync(access, actor, RoutingPermissions.StatusManage, RoutingResources.Agent(actor.Scope, settings.Agent), cancellationToken).ConfigureAwait(false))
             return RoutingRefused.Forbidden;
         var result = RoutingGuards.FromWrite(await agents.SaveSettingsAsync(actor.Scope, settings, expectedRevision, cancellationToken).ConfigureAwait(false));
-        if (result.Value is RoutingValue<StoredAgentProfile>)
+        if (result.Value is RoutingValue<StoredAgentProfile> applied && applied.Value.Presence.EffectiveStatus(time.GetUtcNow()) == AgentStatus.Online)
             await queue.NudgeAsync(actor.Scope, null, cancellationToken).ConfigureAwait(false);
         return result;
     }

@@ -161,10 +161,23 @@ internal static class AutomationEndpoints
         };
     }
 
-    private static AutomationRulePreviewResponse Preview(AutomationRulePreview preview) => new(preview.Rule.Value, preview.Name, TicketFlowHttp.Token(preview.Match),
-        [.. preview.Actions.Select(action => new AutomationActionPreviewResponse(action.Index, Action(action.Action), action.RenderedText, action.Note))]);
-
-    private static System.Text.Json.JsonElement Action(AutomationAction action) => Json.Parse(AutomationCodec.SerializeActions([action])).GetProperty("actions")[0];
+    private static AutomationRulePreviewResponse Preview(AutomationRulePreview preview)
+    {
+        if (preview.Actions.Count == 0)
+            return new(preview.Rule.Value, preview.Name, TicketFlowHttp.Token(preview.Match), []);
+        var rawActions = new AutomationAction[preview.Actions.Count];
+        for (var i = 0; i < preview.Actions.Count; i++)
+            rawActions[i] = preview.Actions[i].Action;
+        using var document = System.Text.Json.JsonDocument.Parse(AutomationCodec.SerializeActions(rawActions));
+        var array = document.RootElement.GetProperty("actions");
+        var outputs = new AutomationActionPreviewResponse[preview.Actions.Count];
+        for (var i = 0; i < preview.Actions.Count; i++)
+        {
+            var action = preview.Actions[i];
+            outputs[i] = new(action.Index, array[i].Clone(), action.RenderedText, action.Note);
+        }
+        return new(preview.Rule.Value, preview.Name, TicketFlowHttp.Token(preview.Match), outputs);
+    }
 
     internal static AutomationActionOutcomeResponse Outcome(AutomationActionOutcome outcome) => outcome switch
     {

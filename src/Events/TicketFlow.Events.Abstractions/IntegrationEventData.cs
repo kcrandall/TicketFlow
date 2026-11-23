@@ -38,18 +38,22 @@ internal static class EventSubjects
     public static IReadOnlyList<LabelId> Labels(IEnumerable<LabelId> labels, string name)
     {
         ArgumentNullException.ThrowIfNull(labels, name);
-        IReadOnlyList<LabelId> snapshot = [.. labels];
-        if (snapshot.Count > 128 || snapshot.Any(label => label == default))
+        LabelId[] snapshot = [.. labels];
+        if (snapshot.Length > 128)
             throw new ArgumentException("At most 128 initialized labels.", name);
+        for (var i = 0; i < snapshot.Length; i++)
+            if (snapshot[i] == default)
+                throw new ArgumentException("At most 128 initialized labels.", name);
         return snapshot;
     }
 
     public static string Identifier(string value, string name) => TicketScope.RequireIdentifier(value, name);
 
-    public static void Require(params bool[] initialized)
+    public static void Require(params ReadOnlySpan<bool> initialized)
     {
-        if (initialized.Any(value => !value))
-            throw new ArgumentException("Event identifiers must be initialized.");
+        for (var i = 0; i < initialized.Length; i++)
+            if (!initialized[i])
+                throw new ArgumentException("Event identifiers must be initialized.");
     }
 }
 

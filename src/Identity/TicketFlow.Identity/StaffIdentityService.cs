@@ -25,7 +25,7 @@ public sealed class StaffIdentityService(
         ArgumentNullException.ThrowIfNull(identity);
         if (user == default)
             throw new ArgumentException("A user identifier is required.", nameof(user));
-        if (await AuthorizeChangeAsync(actor, scope, user, cancellationToken).ConfigureAwait(false) is { } refused)
+        if (await AuthorizeChangeAsync(actor, scope, user, checkManage: true, cancellationToken).ConfigureAwait(false) is { } refused)
             return refused;
         var now = time.GetUtcNow();
         StaffIdentityAuditEvent auditEvent;
@@ -56,7 +56,7 @@ public sealed class StaffIdentityService(
         if (existing is null)
             return StaffIdentityRefused.NotFound;
         var user = existing.Link.User;
-        if (await AuthorizeChangeAsync(actor, scope, user, cancellationToken).ConfigureAwait(false) is { } refused)
+        if (await AuthorizeChangeAsync(actor, scope, user, checkManage: false, cancellationToken).ConfigureAwait(false) is { } refused)
             return refused;
         StaffIdentityAuditEvent auditEvent;
         try
@@ -129,16 +129,21 @@ public sealed class StaffIdentityService(
     /// <c>staff-identity:manage</c> in the workspace and authority to confer every grant <paramref name="user"/> holds there, from
     /// standard grants only (the Access administrator's escalation rule).
     /// </summary>
-    private async Task<StaffIdentityRefused?> AuthorizeChangeAsync(PrincipalRef actor, TicketScope scope, UserId user, CancellationToken cancellationToken)
+    private async Task<StaffIdentityRefused?> AuthorizeChangeAsync(PrincipalRef actor, TicketScope scope, UserId user, bool checkManage = true, CancellationToken cancellationToken = default)
     {
-        if (!await PermittedAsync(actor, StaffIdentityPermissions.Manage, new AccessResource(scope), cancellationToken).ConfigureAwait(false))
+        if (checkManage && !await PermittedAsync(actor, StaffIdentityPermissions.Manage, new AccessResource(scope), cancellationToken).ConfigureAwait(false))
             return StaffIdentityRefused.Forbidden;
-        var subjects = new List<GrantSubject> { user };
-        subjects.AddRange((await teams.GetTeamsAsync(scope, user, cancellationToken).ConfigureAwait(false)).Select(team => (GrantSubject)team));
+        var userTeams = await teams.GetTeamsAsync(scope, user, cancellationToken).ConfigureAwait(false);
+        var subjects = new List<GrantSubject>(userTeams.Count + 1) { user };
+        foreach (var team in userTeams)
+            subjects.Add(team);
         var held = await grants.ListForSubjectsAsync(AccessPartition.From(scope), scope.WorkspaceId, subjects, cancellationToken).ConfigureAwait(false);
         if (held.Count == 0)
             return null;
-        return await administrator.CheckCanConferAsync(actor, held.Select(stored => new GrantConferral(stored.Grant)), cancellationToken).ConfigureAwait(false) switch
+        var conferrals = new GrantConferral[held.Count];
+        for (var i = 0; i < held.Count; i++)
+            conferrals[i] = new GrantConferral(held[i].Grant);
+        return await administrator.CheckCanConferAsync(actor, conferrals, cancellationToken).ConfigureAwait(false) switch
         {
             AccessCheckPassed => null,
             AccessChangeRefused => new StaffIdentityRefused(StaffIdentityRefusal.Forbidden, ["The user holds grants the actor cannot confer."]),

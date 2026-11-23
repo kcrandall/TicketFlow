@@ -25,7 +25,7 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
     private const int MaximumCachedConversations = 4096;
 
     private readonly ConcurrentDictionary<string, ConnectionEntry> connections = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<object, ConcurrentDictionary<string, SubscriptionEntry>> topics = new();
+    private readonly ConcurrentDictionary<object, TopicBucket> topics = new();
     private readonly IServiceScopeFactory scopes;
     private readonly RealtimeOptions options;
     private readonly TimeProvider time;
@@ -37,7 +37,9 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
 
     // Owned by the worker only.
     private readonly Dictionary<object, PrincipalAuthorization> principals = [];
-    private readonly Dictionary<(TicketScope Scope, ConversationId Conversation), (StoredConversation? Value, long Revision)> conversationCache = [];
+    private readonly Dictionary<(TicketScope Scope, ConversationId Conversation), (StoredConversation? Value, long Revision, long Sequence)> conversationCache = [];
+    private long cacheSequence;
+    private DateTimeOffset lastPrunedAt;
 
     private long pending;
     private long dropped;
@@ -115,7 +117,8 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
                 return new RealtimeSubscriptionRefused(RealtimeRefusal.LimitReached);
             var entry = new SubscriptionEntry(connection, topic, grant);
             connection.Topics[topic.Value] = entry;
-            topics.GetOrAdd(topic.Value, _ => new ConcurrentDictionary<string, SubscriptionEntry>(StringComparer.Ordinal))[connectionId] = entry;
+            var bucket = topics.GetOrAdd(topic.Value, _ => new TopicBucket());
+            bucket.Add(connectionId, entry);
         }
         return new RealtimeSubscribed(topic);
     }
@@ -218,26 +221,55 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
 
     private async Task FanOutAsync(RealtimePublication publication)
     {
-        if (!topics.TryGetValue(publication.Topic.Value!, out var subscribers) || subscribers.IsEmpty)
+        if (!topics.TryGetValue(publication.Topic.Value!, out var bucket))
             return;
-        var targets = subscribers.Values.Where(target => !target.Connection.Closed).ToList();
-        if (targets.Count == 0)
+        var snapshot = bucket.Snapshot;
+        if (snapshot.Length == 0)
             return;
         var realtimeEvent = publication.Event;
 
-        foreach (var target in targets)
-            if (target.Connection.Connection.Subscriber.Value is VisitorSubscriber visitor && RealtimeDeliveryPolicy.ForVisitor(visitor, realtimeEvent) is { } visible)
-                Enqueue(target.Connection, target.Topic, visible);
-
-        var agents = targets.Where(target => target.Connection.Connection.Subscriber.Value is AgentSubscriber).ToList();
-        if (agents.Count == 0)
+        SubscriptionEntry? singleAgent = null;
+        List<SubscriptionEntry>? multipleAgents = null;
+        for (var i = 0; i < snapshot.Length; i++)
+        {
+            var target = snapshot[i];
+            if (target.Connection.Closed)
+                continue;
+            var subscriber = target.Connection.Connection.Subscriber.Value;
+            if (subscriber is VisitorSubscriber visitor)
+            {
+                if (RealtimeDeliveryPolicy.ForVisitor(visitor, realtimeEvent) is { } visible)
+                    Enqueue(target.Connection, target.Topic, visible);
+            }
+            else if (subscriber is AgentSubscriber)
+            {
+                if (singleAgent is null && multipleAgents is null)
+                    singleAgent = target;
+                else
+                {
+                    if (multipleAgents is null)
+                    {
+                        multipleAgents = new List<SubscriptionEntry>(snapshot.Length) { singleAgent! };
+                        singleAgent = null;
+                    }
+                    multipleAgents.Add(target);
+                }
+            }
+        }
+        if (singleAgent is null && multipleAgents is null)
             return;
+
         var (decided, plain) = RealtimeDeliveryPolicy.WithoutConversation(publication.Topic, realtimeEvent);
         if (decided)
         {
             if (plain is { } direct)
-                foreach (var target in agents)
-                    Enqueue(target.Connection, target.Topic, direct);
+            {
+                if (singleAgent is not null)
+                    Enqueue(singleAgent.Connection, singleAgent.Topic, direct);
+                else
+                    for (var i = 0; i < multipleAgents!.Count; i++)
+                        Enqueue(multipleAgents[i].Connection, multipleAgents[i].Topic, direct);
+            }
             return;
         }
 
@@ -249,48 +281,122 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
         {
             // A deleted conversation can no longer be authorized: only subscribers already granted the conversation topic learn that it was deleted.
             if (realtimeEvent.Value is ConversationChangedEvent { Kind: ConversationChangeKind.Deleted } && publication.Topic.Value is ConversationTopic)
-                foreach (var target in agents)
-                    Enqueue(target.Connection, target.Topic, realtimeEvent);
+            {
+                if (singleAgent is not null)
+                    Enqueue(singleAgent.Connection, singleAgent.Topic, realtimeEvent);
+                else
+                    for (var i = 0; i < multipleAgents!.Count; i++)
+                        Enqueue(multipleAgents[i].Connection, multipleAgents[i].Topic, realtimeEvent);
+            }
             return;
         }
 
         var resource = ConversationAccess.Resource(conversation);
-        foreach (var group in agents.GroupBy(target => ((AgentSubscriber)target.Connection.Connection.Subscriber.Value!).Principal.Value!))
+        var hasNotes = RealtimeDeliveryPolicy.HasNotes(realtimeEvent);
+        RealtimeEvent? strippedEvent = null;
+        var strippedComputed = false;
+        RealtimeEvent? GetStripped()
         {
-            var principal = ((AgentSubscriber)group.First().Connection.Connection.Subscriber.Value!).Principal;
-            var authorization = Authorization(principal);
-            RealtimeEvent? shared = null;
-            var sharedDecided = false;
-            foreach (var target in group)
+            if (!strippedComputed)
             {
-                RealtimeEvent? filtered;
-                if (target.Topic.Value is InboxQueueTopic queue)
+                strippedComputed = true;
+                strippedEvent = RealtimeDeliveryPolicy.StripNotes((ConversationChangedEvent)realtimeEvent.Value!);
+            }
+            return strippedEvent;
+        }
+
+        if (singleAgent is not null)
+        {
+            var principal = ((AgentSubscriber)singleAgent.Connection.Connection.Subscriber.Value!).Principal;
+            var authorization = Authorization(principal);
+            await DeliverToAgentAsync(singleAgent, principal, authorization, conversation.Scope, resource, realtimeEvent, hasNotes, GetStripped, evaluator, services).ConfigureAwait(false);
+        }
+        else
+        {
+            IAccessQueryPlanner? planner = null;
+            // Group multi-tab agents by principal so authorization & queue filter checks run once per principal.
+            var byPrincipal = new Dictionary<object, List<SubscriptionEntry>>();
+            for (var i = 0; i < multipleAgents!.Count; i++)
+            {
+                var target = multipleAgents[i];
+                var key = ((AgentSubscriber)target.Connection.Connection.Subscriber.Value!).Principal.Value!;
+                if (!byPrincipal.TryGetValue(key, out var list))
+                    byPrincipal[key] = list = [];
+                list.Add(target);
+            }
+            foreach (var group in byPrincipal.Values)
+            {
+                var principal = ((AgentSubscriber)group[0].Connection.Connection.Subscriber.Value!).Principal;
+                var authorization = Authorization(principal);
+                RealtimeEvent? shared = null;
+                var sharedDecided = false;
+                bool? noteReadable = null;
+                for (var i = 0; i < group.Count; i++)
                 {
-                    if (!await QueueAllowsAsync(target, queue, principal, resource, evaluator, services.GetRequiredService<IAccessQueryPlanner>()).ConfigureAwait(false))
-                        continue;
-                    filtered = await RealtimeDeliveryPolicy.StripNotesAsync(realtimeEvent,
-                        () => authorization.PermittedAsync(ConversationPermissions.NoteRead, conversation, evaluator, time, options.DecisionContextLifetime, CancellationToken.None))
-                        .ConfigureAwait(false);
-                }
-                else
-                {
-                    if (!sharedDecided)
+                    var target = group[i];
+                    RealtimeEvent? filtered;
+                    if (target.Topic.Value is InboxQueueTopic queue)
                     {
-                        sharedDecided = true;
-                        shared = await authorization.PermittedAsync(ConversationPermissions.Read, conversation, evaluator, time, options.DecisionContextLifetime, CancellationToken.None)
-                            .ConfigureAwait(false)
-                            ? await RealtimeDeliveryPolicy.StripNotesAsync(realtimeEvent,
-                                () => authorization.PermittedAsync(ConversationPermissions.NoteRead, conversation, evaluator, time, options.DecisionContextLifetime, CancellationToken.None))
-                                .ConfigureAwait(false)
-                            : null;
+                        planner ??= services.GetRequiredService<IAccessQueryPlanner>();
+                        if (!await QueueAllowsAsync(target, queue, principal, resource, evaluator, planner).ConfigureAwait(false))
+                            continue;
+                        if (!hasNotes)
+                            filtered = realtimeEvent;
+                        else
+                        {
+                            noteReadable ??= await authorization.PermittedAsync(ConversationPermissions.NoteRead, conversation.Scope, resource, evaluator, time, options.DecisionContextLifetime, CancellationToken.None).ConfigureAwait(false);
+                            filtered = noteReadable.Value ? realtimeEvent : GetStripped();
+                        }
                     }
-                    filtered = shared;
+                    else
+                    {
+                        if (!sharedDecided)
+                        {
+                            sharedDecided = true;
+                            if (await authorization.PermittedAsync(ConversationPermissions.Read, conversation.Scope, resource, evaluator, time, options.DecisionContextLifetime, CancellationToken.None).ConfigureAwait(false))
+                            {
+                                if (!hasNotes)
+                                    shared = realtimeEvent;
+                                else
+                                {
+                                    noteReadable ??= await authorization.PermittedAsync(ConversationPermissions.NoteRead, conversation.Scope, resource, evaluator, time, options.DecisionContextLifetime, CancellationToken.None).ConfigureAwait(false);
+                                    shared = noteReadable.Value ? realtimeEvent : GetStripped();
+                                }
+                            }
+                        }
+                        filtered = shared;
+                    }
+                    if (filtered is { } delivered)
+                        Enqueue(target.Connection, target.Topic, delivered);
                 }
-                if (filtered is { } delivered)
-                    Enqueue(target.Connection, target.Topic, delivered);
             }
         }
         PruneAuthorizations();
+    }
+
+    private async Task DeliverToAgentAsync(SubscriptionEntry target, PrincipalRef principal, PrincipalAuthorization authorization, TicketScope scope, AccessResource resource,
+        RealtimeEvent realtimeEvent, bool hasNotes, Func<RealtimeEvent?> getStripped, IAccessEvaluator evaluator, IServiceProvider services)
+    {
+        RealtimeEvent? filtered;
+        if (target.Topic.Value is InboxQueueTopic queue)
+        {
+            var planner = services.GetRequiredService<IAccessQueryPlanner>();
+            if (!await QueueAllowsAsync(target, queue, principal, resource, evaluator, planner).ConfigureAwait(false))
+                return;
+            filtered = !hasNotes || await authorization.PermittedAsync(ConversationPermissions.NoteRead, scope, resource, evaluator, time, options.DecisionContextLifetime, CancellationToken.None).ConfigureAwait(false)
+                ? realtimeEvent
+                : getStripped();
+        }
+        else
+        {
+            if (!await authorization.PermittedAsync(ConversationPermissions.Read, scope, resource, evaluator, time, options.DecisionContextLifetime, CancellationToken.None).ConfigureAwait(false))
+                return;
+            filtered = !hasNotes || await authorization.PermittedAsync(ConversationPermissions.NoteRead, scope, resource, evaluator, time, options.DecisionContextLifetime, CancellationToken.None).ConfigureAwait(false)
+                ? realtimeEvent
+                : getStripped();
+        }
+        if (filtered is { } delivered)
+            Enqueue(target.Connection, target.Topic, delivered);
     }
 
     private async Task<bool> QueueAllowsAsync(SubscriptionEntry target, InboxQueueTopic queue, PrincipalRef principal, AccessResource resource, IAccessEvaluator evaluator,
@@ -321,10 +427,21 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
             return cached.Value;
         var conversation = await store.GetAsync(key.Scope, key.Value, CancellationToken.None).ConfigureAwait(false);
         if (conversationCache.Count >= MaximumCachedConversations)
-            conversationCache.Clear();
+            EvictQuarterConversations();
         var revision = conversation?.Revision ?? (realtimeEvent.Value is ConversationChangedEvent deleted ? deleted.Revision : 0);
-        conversationCache[key] = (conversation, revision);
+        conversationCache[key] = (conversation, revision, ++cacheSequence);
         return conversation;
+    }
+
+    private void EvictQuarterConversations()
+    {
+        var evictCount = Math.Max(1, conversationCache.Count / 4);
+        var entries = new List<((TicketScope, ConversationId) Key, long Seq)>(conversationCache.Count);
+        foreach (var pair in conversationCache)
+            entries.Add((pair.Key, pair.Value.Sequence));
+        entries.Sort(static (a, b) => a.Seq.CompareTo(b.Seq));
+        for (var i = 0; i < evictCount; i++)
+            conversationCache.Remove(entries[i].Key);
     }
 
     private PrincipalAuthorization Authorization(PrincipalRef principal)
@@ -338,9 +455,18 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
     {
         if (principals.Count < 1024)
             return;
-        var cutoff = time.GetUtcNow() - options.DecisionContextLifetime;
-        foreach (var key in principals.Where(pair => pair.Value.LoadedAt < cutoff).Select(pair => pair.Key).ToList())
-            principals.Remove(key);
+        var now = time.GetUtcNow();
+        if (now - lastPrunedAt < options.DecisionContextLifetime)
+            return;
+        lastPrunedAt = now;
+        var cutoff = now - options.DecisionContextLifetime;
+        List<object>? stale = null;
+        foreach (var pair in principals)
+            if (pair.Value.LoadedAt < cutoff)
+                (stale ??= []).Add(pair.Key);
+        if (stale is not null)
+            for (var i = 0; i < stale.Count; i++)
+                principals.Remove(stale[i]);
     }
 
     private void Enqueue(ConnectionEntry connection, RealtimeTopic topic, RealtimeEvent realtimeEvent)
@@ -354,28 +480,44 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
 
     private async Task RunSenderAsync(ConnectionEntry entry)
     {
-        await foreach (var (topic, realtimeEvent) in entry.Queue.Reader.ReadAllAsync().ConfigureAwait(false))
+        var timeout = new CancellationTokenSource();
+        try
         {
-            try
+            await foreach (var (topic, realtimeEvent) in entry.Queue.Reader.ReadAllAsync().ConfigureAwait(false))
             {
-                if (entry.Closed)
-                    continue;
                 try
                 {
-                    using var timeout = new CancellationTokenSource(options.SendTimeout);
-                    await entry.Connection.SendAsync(topic, realtimeEvent, timeout.Token).ConfigureAwait(false);
+                    if (entry.Closed)
+                        continue;
+                    try
+                    {
+                        timeout.CancelAfter(options.SendTimeout);
+                        await entry.Connection.SendAsync(topic, realtimeEvent, timeout.Token).ConfigureAwait(false);
+                    }
+                    catch (Exception error)
+                    {
+                        logger.LogDebug("A realtime connection send failed ({Error}).", error.GetType().Name);
+                    }
+                    finally
+                    {
+                        if (!timeout.TryReset())
+                        {
+                            timeout.Dispose();
+                            timeout = new CancellationTokenSource();
+                        }
+                    }
+                    if (realtimeEvent.Value is VisitorSessionEndedEvent)
+                        await CloseAsync(entry).ConfigureAwait(false);
                 }
-                catch (Exception error)
+                finally
                 {
-                    logger.LogDebug("A realtime connection send failed ({Error}).", error.GetType().Name);
+                    Interlocked.Decrement(ref pending);
                 }
-                if (realtimeEvent.Value is VisitorSessionEndedEvent)
-                    await CloseAsync(entry).ConfigureAwait(false);
             }
-            finally
-            {
-                Interlocked.Decrement(ref pending);
-            }
+        }
+        finally
+        {
+            timeout.Dispose();
         }
     }
 
@@ -400,11 +542,29 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
 
     private void RemoveFromTopic(object key, string connectionId)
     {
-        if (!topics.TryGetValue(key, out var subscribers))
+        if (!topics.TryGetValue(key, out var bucket))
             return;
-        subscribers.TryRemove(connectionId, out _);
-        if (subscribers.IsEmpty)
+        if (bucket.Remove(connectionId))
             topics.TryRemove(key, out _);
+    }
+
+    private sealed class TopicBucket
+    {
+        private readonly Dictionary<string, SubscriptionEntry> entries = new(StringComparer.Ordinal);
+        public volatile SubscriptionEntry[] Snapshot = [];
+
+        public void Add(string connectionId, SubscriptionEntry entry)
+        {
+            entries[connectionId] = entry;
+            Snapshot = [.. entries.Values];
+        }
+
+        public bool Remove(string connectionId)
+        {
+            entries.Remove(connectionId);
+            Snapshot = entries.Count == 0 ? [] : [.. entries.Values];
+            return entries.Count == 0;
+        }
     }
 
     private sealed class ConnectionEntry(IRealtimeConnection connection, Channel<(RealtimeTopic, RealtimeEvent)> queue)

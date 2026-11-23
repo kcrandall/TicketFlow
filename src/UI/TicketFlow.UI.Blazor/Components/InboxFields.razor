@@ -11,7 +11,7 @@
     <div class="tf-field">
         <label class="tf-label" for="tf-i-kind">Channel</label>
         <select id="tf-i-kind" name="kind" class="tf-select">
-            @foreach (var kind in new[] { "livechat", "email", "whatsapp", "sms", "slack", "teams", "api" })
+            @foreach (var kind in ChannelKinds)
             {
                 <option value="@kind" selected="@(Session.FormValue("kind", Inbox?.Channel.Kind.Value) == kind)">@UiFormat.Channel(kind)</option>
             }
@@ -60,19 +60,30 @@
     [Parameter] public IReadOnlyDictionary<string, string> SlaPolicies { get; set; } = new Dictionary<string, string>();
     [Parameter] public IReadOnlyDictionary<string, string> RoutingPolicies { get; set; } = new Dictionary<string, string>();
 
+    private static readonly string[] ChannelKinds = ["livechat", "email", "whatsapp", "sms", "slack", "teams", "api"];
+
     /// <summary>Names of calendars, SLA policies and routing policies the viewer can read (empty when a feature is not registered).</summary>
     public static async Task<(Dictionary<string, string> Calendars, Dictionary<string, string> Sla, Dictionary<string, string> Routing)> LoadOptionsAsync(TicketFlowUISession session)
     {
         var calendars = new Dictionary<string, string>(StringComparer.Ordinal);
         var sla = new Dictionary<string, string>(StringComparer.Ordinal);
         var routing = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (session.Service<IBusinessCalendarService>() is { } calendarService && await calendarService.ListAsync(session.Principal, session.Aborted) is WorkspaceSucceeded<IReadOnlyList<StoredBusinessCalendar>> list)
+        var calendarTask = session.Service<IBusinessCalendarService>()?.ListAsync(session.Principal, session.Aborted);
+        var slaTask = session.Service<ISlaPolicyService>()?.ListAsync(session.Principal, session.Aborted);
+        var routingTask = session.Service<IRoutingPolicyService>()?.ListAsync(session.Principal, session.Aborted);
+        var pending = new List<Task>(3);
+        if (calendarTask is not null) pending.Add(calendarTask);
+        if (slaTask is not null) pending.Add(slaTask);
+        if (routingTask is not null) pending.Add(routingTask);
+        if (pending.Count > 1)
+            await Task.WhenAll(pending);
+        if (calendarTask is not null && await calendarTask is WorkspaceSucceeded<IReadOnlyList<StoredBusinessCalendar>> list)
             foreach (var calendar in list.Value)
                 calendars[calendar.Calendar.Id.Value] = calendar.Calendar.Name;
-        if (session.Service<ISlaPolicyService>() is { } slaService && await slaService.ListAsync(session.Principal, session.Aborted) is SlaValue<IReadOnlyList<StoredSlaPolicy>> policies)
+        if (slaTask is not null && await slaTask is SlaValue<IReadOnlyList<StoredSlaPolicy>> policies)
             foreach (var policy in policies.Value)
                 sla[policy.Policy.Id.Value] = policy.Policy.Name;
-        if (session.Service<IRoutingPolicyService>() is { } routingService && await routingService.ListAsync(session.Principal, session.Aborted) is RoutingValue<IReadOnlyList<StoredRoutingPolicy>> routes)
+        if (routingTask is not null && await routingTask is RoutingValue<IReadOnlyList<StoredRoutingPolicy>> routes)
             foreach (var policy in routes.Value)
                 routing[policy.Policy.Id.Value] = policy.Policy.Name;
         return (calendars, sla, routing);

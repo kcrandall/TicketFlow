@@ -112,6 +112,16 @@ public interface IAccessAdministrator
 
     Task<AccessChangeResult<StoredAccessGrant>> RevokeGrantAsync(PrincipalRef actor, GrantId grant, long expectedRevision, CancellationToken cancellationToken = default);
 
+    /// <summary>Revokes multiple grants in one authorized batch (loading the actor's grants once).</summary>
+    async Task<IReadOnlyList<AccessChangeResult<StoredAccessGrant>>> RevokeGrantsAsync(PrincipalRef actor, IReadOnlyList<(GrantId Id, long ExpectedRevision)> grants, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(grants);
+        var results = new AccessChangeResult<StoredAccessGrant>[grants.Count];
+        for (var i = 0; i < grants.Count; i++)
+            results[i] = await RevokeGrantAsync(actor, grants[i].Id, grants[i].ExpectedRevision, cancellationToken).ConfigureAwait(false);
+        return results;
+    }
+
     Task<AccessChangeResult<StoredAccessFieldPolicy>> CreateFieldPolicyAsync(PrincipalRef actor, AccessFieldPolicy policy, CancellationToken cancellationToken = default);
 
     Task<AccessChangeResult<StoredAccessFieldPolicy>> UpdateFieldPolicyAsync(PrincipalRef actor, AccessFieldPolicy policy, long expectedRevision, CancellationToken cancellationToken = default);

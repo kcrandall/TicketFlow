@@ -137,14 +137,16 @@ public static class InboxAgentGrants
         if (workspace == default || inbox == default || agent == default || !role.IsInitialized)
             throw new ArgumentException("Workspace, inbox, agent and role identifiers are required.");
         var buffer = cachedBuffer;
+        var writer = cachedWriter;
+        cachedBuffer = null;
+        cachedWriter = null;
         if (buffer is null)
-            cachedBuffer = buffer = new ArrayBufferWriter<byte>(256);
+            buffer = new ArrayBufferWriter<byte>(256);
         else
             buffer.ResetWrittenCount();
 
-        var writer = cachedWriter;
         if (writer is null)
-            cachedWriter = writer = new Utf8JsonWriter(buffer);
+            writer = new Utf8JsonWriter(buffer);
         else
             writer.Reset(buffer);
 
@@ -162,10 +164,14 @@ public static class InboxAgentGrants
         }
         finally
         {
-            if (buffer.Capacity > 4096)
-                cachedBuffer = null;
-            else
+            if (buffer.Capacity <= 4096)
+            {
                 buffer.ResetWrittenCount();
+                cachedBuffer = buffer;
+                cachedWriter = writer;
+            }
+            else
+                writer.Dispose();
         }
 
         Span<char> idChars = stackalloc char[Prefix.Length + 64];

@@ -26,10 +26,21 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
     {
         if (added.Count == 0 && removed.Count == 0)
             return null;
-        var teamGrants = await TeamGrantsAsync(actor, team, cancellationToken).ConfigureAwait(false);
-        if (added.Count > 0 && await CheckAdditionsWithTeamGrantsAsync(actor, team, added, teamGrants, cancellationToken).ConfigureAwait(false) is { } escalation)
+        var teamGrantsTask = TeamGrantsAsync(actor, team, cancellationToken);
+        var addedGrantsTask = added.Count > 0 ? MemberGrantsAsync(actor, added, cancellationToken) : null;
+        var removedGrantsTask = removed.Count > 0 ? MemberGrantsAsync(actor, removed, cancellationToken) : null;
+        if (addedGrantsTask is not null && removedGrantsTask is not null)
+            await Task.WhenAll(teamGrantsTask, addedGrantsTask, removedGrantsTask).ConfigureAwait(false);
+        else if (addedGrantsTask is not null)
+            await Task.WhenAll(teamGrantsTask, addedGrantsTask).ConfigureAwait(false);
+        else if (removedGrantsTask is not null)
+            await Task.WhenAll(teamGrantsTask, removedGrantsTask).ConfigureAwait(false);
+        else
+            await teamGrantsTask.ConfigureAwait(false);
+        var teamGrants = teamGrantsTask.Result;
+        if (addedGrantsTask is not null && await CheckAdditionsWithGrantsAsync(actor, team, teamGrants, addedGrantsTask.Result, cancellationToken).ConfigureAwait(false) is { } escalation)
             return escalation;
-        if (removed.Count > 0 && await CheckRemovalsWithTeamGrantsAsync(actor, team, removed, teamGrants, cancellationToken).ConfigureAwait(false) is { } lifted)
+        if (removedGrantsTask is not null && await CheckRemovalsWithGrantsAsync(actor, teamGrants, removedGrantsTask.Result, cancellationToken).ConfigureAwait(false) is { } lifted)
             return lifted;
         return null;
     }
@@ -38,27 +49,32 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
     {
         if (added.Count == 0)
             return null;
-        var teamGrants = await TeamGrantsAsync(actor, team, cancellationToken).ConfigureAwait(false);
-        return await CheckAdditionsWithTeamGrantsAsync(actor, team, added, teamGrants, cancellationToken).ConfigureAwait(false);
+        var teamGrantsTask = TeamGrantsAsync(actor, team, cancellationToken);
+        var addedGrantsTask = MemberGrantsAsync(actor, added, cancellationToken);
+        await Task.WhenAll(teamGrantsTask, addedGrantsTask).ConfigureAwait(false);
+        return await CheckAdditionsWithGrantsAsync(actor, team, teamGrantsTask.Result, addedGrantsTask.Result, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<WorkspaceRefused?> CheckAdditionsWithTeamGrantsAsync(PrincipalRef actor, TeamId team, IReadOnlyCollection<UserId> added, IReadOnlyList<StoredAccessGrant> teamGrants, CancellationToken cancellationToken)
+    private async Task<WorkspaceRefused?> CheckAdditionsWithGrantsAsync(PrincipalRef actor, TeamId team, IReadOnlyList<StoredAccessGrant> teamGrants, List<AccessGrant> memberGrants, CancellationToken cancellationToken)
     {
         var teamResource = new AccessResource(actor.Scope, team: team);
         var conferrals = new List<GrantConferral>(teamGrants.Count);
         for (var i = 0; i < teamGrants.Count; i++)
             if (teamGrants[i].Grant.Effect == GrantEffect.Allow)
                 conferrals.Add(new GrantConferral(teamGrants[i].Grant));
-        foreach (var grant in await MemberGrantsAsync(actor, added, cancellationToken).ConfigureAwait(false))
+        for (var i = 0; i < memberGrants.Count; i++)
+        {
+            var grant = memberGrants[i];
             if (grant.Effect == GrantEffect.Allow && UsesPrincipalTeams(grant.Condition))
                 conferrals.Add(new GrantConferral(grant, teamResource));
+        }
         foreach (var batch in conferrals.Chunk(CheckBatch))
             if (Refuse(await administrator.CheckCanConferAsync(actor, batch, cancellationToken).ConfigureAwait(false)) is { } refused)
                 return refused;
         return null;
     }
 
-    private async Task<WorkspaceRefused?> CheckRemovalsWithTeamGrantsAsync(PrincipalRef actor, TeamId team, IReadOnlyCollection<UserId> removed, IReadOnlyList<StoredAccessGrant> teamGrants, CancellationToken cancellationToken)
+    private async Task<WorkspaceRefused?> CheckRemovalsWithGrantsAsync(PrincipalRef actor, IReadOnlyList<StoredAccessGrant> teamGrants, List<AccessGrant> memberGrants, CancellationToken cancellationToken)
     {
         var now = time.GetUtcNow();
         var revoked = new List<AccessGrant>(teamGrants.Count);
@@ -68,9 +84,12 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
             if (grant.Effect == GrantEffect.Deny && Live(grant, now))
                 revoked.Add(grant);
         }
-        foreach (var grant in await MemberGrantsAsync(actor, removed, cancellationToken).ConfigureAwait(false))
+        for (var i = 0; i < memberGrants.Count; i++)
+        {
+            var grant = memberGrants[i];
             if (grant.Effect == GrantEffect.Deny && Live(grant, now) && UsesPrincipalTeams(grant.Condition))
                 revoked.Add(grant);
+        }
         return await CheckRevokeAsync(actor, revoked, cancellationToken).ConfigureAwait(false);
     }
 
@@ -101,12 +120,38 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
 
     private async Task<List<AccessGrant>> MemberGrantsAsync(PrincipalRef actor, IReadOnlyCollection<UserId> members, CancellationToken cancellationToken)
     {
-        var result = new List<AccessGrant>();
+        var partition = AccessPartition.From(actor.Scope);
+        var workspace = actor.Scope.WorkspaceId;
+        if (members.Count <= AccessLimits.MaximumSubjectsPerQuery)
+        {
+            var subjects = new GrantSubject[members.Count];
+            var i = 0;
+            foreach (var member in members)
+                subjects[i++] = member;
+            var stored = await grants.ListForSubjectsAsync(partition, workspace, subjects, cancellationToken).ConfigureAwait(false);
+            var single = new List<AccessGrant>(stored.Count);
+            for (var j = 0; j < stored.Count; j++)
+                single.Add(stored[j].Grant);
+            return single;
+        }
+        var tasks = new List<Task<IReadOnlyList<StoredAccessGrant>>>();
         foreach (var batch in members.Chunk(AccessLimits.MaximumSubjectsPerQuery))
         {
-            var stored = await grants.ListForSubjectsAsync(AccessPartition.From(actor.Scope), actor.Scope.WorkspaceId,
-                [.. batch.Select(member => (GrantSubject)member)], cancellationToken).ConfigureAwait(false);
-            result.AddRange(stored.Select(entry => entry.Grant));
+            var subjects = new GrantSubject[batch.Length];
+            for (var i = 0; i < batch.Length; i++)
+                subjects[i] = batch[i];
+            tasks.Add(grants.ListForSubjectsAsync(partition, workspace, subjects, cancellationToken));
+        }
+        var pages = await Task.WhenAll(tasks).ConfigureAwait(false);
+        var total = 0;
+        for (var i = 0; i < pages.Length; i++)
+            total += pages[i].Count;
+        var result = new List<AccessGrant>(total);
+        for (var i = 0; i < pages.Length; i++)
+        {
+            var page = pages[i];
+            for (var j = 0; j < page.Count; j++)
+                result.Add(page[j].Grant);
         }
         return result;
     }

@@ -26,13 +26,15 @@ public static class ContactLinkingCodec
         if (policy.Value is null)
             throw new ArgumentException("A policy is required.", nameof(policy));
         var buffer = sharedBuffer;
+        var writer = sharedWriter;
+        sharedBuffer = null;
+        sharedWriter = null;
         if (buffer is null)
-            sharedBuffer = buffer = new ArrayBufferWriter<byte>(128);
+            buffer = new ArrayBufferWriter<byte>(128);
         else
             buffer.Clear();
-        var writer = sharedWriter;
         if (writer is null)
-            sharedWriter = writer = new Utf8JsonWriter(buffer);
+            writer = new Utf8JsonWriter(buffer);
         else
             writer.Reset(buffer);
         try
@@ -68,7 +70,13 @@ public static class ContactLinkingCodec
         finally
         {
             buffer.Clear();
-            writer.Reset(buffer);
+            if (buffer.Capacity <= 4096)
+            {
+                sharedBuffer = buffer;
+                sharedWriter = writer;
+            }
+            else
+                writer.Dispose();
         }
     }
 

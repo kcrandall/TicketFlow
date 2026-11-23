@@ -26,44 +26,49 @@ public static class BusinessCalendarCodec
     public static string EncodeSchedule(BusinessCalendar calendar)
     {
         ArgumentNullException.ThrowIfNull(calendar);
-        var buffer = RentBuffer();
+        var (buffer, writer) = RentWriter();
         try
         {
-            WriteSchedule(buffer, calendar);
+            WriteSchedule(writer, calendar);
             return Encoding.UTF8.GetString(buffer.WrittenSpan);
         }
         finally
         {
-            ReleaseBuffer(buffer);
+            ReleaseWriter(buffer, writer);
         }
     }
 
-    private static ArrayBufferWriter<byte> RentBuffer()
+    private static (ArrayBufferWriter<byte> Buffer, Utf8JsonWriter Writer) RentWriter()
     {
         var buffer = cachedBuffer;
-        if (buffer is null)
-            cachedBuffer = buffer = new ArrayBufferWriter<byte>(512);
-        else
-            buffer.ResetWrittenCount();
-        return buffer;
-    }
-
-    private static void ReleaseBuffer(ArrayBufferWriter<byte> buffer)
-    {
-        if (buffer.Capacity > MaximumPooledBufferCapacity)
-            cachedBuffer = null;
-        else
-            buffer.ResetWrittenCount();
-    }
-
-    private static void WriteSchedule(ArrayBufferWriter<byte> buffer, BusinessCalendar calendar)
-    {
         var writer = cachedWriter;
+        cachedBuffer = null;
+        cachedWriter = null;
+        if (buffer is null)
+            buffer = new ArrayBufferWriter<byte>(512);
+        else
+            buffer.ResetWrittenCount();
         if (writer is null)
-            cachedWriter = writer = new Utf8JsonWriter(buffer);
+            writer = new Utf8JsonWriter(buffer);
         else
             writer.Reset(buffer);
+        return (buffer, writer);
+    }
 
+    private static void ReleaseWriter(ArrayBufferWriter<byte> buffer, Utf8JsonWriter writer)
+    {
+        if (buffer.Capacity <= MaximumPooledBufferCapacity)
+        {
+            buffer.ResetWrittenCount();
+            cachedBuffer = buffer;
+            cachedWriter = writer;
+        }
+        else
+            writer.Dispose();
+    }
+
+    private static void WriteSchedule(Utf8JsonWriter writer, BusinessCalendar calendar)
+    {
         writer.WriteStartObject();
         writer.WriteNumber("v"u8, 1);
         writer.WriteStartArray("week"u8);
@@ -160,16 +165,16 @@ public static class BusinessCalendarCodec
                     }
                     var calendar = new BusinessCalendar(id, name, timeZoneId, week, overrides);
                     // Only canonical encodings decode, so a stored schedule never silently changes meaning on re-encoding.
-                    var canonicalBuffer = RentBuffer();
+                    var (canonicalBuffer, canonicalWriter) = RentWriter();
                     try
                     {
-                        WriteSchedule(canonicalBuffer, calendar);
+                        WriteSchedule(canonicalWriter, calendar);
                         if (!canonicalBuffer.WrittenSpan.SequenceEqual(inputUtf8))
                             throw new FormatException("The schedule is not in canonical form.");
                     }
                     finally
                     {
-                        ReleaseBuffer(canonicalBuffer);
+                        ReleaseWriter(canonicalBuffer, canonicalWriter);
                     }
                     return calendar;
                 }

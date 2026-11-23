@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using ModelContextProtocol;
@@ -18,7 +18,9 @@ namespace TicketFlow.Mcp;
 /// </summary>
 internal static class TicketFlowToolListFilter
 {
-    private static readonly ConcurrentDictionary<Tool, (Tool Permitted, Tool Denied)> MarkedCache = new(ReferenceEqualityComparer.Instance);
+    private sealed record MarkedPair(Tool Permitted, Tool Denied);
+
+    private static readonly ConditionalWeakTable<Tool, MarkedPair> MarkedCache = new();
 
     public static McpRequestHandler<ListToolsRequestParams, ListToolsResult> Create(McpRequestHandler<ListToolsRequestParams, ListToolsResult> next) =>
         async (request, cancellationToken) =>
@@ -82,7 +84,7 @@ internal static class TicketFlowToolListFilter
     {
         if (permitted is not { } value)
             return tool;
-        var pair = MarkedCache.GetOrAdd(tool, static original => (CloneWith(original, true), CloneWith(original, false)));
+        var pair = MarkedCache.GetValue(tool, static original => new MarkedPair(CloneWith(original, true), CloneWith(original, false)));
         return value ? pair.Permitted : pair.Denied;
     }
 

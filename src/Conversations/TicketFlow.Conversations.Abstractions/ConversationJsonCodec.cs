@@ -628,14 +628,16 @@ public static class ConversationJsonCodec
     private static (string Json, int ByteCount) WriteWithByteCount(Action<Utf8JsonWriter> write)
     {
         var buffer = sharedBuffer;
+        var writer = sharedWriter;
+        sharedBuffer = null;
+        sharedWriter = null;
         if (buffer is null)
-            sharedBuffer = buffer = new ArrayBufferWriter<byte>(512);
+            buffer = new ArrayBufferWriter<byte>(512);
         else
             buffer.Clear();
 
-        var writer = sharedWriter;
         if (writer is null)
-            sharedWriter = writer = new Utf8JsonWriter(buffer);
+            writer = new Utf8JsonWriter(buffer);
         else
             writer.Reset(buffer);
 
@@ -648,17 +650,14 @@ public static class ConversationJsonCodec
         }
         finally
         {
-            if (buffer.Capacity > MaxPooledBufferCapacity)
+            buffer.Clear();
+            if (buffer.Capacity <= MaxPooledBufferCapacity)
             {
-                sharedBuffer = null;
-                sharedWriter = null;
-                writer.Dispose();
+                sharedBuffer = buffer;
+                sharedWriter = writer;
             }
             else
-            {
-                buffer.Clear();
-                writer.Reset(buffer);
-            }
+                writer.Dispose();
         }
     }
 

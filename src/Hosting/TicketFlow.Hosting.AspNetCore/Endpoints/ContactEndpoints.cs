@@ -145,7 +145,9 @@ internal static class ContactEndpoints
                 buffered += writer.BytesCommitted + 1;
                 if (buffered >= NdjsonFlushThresholdBytes)
                 {
-                    await pipe.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    var flush = await pipe.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    if (flush.IsCanceled || flush.IsCompleted)
+                        return;
                     buffered = 0;
                 }
             }

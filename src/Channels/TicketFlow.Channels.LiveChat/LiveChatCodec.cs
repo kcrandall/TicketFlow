@@ -22,86 +22,96 @@ public static class LiveChatCodec
     [ThreadStatic]
     private static Utf8JsonWriter? sharedWriter;
 
-    private static (ArrayBufferWriter<byte> Buffer, Utf8JsonWriter Writer) AcquireWriter()
+    private static string WritePooled(Action<Utf8JsonWriter> write)
     {
         var buffer = sharedBuffer;
-        if (buffer is null)
-            sharedBuffer = buffer = new ArrayBufferWriter<byte>(512);
-        else
-            buffer.ResetWrittenCount();
         var writer = sharedWriter;
+        sharedBuffer = null;
+        sharedWriter = null;
+        if (buffer is null)
+            buffer = new ArrayBufferWriter<byte>(512);
+        else
+            buffer.Clear();
         if (writer is null)
-            sharedWriter = writer = new Utf8JsonWriter(buffer);
+            writer = new Utf8JsonWriter(buffer);
         else
             writer.Reset(buffer);
-        return (buffer, writer);
-    }
-
-    private static string FinishWriter(ArrayBufferWriter<byte> buffer, Utf8JsonWriter writer)
-    {
-        writer.Flush();
-        var result = Encoding.UTF8.GetString(buffer.WrittenSpan);
-        if (buffer.Capacity > 65536)
-            sharedBuffer = null;
-        return result;
+        try
+        {
+            write(writer);
+            writer.Flush();
+            return Encoding.UTF8.GetString(buffer.WrittenSpan);
+        }
+        finally
+        {
+            buffer.Clear();
+            if (buffer.Capacity <= 65536)
+            {
+                sharedBuffer = buffer;
+                sharedWriter = writer;
+            }
+            else
+                writer.Dispose();
+        }
     }
 
     public static string EncodeWidget(LiveChatWidget widget)
     {
         ArgumentNullException.ThrowIfNull(widget);
-        var (buffer, writer) = AcquireWriter();
-        writer.WriteStartObject();
-        writer.WriteNumber("v"u8, 1);
-        writer.WriteStartArray("origins"u8);
-        for (var i = 0; i < widget.AllowedOrigins.Count; i++)
-            writer.WriteStringValue(widget.AllowedOrigins[i]);
-        writer.WriteEndArray();
-        if (widget.ThemeRef is not null)
-            writer.WriteString("theme"u8, widget.ThemeRef);
-        writer.WriteStartArray("prechat"u8);
-        for (var i = 0; i < widget.PrechatFields.Count; i++)
+        return WritePooled(writer =>
         {
-            var field = widget.PrechatFields[i];
             writer.WriteStartObject();
-            writer.WriteString("key"u8, field.Key);
-            writer.WriteString("label"u8, field.Label);
-            writer.WriteNumber("kind"u8, (int)field.Kind);
-            writer.WriteBoolean("required"u8, field.Required);
-            writer.WriteNumber("max"u8, field.MaximumLength);
-            writer.WriteBoolean("sensitive"u8, field.Sensitive);
-            writer.WriteEndObject();
-        }
-        writer.WriteEndArray();
-        if (widget.GreetingMessage is not null)
-            writer.WriteString("greeting"u8, widget.GreetingMessage);
-        if (widget.AwayMessage is not null)
-            writer.WriteString("away"u8, widget.AwayMessage);
-        if (widget.Deflection is { } deflection)
-        {
-            writer.WriteStartObject("deflection"u8);
-            writer.WriteString("portal"u8, deflection.Portal.Value);
-            writer.WriteString("locale"u8, deflection.Locale.Value);
-            writer.WriteNumber("max"u8, deflection.MaximumResults);
-            writer.WriteEndObject();
-        }
-        if (widget.Attachments is { } attachments)
-        {
-            writer.WriteStartObject("attachments"u8);
-            writer.WriteNumber("maxBytes"u8, attachments.MaximumBytes);
-            writer.WriteStartArray("types"u8);
-            for (var i = 0; i < attachments.AllowedMediaTypes.Count; i++)
-                writer.WriteStringValue(attachments.AllowedMediaTypes[i]);
+            writer.WriteNumber("v"u8, 1);
+            writer.WriteStartArray("origins"u8);
+            for (var i = 0; i < widget.AllowedOrigins.Count; i++)
+                writer.WriteStringValue(widget.AllowedOrigins[i]);
             writer.WriteEndArray();
+            if (widget.ThemeRef is not null)
+                writer.WriteString("theme"u8, widget.ThemeRef);
+            writer.WriteStartArray("prechat"u8);
+            for (var i = 0; i < widget.PrechatFields.Count; i++)
+            {
+                var field = widget.PrechatFields[i];
+                writer.WriteStartObject();
+                writer.WriteString("key"u8, field.Key);
+                writer.WriteString("label"u8, field.Label);
+                writer.WriteNumber("kind"u8, (int)field.Kind);
+                writer.WriteBoolean("required"u8, field.Required);
+                writer.WriteNumber("max"u8, field.MaximumLength);
+                writer.WriteBoolean("sensitive"u8, field.Sensitive);
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+            if (widget.GreetingMessage is not null)
+                writer.WriteString("greeting"u8, widget.GreetingMessage);
+            if (widget.AwayMessage is not null)
+                writer.WriteString("away"u8, widget.AwayMessage);
+            if (widget.Deflection is { } deflection)
+            {
+                writer.WriteStartObject("deflection"u8);
+                writer.WriteString("portal"u8, deflection.Portal.Value);
+                writer.WriteString("locale"u8, deflection.Locale.Value);
+                writer.WriteNumber("max"u8, deflection.MaximumResults);
+                writer.WriteEndObject();
+            }
+            if (widget.Attachments is { } attachments)
+            {
+                writer.WriteStartObject("attachments"u8);
+                writer.WriteNumber("maxBytes"u8, attachments.MaximumBytes);
+                writer.WriteStartArray("types"u8);
+                for (var i = 0; i < attachments.AllowedMediaTypes.Count; i++)
+                    writer.WriteStringValue(attachments.AllowedMediaTypes[i]);
+                writer.WriteEndArray();
+                writer.WriteEndObject();
+            }
+            writer.WriteStartObject("identity"u8);
+            writer.WriteString("namespace"u8, widget.Identity.Namespace);
+            writer.WriteBoolean("hmac"u8, widget.Identity.AllowHmac);
+            writer.WriteBoolean("token"u8, widget.Identity.AllowSignedToken);
+            writer.WriteBoolean("required"u8, widget.Identity.RequireVerified);
             writer.WriteEndObject();
-        }
-        writer.WriteStartObject("identity"u8);
-        writer.WriteString("namespace"u8, widget.Identity.Namespace);
-        writer.WriteBoolean("hmac"u8, widget.Identity.AllowHmac);
-        writer.WriteBoolean("token"u8, widget.Identity.AllowSignedToken);
-        writer.WriteBoolean("required"u8, widget.Identity.RequireVerified);
-        writer.WriteEndObject();
-        writer.WriteEndObject();
-        return FinishWriter(buffer, writer);
+            writer.WriteEndObject();
+        });
     }
 
     public static LiveChatWidget DecodeWidget(string configurationId, InboxId inbox, string json)
@@ -173,15 +183,16 @@ public static class LiveChatCodec
             keys[idx++] = key;
         if (keys.Length > 1)
             Array.Sort(keys, StringComparer.Ordinal);
-        var (buffer, writer) = AcquireWriter();
-        writer.WriteStartObject();
-        writer.WriteNumber("v"u8, 1);
-        writer.WriteStartObject("answers"u8);
-        for (var i = 0; i < keys.Length; i++)
-            writer.WriteString(keys[i], answers[keys[i]]);
-        writer.WriteEndObject();
-        writer.WriteEndObject();
-        return FinishWriter(buffer, writer);
+        return WritePooled(writer =>
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber("v"u8, 1);
+            writer.WriteStartObject("answers"u8);
+            for (var i = 0; i < keys.Length; i++)
+                writer.WriteString(keys[i], answers[keys[i]]);
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        });
     }
 
     public static IReadOnlyDictionary<string, string> DecodePrechat(string json)

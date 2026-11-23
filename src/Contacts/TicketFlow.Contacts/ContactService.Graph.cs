@@ -22,14 +22,34 @@ public sealed partial class ContactService
         {
             var strong = new SortedSet<string>(StringComparer.Ordinal);
             var weak = new SortedSet<string>(StringComparer.Ordinal);
-            foreach (var evidence in request.Evidence)
+            var evidenceList = request.Evidence;
+            if (evidenceList.Count == 1)
             {
+                var evidence = evidenceList[0];
                 foreach (var owner in await store.FindByIdentityAsync(scope, evidence.Address, cancellationToken).ConfigureAwait(false))
                 {
                     if (evidence.Verification.IsVerified && owner.Verification.IsVerified)
                         strong.Add(owner.Contact.Value);
                     else
                         weak.Add(owner.Contact.Value);
+                }
+            }
+            else
+            {
+                var lookupTasks = new Task<IReadOnlyList<ContactIdentityOwner>>[evidenceList.Count];
+                for (var i = 0; i < evidenceList.Count; i++)
+                    lookupTasks[i] = store.FindByIdentityAsync(scope, evidenceList[i].Address, cancellationToken);
+                var results = await Task.WhenAll(lookupTasks).ConfigureAwait(false);
+                for (var i = 0; i < results.Length; i++)
+                {
+                    var verifiedEvidence = evidenceList[i].Verification.IsVerified;
+                    foreach (var owner in results[i])
+                    {
+                        if (verifiedEvidence && owner.Verification.IsVerified)
+                            strong.Add(owner.Contact.Value);
+                        else
+                            weak.Add(owner.Contact.Value);
+                    }
                 }
             }
             weak.ExceptWith(strong);
@@ -298,13 +318,15 @@ public sealed partial class ContactService
     private static string EncodeCursor(ContactSearch search, ContactSearchCursor next)
     {
         var buffer = cursorBuffer;
+        var writer = cursorWriter;
+        cursorBuffer = null;
+        cursorWriter = null;
         if (buffer is null)
-            cursorBuffer = buffer = new ArrayBufferWriter<byte>(256);
+            buffer = new ArrayBufferWriter<byte>(256);
         else
             buffer.Clear();
-        var writer = cursorWriter;
         if (writer is null)
-            cursorWriter = writer = new Utf8JsonWriter(buffer);
+            writer = new Utf8JsonWriter(buffer);
         else
             writer.Reset(buffer);
         try
@@ -324,7 +346,13 @@ public sealed partial class ContactService
         finally
         {
             buffer.Clear();
-            writer.Reset(buffer);
+            if (buffer.Capacity <= 8192)
+            {
+                cursorBuffer = buffer;
+                cursorWriter = writer;
+            }
+            else
+                writer.Dispose();
         }
     }
 

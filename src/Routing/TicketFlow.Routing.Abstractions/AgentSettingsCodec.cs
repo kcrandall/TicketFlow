@@ -28,42 +28,55 @@ public static class AgentSettingsCodec
         if (settings.Capacities.Count == 0 && settings.Skills.Count == 0)
             return EmptySettingsJson;
         var buffer = sharedBuffer;
+        var writer = sharedWriter;
+        sharedBuffer = null;
+        sharedWriter = null;
         if (buffer is null)
-            sharedBuffer = buffer = new ArrayBufferWriter<byte>(256);
+            buffer = new ArrayBufferWriter<byte>(256);
         else
             buffer.ResetWrittenCount();
-        var writer = sharedWriter;
         if (writer is null)
-            sharedWriter = writer = new Utf8JsonWriter(buffer);
+            writer = new Utf8JsonWriter(buffer);
         else
             writer.Reset(buffer);
-        writer.WriteStartObject();
-        writer.WriteNumber("v"u8, Version);
-        writer.WriteStartArray("capacities"u8);
-        foreach (var (kind, capacity) in settings.Capacities)
+        try
         {
             writer.WriteStartObject();
-            writer.WriteString("kind"u8, kind.Value);
-            writer.WriteNumber("max"u8, capacity);
+            writer.WriteNumber("v"u8, Version);
+            writer.WriteStartArray("capacities"u8);
+            foreach (var (kind, capacity) in settings.Capacities)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("kind"u8, kind.Value);
+                writer.WriteNumber("max"u8, capacity);
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+            writer.WriteStartArray("skills"u8);
+            for (var i = 0; i < settings.Skills.Count; i++)
+            {
+                var skill = settings.Skills[i];
+                writer.WriteStartObject();
+                writer.WriteString("name"u8, skill.Name);
+                writer.WriteNumber("level"u8, skill.Level);
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
             writer.WriteEndObject();
+            writer.Flush();
+            return Encoding.UTF8.GetString(buffer.WrittenSpan);
         }
-        writer.WriteEndArray();
-        writer.WriteStartArray("skills"u8);
-        for (var i = 0; i < settings.Skills.Count; i++)
+        finally
         {
-            var skill = settings.Skills[i];
-            writer.WriteStartObject();
-            writer.WriteString("name"u8, skill.Name);
-            writer.WriteNumber("level"u8, skill.Level);
-            writer.WriteEndObject();
+            if (buffer.Capacity <= 65536)
+            {
+                buffer.ResetWrittenCount();
+                sharedBuffer = buffer;
+                sharedWriter = writer;
+            }
+            else
+                writer.Dispose();
         }
-        writer.WriteEndArray();
-        writer.WriteEndObject();
-        writer.Flush();
-        var result = Encoding.UTF8.GetString(buffer.WrittenSpan);
-        if (buffer.Capacity > 65536)
-            sharedBuffer = null;
-        return result;
     }
 
     public static AgentRoutingSettings Deserialize(UserId agent, int defaultCapacity, string json)

@@ -221,11 +221,26 @@ public static class TicketFlowBlazorUIEndpointExtensions
         public override void Write(string? value) => Writer().Write(value);
         public override void Write(char[] buffer, int index, int count) => Writer().Write(buffer, index, count);
         public override void Write(ReadOnlySpan<char> buffer) => Writer().Write(buffer);
+        public override Task WriteAsync(char value) => Writer().WriteAsync(value);
         public override Task WriteAsync(string? value) => Writer().WriteAsync(value);
+        public override Task WriteAsync(char[] buffer, int index, int count) => Writer().WriteAsync(buffer, index, count);
         public override Task WriteAsync(ReadOnlyMemory<char> buffer, CancellationToken cancellationToken = default) => Writer().WriteAsync(buffer, cancellationToken);
+        public override Task WriteAsync(System.Text.StringBuilder? value, CancellationToken cancellationToken = default) => Writer().WriteAsync(value, cancellationToken);
+        public override Task WriteLineAsync() => Writer().WriteLineAsync();
+        public override Task WriteLineAsync(char value) => Writer().WriteLineAsync(value);
         public override Task WriteLineAsync(string? value) => Writer().WriteLineAsync(value);
+        public override Task WriteLineAsync(char[] buffer, int index, int count) => Writer().WriteLineAsync(buffer, index, count);
+        public override Task WriteLineAsync(ReadOnlyMemory<char> buffer, CancellationToken cancellationToken = default) => Writer().WriteLineAsync(buffer, cancellationToken);
+        public override Task WriteLineAsync(System.Text.StringBuilder? value, CancellationToken cancellationToken = default) => Writer().WriteLineAsync(value, cancellationToken);
         public override Task FlushAsync() => inner is null ? Task.CompletedTask : inner.FlushAsync();
         public override Task FlushAsync(CancellationToken cancellationToken) => inner is null ? Task.CompletedTask : inner.FlushAsync(cancellationToken);
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                inner?.Dispose();
+            base.Dispose(disposing);
+        }
 
         public override ValueTask DisposeAsync() => inner is null ? ValueTask.CompletedTask : inner.DisposeAsync();
     }

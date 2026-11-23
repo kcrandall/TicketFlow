@@ -27,54 +27,67 @@ public static class RoutingPolicyCodec
     {
         ArgumentNullException.ThrowIfNull(policy);
         var buffer = sharedBuffer;
+        var writer = sharedWriter;
+        sharedBuffer = null;
+        sharedWriter = null;
         if (buffer is null)
-            sharedBuffer = buffer = new ArrayBufferWriter<byte>(512);
+            buffer = new ArrayBufferWriter<byte>(512);
         else
             buffer.ResetWrittenCount();
-        var writer = sharedWriter;
         if (writer is null)
-            sharedWriter = writer = new Utf8JsonWriter(buffer);
+            writer = new Utf8JsonWriter(buffer);
         else
             writer.Reset(buffer);
-        writer.WriteStartObject();
-        writer.WriteNumber("v"u8, Version);
-        writer.WriteString("name"u8, policy.Name);
-        writer.WritePropertyName("strategy"u8);
-        WriteStrategy(writer, policy.Strategy);
-        if (policy.Team is { } team)
-            writer.WriteString("team"u8, team.Value);
-        writer.WriteStartArray("overflow"u8);
-        for (var i = 0; i < policy.Overflow.Count; i++)
+        try
         {
-            var rule = policy.Overflow[i];
             writer.WriteStartObject();
-            writer.WriteNumber("after"u8, (long)rule.After.TotalSeconds);
-            writer.WritePropertyName("target"u8);
-            writer.WriteStartObject();
-            switch (rule.Target)
+            writer.WriteNumber("v"u8, Version);
+            writer.WriteString("name"u8, policy.Name);
+            writer.WritePropertyName("strategy"u8);
+            WriteStrategy(writer, policy.Strategy);
+            if (policy.Team is { } team)
+                writer.WriteString("team"u8, team.Value);
+            writer.WriteStartArray("overflow"u8);
+            for (var i = 0; i < policy.Overflow.Count; i++)
             {
-                case OverflowToTeam toTeam:
-                    writer.WriteString("k"u8, "team"u8);
-                    writer.WriteString("team"u8, toTeam.Team.Value);
-                    break;
-                case OverflowToInbox toInbox:
-                    writer.WriteString("k"u8, "inbox"u8);
-                    writer.WriteString("inbox"u8, toInbox.Inbox.Value);
-                    break;
+                var rule = policy.Overflow[i];
+                writer.WriteStartObject();
+                writer.WriteNumber("after"u8, (long)rule.After.TotalSeconds);
+                writer.WritePropertyName("target"u8);
+                writer.WriteStartObject();
+                switch (rule.Target)
+                {
+                    case OverflowToTeam toTeam:
+                        writer.WriteString("k"u8, "team"u8);
+                        writer.WriteString("team"u8, toTeam.Team.Value);
+                        break;
+                    case OverflowToInbox toInbox:
+                        writer.WriteString("k"u8, "inbox"u8);
+                        writer.WriteString("inbox"u8, toInbox.Inbox.Value);
+                        break;
+                }
+                writer.WriteEndObject();
+                writer.WriteEndObject();
             }
+            writer.WriteEndArray();
+            if (policy.MaximumWait is { } wait)
+                writer.WriteNumber("maxWait"u8, (long)wait.TotalSeconds);
+            writer.WriteNumber("offline"u8, (int)policy.OnAgentOffline);
             writer.WriteEndObject();
-            writer.WriteEndObject();
+            writer.Flush();
+            return Encoding.UTF8.GetString(buffer.WrittenSpan);
         }
-        writer.WriteEndArray();
-        if (policy.MaximumWait is { } wait)
-            writer.WriteNumber("maxWait"u8, (long)wait.TotalSeconds);
-        writer.WriteNumber("offline"u8, (int)policy.OnAgentOffline);
-        writer.WriteEndObject();
-        writer.Flush();
-        var result = Encoding.UTF8.GetString(buffer.WrittenSpan);
-        if (buffer.Capacity > 65536)
-            sharedBuffer = null;
-        return result;
+        finally
+        {
+            if (buffer.Capacity <= 65536)
+            {
+                buffer.ResetWrittenCount();
+                sharedBuffer = buffer;
+                sharedWriter = writer;
+            }
+            else
+                writer.Dispose();
+        }
     }
 
     public static RoutingPolicy Deserialize(RoutingPolicyId id, string json)

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using System.Globalization;
 using System.Text;
 using TicketFlow.Conversations;
@@ -45,9 +46,14 @@ public static class UiFormat
 
     private static readonly ConcurrentDictionary<Enum, string> TokenCache = new();
 
-    public static string Token(Enum value) => TokenCache.GetOrAdd(value, static item =>
+    public static string Token<TEnum>(TEnum value)
+        where TEnum : struct, Enum =>
+        EnumTokenCache<TEnum>.Map.TryGetValue(value, out var formatted) ? formatted : FormatToken(value.ToString());
+
+    public static string Token(Enum value) => TokenCache.GetOrAdd(value, static item => FormatToken(item.ToString()));
+
+    private static string FormatToken(string name)
     {
-        var name = item.ToString();
         var sb = new StringBuilder(name.Length + 4);
         for (var i = 0; i < name.Length; i++)
         {
@@ -58,7 +64,22 @@ public static class UiFormat
                 sb.Append(c);
         }
         return sb.ToString();
-    });
+    }
+
+    private static class EnumTokenCache<TEnum>
+        where TEnum : struct, Enum
+    {
+        public static readonly FrozenDictionary<TEnum, string> Map = Build();
+
+        private static FrozenDictionary<TEnum, string> Build()
+        {
+            var values = Enum.GetValues<TEnum>();
+            var dict = new Dictionary<TEnum, string>(values.Length);
+            for (var i = 0; i < values.Length; i++)
+                dict[values[i]] = FormatToken(values[i].ToString());
+            return dict.ToFrozenDictionary();
+        }
+    }
 
     public static string Status(ConversationStatusKind kind) => kind switch
     {

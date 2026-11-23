@@ -239,24 +239,37 @@ public sealed partial class PostgresRoutingStore
         if (attributes.Count == 0)
             return "{}";
         var buffer = sharedAttrBuffer;
-        if (buffer is null)
-            sharedAttrBuffer = buffer = new ArrayBufferWriter<byte>(256);
-        else
-            buffer.ResetWrittenCount();
         var writer = sharedAttrWriter;
+        sharedAttrBuffer = null;
+        sharedAttrWriter = null;
+        if (buffer is null)
+            buffer = new ArrayBufferWriter<byte>(256);
+        else
+            buffer.Clear();
         if (writer is null)
-            sharedAttrWriter = writer = new Utf8JsonWriter(buffer);
+            writer = new Utf8JsonWriter(buffer);
         else
             writer.Reset(buffer);
-        writer.WriteStartObject();
-        foreach (var (key, value) in attributes)
-            writer.WriteString(key, value);
-        writer.WriteEndObject();
-        writer.Flush();
-        var json = Encoding.UTF8.GetString(buffer.WrittenSpan);
-        if (buffer.Capacity > 65536)
-            sharedAttrBuffer = null;
-        return json;
+        try
+        {
+            writer.WriteStartObject();
+            foreach (var (key, value) in attributes)
+                writer.WriteString(key, value);
+            writer.WriteEndObject();
+            writer.Flush();
+            return Encoding.UTF8.GetString(buffer.WrittenSpan);
+        }
+        finally
+        {
+            buffer.Clear();
+            if (buffer.Capacity <= 65536)
+            {
+                sharedAttrBuffer = buffer;
+                sharedAttrWriter = writer;
+            }
+            else
+                writer.Dispose();
+        }
     }
 
     private static IReadOnlyDictionary<string, string> DeserializeFlatAttributes(string json)

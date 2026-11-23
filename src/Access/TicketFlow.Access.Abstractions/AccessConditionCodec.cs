@@ -31,14 +31,16 @@ public static class AccessConditionCodec
     {
         ArgumentNullException.ThrowIfNull(condition);
         var buffer = cachedBuffer;
+        var writer = cachedWriter;
+        cachedBuffer = null;
+        cachedWriter = null;
         if (buffer is null)
-            cachedBuffer = buffer = new ArrayBufferWriter<byte>(256);
+            buffer = new ArrayBufferWriter<byte>(256);
         else
             buffer.ResetWrittenCount();
 
-        var writer = cachedWriter;
         if (writer is null)
-            cachedWriter = writer = new Utf8JsonWriter(buffer);
+            writer = new Utf8JsonWriter(buffer);
         else
             writer.Reset(buffer);
 
@@ -54,10 +56,14 @@ public static class AccessConditionCodec
         }
         finally
         {
-            if (buffer.Capacity > MaximumPooledBufferCapacity)
-                cachedBuffer = null;
-            else
+            if (buffer.Capacity <= MaximumPooledBufferCapacity)
+            {
                 buffer.ResetWrittenCount();
+                cachedBuffer = buffer;
+                cachedWriter = writer;
+            }
+            else
+                writer.Dispose();
         }
     }
 

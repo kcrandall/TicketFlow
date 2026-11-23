@@ -184,7 +184,7 @@ public sealed class EventDeliveryWorker
         IReadOnlyList<StoredIntegrationEvent> page;
         if (logCache is not null)
         {
-            var lazy = logCache.GetOrAdd((scope, start), key => new Lazy<Task<IReadOnlyList<StoredIntegrationEvent>>>(() => log.ReadAsync(key.Scope, key.Cursor, options.MaximumScan, CancellationToken.None)));
+            var lazy = logCache.GetOrAdd((scope, start), key => new Lazy<Task<IReadOnlyList<StoredIntegrationEvent>>>(() => log.ReadAsync(key.Scope, key.Cursor, options.MaximumScan, cancellationToken)));
             page = await lazy.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         else

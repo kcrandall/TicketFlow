@@ -63,14 +63,41 @@ public sealed class RoutingPolicyService(IAccessEvaluator access, IRoutingPolicy
         if (!await RoutingGuards.PermittedAsync(access, actor, RoutingPermissions.Manage, RoutingResources.Policy(actor.Scope, policy.Id), cancellationToken).ConfigureAwait(false))
             return RoutingRefused.Forbidden;
         var scope = actor.Scope;
-        var referencedTeams = policy.Overflow.Select(rule => rule.Target.Value).OfType<OverflowToTeam>().Select(target => target.Team).ToList();
+        var teamSet = new HashSet<TeamId>();
+        var inboxSet = new HashSet<InboxId>();
         if (policy.Team is { } team)
-            referencedTeams.Add(team);
-        foreach (var referenced in referencedTeams.Distinct())
-            if (await teams.GetAsync(scope, referenced, cancellationToken).ConfigureAwait(false) is null)
+            teamSet.Add(team);
+        for (var i = 0; i < policy.Overflow.Count; i++)
+        {
+            switch (policy.Overflow[i].Target)
+            {
+                case OverflowToTeam toTeam:
+                    teamSet.Add(toTeam.Team);
+                    break;
+                case OverflowToInbox toInbox:
+                    inboxSet.Add(toInbox.Inbox);
+                    break;
+            }
+        }
+        var teamTasks = new Task<StoredTeam?>[teamSet.Count];
+        var ti = 0;
+        foreach (var referenced in teamSet)
+            teamTasks[ti++] = teams.GetAsync(scope, referenced, cancellationToken);
+        var inboxTasks = new Task<StoredInbox?>[inboxSet.Count];
+        var ii = 0;
+        foreach (var inbox in inboxSet)
+            inboxTasks[ii++] = inboxes.GetAsync(scope, inbox, cancellationToken);
+        if (teamTasks.Length > 0 && inboxTasks.Length > 0)
+            await Task.WhenAll(Task.WhenAll(teamTasks), Task.WhenAll(inboxTasks)).ConfigureAwait(false);
+        else if (teamTasks.Length > 0)
+            await Task.WhenAll(teamTasks).ConfigureAwait(false);
+        else if (inboxTasks.Length > 0)
+            await Task.WhenAll(inboxTasks).ConfigureAwait(false);
+        for (var i = 0; i < teamTasks.Length; i++)
+            if (teamTasks[i].Result is null)
                 return RoutingRefused.Invalid("A referenced team does not exist.");
-        foreach (var inbox in policy.Overflow.Select(rule => rule.Target.Value).OfType<OverflowToInbox>().Select(target => target.Inbox).Distinct())
-            if (await inboxes.GetAsync(scope, inbox, cancellationToken).ConfigureAwait(false) is null)
+        for (var i = 0; i < inboxTasks.Length; i++)
+            if (inboxTasks[i].Result is null)
                 return RoutingRefused.Invalid("A referenced inbox does not exist.");
         return null;
     }

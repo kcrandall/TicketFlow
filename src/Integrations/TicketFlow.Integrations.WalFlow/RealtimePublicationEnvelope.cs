@@ -33,10 +33,14 @@ public static class RealtimePublicationEnvelope
     {
         if (json is null || !json.StartsWith(OriginPrefix, StringComparison.Ordinal))
             return false;
+        var expected = expectedOrigin.AsSpan();
+        // Fall back to full JSON parsing if the expected origin would require JSON escaping.
+        if (expected.ContainsAny('"', '\\') || expected.ContainsAnyInRange('\0', '\u001F'))
+            return false;
         var rest = json.AsSpan(OriginPrefix.Length);
-        return rest.Length > expectedOrigin.Length
-            && rest[expectedOrigin.Length] == '"'
-            && rest[..expectedOrigin.Length].SequenceEqual(expectedOrigin.AsSpan());
+        return rest.Length > expected.Length
+            && rest[expected.Length] == '"'
+            && rest[..expected.Length].SequenceEqual(expected);
     }
 
     /// <summary>Serializes <paramref name="publication"/> with <paramref name="origin"/> into compact UTF-8 JSON.</summary>

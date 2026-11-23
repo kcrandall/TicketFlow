@@ -336,12 +336,34 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
                 return Refused<VisitorMessageAccepted>(LiveChatRefusal.Unavailable, "Attachments are disabled.");
             if (refs.Count > LiveChatChannel.MaximumAttachments)
                 return Refused<VisitorMessageAccepted>(LiveChatRefusal.Invalid, $"At most {LiveChatChannel.MaximumAttachments} attachments are allowed.");
-            foreach (var reference in refs.Distinct(StringComparer.Ordinal))
+            var distinctRefs = new List<string>(refs.Count);
+            var seenRefs = new HashSet<string>(StringComparer.Ordinal);
+            for (var i = 0; i < refs.Count; i++)
             {
-                if (reference is null || reference.Length > AttachmentRef.MaximumStorageRefLength
-                    || await attachments.FindAsync(scope, visitor.Id, reference, cancellationToken).ConfigureAwait(false) is not { } attachment)
+                var reference = refs[i];
+                if (reference is null || reference.Length > AttachmentRef.MaximumStorageRefLength)
+                    return Refused<VisitorMessageAccepted>(LiveChatRefusal.Invalid, "Unknown attachment.");
+                if (seenRefs.Add(reference))
+                    distinctRefs.Add(reference);
+            }
+            if (distinctRefs.Count == 1)
+            {
+                if (await attachments.FindAsync(scope, visitor.Id, distinctRefs[0], cancellationToken).ConfigureAwait(false) is not { } attachment)
                     return Refused<VisitorMessageAccepted>(LiveChatRefusal.Invalid, "Unknown attachment.");
                 resolved.Add(attachment);
+            }
+            else if (distinctRefs.Count > 1)
+            {
+                var lookupTasks = new Task<AttachmentRef?>[distinctRefs.Count];
+                for (var i = 0; i < distinctRefs.Count; i++)
+                    lookupTasks[i] = attachments.FindAsync(scope, visitor.Id, distinctRefs[i], cancellationToken);
+                var foundAttachments = await Task.WhenAll(lookupTasks).ConfigureAwait(false);
+                for (var i = 0; i < foundAttachments.Length; i++)
+                {
+                    if (foundAttachments[i] is not { } attachment)
+                        return Refused<VisitorMessageAccepted>(LiveChatRefusal.Invalid, "Unknown attachment.");
+                    resolved.Add(attachment);
+                }
             }
         }
 
@@ -450,8 +472,12 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
     {
         if (await RequireLiveAsync(context, cancellationToken).ConfigureAwait(false) is not { } session)
             return Refused<long>(LiveChatRefusal.Unauthenticated);
-        if (await LinkAsync(session, conversation, cancellationToken).ConfigureAwait(false) is null
-            || await conversations.GetAsync(session.Scope, conversation, cancellationToken).ConfigureAwait(false) is not { } stored)
+        if (conversation == default)
+            return Refused<long>(LiveChatRefusal.NotFound);
+        var linkTask = sessions.GetLinkAsync(session.Scope, session.Session.Id, conversation, cancellationToken);
+        var convTask = conversations.GetAsync(session.Scope, conversation, cancellationToken);
+        await Task.WhenAll(linkTask, convTask).ConfigureAwait(false);
+        if (linkTask.Result is null || convTask.Result is not { } stored)
             return Refused<long>(LiveChatRefusal.NotFound);
         if (upToSequence < 1 || upToSequence > stored.Conversation.LastSequence)
             return Refused<long>(LiveChatRefusal.Invalid);

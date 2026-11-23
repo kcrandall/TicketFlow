@@ -46,7 +46,7 @@ export class ChatWidget {
   private readonly composer: HTMLFormElement;
   private readonly typing: TypingNotifier;
   private readonly unsubscribe: () => void;
-  private readonly bubbles = new Map<string, { el: HTMLElement; body: string; sequence: number }>();
+  private readonly bubbles = new Map<string, { el: HTMLElement; body: string; attachmentsKey: string; sequence: number }>();
   private renderedConversation: string | null = null;
   private pending: Attachment[] = [];
   private searched = false;
@@ -189,8 +189,9 @@ export class ChatWidget {
     const fragment = document.createDocumentFragment();
     for (const message of messages) {
       const existing = this.bubbles.get(message.message);
+      const attachmentsKey = message.attachments.length === 0 ? "" : message.attachments.map((a) => `${a.storageRef}\0${a.fileName}`).join("\n");
       if (existing) {
-        if (existing.body !== message.body) {
+        if (existing.body !== message.body || existing.attachmentsKey !== attachmentsKey) {
           existing.el.textContent = message.body; // Never innerHTML: bodies are untrusted.
           for (const attachment of message.attachments) {
             const line = document.createElement("div");
@@ -199,6 +200,7 @@ export class ChatWidget {
             existing.el.append(line);
           }
           existing.body = message.body;
+          existing.attachmentsKey = attachmentsKey;
         }
         if (existing.sequence !== message.sequence) {
           existing.sequence = message.sequence;
@@ -214,7 +216,7 @@ export class ChatWidget {
           line.textContent = `📎 ${attachment.fileName}`;
           bubble.append(line);
         }
-        this.bubbles.set(message.message, { el: bubble, body: message.body, sequence: message.sequence });
+        this.bubbles.set(message.message, { el: bubble, body: message.body, attachmentsKey, sequence: message.sequence });
         if (message.sequence < lastRenderedSeq) outOfOrder = true;
         else lastRenderedSeq = message.sequence;
         fragment.append(bubble);
@@ -254,6 +256,7 @@ export class ChatWidget {
       await this.client.send(text, attachments);
     } catch (error) {
       input.value = text;
+      if (attachments.length > 0) this.pending = [...attachments, ...this.pending];
       this.notice(error instanceof ChatError && error.code === "prechat-required" ? "Please fill in the form first." : "Your message could not be sent.");
     }
   }

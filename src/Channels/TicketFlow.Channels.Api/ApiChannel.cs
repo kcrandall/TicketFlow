@@ -164,7 +164,7 @@ public sealed class ApiChannel : ITicketChannel, IDisposable
             if (status is >= 200 and < 300)
             {
                 string? externalId = null;
-                if (response.Content.Headers.ContentType?.MediaType is "application/json")
+                if (string.Equals(response.Content.Headers.ContentType?.MediaType, "application/json", StringComparison.OrdinalIgnoreCase))
                 {
                     // HttpClient.Timeout does not cover the body after ResponseHeadersRead; bound it separately. The submission is already
                     // accepted, so a slow or stalled body only loses the optional external id.
@@ -238,81 +238,94 @@ public sealed class ApiChannel : ITicketChannel, IDisposable
     {
         ArgumentNullException.ThrowIfNull(message);
         var buffer = sharedBuffer;
-        if (buffer is null)
-            sharedBuffer = buffer = new ArrayBufferWriter<byte>(1024);
-        else
-            buffer.ResetWrittenCount();
         var writer = sharedWriter;
+        sharedBuffer = null;
+        sharedWriter = null;
+        if (buffer is null)
+            buffer = new ArrayBufferWriter<byte>(1024);
+        else
+            buffer.Clear();
         if (writer is null)
-            sharedWriter = writer = new Utf8JsonWriter(buffer);
+            writer = new Utf8JsonWriter(buffer);
         else
             writer.Reset(buffer);
 
-        writer.WriteStartObject();
-        writer.WriteNumber("v"u8, 1);
-        writer.WriteString("type"u8, "message.outgoing"u8);
-        writer.WriteString("id"u8, message.IdempotencyKey);
-        writer.WriteString("channel"u8, message.Binding.Kind.Value);
-        writer.WriteString("configurationId"u8, message.Binding.ConfigurationId);
-        writer.WriteString("inbox"u8, message.Inbox.Value);
-        writer.WriteString("conversation"u8, message.Conversation.Value);
-        if (message.Message is { } id)
-            writer.WriteString("message"u8, id.Value);
-        else
-            writer.WriteNull("message"u8);
-        writer.WriteString("contact"u8, message.Contact.Value);
-        writer.WriteStartObject("recipient"u8);
-        writer.WriteString("kind"u8, IdentityKind(message.Recipient.Kind));
-        writer.WriteString("value"u8, message.Recipient.Value);
-        if (message.Recipient.Namespace is { } ns)
-            writer.WriteString("namespace"u8, ns);
-        writer.WriteEndObject();
-        writer.WriteString("body"u8, message.Body);
-        writer.WriteString("contentType"u8, message.ContentType switch
+        try
         {
-            MessageContentType.PlainText => "plain_text"u8,
-            MessageContentType.Markdown => "markdown"u8,
-            MessageContentType.Html => "html"u8,
-            _ => throw new InvalidOperationException("Unknown content type."),
-        });
-        writer.WriteStartArray("attachments"u8);
-        for (var i = 0; i < message.Attachments.Count; i++)
-        {
-            var attachment = message.Attachments[i];
             writer.WriteStartObject();
-            writer.WriteString("storageRef"u8, attachment.StorageRef);
-            writer.WriteString("fileName"u8, attachment.FileName);
-            writer.WriteString("mediaType"u8, attachment.MediaType);
-            writer.WriteNumber("sizeBytes"u8, attachment.SizeBytes);
+            writer.WriteNumber("v"u8, 1);
+            writer.WriteString("type"u8, "message.outgoing"u8);
+            writer.WriteString("id"u8, message.IdempotencyKey);
+            writer.WriteString("channel"u8, message.Binding.Kind.Value);
+            writer.WriteString("configurationId"u8, message.Binding.ConfigurationId);
+            writer.WriteString("inbox"u8, message.Inbox.Value);
+            writer.WriteString("conversation"u8, message.Conversation.Value);
+            if (message.Message is { } id)
+                writer.WriteString("message"u8, id.Value);
+            else
+                writer.WriteNull("message"u8);
+            writer.WriteString("contact"u8, message.Contact.Value);
+            writer.WriteStartObject("recipient"u8);
+            writer.WriteString("kind"u8, IdentityKind(message.Recipient.Kind));
+            writer.WriteString("value"u8, message.Recipient.Value);
+            if (message.Recipient.Namespace is { } ns)
+                writer.WriteString("namespace"u8, ns);
             writer.WriteEndObject();
-        }
-        writer.WriteEndArray();
-        writer.WriteStartObject("thread"u8);
-        WriteOptional(writer, "externalThreadId"u8, message.Thread.ExternalThreadId);
-        WriteOptional(writer, "inReplyTo"u8, message.Thread.InReplyTo);
-        writer.WriteStartArray("references"u8);
-        for (var i = 0; i < message.Thread.References.Count; i++)
-            writer.WriteStringValue(message.Thread.References[i]);
-        writer.WriteEndArray();
-        WriteOptional(writer, "subject"u8, message.Thread.Subject);
-        writer.WriteEndObject();
-        if (message.Template is { } template)
-        {
-            writer.WriteStartObject("template"u8);
-            writer.WriteString("name"u8, template.Name);
-            writer.WriteString("locale"u8, template.Locale);
-            writer.WriteStartArray("parameters"u8);
-            for (var i = 0; i < template.Parameters.Count; i++)
-                writer.WriteStringValue(template.Parameters[i]);
+            writer.WriteString("body"u8, message.Body);
+            writer.WriteString("contentType"u8, message.ContentType switch
+            {
+                MessageContentType.PlainText => "plain_text"u8,
+                MessageContentType.Markdown => "markdown"u8,
+                MessageContentType.Html => "html"u8,
+                _ => throw new InvalidOperationException("Unknown content type."),
+            });
+            writer.WriteStartArray("attachments"u8);
+            for (var i = 0; i < message.Attachments.Count; i++)
+            {
+                var attachment = message.Attachments[i];
+                writer.WriteStartObject();
+                writer.WriteString("storageRef"u8, attachment.StorageRef);
+                writer.WriteString("fileName"u8, attachment.FileName);
+                writer.WriteString("mediaType"u8, attachment.MediaType);
+                writer.WriteNumber("sizeBytes"u8, attachment.SizeBytes);
+                writer.WriteEndObject();
+            }
             writer.WriteEndArray();
+            writer.WriteStartObject("thread"u8);
+            WriteOptional(writer, "externalThreadId"u8, message.Thread.ExternalThreadId);
+            WriteOptional(writer, "inReplyTo"u8, message.Thread.InReplyTo);
+            writer.WriteStartArray("references"u8);
+            for (var i = 0; i < message.Thread.References.Count; i++)
+                writer.WriteStringValue(message.Thread.References[i]);
+            writer.WriteEndArray();
+            WriteOptional(writer, "subject"u8, message.Thread.Subject);
             writer.WriteEndObject();
+            if (message.Template is { } template)
+            {
+                writer.WriteStartObject("template"u8);
+                writer.WriteString("name"u8, template.Name);
+                writer.WriteString("locale"u8, template.Locale);
+                writer.WriteStartArray("parameters"u8);
+                for (var i = 0; i < template.Parameters.Count; i++)
+                    writer.WriteStringValue(template.Parameters[i]);
+                writer.WriteEndArray();
+                writer.WriteEndObject();
+            }
+            writer.WriteEndObject();
+            writer.Flush();
+            return buffer.WrittenSpan.ToArray();
         }
-        writer.WriteEndObject();
-        writer.Flush();
-        var result = buffer.WrittenSpan.ToArray();
-        if (buffer.Capacity > 131072)
-            sharedBuffer = null;
-        return result;
+        finally
+        {
+            buffer.Clear();
+            if (buffer.Capacity <= 131072)
+            {
+                sharedBuffer = buffer;
+                sharedWriter = writer;
+            }
+            else
+                writer.Dispose();
+        }
     }
 
     private static void WriteOptional(Utf8JsonWriter writer, ReadOnlySpan<byte> name, string? value)

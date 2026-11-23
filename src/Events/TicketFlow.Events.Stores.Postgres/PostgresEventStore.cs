@@ -328,20 +328,23 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
             await lockCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         bool inserted;
-        bool atLimit;
+        bool duplicate;
         await using (var create = new NpgsqlCommand($"""
-            WITH cnt AS (
+            WITH existing AS (
+                SELECT 1 FROM tf_event_subscriptions WHERE {SubscriptionWhere}
+            ),
+            cnt AS (
                 SELECT count(*) AS n FROM tf_event_subscriptions WHERE {ScopeKeyWhere}
             ),
             ins AS (
                 INSERT INTO tf_event_subscriptions({ScopeColumns}, subscription_id, format_version, name, sink_kind, sink_target, filter, principal_id, privacy, enabled, batch_size,
                     revision, created_at, delivery_cursor, attempts, available_at, last_error, last_delivered_at, fence, lease_until)
                 SELECT {ScopeParameters}, @subscription, 1, @name, @sink_kind, @sink_target, @filter, @principal, @privacy, @enabled, @batch, 1, @created, @cursor, 0, @created, NULL, NULL, 0, NULL
-                WHERE (SELECT n FROM cnt) < @max
+                WHERE NOT EXISTS (SELECT 1 FROM existing) AND (SELECT n FROM cnt) < @max
                 ON CONFLICT (subscription_key) DO NOTHING
                 RETURNING 1
             )
-            SELECT EXISTS(SELECT 1 FROM ins), ((SELECT n FROM cnt) >= @max)
+            SELECT EXISTS(SELECT 1 FROM ins), EXISTS(SELECT 1 FROM existing)
             """, connection, transaction))
         {
             BindSubscription(create, scope, subscription);
@@ -351,14 +354,14 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
             await using var reader = await create.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
             inserted = reader.GetBoolean(0);
-            atLimit = reader.GetBoolean(1);
+            duplicate = reader.GetBoolean(1);
         }
         if (inserted)
         {
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new EventWriteApplied<StoredEventSubscription>(new StoredEventSubscription(scope, subscription, 1, createdAt));
         }
-        return new EventWriteRejected(atLimit ? EventWriteRejection.LimitReached : EventWriteRejection.Duplicate);
+        return new EventWriteRejected(duplicate ? EventWriteRejection.Duplicate : EventWriteRejection.LimitReached);
     }
 
     public async Task<EventWriteResult<StoredEventSubscription>> UpdateAsync(TicketScope scope, EventSubscription subscription, long expectedRevision, CancellationToken cancellationToken = default)

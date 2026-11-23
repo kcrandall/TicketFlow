@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 using TicketFlow.Contacts;
 using TicketFlow.Conversations;
+using TicketFlow.Core;
 using TicketFlow.Realtime;
 using TicketFlow.Workspaces;
 
@@ -47,20 +48,30 @@ public sealed class LiveChatChannel : ITicketChannel
         if (row is null)
             return new ChannelSendRejected("message-not-found", retryable: false);
         var linked = await LiveChatSessionDirectory.LiveSessionsAsync(sessions, message.Scope, message.Conversation, time.GetUtcNow(), cancellationToken).ConfigureAwait(false);
-        foreach (var session in linked)
+        if (linked.Count == 1)
+            await PublishBestEffortAsync(message, messageId, row.Sequence, linked[0], cancellationToken).ConfigureAwait(false);
+        else if (linked.Count > 1)
         {
-            var push = new VisitorMessageEvent(message.Scope, session, message.Conversation, messageId, row.Sequence, MessageDirection.Outgoing, message.Body,
-                message.ContentType, message.Attachments, time.GetUtcNow());
-            try
-            {
-                await publisher.PublishAsync(new RealtimePublication(new VisitorSessionTopic(message.Scope, session), push), cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception) when (!cancellationToken.IsCancellationRequested)
-            {
-                // Best effort: the visitor fetches the stored reply on reconnect.
-            }
+            var tasks = new Task[linked.Count];
+            for (var i = 0; i < linked.Count; i++)
+                tasks[i] = PublishBestEffortAsync(message, messageId, row.Sequence, linked[i], cancellationToken);
+            await Task.WhenAll(tasks).ConfigureAwait(false);
         }
         return new ChannelSendAccepted($"livechat:{messageId.Value}");
+    }
+
+    private async Task PublishBestEffortAsync(OutboundChannelMessage message, MessageId messageId, long sequence, VisitorSessionId session, CancellationToken cancellationToken)
+    {
+        var push = new VisitorMessageEvent(message.Scope, session, message.Conversation, messageId, sequence, MessageDirection.Outgoing, message.Body,
+            message.ContentType, message.Attachments, time.GetUtcNow());
+        try
+        {
+            await publisher.PublishAsync(new RealtimePublication(new VisitorSessionTopic(message.Scope, session), push), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Best effort: the visitor fetches the stored reply on reconnect.
+        }
     }
 }
 

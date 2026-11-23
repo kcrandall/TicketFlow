@@ -24,30 +24,44 @@ internal static class ChannelAuthorization
     public static string IdempotencyKey(TicketScope scope, string kind, string conversation, string message)
     {
         var buffer = sharedBuffer;
+        var writer = sharedWriter;
+        sharedBuffer = null;
+        sharedWriter = null;
         if (buffer is null)
-            sharedBuffer = buffer = new ArrayBufferWriter<byte>(256);
+            buffer = new ArrayBufferWriter<byte>(256);
         else
             buffer.ResetWrittenCount();
-        var writer = sharedWriter;
         if (writer is null)
-            sharedWriter = writer = new Utf8JsonWriter(buffer);
+            writer = new Utf8JsonWriter(buffer);
         else
             writer.Reset(buffer);
-        writer.WriteStartArray();
-        writer.WriteStringValue(scope.TenantId);
-        writer.WriteStringValue(scope.ProjectId);
-        writer.WriteStringValue(scope.EnvironmentId);
-        writer.WriteStringValue(scope.AppId);
-        writer.WriteStringValue(scope.WorkspaceId.Value);
-        writer.WriteStringValue(kind);
-        writer.WriteStringValue(conversation);
-        writer.WriteStringValue(message);
-        writer.WriteEndArray();
-        writer.Flush();
         Span<byte> hash = stackalloc byte[32];
-        SHA256.HashData(buffer.WrittenSpan, hash);
-        if (buffer.Capacity > 8192)
-            sharedBuffer = null;
+        try
+        {
+            writer.WriteStartArray();
+            writer.WriteStringValue(scope.TenantId);
+            writer.WriteStringValue(scope.ProjectId);
+            writer.WriteStringValue(scope.EnvironmentId);
+            writer.WriteStringValue(scope.AppId);
+            writer.WriteStringValue(scope.WorkspaceId.Value);
+            writer.WriteStringValue(kind);
+            writer.WriteStringValue(conversation);
+            writer.WriteStringValue(message);
+            writer.WriteEndArray();
+            writer.Flush();
+            SHA256.HashData(buffer.WrittenSpan, hash);
+        }
+        finally
+        {
+            if (buffer.Capacity <= 8192)
+            {
+                buffer.ResetWrittenCount();
+                sharedBuffer = buffer;
+                sharedWriter = writer;
+            }
+            else
+                writer.Dispose();
+        }
         return FormatIdempotencyKey(hash);
     }
 

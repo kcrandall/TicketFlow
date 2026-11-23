@@ -260,6 +260,8 @@ public sealed partial class PostgresSurveyStore
         ArgumentNullException.ThrowIfNull(filter);
         await using var command = source.CreateCommand();
         var (from, predicate) = FilteredResponses(filter, command);
+        if (predicate is null)
+            return new SurveyResponsePage([], null);
         command.CommandText = $"""
             SELECT {ResponseColumnsR} FROM {from}
             WHERE {predicate} AND r.responded_at >= @from AND r.responded_at < @to AND (@survey::text IS NULL OR r.survey_id=@survey::text)
@@ -304,6 +306,8 @@ public sealed partial class PostgresSurveyStore
         };
         await using var command = source.CreateCommand();
         var (from, predicate) = FilteredResponses(filter, command);
+        if (predicate is null)
+            return new SurveyAggregateResult([], false);
         command.CommandText = $"""
             SELECT g.bucket, g.grp, count(*), count(*) FILTER (WHERE g.score >= @positive), count(*) FILTER (WHERE g.score >= @neutral AND g.score < @positive),
                    count(*) FILTER (WHERE g.score < @neutral), sum(g.score)::bigint
@@ -331,9 +335,11 @@ public sealed partial class PostgresSurveyStore
     /// (agent as assignee, unknown labels and attributes), and the translated filter predicate over it. Untranslatable filters
     /// become FALSE.
     /// </summary>
-    private static (string From, string Predicate) FilteredResponses(AccessFilter filter, NpgsqlCommand command)
+    private static (string From, string? Predicate) FilteredResponses(AccessFilter filter, NpgsqlCommand command)
     {
         var translated = PostgresAccessFilterTranslator.Translate(filter, ResponseAccessColumns, "access_").OrDenyAll();
+        if (translated.Sql == "FALSE")
+            return (string.Empty, null);
         foreach (var parameter in translated.Parameters)
             command.Parameters.Add(parameter.Clone());
         return ("""

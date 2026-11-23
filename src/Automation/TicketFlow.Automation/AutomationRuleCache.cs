@@ -101,7 +101,7 @@ public sealed class AutomationRuleCache
     }
 
     private readonly ConcurrentDictionary<TicketScope, CacheEntry> entries = new();
-    private readonly ConcurrentDictionary<(TicketScope Scope, long Version), Task<CompiledRuleSet>> inflight = new();
+    private readonly ConcurrentDictionary<(TicketScope Scope, long Version), Lazy<Task<CompiledRuleSet>>> inflight = new();
     private long accessCounter;
 
     public async Task<IReadOnlyList<AutomationRule>> GetAsync(IAutomationRuleStore store, TicketScope scope, CancellationToken cancellationToken = default) =>
@@ -118,29 +118,35 @@ public sealed class AutomationRuleCache
             return cached.Compiled;
         }
         // Coalesce concurrent reloads for the same (scope, version) to avoid thundering-herd DB queries.
+        // Cleanup runs inside LoadAsync's finally so a cancelled waiter never evicts a still-running load.
         var key = (scope, version);
-        var task = inflight.GetOrAdd(key, _ => LoadAsync(store, scope, version));
+        var lazy = inflight.GetOrAdd(key, static (k, state) =>
+        {
+            Lazy<Task<CompiledRuleSet>>? holder = null;
+            holder = new Lazy<Task<CompiledRuleSet>>(() => state.Self.LoadAsync(state.Store, k, holder!));
+            return holder;
+        }, (Self: this, Store: store));
+        return await lazy.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<CompiledRuleSet> LoadAsync(IAutomationRuleStore store, (TicketScope Scope, long Version) key, Lazy<Task<CompiledRuleSet>> holder)
+    {
         try
         {
-            return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            var stored = await store.ListAsync(key.Scope).ConfigureAwait(false);
+            var rules = new AutomationRule[stored.Count];
+            for (var i = 0; i < stored.Count; i++)
+                rules[i] = stored[i].Rule;
+            var compiled = new CompiledRuleSet(rules);
+            if (entries.Count >= MaximumScopes && !entries.ContainsKey(key.Scope))
+                EvictOldestQuarter();
+            entries[key.Scope] = new CacheEntry(key.Version, compiled, Interlocked.Increment(ref accessCounter));
+            return compiled;
         }
         finally
         {
-            inflight.TryRemove(new KeyValuePair<(TicketScope, long), Task<CompiledRuleSet>>(key, task));
+            inflight.TryRemove(new KeyValuePair<(TicketScope, long), Lazy<Task<CompiledRuleSet>>>(key, holder));
         }
-    }
-
-    private async Task<CompiledRuleSet> LoadAsync(IAutomationRuleStore store, TicketScope scope, long version)
-    {
-        var stored = await store.ListAsync(scope).ConfigureAwait(false);
-        var rules = new AutomationRule[stored.Count];
-        for (var i = 0; i < stored.Count; i++)
-            rules[i] = stored[i].Rule;
-        var compiled = new CompiledRuleSet(rules);
-        if (entries.Count >= MaximumScopes && !entries.ContainsKey(scope))
-            EvictOldestQuarter();
-        entries[scope] = new CacheEntry(version, compiled, Interlocked.Increment(ref accessCounter));
-        return compiled;
     }
 
     private void EvictOldestQuarter()

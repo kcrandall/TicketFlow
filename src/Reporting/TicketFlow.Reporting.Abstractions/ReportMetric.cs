@@ -55,18 +55,33 @@ public enum ReportMetric
     SlaBreached = 16,
 }
 
+public static class ReportMetricExtensions
+{
+    extension(ReportMetric metric)
+    {
+        /// <summary>True for metrics whose value is a duration in microseconds.</summary>
+        public bool IsDuration => metric switch
+        {
+            ReportMetric.FirstResponseTime or ReportMetric.FirstResponseBusinessTime or ReportMetric.ResponseTime or ReportMetric.ResponseBusinessTime
+                or ReportMetric.ResolutionTime or ReportMetric.ResolutionBusinessTime => true,
+            _ => false,
+        };
+    }
+
+    extension(ReportMetric)
+    {
+        /// <summary>Every metric in numeric order.</summary>
+        public static IReadOnlyList<ReportMetric> All => ReportMetrics.All;
+    }
+}
+
 public static class ReportMetrics
 {
     /// <summary>Every metric in numeric order.</summary>
     public static IReadOnlyList<ReportMetric> All { get; } = [.. Enum.GetValues<ReportMetric>().Order()];
 
     /// <summary>True for metrics whose value is a duration in microseconds.</summary>
-    public static bool IsDuration(ReportMetric metric) => metric switch
-    {
-        ReportMetric.FirstResponseTime or ReportMetric.FirstResponseBusinessTime or ReportMetric.ResponseTime or ReportMetric.ResponseBusinessTime
-            or ReportMetric.ResolutionTime or ReportMetric.ResolutionBusinessTime => true,
-        _ => false,
-    };
+    public static bool IsDuration(ReportMetric metric) => metric.IsDuration;
 
     public static ReportMetric Require(ReportMetric metric, string parameterName) =>
         Enum.IsDefined(metric) ? metric : throw new ArgumentOutOfRangeException(parameterName, "Unknown report metric.");

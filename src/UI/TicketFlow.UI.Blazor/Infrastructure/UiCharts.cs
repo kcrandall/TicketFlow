@@ -19,8 +19,7 @@ internal static class UiCharts
         for (var i = 0; i < trend.Points.Count; i++)
         {
             var point = trend.Points[i];
-            var key = (point.Metric, point.BucketStart);
-            totals[key] = totals.GetValueOrDefault(key) + point.Count;
+            totals[point.Metric, point.BucketStart] += point.Count;
         }
 
         var series = new AreaChart.ChartSeries[metrics.Count];
@@ -29,7 +28,7 @@ internal static class UiCharts
             var (metric, name) = metrics[m];
             var values = new double[bucketCount];
             for (var b = 0; b < bucketCount; b++)
-                values[b] = totals.GetValueOrDefault((metric, trend.Buckets[b]));
+                values[b] = totals[metric, trend.Buckets[b]];
             series[m] = new AreaChart.ChartSeries(name, values);
         }
         return (labels, series);

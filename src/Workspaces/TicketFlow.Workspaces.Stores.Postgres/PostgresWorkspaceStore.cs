@@ -89,9 +89,6 @@ public sealed partial class PostgresWorkspaceStore : IWorkspaceSettingsStore, II
     private static void AddTextArray(NpgsqlBatchCommand command, string name, string[] values) =>
         command.Parameters.Add(new NpgsqlParameter<string[]>(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { TypedValue = values });
 
-    private static string? NullableText(NpgsqlDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
-
     /// <summary>Serializes writers for one workspace and table within the current transaction.</summary>
     private static async Task LockAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string table, TicketScope scope, CancellationToken cancellationToken)
     {

@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using TicketFlow.Conversations;
 using TicketFlow.Core;
 using TicketFlow.Reporting;
 
@@ -157,7 +158,7 @@ public static class InsightFlowClientEventEncoder
             writer.WriteString("agent_id"u8, attributedAgent.Value);
         if (fact.Dimensions.Channel is { } channel)
             writer.WriteString("channel"u8, channel);
-        writer.WriteString("priority"u8, PriorityName(fact.Dimensions.Priority));
+        writer.WriteString("priority"u8, fact.Dimensions.Priority.WireName);
         if (fact.Dimensions.Labels.Count > 0)
         {
             writer.WriteStartArray("labels"u8);
@@ -166,7 +167,7 @@ public static class InsightFlowClientEventEncoder
             writer.WriteEndArray();
         }
         writer.WriteNumber("value"u8, fact.Value);
-        if (ReportMetrics.IsDuration(fact.Metric))
+        if (fact.Metric.IsDuration)
         {
             writer.WriteNumber("duration_us"u8, fact.Value);
             writer.WriteNumber("duration_ms"u8, fact.Value / 1000.0);
@@ -174,14 +175,4 @@ public static class InsightFlowClientEventEncoder
         writer.WriteEndObject();
         writer.WriteEndObject();
     }
-
-    private static string PriorityName(Conversations.ConversationPriority priority) => priority switch
-    {
-        Conversations.ConversationPriority.None => "none",
-        Conversations.ConversationPriority.Low => "low",
-        Conversations.ConversationPriority.Medium => "medium",
-        Conversations.ConversationPriority.High => "high",
-        Conversations.ConversationPriority.Urgent => "urgent",
-        _ => priority.ToString().ToLowerInvariant(),
-    };
 }

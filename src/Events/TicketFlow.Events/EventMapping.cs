@@ -10,25 +10,9 @@ namespace TicketFlow.Events;
 /// <summary>Maps feature values to the event contract's string vocabularies.</summary>
 public static class EventMapping
 {
-    public static string Status(ConversationStatusKind kind) => kind switch
-    {
-        ConversationStatusKind.Open => "open",
-        ConversationStatusKind.Pending => "pending",
-        ConversationStatusKind.Snoozed => "snoozed",
-        ConversationStatusKind.Resolved => "resolved",
-        ConversationStatusKind.Closed => "closed",
-        _ => throw new ArgumentOutOfRangeException(nameof(kind)),
-    };
+    public static string Status(ConversationStatusKind kind) => kind.WireName;
 
-    public static string Priority(ConversationPriority priority) => priority switch
-    {
-        ConversationPriority.None => "none",
-        ConversationPriority.Low => "low",
-        ConversationPriority.Medium => "medium",
-        ConversationPriority.High => "high",
-        ConversationPriority.Urgent => "urgent",
-        _ => throw new ArgumentOutOfRangeException(nameof(priority)),
-    };
+    public static string Priority(ConversationPriority priority) => priority.WireName;
 
     public static string ContentType(MessageContentType type) => type switch
     {
@@ -49,13 +33,7 @@ public static class EventMapping
         _ => throw new ArgumentOutOfRangeException(nameof(state)),
     };
 
-    public static string Metric(SlaMetric metric) => metric switch
-    {
-        SlaMetric.FirstResponse => "first-response",
-        SlaMetric.NextResponse => "next-response",
-        SlaMetric.Resolution => "resolution",
-        _ => throw new ArgumentOutOfRangeException(nameof(metric)),
-    };
+    public static string Metric(SlaMetric metric) => metric.WireName;
 
     public static string Basis(SlaClockBasis basis) => basis switch
     {

@@ -176,12 +176,12 @@ public sealed partial class PostgresWorkspaceStore
                 new InboxId(reader.GetString(offset)),
                 reader.GetString(offset + 2),
                 new ChannelBinding(new ChannelKind(reader.GetString(offset + 3)), reader.GetString(offset + 4)),
-                NullableText(reader, offset + 5) is { } calendar ? new BusinessCalendarId(calendar) : null,
-                NullableText(reader, offset + 6) is { } sla ? new SlaPolicyId(sla) : null,
-                NullableText(reader, offset + 7) is { } routing ? new RoutingPolicyId(routing) : null,
+                reader.NullableText(offset + 5) is { } calendar ? new BusinessCalendarId(calendar) : null,
+                reader.NullableText(offset + 6) is { } sla ? new SlaPolicyId(sla) : null,
+                reader.NullableText(offset + 7) is { } routing ? new RoutingPolicyId(routing) : null,
                 reader.GetBoolean(offset + 8),
-                NullableText(reader, offset + 9),
-                NullableText(reader, offset + 10));
+                reader.NullableText(offset + 9),
+                reader.NullableText(offset + 10));
             return new StoredInbox(scope, inbox, reader.GetInt64(offset + 11));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)

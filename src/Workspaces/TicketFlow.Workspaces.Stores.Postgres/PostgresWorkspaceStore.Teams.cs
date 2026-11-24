@@ -349,7 +349,7 @@ public sealed partial class PostgresWorkspaceStore
         {
             if (reader.GetInt16(1) != 1)
                 throw new FormatException("Unsupported team format version.");
-            var team = new Team(new TeamId(reader.GetString(0)), reader.GetString(2), NullableText(reader, 3));
+            var team = new Team(new TeamId(reader.GetString(0)), reader.GetString(2), reader.NullableText(3));
             return new TeamSummary(scope, team.Id, team.Name, team.Description, reader.GetInt32(4), reader.GetInt64(5));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
@@ -374,7 +374,7 @@ public sealed partial class PostgresWorkspaceStore
                 for (var i = 0; i < rawMembers.Length; i++)
                     members[i] = new UserId(rawMembers[i]);
             }
-            var team = new Team(new TeamId(reader.GetString(0)), reader.GetString(2), NullableText(reader, 3), members);
+            var team = new Team(new TeamId(reader.GetString(0)), reader.GetString(2), reader.NullableText(3), members);
             return new StoredTeam(scope, team, reader.GetInt64(5));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)

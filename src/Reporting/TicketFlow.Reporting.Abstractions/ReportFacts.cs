@@ -134,7 +134,7 @@ public sealed record ReportFact
             throw new ArgumentException("Source and conversation identifiers are required.");
         ReportMetrics.Require(metric, nameof(metric));
         ArgumentNullException.ThrowIfNull(dimensions);
-        if (ReportMetrics.IsDuration(metric) ? value < 0 || value > MaximumDuration.Ticks / 10 : value != 1)
+        if (metric.IsDuration ? value < 0 || value > MaximumDuration.Ticks / 10 : value != 1)
             throw new ArgumentOutOfRangeException(nameof(value), "Count facts carry 1; duration facts carry 0 to 3660 days in microseconds.");
         SourceId = sourceId;
         Metric = metric;
@@ -155,10 +155,10 @@ public sealed record ReportFact
     public DateTimeOffset CellStart => ReportBuckets.CellStart(OccurredAt);
 
     /// <summary>The histogram bin for duration metrics, 0 for count metrics.</summary>
-    public int Bin => ReportMetrics.IsDuration(Metric) ? ReportHistogram.Bin(Value) : 0;
+    public int Bin => Metric.IsDuration ? ReportHistogram.Bin(Value) : 0;
 
     /// <summary>Duration facts as a <see cref="TimeSpan"/>; <see langword="null"/> for count facts.</summary>
-    public TimeSpan? Duration => ReportMetrics.IsDuration(Metric) ? TimeSpan.FromTicks(Value * 10) : null;
+    public TimeSpan? Duration => Metric.IsDuration ? TimeSpan.FromTicks(Value * 10) : null;
 
     public static long Microseconds(TimeSpan duration) => duration.Ticks / 10;
 

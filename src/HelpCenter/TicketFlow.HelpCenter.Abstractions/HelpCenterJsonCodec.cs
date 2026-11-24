@@ -23,7 +23,7 @@ public static class HelpCenterJsonCodec
 
     public static IReadOnlyList<CollectionTranslation> DecodeCollectionTranslations(string json) =>
         Decode(json, ["locale", "name", "slug", "description"], item => new CollectionTranslation(
-            new HelpCenterLocale(Required(item, "locale")), Required(item, "name"), new HelpCenterSlug(Required(item, "slug")), Optional(item, "description")));
+            new HelpCenterLocale(item.RequiredString("locale")), item.RequiredString("name"), new HelpCenterSlug(item.RequiredString("slug")), item.OptionalString("description")));
 
     public static string EncodeArticleTranslations(IEnumerable<ArticleTranslation> translations) =>
         Encode(translations, WriteArticle);
@@ -40,7 +40,7 @@ public static class HelpCenterJsonCodec
 
     public static IReadOnlyList<PublishedTranslation> DecodePublishedTranslations(string json) =>
         Decode(json, ["locale", "title", "slug", "body", "excerpt", "tags", "plain"], item =>
-            new PublishedTranslation(ReadArticle(item), item.TryGetProperty("plain", out var plain) && plain.ValueKind == JsonValueKind.String
+            new PublishedTranslation(ReadArticle(item), item["plain"] is { ValueKind: JsonValueKind.String } plain
                 ? plain.GetString()!
                 : throw new FormatException("Missing plain text.")));
 
@@ -61,12 +61,12 @@ public static class HelpCenterJsonCodec
     private static ArticleTranslation ReadArticle(JsonElement item)
     {
         var tags = new List<string>();
-        if (!item.TryGetProperty("tags", out var array) || array.ValueKind != JsonValueKind.Array)
+        if (item["tags"] is not { ValueKind: JsonValueKind.Array } array)
             throw new FormatException("Missing tags.");
         foreach (var tag in array.EnumerateArray())
             tags.Add(tag.ValueKind == JsonValueKind.String ? tag.GetString()! : throw new FormatException("Tags must be strings."));
-        return new ArticleTranslation(new HelpCenterLocale(Required(item, "locale")), Required(item, "title"), new HelpCenterSlug(Required(item, "slug")),
-            Required(item, "body"), Optional(item, "excerpt"), tags);
+        return new ArticleTranslation(new HelpCenterLocale(item.RequiredString("locale")), item.RequiredString("title"), new HelpCenterSlug(item.RequiredString("slug")),
+            item.RequiredString("body"), item.OptionalString("excerpt"), tags);
     }
 
     private static string Encode<T>(IEnumerable<T> items, Action<Utf8JsonWriter, T> write)
@@ -98,9 +98,9 @@ public static class HelpCenterJsonCodec
         if (root.ValueKind != JsonValueKind.Object)
             throw new FormatException("Translations must be a JSON object.");
         RequireProperties(root, ["v", "items"]);
-        if (!root.TryGetProperty("v", out var version) || version.ValueKind != JsonValueKind.Number || !version.TryGetInt32(out var number) || number != Version)
+        if (root["v"] is not { ValueKind: JsonValueKind.Number } version || !version.TryGetInt32(out var number) || number != Version)
             throw new FormatException("Unsupported translation format version.");
-        if (!root.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+        if (root["items"] is not { ValueKind: JsonValueKind.Array } items)
             throw new FormatException("Missing translation items.");
         var result = new List<T>();
         foreach (var item in items.EnumerateArray())
@@ -120,11 +120,19 @@ public static class HelpCenterJsonCodec
             if (!allowed.Contains(property.Name, StringComparer.Ordinal) || !seen.Add(property.Name))
                 throw new FormatException("Unknown or duplicate translation property.");
     }
+}
 
-    private static string Required(JsonElement item, string name) =>
-        item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString()! : throw new FormatException($"Missing '{name}'.");
+internal static class HelpCenterJsonExtensions
+{
+    extension(JsonElement element)
+    {
+        public JsonElement? this[string name] => element.TryGetProperty(name, out var value) ? value : null;
 
-    private static string? Optional(JsonElement item, string name) =>
-        !item.TryGetProperty(name, out var value) ? null
-        : value.ValueKind == JsonValueKind.String ? value.GetString() : throw new FormatException($"'{name}' must be a string.");
+        public string RequiredString(string name) =>
+            element[name] is { ValueKind: JsonValueKind.String } value ? value.GetString()! : throw new FormatException($"Missing '{name}'.");
+
+        public string? OptionalString(string name) =>
+            element[name] is not { } value ? null
+            : value.ValueKind == JsonValueKind.String ? value.GetString() : throw new FormatException($"'{name}' must be a string.");
+    }
 }

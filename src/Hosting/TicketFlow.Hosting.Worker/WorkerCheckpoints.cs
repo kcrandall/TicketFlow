@@ -38,7 +38,7 @@ public sealed class InMemoryWorkerCheckpointStore(int maximumEntries = 100_000) 
         ArgumentNullException.ThrowIfNull(scope);
         WorkerCheckpointNames.Require(name, nameof(name));
         lock (gate)
-            return Task.FromResult(values.TryGetValue((scope, name), out var value) ? value : (long?)null);
+            return Task.FromResult(values.TryGetValue(scope, name, out var value) ? value : (long?)null);
     }
 
     public Task<bool> SetAsync(TicketScope scope, string name, long value, long? expected, CancellationToken cancellationToken = default)
@@ -48,12 +48,12 @@ public sealed class InMemoryWorkerCheckpointStore(int maximumEntries = 100_000) 
         ArgumentOutOfRangeException.ThrowIfNegative(value);
         lock (gate)
         {
-            var exists = values.TryGetValue((scope, name), out var current);
+            var exists = values.TryGetValue(scope, name, out var current);
             if (exists ? expected != current : expected is not null)
                 return Task.FromResult(false);
             if (!exists && values.Count >= maximumEntries)
                 throw new InvalidOperationException("The in-memory checkpoint store is full.");
-            values[(scope, name)] = value;
+            values[scope, name] = value;
             return Task.FromResult(true);
         }
     }

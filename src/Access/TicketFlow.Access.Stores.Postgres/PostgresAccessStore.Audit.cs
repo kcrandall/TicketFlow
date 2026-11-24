@@ -83,16 +83,16 @@ public sealed partial class PostgresAccessStore
                 (AccessAuditKind)reader.GetInt16(3),
                 (AccessAuditOutcome)reader.GetInt16(4),
                 new AccessActor((AccessActorKind)reader.GetInt16(5), reader.GetString(6)),
-                NullableText(reader, 7) is { } permission ? Permission.Parse(permission) : null,
-                NullableText(reader, 8),
-                NullableText(reader, 9) is { } team ? new TeamId(team) : null,
-                NullableText(reader, 10) is { } inbox ? new InboxId(inbox) : null,
-                NullableText(reader, 11) is { } grant ? new GrantId(grant) : null,
-                NullableText(reader, 12) is { } role ? new RoleId(role) : null,
-                NullableText(reader, 13) is { } field ? new FieldPath(field) : null,
+                reader.NullableText(7) is { } permission ? Permission.Parse(permission) : null,
+                reader.NullableText(8),
+                reader.NullableText(9) is { } team ? new TeamId(team) : null,
+                reader.NullableText(10) is { } inbox ? new InboxId(inbox) : null,
+                reader.NullableText(11) is { } grant ? new GrantId(grant) : null,
+                reader.NullableText(12) is { } role ? new RoleId(role) : null,
+                reader.NullableText(13) is { } field ? new FieldPath(field) : null,
                 reader.GetBoolean(14),
                 reader.IsDBNull(15) ? null : (AccessDenialReason)reader.GetInt16(15),
-                NullableText(reader, 16));
+                reader.NullableText(16));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
         {

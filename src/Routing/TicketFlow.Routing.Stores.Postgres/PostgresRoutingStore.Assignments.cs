@@ -409,7 +409,7 @@ public sealed partial class PostgresRoutingStore
             if (!Enum.IsDefined(state))
                 throw new FormatException("Unknown assignment state.");
             return new RoutingAssignment(new ConversationId(reader.GetString(0)), new UserId(reader.GetString(2)), new InboxId(reader.GetString(3)),
-                new ContactId(reader.GetString(4)), new ChannelKind(reader.GetString(5)), state, NullableInstant(reader, 7), reader.GetInt64(8),
+                new ContactId(reader.GetString(4)), new ChannelKind(reader.GetString(5)), state, reader.NullableInstant(7), reader.GetInt64(8),
                 reader.GetFieldValue<DateTimeOffset>(9));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)

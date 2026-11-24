@@ -203,33 +203,33 @@ public sealed class SlaConversationTracker : IConversationOutboxHandler
 
     private async Task<Inbox?> GetInboxAsync(TicketScope scope, InboxId id, SlaRunCache? cache, CancellationToken cancellationToken)
     {
-        if (cache is not null && cache.Inboxes.TryGetValue((scope, id), out var cached))
+        if (cache is not null && cache.Inboxes.TryGetValue(scope, id, out var cached))
             return cached;
         var inbox = (await inboxes.GetAsync(scope, id, cancellationToken).ConfigureAwait(false))?.Inbox;
         if (cache is not null)
-            cache.Inboxes[(scope, id)] = inbox;
+            cache.Inboxes[scope, id] = inbox;
         return inbox;
     }
 
     private async Task<StoredSlaPolicy?> GetPolicyAsync(TicketScope scope, SlaPolicyId id, SlaRunCache? cache, CancellationToken cancellationToken)
     {
-        if (cache is not null && cache.Policies.TryGetValue((scope, id), out var cached))
+        if (cache is not null && cache.Policies.TryGetValue(scope, id, out var cached))
             return cached;
         var policy = await policies.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
         if (cache is not null)
-            cache.Policies[(scope, id)] = policy;
+            cache.Policies[scope, id] = policy;
         return policy;
     }
 
     private async Task<SlaClockTime?> GetCalendarAsync(TicketScope scope, BusinessCalendarId id, SlaRunCache? cache, CancellationToken cancellationToken)
     {
-        if (cache is not null && cache.Calendars.TryGetValue((scope, id), out var cached))
+        if (cache is not null && cache.Calendars.TryGetValue(scope, id, out var cached))
             return cached;
         var clock = await calendars.GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is { } calendar
             ? SlaClockTime.Business(new BusinessCalendarCalculator(calendar.Calendar))
             : null;
         if (cache is not null)
-            cache.Calendars[(scope, id)] = clock;
+            cache.Calendars[scope, id] = clock;
         return clock;
     }
 

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using TicketFlow.Conversations;
 using TicketFlow.Core;
 using TicketFlow.Workspaces;
 
@@ -39,7 +40,7 @@ public static class SlaPolicyCodec
     {
         SlaJson.RequireProperties(root, "v", "name", "risk", "pause", "rules");
         SlaJson.RequireVersion(root, FormatVersion);
-        return new SlaPolicy(id, SlaJson.String(root.GetProperty("name")), [.. SlaJson.Array(root.GetProperty("rules")).Select(ReadRule)],
+        return new SlaPolicy(id, root.RequiredString("name"), [.. root.RequiredArray("rules").Select(ReadRule)],
             ReadPause(root.GetProperty("pause")), root.GetProperty("risk").GetInt32());
     });
 
@@ -54,7 +55,7 @@ public static class SlaPolicyCodec
     internal static SlaPausePolicy ReadPause(JsonElement element)
     {
         SlaJson.RequireProperties(element, "pending", "snoozed");
-        return new(SlaJson.Bool(element.GetProperty("pending")), SlaJson.Bool(element.GetProperty("snoozed")));
+        return new(element.RequiredBool("pending"), element.RequiredBool("snoozed"));
     }
 
     internal static void WriteRule(Utf8JsonWriter writer, SlaRule rule)
@@ -64,7 +65,7 @@ public static class SlaPolicyCodec
         writer.WriteString("basis", SlaJson.Name(rule.Basis));
         writer.WriteStartArray("priorities");
         foreach (var priority in rule.Condition.Priorities)
-            writer.WriteStringValue(SlaJson.Name(priority));
+            writer.WriteStringValue(priority.WireName);
         writer.WriteEndArray();
         writer.WriteStartArray("labels");
         foreach (var label in rule.Condition.Labels)
@@ -72,13 +73,13 @@ public static class SlaPolicyCodec
         writer.WriteEndArray();
         writer.WriteStartObject("targets");
         foreach (var metric in Enum.GetValues<SlaMetric>())
-            SlaJson.WriteOptionalDuration(writer, SlaJson.Name(metric), rule.Targets.For(metric));
+            SlaJson.WriteOptionalDuration(writer, metric.WireName, rule.Targets.For(metric));
         writer.WriteEndObject();
         writer.WriteStartArray("esc");
         foreach (var escalation in rule.Escalations)
         {
             writer.WriteStartObject();
-            writer.WriteString("metric", SlaJson.Name(escalation.Metric));
+            writer.WriteString("metric", escalation.Metric.WireName);
             writer.WriteNumber("pct", escalation.ThresholdPercent);
             SlaJson.WriteActions(writer, "actions", escalation.Actions);
             writer.WriteEndObject();
@@ -93,12 +94,12 @@ public static class SlaPolicyCodec
         var targets = element.GetProperty("targets");
         SlaJson.RequireProperties(targets, "first-response", "next-response", "resolution");
         return new SlaRule(
-            SlaJson.String(element.GetProperty("name")),
-            new SlaCondition([.. SlaJson.Array(element.GetProperty("priorities")).Select(SlaJson.Priority)],
-                [.. SlaJson.Array(element.GetProperty("labels")).Select(label => new LabelId(SlaJson.String(label)))]),
-            new SlaTargets(SlaJson.OptionalDuration(targets, "first-response"), SlaJson.OptionalDuration(targets, "next-response"), SlaJson.OptionalDuration(targets, "resolution")),
+            element.RequiredString("name"),
+            new SlaCondition([.. element.RequiredArray("priorities").Select(SlaJson.Priority)],
+                [.. element.RequiredArray("labels").Select(label => new LabelId(label.RequiredString()))]),
+            new SlaTargets(targets.OptionalDuration("first-response"), targets.OptionalDuration("next-response"), targets.OptionalDuration("resolution")),
             SlaJson.Basis(element.GetProperty("basis")),
-            [.. SlaJson.Array(element.GetProperty("esc")).Select(escalation =>
+            [.. element.RequiredArray("esc").Select(escalation =>
             {
                 SlaJson.RequireProperties(escalation, "metric", "pct", "actions");
                 return new SlaEscalation(SlaJson.Metric(escalation.GetProperty("metric")), escalation.GetProperty("pct").GetInt32(), SlaJson.Actions(escalation.GetProperty("actions")));

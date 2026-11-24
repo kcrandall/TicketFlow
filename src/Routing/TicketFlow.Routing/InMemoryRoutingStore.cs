@@ -42,7 +42,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         ArgumentNullException.ThrowIfNull(scope);
         RequirePolicyId(id);
         lock (gate)
-            return Task.FromResult(policies.GetValueOrDefault((scope, id.Value)));
+            return Task.FromResult(policies.GetValueOrDefault(scope, id.Value));
     }
 
     public Task<IReadOnlyList<StoredRoutingPolicy>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default)
@@ -58,12 +58,12 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         ArgumentNullException.ThrowIfNull(policy);
         lock (gate)
         {
-            if (policies.TryGetValue((scope, policy.Id.Value), out var existing))
+            if (policies.TryGetValue(scope, policy.Id.Value, out var existing))
                 return Result<StoredRoutingPolicy>(new StoreConflict(existing.Revision));
             if (policies.Keys.Count(key => key.Scope == scope) >= IRoutingPolicyStore.MaximumPoliciesPerWorkspace)
                 return Result<StoredRoutingPolicy>(new StoreRejected<RoutingWriteRejection>(RoutingWriteRejection.CapacityExceeded));
             var stored = new StoredRoutingPolicy(scope, policy, 1);
-            policies[(scope, policy.Id.Value)] = stored;
+            policies[scope, policy.Id.Value] = stored;
             return Result<StoredRoutingPolicy>(new StoreApplied<StoredRoutingPolicy>(stored));
         }
     }
@@ -74,12 +74,12 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         ArgumentNullException.ThrowIfNull(policy);
         lock (gate)
         {
-            if (!policies.TryGetValue((scope, policy.Id.Value), out var existing))
+            if (!policies.TryGetValue(scope, policy.Id.Value, out var existing))
                 return Result<StoredRoutingPolicy>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
                 return Result<StoredRoutingPolicy>(new StoreConflict(existing.Revision));
             var stored = new StoredRoutingPolicy(scope, policy, existing.Revision + 1);
-            policies[(scope, policy.Id.Value)] = stored;
+            policies[scope, policy.Id.Value] = stored;
             return Result<StoredRoutingPolicy>(new StoreApplied<StoredRoutingPolicy>(stored));
         }
     }
@@ -90,11 +90,11 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         RequirePolicyId(id);
         lock (gate)
         {
-            if (!policies.TryGetValue((scope, id.Value), out var existing))
+            if (!policies.TryGetValue(scope, id.Value, out var existing))
                 return Result<StoredRoutingPolicy>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
                 return Result<StoredRoutingPolicy>(new StoreConflict(existing.Revision));
-            policies.Remove((scope, id.Value));
+            policies.Remove(scope, id.Value);
             return Result<StoredRoutingPolicy>(new StoreApplied<StoredRoutingPolicy>(existing));
         }
     }
@@ -106,7 +106,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         ArgumentNullException.ThrowIfNull(scope);
         RequireAgent(agent);
         lock (gate)
-            return Task.FromResult(agents.GetValueOrDefault((scope, agent))?.Profile);
+            return Task.FromResult(agents.GetValueOrDefault(scope, agent)?.Profile);
     }
 
     public Task<IReadOnlyList<StoredAgentProfile>> ListAsync(TicketScope scope, UserId? after, int limit, CancellationToken cancellationToken = default)
@@ -174,7 +174,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         var now = Now;
         lock (gate)
         {
-            if (!agents.TryGetValue((scope, agent), out var row))
+            if (!agents.TryGetValue(scope, agent, out var row))
                 return Result<StoredAgentProfile>(StoreNotFound.Instance);
             var profile = row.Profile;
             var wasOnline = profile.Presence.EffectiveStatus(now) != AgentStatus.Offline;
@@ -197,7 +197,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         var now = Now;
         lock (gate)
         {
-            if (!agents.TryGetValue((scope, agent), out var row))
+            if (!agents.TryGetValue(scope, agent, out var row))
                 return Result<StoredAgentProfile>(StoreNotFound.Instance);
             var presence = row.Profile.Presence;
             if (presence.EffectiveStatus(now) != AgentStatus.Offline)
@@ -212,11 +212,11 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         RequireAgent(agent);
         lock (gate)
         {
-            if (!agents.TryGetValue((scope, agent), out var row))
+            if (!agents.TryGetValue(scope, agent, out var row))
                 return Result<StoredAgentProfile>(StoreNotFound.Instance);
             if (row.Profile.Revision != expectedRevision)
                 return Result<StoredAgentProfile>(new StoreConflict(row.Profile.Revision));
-            agents.Remove((scope, agent));
+            agents.Remove(scope, agent);
             return Result<StoredAgentProfile>(new StoreApplied<StoredAgentProfile>(row.Profile));
         }
     }
@@ -264,7 +264,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         RequireAgent(agent);
         lock (gate)
         {
-            if (!agents.TryGetValue((scope, agent), out var row) || row.Fence != fence || !row.Profile.ReassignmentPending)
+            if (!agents.TryGetValue(scope, agent, out var row) || row.Fence != fence || !row.Profile.ReassignmentPending)
                 return Task.FromResult(false);
             row.Profile = row.Profile with { ReassignmentPending = false };
             row.LeaseUntil = null;
@@ -281,20 +281,20 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         var now = Now;
         lock (gate)
         {
-            if (assignments.TryGetValue((scope, request.Conversation), out var existing)
+            if (assignments.TryGetValue(scope, request.Conversation, out var existing)
                 && ((existing.State == RoutingAssignmentState.Reserved && existing.CountsAt(now))
                     || (existing.State == RoutingAssignmentState.Assigned && existing.ConversationRevision > request.ConversationRevision)))
                 return Task.FromResult<RoutingReservationResult>(new RoutingAlreadyReserved(existing));
             var loads = ComputeLoadsLocked(scope, request.Candidates, request.Channel, request.Conversation, now);
-            var chosen = request.Select(loads, cursors.GetValueOrDefault((scope, request.CursorKey)));
+            var chosen = request.Select(loads, cursors.GetValueOrDefault(scope, request.CursorKey));
             if (chosen is null)
                 return Task.FromResult<RoutingReservationResult>(RoutingNoCapacity.Instance);
             if (existing is null && assignments.Count >= MaximumRows)
                 throw new InvalidOperationException("The in-memory routing store is full.");
             var reservation = new RoutingAssignment(request.Conversation, chosen.Agent, request.Inbox, request.Contact, request.Channel, RoutingAssignmentState.Reserved,
                 now + request.Lease, request.ConversationRevision, now);
-            assignments[(scope, request.Conversation)] = reservation;
-            cursors[(scope, request.CursorKey)] = chosen.Agent.Value;
+            assignments[scope, request.Conversation] = reservation;
+            cursors[scope, request.CursorKey] = chosen.Agent.Value;
             return Task.FromResult<RoutingReservationResult>(new RoutingReserved(reservation, loads.GetValueOrDefault(chosen.Agent) + 1));
         }
     }
@@ -308,13 +308,13 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         var now = Now;
         lock (gate)
         {
-            if (!assignments.TryGetValue((scope, conversation), out var row) || row.Agent != agent || row.ConversationRevision > conversationRevision)
+            if (!assignments.TryGetValue(scope, conversation, out var row) || row.Agent != agent || row.ConversationRevision > conversationRevision)
                 return Task.FromResult(false);
             if (row.State == RoutingAssignmentState.Reserved || row.ConversationRevision < conversationRevision)
             {
-                assignments[(scope, conversation)] = new RoutingAssignment(conversation, agent, row.Inbox, row.Contact, row.Channel, RoutingAssignmentState.Assigned, null,
+                assignments[scope, conversation] = new RoutingAssignment(conversation, agent, row.Inbox, row.Contact, row.Channel, RoutingAssignmentState.Assigned, null,
                     conversationRevision, now);
-                sticky[(scope, row.Contact)] = new StickyOwner(row.Contact, agent, now);
+                sticky[scope, row.Contact] = new StickyOwner(row.Contact, agent, now);
             }
             return Task.FromResult(true);
         }
@@ -327,9 +327,9 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         RequireAgent(agent);
         lock (gate)
         {
-            if (!assignments.TryGetValue((scope, conversation), out var row) || row.Agent != agent || row.State != RoutingAssignmentState.Reserved)
+            if (!assignments.TryGetValue(scope, conversation, out var row) || row.Agent != agent || row.State != RoutingAssignmentState.Reserved)
                 return Task.FromResult(false);
-            return Task.FromResult(assignments.Remove((scope, conversation)));
+            return Task.FromResult(assignments.Remove(scope, conversation));
         }
     }
 
@@ -348,7 +348,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
                 throw new InvalidOperationException("The in-memory routing store is full.");
             assignments[key] = new RoutingAssignment(record.Conversation, record.Agent, record.Inbox, record.Contact, record.Channel, RoutingAssignmentState.Assigned, null,
                 record.ConversationRevision, now);
-            sticky[(scope, record.Contact)] = new StickyOwner(record.Contact, record.Agent, now);
+            sticky[scope, record.Contact] = new StickyOwner(record.Contact, record.Agent, now);
             return Task.CompletedTask;
         }
     }
@@ -360,10 +360,10 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         var now = Now;
         lock (gate)
         {
-            if (!assignments.TryGetValue((scope, conversation), out var row) || row.ConversationRevision > conversationRevision
+            if (!assignments.TryGetValue(scope, conversation, out var row) || row.ConversationRevision > conversationRevision
                 || (row.State == RoutingAssignmentState.Reserved && row.CountsAt(now)))
                 return Task.FromResult(false);
-            return Task.FromResult(assignments.Remove((scope, conversation)));
+            return Task.FromResult(assignments.Remove(scope, conversation));
         }
     }
 
@@ -372,7 +372,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         ArgumentNullException.ThrowIfNull(scope);
         RequireConversation(conversation);
         lock (gate)
-            return Task.FromResult(assignments.GetValueOrDefault((scope, conversation)));
+            return Task.FromResult(assignments.GetValueOrDefault(scope, conversation));
     }
 
     public Task<IReadOnlyList<RoutingAssignment>> ListForAgentAsync(TicketScope scope, UserId agent, ConversationId? after, int limit, CancellationToken cancellationToken = default)
@@ -404,7 +404,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         if (contact == default)
             throw new ArgumentException("A contact is required.", nameof(contact));
         lock (gate)
-            return Task.FromResult(sticky.GetValueOrDefault((scope, contact)));
+            return Task.FromResult(sticky.GetValueOrDefault(scope, contact));
     }
 
     public Task<string?> GetCursorAsync(TicketScope scope, string cursorKey, CancellationToken cancellationToken = default)
@@ -412,7 +412,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         ArgumentNullException.ThrowIfNull(scope);
         TicketScope.RequireIdentifier(cursorKey, nameof(cursorKey));
         lock (gate)
-            return Task.FromResult(cursors.GetValueOrDefault((scope, cursorKey)));
+            return Task.FromResult(cursors.GetValueOrDefault(scope, cursorKey));
     }
 
     private Dictionary<UserId, int> ComputeLoadsLocked(TicketScope scope, IReadOnlyList<RoutingCandidate> candidates, ChannelKind channel, ConversationId excluded, DateTimeOffset now)
@@ -459,8 +459,8 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         ArgumentNullException.ThrowIfNull(scope);
         RequireConversation(conversation);
         lock (gate)
-            return Task.FromResult(queue.TryGetValue((scope, conversation), out var row) && row.Entry.Snapshot.ConversationRevision <= conversationRevision
-                && queue.Remove((scope, conversation)));
+            return Task.FromResult(queue.TryGetValue(scope, conversation, out var row) && row.Entry.Snapshot.ConversationRevision <= conversationRevision
+                && queue.Remove(scope, conversation));
     }
 
     Task<StoredRoutingQueueEntry?> IRoutingQueueStore.GetAsync(TicketScope scope, ConversationId conversation, CancellationToken cancellationToken)
@@ -468,7 +468,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         ArgumentNullException.ThrowIfNull(scope);
         RequireConversation(conversation);
         lock (gate)
-            return Task.FromResult(queue.TryGetValue((scope, conversation), out var row) ? new StoredRoutingQueueEntry(scope, row.Entry) : null);
+            return Task.FromResult(queue.TryGetValue(scope, conversation, out var row) ? new StoredRoutingQueueEntry(scope, row.Entry) : null);
     }
 
     public Task<RoutingQueuePage> ListAsync(TicketScope scope, RoutingQueueQuery query, AccessFilter filter, CancellationToken cancellationToken = default)
@@ -518,7 +518,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         var now = Now;
         lock (gate)
         {
-            if (!queue.TryGetValue((scope, conversation), out var row) || row.Fence != fence || !(row.LeaseUntil > now))
+            if (!queue.TryGetValue(scope, conversation, out var row) || row.Fence != fence || !(row.LeaseUntil > now))
                 return Task.FromResult(false);
             var entry = row.Entry;
             row.Entry = new RoutingQueueEntry(entry.Snapshot, update.TargetInbox, entry.QueuedAt, update.OverflowStage, update.WaitExceeded, update.NextAttemptAt, entry.Attempts + 1);
@@ -561,11 +561,11 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         var now = Now;
         lock (gate)
         {
-            if (!presence.TryGetValue((scope, conversation), out var entries))
+            if (!presence.TryGetValue(scope, conversation, out var entries))
             {
                 if (presence.Count >= MaximumRows)
                     throw new InvalidOperationException("The in-memory routing store is full.");
-                presence[(scope, conversation)] = entries = new(StringComparer.Ordinal);
+                presence[scope, conversation] = entries = new(StringComparer.Ordinal);
             }
             foreach (var expired in entries.Where(pair => pair.Value.ExpiresAt <= now).Select(pair => pair.Key).ToList())
                 entries.Remove(expired);
@@ -587,10 +587,10 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         var now = Now;
         lock (gate)
         {
-            if (!presence.TryGetValue((scope, conversation), out var entries) || !entries.Remove(user.Value, out var removed))
+            if (!presence.TryGetValue(scope, conversation, out var entries) || !entries.Remove(user.Value, out var removed))
                 return Task.FromResult(false);
             if (entries.Count == 0)
-                presence.Remove((scope, conversation));
+                presence.Remove(scope, conversation);
             return Task.FromResult(removed.ExpiresAt > now);
         }
     }
@@ -601,7 +601,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         RequireConversation(conversation);
         var now = Now;
         lock (gate)
-            return Task.FromResult<IReadOnlyList<ConversationPresence>>(presence.TryGetValue((scope, conversation), out var entries)
+            return Task.FromResult<IReadOnlyList<ConversationPresence>>(presence.TryGetValue(scope, conversation, out var entries)
                 ? [.. entries.Values.Where(item => item.ExpiresAt > now)]
                 : []);
     }
@@ -615,14 +615,14 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         var now = Now;
         lock (gate)
         {
-            var current = locks.GetValueOrDefault((scope, conversation));
+            var current = locks.GetValueOrDefault(scope, conversation);
             if (current is not null && current.ExpiresAt > now && current.Holder != holder)
                 return Task.FromResult<ReplyLockResult>(new ReplyLockHeld(current));
             if (current is null && locks.Count >= MaximumRows)
                 throw new InvalidOperationException("The in-memory routing store is full.");
             var renewed = current is not null && current.ExpiresAt > now;
             var acquired = new ReplyLock(conversation, holder, ++nextFence, renewed ? current!.AcquiredAt : now, now + duration);
-            locks[(scope, conversation)] = acquired;
+            locks[scope, conversation] = acquired;
             return Task.FromResult<ReplyLockResult>(new ReplyLockAcquired(acquired, renewed));
         }
     }
@@ -633,7 +633,7 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         RequireConversation(conversation);
         var now = Now;
         lock (gate)
-            return Task.FromResult(locks.GetValueOrDefault((scope, conversation)) is { } current && current.ExpiresAt > now ? current : null);
+            return Task.FromResult(locks.GetValueOrDefault(scope, conversation) is { } current && current.ExpiresAt > now ? current : null);
     }
 
     public Task<bool> ReleaseLockAsync(TicketScope scope, ConversationId conversation, UserId holder, long fence, CancellationToken cancellationToken = default)
@@ -644,9 +644,9 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         var now = Now;
         lock (gate)
         {
-            if (locks.GetValueOrDefault((scope, conversation)) is not { } current || current.Holder != holder || current.Fence != fence || current.ExpiresAt <= now)
+            if (locks.GetValueOrDefault(scope, conversation) is not { } current || current.Holder != holder || current.Fence != fence || current.ExpiresAt <= now)
                 return Task.FromResult(false);
-            return Task.FromResult(locks.Remove((scope, conversation)));
+            return Task.FromResult(locks.Remove(scope, conversation));
         }
     }
 

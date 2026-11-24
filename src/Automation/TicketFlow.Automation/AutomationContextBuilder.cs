@@ -174,17 +174,17 @@ public sealed class AutomationContextBuilder(IConversationService conversations,
 
     private async Task<Inbox?> InboxAsync(TicketScope scope, InboxId id, AutomationContextCache? cache, CancellationToken cancellationToken)
     {
-        if (cache is not null && cache.Inboxes.TryGetValue((scope, id), out var cached))
+        if (cache is not null && cache.Inboxes.TryGetValue(scope, id, out var cached))
             return cached;
         var inbox = (await inboxes.GetAsync(scope, id, cancellationToken).ConfigureAwait(false))?.Inbox;
         if (cache is not null)
-            cache.Inboxes[(scope, id)] = inbox;
+            cache.Inboxes[scope, id] = inbox;
         return inbox;
     }
 
     private async Task<BusinessCalendarCalculator?> CalendarAsync(TicketScope scope, BusinessCalendarId calendarId, AutomationContextCache? cache, CancellationToken cancellationToken)
     {
-        if (cache is not null && cache.Calendars.TryGetValue((scope, calendarId), out var cached))
+        if (cache is not null && cache.Calendars.TryGetValue(scope, calendarId, out var cached))
             return cached;
         BusinessCalendarCalculator? calendar = null;
         if (await calendars.GetAsync(scope, calendarId, cancellationToken).ConfigureAwait(false) is { } stored)
@@ -199,13 +199,13 @@ public sealed class AutomationContextBuilder(IConversationService conversations,
             }
         }
         if (cache is not null)
-            cache.Calendars[(scope, calendarId)] = calendar;
+            cache.Calendars[scope, calendarId] = calendar;
         return calendar;
     }
 
     private async Task<AutomationContactFacts?> ContactAsync(PrincipalRef principal, ContactId id, AutomationContextCache? cache, CancellationToken cancellationToken)
     {
-        if (cache is not null && cache.Contacts.TryGetValue((principal, id), out var cached))
+        if (cache is not null && cache.Contacts.TryGetValue(principal, id, out var cached))
             return cached;
         var result = await contacts.GetAsync(principal, id, cancellationToken).ConfigureAwait(false);
         AutomationContactFacts? facts = null;
@@ -235,7 +235,7 @@ public sealed class AutomationContextBuilder(IConversationService conversations,
             facts = new AutomationContactFacts(view.Id, view.Profile.DisplayName, view.Profile.Company, view.Profile.Locale, view.Labels, attributes, masked);
         }
         if (cache is not null)
-            cache.Contacts[(principal, id)] = facts;
+            cache.Contacts[principal, id] = facts;
         return facts;
     }
 
@@ -261,8 +261,8 @@ public static class AutomationTemplateValues
         var values = new Dictionary<string, string?>(6 + context.Conversation.Attributes.Count + (context.Contact?.Attributes.Count ?? 0), StringComparer.Ordinal)
         {
             [AutomationTemplate.ConversationIdVariable] = context.Conversation.Id.Value,
-            [AutomationTemplate.ConversationStatus] = StatusName(context.Conversation.Status.Kind),
-            [AutomationTemplate.ConversationPriority] = PriorityName(context.Conversation.Priority),
+            [AutomationTemplate.ConversationStatus] = context.Conversation.Status.Kind.WireName,
+            [AutomationTemplate.ConversationPriority] = context.Conversation.Priority.WireName,
             [AutomationTemplate.AgentName] = agentName,
             [AutomationTemplate.ContactName] = context.Contact?.Name,
             [AutomationTemplate.ContactCompany] = context.Contact?.Company,
@@ -278,8 +278,8 @@ public static class AutomationTemplateValues
     internal static Func<string, string?> Resolver(AutomationContext context, string? agentName) => variable => variable switch
     {
         AutomationTemplate.ConversationIdVariable => context.Conversation.Id.Value,
-        AutomationTemplate.ConversationStatus => StatusName(context.Conversation.Status.Kind),
-        AutomationTemplate.ConversationPriority => PriorityName(context.Conversation.Priority),
+        AutomationTemplate.ConversationStatus => context.Conversation.Status.Kind.WireName,
+        AutomationTemplate.ConversationPriority => context.Conversation.Priority.WireName,
         AutomationTemplate.AgentName => agentName,
         AutomationTemplate.ContactName => context.Contact?.Name,
         AutomationTemplate.ContactCompany => context.Contact?.Company,
@@ -288,26 +288,6 @@ public static class AutomationTemplateValues
         _ when variable.StartsWith(AutomationTemplate.ContactAttributePrefix, StringComparison.Ordinal) =>
             context.Contact is { } c && c.Attributes.TryGetValue(variable[AutomationTemplate.ContactAttributePrefix.Length..], out var contactFact) ? Text(contactFact) : null,
         _ => null,
-    };
-
-    private static string StatusName(ConversationStatusKind status) => status switch
-    {
-        ConversationStatusKind.Open => "open",
-        ConversationStatusKind.Pending => "pending",
-        ConversationStatusKind.Snoozed => "snoozed",
-        ConversationStatusKind.Resolved => "resolved",
-        ConversationStatusKind.Closed => "closed",
-        _ => status.ToString().ToLowerInvariant(),
-    };
-
-    private static string PriorityName(ConversationPriority priority) => priority switch
-    {
-        ConversationPriority.None => "none",
-        ConversationPriority.Low => "low",
-        ConversationPriority.Medium => "medium",
-        ConversationPriority.High => "high",
-        ConversationPriority.Urgent => "urgent",
-        _ => priority.ToString().ToLowerInvariant(),
     };
 
     private static string? Text(AutomationAttributeFact fact) => fact.Kind == AutomationAttributeKind.List ? string.Join(", ", fact.Items ?? []) : fact.Scalar;

@@ -344,7 +344,7 @@ public sealed partial class PostgresConversationStore : IConversationStore, ICon
                 if (reader.IsDBNull(8))
                     throw new FormatException("A message event has no message row.");
                 payload = message.WithDelivery(new MessageDelivery((MessageDeliveryState)reader.GetInt16(8), reader.GetFieldValue<DateTimeOffset>(10),
-                    NullableText(reader, 9)), NullableText(reader, 7));
+                    reader.NullableText(9)), reader.NullableText(7));
             }
             return new TimelineEvent(id, reader.GetInt64(0), reader.GetGuid(1), reader.GetFieldValue<DateTimeOffset>(2),
                 new AccessActor((AccessActorKind)reader.GetInt16(3), reader.GetString(4)), payload);
@@ -361,7 +361,7 @@ public sealed partial class PostgresConversationStore : IConversationStore, ICon
         {
             if (reader.GetInt16(1) != 1)
                 throw new FormatException("Unsupported conversation format version.");
-            var channel = NullableText(reader, 12);
+            var channel = reader.NullableText(12);
             var rawLabels = reader.GetFieldValue<string[]>(9);
             LabelId[] labels = [];
             if (rawLabels.Length > 0)
@@ -382,20 +382,20 @@ public sealed partial class PostgresConversationStore : IConversationStore, ICon
                 new ConversationId(reader.GetString(0)),
                 new InboxId(reader.GetString(2)),
                 new ContactId(reader.GetString(3)),
-                ConversationStatus.FromKind((ConversationStatusKind)reader.GetInt16(4), NullableInstant(reader, 5)),
+                ConversationStatus.FromKind((ConversationStatusKind)reader.GetInt16(4), reader.NullableInstant(5)),
                 Defined((ConversationPriority)reader.GetInt16(6)),
-                NullableText(reader, 7) is { } assignee ? new UserId(assignee) : null,
-                NullableText(reader, 8) is { } team ? new TeamId(team) : null,
+                reader.NullableText(7) is { } assignee ? new UserId(assignee) : null,
+                reader.NullableText(8) is { } team ? new TeamId(team) : null,
                 labels,
                 ConversationJsonCodec.DeserializeAttributes(reader.GetString(10)),
                 participants,
                 channel is null ? null : new ChannelThreadRef(channel, reader.GetString(13)),
                 reader.GetFieldValue<DateTimeOffset>(14),
                 reader.GetFieldValue<DateTimeOffset>(15),
-                NullableInstant(reader, 16),
-                NullableInstant(reader, 17),
-                NullableInstant(reader, 18),
-                NullableInstant(reader, 19),
+                reader.NullableInstant(16),
+                reader.NullableInstant(17),
+                reader.NullableInstant(18),
+                reader.NullableInstant(19),
                 reader.GetInt64(20),
                 ConversationJsonCodec.DeserializeRedirects(reader.GetString(21)));
             return new StoredConversation(scope, conversation, reader.GetInt64(22));
@@ -416,7 +416,7 @@ public sealed partial class PostgresConversationStore : IConversationStore, ICon
             if (!Enum.IsDefined(direction))
                 throw new FormatException("Unknown message direction.");
             return new StoredMessage(scope, new ConversationId(reader.GetString(0)), new InboxId(reader.GetString(1)), new MessageId(reader.GetString(2)), reader.GetInt64(3),
-                direction, NullableText(reader, 5), new MessageDelivery((MessageDeliveryState)reader.GetInt16(6), reader.GetFieldValue<DateTimeOffset>(8), NullableText(reader, 7)),
+                direction, reader.NullableText(5), new MessageDelivery((MessageDeliveryState)reader.GetInt16(6), reader.GetFieldValue<DateTimeOffset>(8), reader.NullableText(7)),
                 reader.GetInt64(9));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
@@ -426,10 +426,6 @@ public sealed partial class PostgresConversationStore : IConversationStore, ICon
     }
 
     private static T Defined<T>(T value) where T : struct, Enum => Enum.IsDefined(value) ? value : throw new FormatException("Unknown enumeration value.");
-
-    private static string? NullableText(NpgsqlDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
-
-    private static DateTimeOffset? NullableInstant(NpgsqlDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetFieldValue<DateTimeOffset>(ordinal);
 
     private static void AddScope(NpgsqlCommand command, TicketScope scope) => AddScope(command.Parameters, scope);
 

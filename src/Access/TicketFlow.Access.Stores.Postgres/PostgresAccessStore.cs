@@ -88,12 +88,6 @@ public sealed partial class PostgresAccessStore : IAccessRoleStore, IAccessGrant
             command.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.TimestampTz) { Value = DBNull.Value });
     }
 
-    private static string? NullableText(NpgsqlDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
-
-    private static DateTimeOffset? NullableInstant(NpgsqlDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : reader.GetFieldValue<DateTimeOffset>(ordinal);
-
     /// <summary>Serializes writers for one scope or subject within the current transaction.</summary>
     private static async Task LockAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken, params string[] parts)
     {

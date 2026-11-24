@@ -3,6 +3,9 @@
     <Description>Conversation service for TicketFlow: access-checked commands and timeline reads, masking, filtered lists, outbox dispatcher, contact-merge follower and development in-memory stores.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Shared/TupleDictionaryExtensions.cs" Link="Internal/TupleDictionaryExtensions.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
     <ProjectReference Include="../../Contacts/TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj" />
     <ProjectReference Include="../../Workspaces/TicketFlow.Workspaces.Abstractions/TicketFlow.Workspaces.Abstractions.csproj" />

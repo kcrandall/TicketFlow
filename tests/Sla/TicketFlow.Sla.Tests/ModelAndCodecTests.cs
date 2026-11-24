@@ -115,4 +115,13 @@ public sealed class ModelAndCodecTests
         Assert.ThrowsExactly<FormatException>(() => SlaTrackerCodec.Deserialize(json.Replace("\"v\":1", "\"v\":9", StringComparison.Ordinal)));
         Assert.ThrowsExactly<FormatException>(() => SlaTrackerCodec.Deserialize(json.Replace("\"emissions\":", "\"unknown\":0,\"emissions\":", StringComparison.Ordinal)));
     }
+
+    [TestMethod]
+    public void SlaMetricWireNamesAreStable()
+    {
+        Assert.AreEqual("first-response", SlaMetric.FirstResponse.WireName);
+        Assert.AreEqual("next-response", SlaMetric.NextResponse.WireName);
+        Assert.AreEqual("resolution", SlaMetric.Resolution.WireName);
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => _ = ((SlaMetric)99).WireName);
+    }
 }

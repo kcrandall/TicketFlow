@@ -246,7 +246,7 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
                 throw new FormatException("Unsupported endpoint format version.");
             var stored = scope ?? new TicketScope(reader.GetString(6), reader.GetString(7), reader.GetString(8), reader.GetString(9), new WorkspaceId(reader.GetString(10)));
             return new StoredChannelEndpoint(stored, new ChannelEndpoint(new ChannelKind(reader.GetString(0)), reader.GetString(1), new InboxId(reader.GetString(2)),
-                NullableText(reader, 3)), reader.GetInt64(4));
+                reader.NullableText(3)), reader.GetInt64(4));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
         {
@@ -370,10 +370,10 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         {
             if (reader.GetInt16(11) != 1)
                 throw new FormatException("Unsupported state format version.");
-            var recipient = new ChannelRecipient(Defined((ContactIdentityKind)reader.GetInt16(3)), reader.GetString(5), NullableText(reader, 4));
+            var recipient = new ChannelRecipient(Defined((ContactIdentityKind)reader.GetInt16(3)), reader.GetString(5), reader.NullableText(4));
             return new StoredChannelConversationState(scope, new ChannelConversationState(new ConversationId(reader.GetString(0)), new InboxId(reader.GetString(1)),
-                new ChannelKind(reader.GetString(2)), recipient, NullableText(reader, 6), NullableText(reader, 7), NullableInstant(reader, 8), NullableText(reader, 9),
-                NullableText(reader, 12) is { } contact ? new ContactId(contact) : null), reader.GetInt64(10));
+                new ChannelKind(reader.GetString(2)), recipient, reader.NullableText(6), reader.NullableText(7), reader.NullableInstant(8), reader.NullableText(9),
+                reader.NullableText(12) is { } contact ? new ContactId(contact) : null), reader.GetInt64(10));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
         {
@@ -507,7 +507,7 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
         {
             if (reader.GetInt16(6) != 1)
                 throw new FormatException("Unsupported reference format version.");
-            var message = NullableText(reader, 3);
+            var message = reader.NullableText(3);
             return new StoredChannelMessageReference(conversation, new InboxId(reader.GetString(0)), new ChannelMessageReference(reader.GetString(1),
                 Defined((MessageDirection)reader.GetInt16(2)), message is null ? null : new MessageId(message)), reader.GetInt64(4), reader.GetFieldValue<DateTimeOffset>(5));
         }
@@ -599,7 +599,7 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
                 throw new FormatException("Unsupported dispatch format version.");
             return new StoredChannelDispatch(scope, new ChannelDispatch(new ConversationId(reader.GetString(0)), new MessageId(reader.GetString(1)), new InboxId(reader.GetString(2)),
                 new ChannelKind(reader.GetString(3)), Defined((ChannelDispatchState)reader.GetInt16(4)), reader.GetInt32(5), reader.GetFieldValue<DateTimeOffset>(6),
-                NullableInstant(reader, 7), NullableText(reader, 8), NullableText(reader, 9)), reader.GetInt64(10));
+                reader.NullableInstant(7), reader.NullableText(8), reader.NullableText(9)), reader.GetInt64(10));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
         {
@@ -642,10 +642,6 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
     private static string Kind(ChannelKind kind) => kind.IsInitialized ? kind.Value : throw new ArgumentException("A channel kind is required.", nameof(kind));
 
     private static T Defined<T>(T value) where T : struct, Enum => Enum.IsDefined(value) ? value : throw new FormatException("Unknown enumeration value.");
-
-    private static string? NullableText(NpgsqlDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
-
-    private static DateTimeOffset? NullableInstant(NpgsqlDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetFieldValue<DateTimeOffset>(ordinal);
 
     private static void AddScope(NpgsqlCommand command, TicketScope scope)
     {

@@ -152,7 +152,7 @@ public sealed partial class PostgresConversationStore
             if (reader.GetInt16(1) != 1)
                 throw new FormatException("Unsupported attribute definition format version.");
             return new StoredConversationAttributeDefinition(scope,
-                new ConversationAttributeDefinition(reader.GetString(0), Defined((ConversationAttributeType)reader.GetInt16(2)), reader.GetBoolean(3), NullableText(reader, 4)),
+                new ConversationAttributeDefinition(reader.GetString(0), Defined((ConversationAttributeType)reader.GetInt16(2)), reader.GetBoolean(3), reader.NullableText(4)),
                 reader.GetInt64(5));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)

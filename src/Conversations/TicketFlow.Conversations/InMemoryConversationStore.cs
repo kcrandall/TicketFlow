@@ -114,10 +114,10 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
             var item = write.Events[i];
             if (item.Event.Value is not MessageEvent message)
                 continue;
-            if (messages.ContainsKey((scope, conversation.Id, message.Id)))
+            if (messages.ContainsKey(scope, conversation.Id, message.Id))
                 return new ConversationWriteRejected(ConversationWriteRejection.DuplicateMessageId);
-            if (message.ExternalId is { } external && externalIds.TryGetValue((scope, conversation.Inbox, external), out var holder))
-                return new ConversationDuplicateMessage(messages[(scope, holder.Conversation, holder.Message)]);
+            if (message.ExternalId is { } external && externalIds.TryGetValue(scope, conversation.Inbox, external, out var holder))
+                return new ConversationDuplicateMessage(messages[scope, holder.Conversation, holder.Message]);
             newMessages ??= [];
             newMessages.Add(new StoredMessage(scope, conversation.Id, conversation.Inbox, message.Id, item.Sequence, message.Direction, message.ExternalId, message.Delivery, 1));
         }
@@ -146,9 +146,9 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
             for (var i = 0; i < newMessages.Count; i++)
             {
                 var message = newMessages[i];
-                messages[(scope, conversation.Id, message.Message)] = message;
+                messages[scope, conversation.Id, message.Message] = message;
                 if (message.ExternalId is { } external)
-                    externalIds[(scope, conversation.Inbox, external)] = (conversation.Id, message.Message);
+                    externalIds[scope, conversation.Inbox, external] = (conversation.Id, message.Message);
             }
         }
         var entry = write.Change is null ? null : Append(write.Change);
@@ -186,14 +186,14 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
                         byThread.Remove(threadKey);
                 }
             }
-            if (timelines.Remove((scope, id), out var timeline))
+            if (timelines.Remove(scope, id, out var timeline))
             {
                 eventCount -= timeline.Count;
                 for (var i = 0; i < timeline.Count; i++)
                 {
-                    if (timeline[i].Event.Value is MessageEvent message && messages.Remove((scope, id, message.Id), out var storedMessage)
+                    if (timeline[i].Event.Value is MessageEvent message && messages.Remove(scope, id, message.Id, out var storedMessage)
                         && storedMessage.ExternalId is { } external)
-                        externalIds.Remove((scope, storedMessage.Inbox, external));
+                        externalIds.Remove(scope, storedMessage.Inbox, external);
                 }
             }
             return Task.FromResult<ConversationWriteResult>(new ConversationWriteApplied(existing, [], Append(change)));
@@ -209,7 +209,7 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IConversationStore.MaximumTimelineRead);
         lock (gate)
         {
-            if (!timelines.TryGetValue((scope, id), out var timeline) || timeline.Count == 0)
+            if (!timelines.TryGetValue(scope, id, out var timeline) || timeline.Count == 0)
                 return Task.FromResult<IReadOnlyList<TimelineEvent>>([]);
             var start = FindFirstAfter(timeline, afterSequence);
             if (start >= timeline.Count)
@@ -220,7 +220,7 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
                 var item = timeline[i];
                 if (!includeNotes && item.Event.Kind == ConversationEventKind.Note)
                     continue;
-                if (item.Event.Value is MessageEvent message && messages.TryGetValue((scope, id, message.Id), out var current)
+                if (item.Event.Value is MessageEvent message && messages.TryGetValue(scope, id, message.Id, out var current)
                     && (current.Delivery != message.Delivery || current.ExternalId != message.ExternalId))
                     item = item.WithEvent(message.WithDelivery(current.Delivery, current.ExternalId));
                 page.Add(item);
@@ -250,7 +250,7 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
         if (message == default)
             throw new ArgumentException("A message identifier is required.", nameof(message));
         lock (gate)
-            return Task.FromResult(messages.GetValueOrDefault((scope, conversation, message)));
+            return Task.FromResult(messages.GetValueOrDefault(scope, conversation, message));
     }
 
     public Task<StoredMessage?> FindMessageByExternalIdAsync(TicketScope scope, InboxId inbox, string externalId, CancellationToken cancellationToken = default)
@@ -260,7 +260,7 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
             throw new ArgumentException("An inbox identifier is required.", nameof(inbox));
         ArgumentNullException.ThrowIfNull(externalId);
         lock (gate)
-            return Task.FromResult(externalIds.TryGetValue((scope, inbox, externalId), out var holder) ? messages[(scope, holder.Conversation, holder.Message)] : null);
+            return Task.FromResult(externalIds.TryGetValue(scope, inbox, externalId, out var holder) ? messages[scope, holder.Conversation, holder.Message] : null);
     }
 
     public Task<MessageDeliveryWriteResult> UpdateDeliveryAsync(TicketScope scope, MessageDeliveryWrite write, CancellationToken cancellationToken = default)
@@ -271,7 +271,7 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
         lock (gate)
         {
             if (!conversationsByScope.TryGetValue(scope, out var bucket) || !bucket.ContainsKey(write.Conversation)
-                || !messages.TryGetValue((scope, write.Conversation, write.Message), out var current))
+                || !messages.TryGetValue(scope, write.Conversation, write.Message, out var current))
                 return Task.FromResult<MessageDeliveryWriteResult>(ConversationWriteNotFound.Instance);
             if (current.DeliveryRevision != write.ExpectedDeliveryRevision)
                 return Task.FromResult<MessageDeliveryWriteResult>(new MessageDeliveryConflict(current));
@@ -282,16 +282,16 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
             {
                 if (current.ExternalId is not null)
                     throw new ArgumentException("A message's external identifier cannot be replaced.", nameof(write));
-                if (externalIds.TryGetValue((scope, current.Inbox, external), out var holder))
-                    return Task.FromResult<MessageDeliveryWriteResult>(new ConversationDuplicateMessage(messages[(scope, holder.Conversation, holder.Message)]));
+                if (externalIds.TryGetValue(scope, current.Inbox, external, out var holder))
+                    return Task.FromResult<MessageDeliveryWriteResult>(new ConversationDuplicateMessage(messages[scope, holder.Conversation, holder.Message]));
                 externalId = external;
             }
             if (entries.Count >= MaximumOutboxEntries)
                 throw new InvalidOperationException("The in-memory conversation outbox is full.");
             var updated = current with { Delivery = write.Delivery, ExternalId = externalId, DeliveryRevision = checked(current.DeliveryRevision + 1) };
-            messages[(scope, write.Conversation, write.Message)] = updated;
+            messages[scope, write.Conversation, write.Message] = updated;
             if (externalId is not null && current.ExternalId is null)
-                externalIds[(scope, current.Inbox, externalId)] = (write.Conversation, write.Message);
+                externalIds[scope, current.Inbox, externalId] = (write.Conversation, write.Message);
             return Task.FromResult<MessageDeliveryWriteResult>(new MessageDeliveryApplied(updated, Append(write.Change)));
         }
     }
@@ -302,7 +302,7 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
         ArgumentNullException.ThrowIfNull(thread);
         lock (gate)
         {
-            if (!byThread.TryGetValue((scope, inbox, thread), out var ids) || !conversationsByScope.TryGetValue(scope, out var bucket))
+            if (!byThread.TryGetValue(scope, inbox, thread, out var ids) || !conversationsByScope.TryGetValue(scope, out var bucket))
                 return Task.FromResult<StoredConversation?>(null);
             StoredConversation? best = null;
             for (var i = 0; i < ids.Count; i++)

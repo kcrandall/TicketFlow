@@ -306,7 +306,7 @@ public sealed partial class PostgresRoutingStore
                     labels[i] = new LabelId(rawLabels[i]);
             }
             var snapshot = new RoutingQueueSnapshot(new ConversationId(reader.GetString(offset)), new InboxId(reader.GetString(offset + 2)),
-                NullableText(reader, offset + 3) is { } team ? new TeamId(team) : null, new ContactId(reader.GetString(offset + 4)),
+                reader.NullableText(offset + 3) is { } team ? new TeamId(team) : null, new ContactId(reader.GetString(offset + 4)),
                 labels, attributes, reader.GetFieldValue<DateTimeOffset>(offset + 7), reader.GetInt64(offset + 8));
             return new RoutingQueueEntry(snapshot, new InboxId(reader.GetString(offset + 9)), reader.GetFieldValue<DateTimeOffset>(offset + 10), reader.GetInt32(offset + 11),
                 reader.GetBoolean(offset + 12), reader.GetFieldValue<DateTimeOffset>(offset + 13), reader.GetInt32(offset + 14));

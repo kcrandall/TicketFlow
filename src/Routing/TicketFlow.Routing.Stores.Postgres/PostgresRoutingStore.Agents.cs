@@ -339,7 +339,7 @@ public sealed partial class PostgresRoutingStore
                 throw new FormatException("Unknown agent status.");
             var agent = new UserId(reader.GetString(0));
             return new StoredAgentProfile(scope, AgentSettingsCodec.Deserialize(agent, reader.GetInt32(2), reader.GetString(3)),
-                new AgentPresence(status, reader.GetFieldValue<DateTimeOffset>(5), NullableInstant(reader, 6), NullableInstant(reader, 7)),
+                new AgentPresence(status, reader.GetFieldValue<DateTimeOffset>(5), reader.NullableInstant(6), reader.NullableInstant(7)),
                 reader.GetBoolean(8), reader.GetInt64(9));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException or System.Text.Json.JsonException)

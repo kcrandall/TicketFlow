@@ -100,7 +100,7 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
     {
         ArgumentNullException.ThrowIfNull(partition);
         lock (gate)
-            return Task.FromResult(sessions.GetValueOrDefault((partition, id)));
+            return Task.FromResult(sessions.GetValueOrDefault(partition, id));
     }
 
     public Task<StoreWriteResult<StoredVisitorSession, LiveChatWriteRejection>> UpdateAsync(TicketScope scope, VisitorSession session, long expectedRevision, CancellationToken cancellationToken = default)
@@ -129,10 +129,10 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         RequireIds(session, conversation);
         lock (gate)
         {
-            if (!sessions.TryGetValue((AccessPartition.From(scope), session), out var stored) || stored.Scope != scope)
+            if (!sessions.TryGetValue(AccessPartition.From(scope), session, out var stored) || stored.Scope != scope)
                 return Result<VisitorConversationLink>(StoreNotFound.Instance);
-            if (!links.TryGetValue((scope, session), out var list))
-                links[(scope, session)] = list = [];
+            if (!links.TryGetValue(scope, session, out var list))
+                links[scope, session] = list = [];
             for (var i = 0; i < list.Count; i++)
                 if (list[i].Conversation == conversation)
                     return Result<VisitorConversationLink>(new StoreApplied<VisitorConversationLink>(list[i]));
@@ -140,8 +140,8 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
                 return Result<VisitorConversationLink>(new StoreRejected<LiveChatWriteRejection>(LiveChatWriteRejection.CapacityExceeded));
             var link = new VisitorConversationLink(session, conversation, LiveChatText.Instant(linkedAt), 0);
             list.Add(link);
-            if (!linksByConversation.TryGetValue((scope, conversation), out var byConv))
-                linksByConversation[(scope, conversation)] = byConv = [];
+            if (!linksByConversation.TryGetValue(scope, conversation, out var byConv))
+                linksByConversation[scope, conversation] = byConv = [];
             byConv.Add(link);
             return Result<VisitorConversationLink>(new StoreApplied<VisitorConversationLink>(link));
         }
@@ -153,7 +153,7 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         RequireIds(session, conversation);
         lock (gate)
         {
-            if (!links.TryGetValue((scope, session), out var list))
+            if (!links.TryGetValue(scope, session, out var list))
                 return Task.FromResult<VisitorConversationLink?>(null);
             for (var i = 0; i < list.Count; i++)
                 if (list[i].Conversation == conversation)
@@ -167,7 +167,7 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         ArgumentNullException.ThrowIfNull(scope);
         lock (gate)
         {
-            if (!links.TryGetValue((scope, session), out var list) || list.Count == 0)
+            if (!links.TryGetValue(scope, session, out var list) || list.Count == 0)
                 return Task.FromResult<IReadOnlyList<VisitorConversationLink>>([]);
             var result = new VisitorConversationLink[list.Count];
             for (var i = 0; i < list.Count; i++)
@@ -185,7 +185,7 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IVisitorSessionDirectory.MaximumSessions);
         lock (gate)
         {
-            if (!linksByConversation.TryGetValue((scope, conversation), out var byConv) || byConv.Count == 0)
+            if (!linksByConversation.TryGetValue(scope, conversation, out var byConv) || byConv.Count == 0)
                 return Task.FromResult<IReadOnlyList<VisitorSessionId>>([]);
             var sorted = new List<VisitorConversationLink>(byConv);
             if (sorted.Count > 1)
@@ -207,14 +207,14 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IVisitorSessionDirectory.MaximumSessions);
         lock (gate)
         {
-            if (!linksByConversation.TryGetValue((scope, conversation), out var byConv) || byConv.Count == 0)
+            if (!linksByConversation.TryGetValue(scope, conversation, out var byConv) || byConv.Count == 0)
                 return Task.FromResult<IReadOnlyList<VisitorSessionId>>([]);
             var partition = AccessPartition.From(scope);
             var candidates = new List<VisitorConversationLink>(byConv.Count);
             for (var i = 0; i < byConv.Count; i++)
             {
                 var link = byConv[i];
-                if (sessions.TryGetValue((partition, link.Session), out var stored) && stored.Scope == scope && stored.Session.IsLive(now))
+                if (sessions.TryGetValue(partition, link.Session, out var stored) && stored.Scope == scope && stored.Session.IsLive(now))
                     candidates.Add(link);
             }
             if (candidates.Count == 0)
@@ -242,14 +242,14 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         ArgumentOutOfRangeException.ThrowIfNegative(readSequence);
         lock (gate)
         {
-            var index = links.TryGetValue((scope, session), out var list) ? list.FindIndex(link => link.Conversation == conversation) : -1;
+            var index = links.TryGetValue(scope, session, out var list) ? list.FindIndex(link => link.Conversation == conversation) : -1;
             if (list is null || index < 0)
                 return Result<VisitorConversationLink>(StoreNotFound.Instance);
             var link = list[index];
             if (readSequence > link.ReadSequence)
             {
                 list[index] = link = link with { ReadSequence = readSequence };
-                if (linksByConversation.TryGetValue((scope, conversation), out var byConv))
+                if (linksByConversation.TryGetValue(scope, conversation, out var byConv))
                 {
                     for (var i = 0; i < byConv.Count; i++)
                         if (byConv[i].Session == session)
@@ -283,7 +283,7 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
             {
                 var (key, stored) = expired[i];
                 sessions.Remove(key);
-                if (links.Remove((stored.Scope, stored.Session.Id), out var sessionLinks))
+                if (links.Remove(stored.Scope, stored.Session.Id, out var sessionLinks))
                 {
                     for (var j = 0; j < sessionLinks.Count; j++)
                     {

@@ -347,16 +347,16 @@ public sealed partial class PostgresAccessStore
             GrantScope scope = reader.GetInt16(offset + 5) switch
             {
                 1 => TenantGrantScope.Instance,
-                2 => new WorkspaceGrantScope(new WorkspaceId(NullableText(reader, offset + 6)!)),
-                3 => new TeamGrantScope(new WorkspaceId(NullableText(reader, offset + 6)!), new TeamId(NullableText(reader, offset + 7)!)),
-                4 => new InboxGrantScope(new WorkspaceId(NullableText(reader, offset + 6)!), new InboxId(NullableText(reader, offset + 8)!)),
+                2 => new WorkspaceGrantScope(new WorkspaceId(reader.NullableText(offset + 6)!)),
+                3 => new TeamGrantScope(new WorkspaceId(reader.NullableText(offset + 6)!), new TeamId(reader.NullableText(offset + 7)!)),
+                4 => new InboxGrantScope(new WorkspaceId(reader.NullableText(offset + 6)!), new InboxId(reader.NullableText(offset + 8)!)),
                 _ => throw new FormatException("Unknown scope discriminator."),
             };
             var effect = (GrantEffect)reader.GetInt16(offset + 9);
             var kind = (GrantKind)reader.GetInt16(offset + 10);
-            var condition = NullableText(reader, offset + 11) is { } json ? AccessConditionCodec.Deserialize(json) : null;
+            var condition = reader.NullableText(offset + 11) is { } json ? AccessConditionCodec.Deserialize(json) : null;
             var grant = new AccessGrant(new GrantId(reader.GetString(offset)), partition, subject, new RoleId(reader.GetString(offset + 4)), scope, effect, condition,
-                NullableInstant(reader, offset + 12), NullableInstant(reader, offset + 13), NullableText(reader, offset + 14), kind);
+                reader.NullableInstant(offset + 12), reader.NullableInstant(offset + 13), reader.NullableText(offset + 14), kind);
             return new StoredAccessGrant(grant, reader.GetInt64(offset + 15));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)

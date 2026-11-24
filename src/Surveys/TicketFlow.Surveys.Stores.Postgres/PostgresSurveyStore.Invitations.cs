@@ -406,13 +406,11 @@ public sealed partial class PostgresSurveyStore
     {
         if (reader.GetInt16(16) != 1)
             throw new FormatException("Unsupported invitation format version.");
-        string? Text(int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
-        DateTimeOffset? Time(int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetFieldValue<DateTimeOffset>(ordinal);
         var invitation = new SurveyInvitation(new SurveyInvitationId(reader.GetGuid(0)), new SurveyId(reader.GetString(1)), Enum<SurveyKind>(reader.GetInt16(2)),
-            new ConversationId(reader.GetString(3)), new ContactId(reader.GetString(4)), Text(5) is { } inbox ? new InboxId(inbox) : null, Text(6) is { } team ? new TeamId(team) : null,
-            Text(7) is { } agent ? new UserId(agent) : null, new SurveyLocale(reader.GetString(8)), reader.GetFieldValue<DateTimeOffset>(9), reader.GetFieldValue<DateTimeOffset>(10),
-            Enum<SurveyInvitationState>(reader.GetInt16(11)), reader.GetInt32(12), reader.IsDBNull(13) ? null : SurveyTokenHash.FromBytes(reader.GetFieldValue<byte[]>(13)), Time(14), Time(15),
-            Time(18));
+            new ConversationId(reader.GetString(3)), new ContactId(reader.GetString(4)), reader.NullableText(5) is { } inbox ? new InboxId(inbox) : null, reader.NullableText(6) is { } team ? new TeamId(team) : null,
+            reader.NullableText(7) is { } agent ? new UserId(agent) : null, new SurveyLocale(reader.GetString(8)), reader.GetFieldValue<DateTimeOffset>(9), reader.GetFieldValue<DateTimeOffset>(10),
+            Enum<SurveyInvitationState>(reader.GetInt16(11)), reader.GetInt32(12), reader.IsDBNull(13) ? null : SurveyTokenHash.FromBytes(reader.GetFieldValue<byte[]>(13)), reader.NullableInstant(14), reader.NullableInstant(15),
+            reader.NullableInstant(18));
         return new StoredInvitation(scope, invitation, reader.GetInt64(17));
     }, "invitation");
 
@@ -420,10 +418,9 @@ public sealed partial class PostgresSurveyStore
     {
         if (reader.GetInt16(11) != 1)
             throw new FormatException("Unsupported response format version.");
-        string? Text(int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
         var response = new SurveyResponse(new SurveyInvitationId(reader.GetGuid(0)), new SurveyId(reader.GetString(1)), Enum<SurveyKind>(reader.GetInt16(2)), reader.GetInt16(3),
-            Text(4), reader.GetFieldValue<DateTimeOffset>(5), new ConversationId(reader.GetString(6)), new ContactId(reader.GetString(7)),
-            Text(8) is { } inbox ? new InboxId(inbox) : null, Text(9) is { } team ? new TeamId(team) : null, Text(10) is { } agent ? new UserId(agent) : null);
+            reader.NullableText(4), reader.GetFieldValue<DateTimeOffset>(5), new ConversationId(reader.GetString(6)), new ContactId(reader.GetString(7)),
+            reader.NullableText(8) is { } inbox ? new InboxId(inbox) : null, reader.NullableText(9) is { } team ? new TeamId(team) : null, reader.NullableText(10) is { } agent ? new UserId(agent) : null);
         return new StoredResponse(scope, response);
     }, "response");
 }

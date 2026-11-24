@@ -3,6 +3,9 @@
     <Description>Optional durable PostgreSQL routing policy, agent availability, assignment/load, queue and collision presence storage for TicketFlow routing.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Shared/PostgresReaderExtensions.cs" Link="Internal/PostgresReaderExtensions.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../TicketFlow.Routing.Abstractions/TicketFlow.Routing.Abstractions.csproj" />
     <ProjectReference Include="../../Access/TicketFlow.Access.Stores.Postgres/TicketFlow.Access.Stores.Postgres.csproj" />
     <ProjectReference Include="../../Stores/TicketFlow.Stores.Migrations.Postgres/TicketFlow.Stores.Migrations.Postgres.csproj" />

@@ -57,7 +57,7 @@ public sealed class ReportingService : IReportingService
         ReportSatisfaction? overall = null;
         if (filter is not DenyAllFilter)
         {
-            var aggregateTask = store.AggregateAsync(scope, new ReportAggregateQuery(range, ReportMetrics.All, query.Filter, histograms: true), filter, cancellationToken);
+            var aggregateTask = store.AggregateAsync(scope, new ReportAggregateQuery(range, ReportMetric.All, query.Filter, histograms: true), filter, cancellationToken);
             var backlogTask = store.CountBacklogAsync(scope, query.Filter, filter, cancellationToken);
             if (satisfactionGroup is { } group)
             {
@@ -180,7 +180,7 @@ public sealed class ReportingService : IReportingService
         {
             var hasDuration = false;
             for (var i = 0; i < query.Metrics.Count; i++)
-                if (ReportMetrics.IsDuration(query.Metrics[i]))
+                if (query.Metrics[i].IsDuration)
                 {
                     hasDuration = true;
                     break;
@@ -198,7 +198,7 @@ public sealed class ReportingService : IReportingService
             var bucket = first.Bucket;
             var group = first.Group;
             var metric = first.Metric;
-            var isDuration = ReportMetrics.IsDuration(metric);
+            var isDuration = metric.IsDuration;
             long count = 0;
             long sum = 0;
             if (isDuration)
@@ -359,18 +359,8 @@ public sealed class ReportingService : IReportingService
     private static string? DisplayGroup(ReportDimension dimension, string? group) =>
         dimension == ReportDimension.Priority && int.TryParse(group, NumberStyles.None, CultureInfo.InvariantCulture, out var value)
             && Enum.IsDefined((ConversationPriority)value)
-            ? PriorityName((ConversationPriority)value)
+            ? ((ConversationPriority)value).WireName
             : group;
-
-    private static string PriorityName(ConversationPriority priority) => priority switch
-    {
-        ConversationPriority.None => "none",
-        ConversationPriority.Low => "low",
-        ConversationPriority.Medium => "medium",
-        ConversationPriority.High => "high",
-        ConversationPriority.Urgent => "urgent",
-        _ => priority.ToString().ToLowerInvariant(),
-    };
 
     private static TimeSpan? Micro(long? microseconds) => microseconds is { } value ? TimeSpan.FromTicks(value * 10) : null;
 
@@ -382,7 +372,7 @@ public sealed class ReportingService : IReportingService
         fact.SourceId.TryFormat(scratch, out var written, "D");
         line.Append(scratch[..written]);
         // 2. metric (lowercase kebab-case — always safe)
-        line.Append(',').Append(ReportMetricNames.Name(fact.Metric));
+        line.Append(',').Append(fact.Metric.WireName);
         // 3. occurred_at (UTC ISO-8601 microsecond — always safe)
         line.Append(',');
         FormatUtcInstant(scratch, fact.OccurredAt);
@@ -406,7 +396,7 @@ public sealed class ReportingService : IReportingService
         if (dimensions.Channel is { } channel)
             Csv.Append(line, channel);
         // 9. priority (always lowercase alpha — safe)
-        line.Append(',').Append(PriorityName(dimensions.Priority));
+        line.Append(',').Append(dimensions.Priority.WireName);
         // 10. labels (';'-joined)
         line.Append(',');
         var labels = dimensions.Labels;
@@ -428,7 +418,7 @@ public sealed class ReportingService : IReportingService
         fact.Value.TryFormat(scratch, out written, provider: CultureInfo.InvariantCulture);
         line.Append(scratch[..written]);
         // 12. unit
-        line.Append(ReportMetrics.IsDuration(fact.Metric) ? ",us" : ",count");
+        line.Append(fact.Metric.IsDuration ? ",us" : ",count");
     }
 
     private static void FormatUtcInstant(Span<char> dest, DateTimeOffset instant)
@@ -487,7 +477,7 @@ public sealed class ReportingService : IReportingService
                 var m = (int)row.Metric;
                 counts[m] += row.Count;
                 sums[m] += row.Sum;
-                if (ReportMetrics.IsDuration(row.Metric))
+                if (row.Metric.IsDuration)
                     (bins[m] ??= []).Add(new ReportHistogramBin(row.Bin, row.Count, row.Minimum, row.Maximum));
             }
         }
@@ -511,26 +501,32 @@ public sealed class ReportingService : IReportingService
 /// <summary>Stable lowercase kebab-case metric names used in exports (for example <c>first-response-time</c>).</summary>
 public static class ReportMetricNames
 {
-    public static string Name(ReportMetric metric) => metric switch
+    extension(ReportMetric metric)
     {
-        ReportMetric.ConversationCreated => "conversation-created",
-        ReportMetric.ConversationResolved => "conversation-resolved",
-        ReportMetric.ConversationReopened => "conversation-reopened",
-        ReportMetric.MessageReceived => "message-received",
-        ReportMetric.MessageSent => "message-sent",
-        ReportMetric.FirstResponseTime => "first-response-time",
-        ReportMetric.FirstResponseBusinessTime => "first-response-business-time",
-        ReportMetric.ResponseTime => "response-time",
-        ReportMetric.ResponseBusinessTime => "response-business-time",
-        ReportMetric.ResolutionTime => "resolution-time",
-        ReportMetric.ResolutionBusinessTime => "resolution-business-time",
-        ReportMetric.Assignment => "assignment",
-        ReportMetric.Handoff => "handoff",
-        ReportMetric.TeamTransfer => "team-transfer",
-        ReportMetric.SlaAchieved => "sla-achieved",
-        ReportMetric.SlaBreached => "sla-breached",
-        _ => throw new ArgumentOutOfRangeException(nameof(metric), "Unknown report metric."),
-    };
+        /// <summary>Stable lowercase kebab-case wire name used in exports (for example <c>first-response-time</c>).</summary>
+        public string WireName => metric switch
+        {
+            ReportMetric.ConversationCreated => "conversation-created",
+            ReportMetric.ConversationResolved => "conversation-resolved",
+            ReportMetric.ConversationReopened => "conversation-reopened",
+            ReportMetric.MessageReceived => "message-received",
+            ReportMetric.MessageSent => "message-sent",
+            ReportMetric.FirstResponseTime => "first-response-time",
+            ReportMetric.FirstResponseBusinessTime => "first-response-business-time",
+            ReportMetric.ResponseTime => "response-time",
+            ReportMetric.ResponseBusinessTime => "response-business-time",
+            ReportMetric.ResolutionTime => "resolution-time",
+            ReportMetric.ResolutionBusinessTime => "resolution-business-time",
+            ReportMetric.Assignment => "assignment",
+            ReportMetric.Handoff => "handoff",
+            ReportMetric.TeamTransfer => "team-transfer",
+            ReportMetric.SlaAchieved => "sla-achieved",
+            ReportMetric.SlaBreached => "sla-breached",
+            _ => throw new ArgumentOutOfRangeException(nameof(metric), "Unknown report metric."),
+        };
+    }
+
+    public static string Name(ReportMetric metric) => metric.WireName;
 }
 
 /// <summary>RFC 4180 field encoding with spreadsheet formula neutralization.</summary>

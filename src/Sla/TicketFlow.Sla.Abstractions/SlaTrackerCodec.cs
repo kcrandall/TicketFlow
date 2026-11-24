@@ -1,4 +1,5 @@
 using System.Text.Json;
+using TicketFlow.Conversations;
 using TicketFlow.Core;
 using TicketFlow.Workspaces;
 
@@ -39,9 +40,9 @@ public static class SlaTrackerCodec
             }
             var facts = tracker.Facts;
             writer.WriteStartObject("facts");
-            writer.WriteString("status", SlaJson.Name(facts.Status));
+            writer.WriteString("status", facts.Status.WireName);
             SlaJson.WriteOptionalInstant(writer, "snoozedUntil", facts.SnoozedUntil);
-            writer.WriteString("priority", SlaJson.Name(facts.Priority));
+            writer.WriteString("priority", facts.Priority.WireName);
             SlaJson.WriteOptionalInstant(writer, "waitingSince", facts.WaitingSince);
             writer.WriteBoolean("replied", facts.Replied);
             writer.WriteEndObject();
@@ -49,7 +50,7 @@ public static class SlaTrackerCodec
             foreach (var clock in tracker.Clocks)
             {
                 writer.WriteStartObject();
-                writer.WriteString("metric", SlaJson.Name(clock.Metric));
+                writer.WriteString("metric", clock.Metric.WireName);
                 writer.WriteNumber("cycle", clock.Cycle);
                 SlaJson.WriteInstant(writer, "startedAt", clock.StartedAt);
                 SlaJson.WriteDuration(writer, "target", clock.Target);
@@ -125,29 +126,29 @@ public static class SlaTrackerCodec
         SlaJson.RequireProperties(root, "v", "conversation", "inbox", "applied", "facts", "clocks", "pauses", "pending", "emissions", "access", "lastSequence", "evaluatedAt", "flushRetryAt", "schedule");
         SlaJson.RequireVersion(root, FormatVersion);
         SlaAppliedRule? applied = null;
-        if (root.TryGetProperty("applied", out var appliedElement))
+        if (root["applied"] is { } appliedElement)
         {
             SlaJson.RequireProperties(appliedElement, "policy", "policyRevision", "rule", "risk", "calendar", "pause", "def");
-            applied = new SlaAppliedRule(new SlaPolicyId(SlaJson.String(appliedElement.GetProperty("policy"))), appliedElement.GetProperty("policyRevision").GetInt64(),
+            applied = new SlaAppliedRule(new SlaPolicyId(appliedElement.RequiredString("policy")), appliedElement.GetProperty("policyRevision").GetInt64(),
                 appliedElement.GetProperty("rule").GetInt32(), SlaPolicyCodec.ReadRule(appliedElement.GetProperty("def")),
                 SlaPolicyCodec.ReadPause(appliedElement.GetProperty("pause")), appliedElement.GetProperty("risk").GetInt32(),
-                SlaJson.OptionalString(appliedElement, "calendar") is { } calendar ? new BusinessCalendarId(calendar) : null);
+                appliedElement.OptionalString("calendar") is { } calendar ? new BusinessCalendarId(calendar) : null);
         }
         var factsElement = root.GetProperty("facts");
         SlaJson.RequireProperties(factsElement, "status", "snoozedUntil", "priority", "waitingSince", "replied");
-        var facts = new SlaConversationFacts(SlaJson.Status(factsElement.GetProperty("status")), SlaJson.OptionalInstant(factsElement, "snoozedUntil"),
-            SlaJson.Priority(factsElement.GetProperty("priority")), SlaJson.OptionalInstant(factsElement, "waitingSince"), SlaJson.Bool(factsElement.GetProperty("replied")));
-        var clocks = SlaJson.Array(root.GetProperty("clocks")).Select(ReadClock).ToList();
-        var pauses = SlaJson.Array(root.GetProperty("pauses")).Select(pause =>
+        var facts = new SlaConversationFacts(SlaJson.Status(factsElement.GetProperty("status")), factsElement.OptionalInstant("snoozedUntil"),
+            SlaJson.Priority(factsElement.GetProperty("priority")), factsElement.OptionalInstant("waitingSince"), factsElement.RequiredBool("replied"));
+        var clocks = root.RequiredArray("clocks").Select(ReadClock).ToList();
+        var pauses = root.RequiredArray("pauses").Select(pause =>
         {
             SlaJson.RequireProperties(pause, "start", "end");
-            return new SlaPauseInterval(SlaJson.Instant(pause.GetProperty("start")), SlaJson.OptionalInstant(pause, "end"));
+            return new SlaPauseInterval(pause.RequiredInstant("start"), pause.OptionalInstant("end"));
         }).ToList();
-        var pending = SlaJson.Array(root.GetProperty("pending")).Select(item =>
+        var pending = root.RequiredArray("pending").Select(item =>
         {
             SlaJson.RequireProperties(item, "key", "kind", "payload", "after");
-            var timelineEvent = SlaEventCodec.Deserialize(SlaJson.String(item.GetProperty("kind")), SlaEventCodec.PayloadVersion, SlaJson.String(item.GetProperty("payload")));
-            var key = SlaJson.String(item.GetProperty("key"));
+            var timelineEvent = SlaEventCodec.Deserialize(item.RequiredString("kind"), SlaEventCodec.PayloadVersion, item.RequiredString("payload"));
+            var key = item.RequiredString("key");
             if (timelineEvent.Key != key)
                 throw new FormatException("A pending emission key does not match its payload.");
             return new SlaPendingEmission(key, timelineEvent, item.GetProperty("after").GetInt64());
@@ -158,27 +159,27 @@ public static class SlaTrackerCodec
         if (attributes.ValueKind != JsonValueKind.Object)
             throw new FormatException("Access attributes are an object.");
         var access = new SlaAccessSnapshot(
-            SlaJson.OptionalString(accessElement, "team") is { } team ? new TeamId(team) : null,
-            SlaJson.OptionalString(accessElement, "assignee") is { } assignee ? new UserId(assignee) : null,
-            [.. SlaJson.Array(accessElement.GetProperty("labels")).Select(label => new LabelId(SlaJson.String(label)))],
-            [.. attributes.EnumerateObject().Select(property => new KeyValuePair<string, string>(property.Name, SlaJson.String(property.Value)))]);
+            accessElement.OptionalString("team") is { } team ? new TeamId(team) : null,
+            accessElement.OptionalString("assignee") is { } assignee ? new UserId(assignee) : null,
+            [.. accessElement.RequiredArray("labels").Select(label => new LabelId(label.RequiredString()))],
+            [.. attributes.EnumerateObject().Select(property => new KeyValuePair<string, string>(property.Name, property.Value.RequiredString()))]);
         var scheduleElement = root.GetProperty("schedule");
         SlaJson.RequireProperties(scheduleElement, "next", "due", "risk", "breached", "urgency");
-        var schedule = new SlaSchedule(SlaJson.OptionalInstant(scheduleElement, "next"), SlaJson.OptionalInstant(scheduleElement, "due"),
-            SlaJson.OptionalInstant(scheduleElement, "risk"), SlaJson.Bool(scheduleElement.GetProperty("breached")), SlaJson.OptionalInstant(scheduleElement, "urgency"));
-        return new SlaTracker(new ConversationId(SlaJson.String(root.GetProperty("conversation"))), new InboxId(SlaJson.String(root.GetProperty("inbox"))), applied, facts,
+        var schedule = new SlaSchedule(scheduleElement.OptionalInstant("next"), scheduleElement.OptionalInstant("due"),
+            scheduleElement.OptionalInstant("risk"), scheduleElement.RequiredBool("breached"), scheduleElement.OptionalInstant("urgency"));
+        return new SlaTracker(new ConversationId(root.RequiredString("conversation")), new InboxId(root.RequiredString("inbox")), applied, facts,
             clocks, pauses, pending, root.GetProperty("emissions").GetInt64(), access, root.GetProperty("lastSequence").GetInt64(),
-            SlaJson.Instant(root.GetProperty("evaluatedAt")), schedule, SlaJson.OptionalInstant(root, "flushRetryAt"));
+            root.RequiredInstant("evaluatedAt"), schedule, root.OptionalInstant("flushRetryAt"));
     });
 
     private static SlaClock ReadClock(JsonElement element)
     {
         SlaJson.RequireProperties(element, "metric", "cycle", "startedAt", "target", "elapsed", "runningSince", "state", "dueAt", "breachedAt", "completedAt", "outcome",
             "completions", "fired");
-        return new SlaClock(SlaJson.Metric(element.GetProperty("metric")), element.GetProperty("cycle").GetInt32(), SlaJson.Instant(element.GetProperty("startedAt")),
-            SlaJson.Duration(element.GetProperty("target")), SlaJson.Duration(element.GetProperty("elapsed")), SlaJson.OptionalInstant(element, "runningSince"),
-            SlaJson.State(element.GetProperty("state")), SlaJson.OptionalInstant(element, "dueAt"), SlaJson.OptionalInstant(element, "breachedAt"),
-            SlaJson.OptionalInstant(element, "completedAt"), element.TryGetProperty("outcome", out var outcome) ? SlaJson.Outcome(outcome) : null,
-            element.GetProperty("completions").GetInt32(), [.. SlaJson.Array(element.GetProperty("fired")).Select(threshold => threshold.GetInt32())]);
+        return new SlaClock(SlaJson.Metric(element.GetProperty("metric")), element.GetProperty("cycle").GetInt32(), element.RequiredInstant("startedAt"),
+            element.RequiredDuration("target"), element.RequiredDuration("elapsed"), element.OptionalInstant("runningSince"),
+            SlaJson.State(element.GetProperty("state")), element.OptionalInstant("dueAt"), element.OptionalInstant("breachedAt"),
+            element.OptionalInstant("completedAt"), element["outcome"] is { } outcome ? SlaJson.Outcome(outcome) : null,
+            element.GetProperty("completions").GetInt32(), [.. element.RequiredArray("fired").Select(threshold => threshold.GetInt32())]);
     }
 }

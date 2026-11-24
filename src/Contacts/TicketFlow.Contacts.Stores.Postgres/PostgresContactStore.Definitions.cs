@@ -139,7 +139,7 @@ public sealed partial class PostgresContactStore
             if (reader.GetInt16(offset + 1) != 1)
                 throw new FormatException("Unsupported attribute definition format version.");
             return new StoredContactAttributeDefinition(scope,
-                new ContactAttributeDefinition(reader.GetString(offset), (ContactAttributeType)reader.GetInt16(offset + 2), reader.GetBoolean(offset + 3), NullableText(reader, offset + 4)),
+                new ContactAttributeDefinition(reader.GetString(offset), (ContactAttributeType)reader.GetInt16(offset + 2), reader.GetBoolean(offset + 3), reader.NullableText(offset + 4)),
                 reader.GetInt64(offset + 5));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)

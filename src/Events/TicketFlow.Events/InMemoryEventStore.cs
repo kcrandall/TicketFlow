@@ -125,7 +125,7 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
         ArgumentNullException.ThrowIfNull(scope);
         IEventLog.RequireCheckpointName(name);
         lock (gate)
-            return Task.FromResult(checkpoints.TryGetValue((scope, name), out var value) ? value : (long?)null);
+            return Task.FromResult(checkpoints.TryGetValue(scope, name, out var value) ? value : (long?)null);
     }
 
     public Task<bool> SetCheckpointAsync(TicketScope scope, string name, long value, long? expected, CancellationToken cancellationToken = default)
@@ -134,10 +134,10 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
         IEventLog.RequireCheckpointName(name);
         lock (gate)
         {
-            var exists = checkpoints.TryGetValue((scope, name), out var current);
+            var exists = checkpoints.TryGetValue(scope, name, out var current);
             if (exists ? expected != current : expected is not null)
                 return Task.FromResult(false);
-            checkpoints[(scope, name)] = value;
+            checkpoints[scope, name] = value;
             return Task.FromResult(true);
         }
     }
@@ -146,7 +146,7 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
     {
         ArgumentNullException.ThrowIfNull(scope);
         lock (gate)
-            return Task.FromResult(subscriptions.TryGetValue((scope, Require(id)), out var entry) ? entry.Subscription : null);
+            return Task.FromResult(subscriptions.TryGetValue(scope, Require(id), out var entry) ? entry.Subscription : null);
     }
 
     public Task<IReadOnlyList<StoredEventSubscription>> ListAsync(TicketScope scope, CancellationToken cancellationToken = default)
@@ -165,12 +165,12 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
         ArgumentOutOfRangeException.ThrowIfNegative(cursor);
         lock (gate)
         {
-            if (subscriptions.ContainsKey((scope, subscription.Id)))
+            if (subscriptions.ContainsKey(scope, subscription.Id))
                 return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(new StoreRejected<EventWriteRejection>(EventWriteRejection.Duplicate));
             if (subscriptions.Values.Count(entry => entry.Subscription.Scope == scope) >= IEventSubscriptionStore.MaximumSubscriptionsPerWorkspace)
                 return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(new StoreRejected<EventWriteRejection>(EventWriteRejection.LimitReached));
             var stored = new StoredEventSubscription(scope, subscription, 1, EventText.Instant(createdAt));
-            subscriptions[(scope, subscription.Id)] = new Entry(stored, new EventDeliveryState(cursor, 0, EventText.Instant(createdAt), null, null));
+            subscriptions[scope, subscription.Id] = new Entry(stored, new EventDeliveryState(cursor, 0, EventText.Instant(createdAt), null, null));
             return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(new StoreApplied<StoredEventSubscription>(stored));
         }
     }
@@ -181,7 +181,7 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
         ArgumentNullException.ThrowIfNull(subscription);
         lock (gate)
         {
-            if (!subscriptions.TryGetValue((scope, subscription.Id), out var entry))
+            if (!subscriptions.TryGetValue(scope, subscription.Id, out var entry))
                 return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(StoreNotFound.Instance);
             if (entry.Subscription.Revision != expectedRevision)
                 return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(new StoreConflict(entry.Subscription.Revision));
@@ -196,11 +196,11 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
         ArgumentNullException.ThrowIfNull(scope);
         lock (gate)
         {
-            if (!subscriptions.TryGetValue((scope, Require(id)), out var entry))
+            if (!subscriptions.TryGetValue(scope, Require(id), out var entry))
                 return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(StoreNotFound.Instance);
             if (entry.Subscription.Revision != expectedRevision)
                 return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(new StoreConflict(entry.Subscription.Revision));
-            subscriptions.Remove((scope, id));
+            subscriptions.Remove(scope, id);
             return Task.FromResult<StoreWriteResult<StoredEventSubscription, EventWriteRejection>>(new StoreApplied<StoredEventSubscription>(entry.Subscription));
         }
     }
@@ -209,14 +209,14 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
     {
         ArgumentNullException.ThrowIfNull(scope);
         lock (gate)
-            return Task.FromResult(subscriptions.TryGetValue((scope, Require(id)), out var entry) ? entry.State : null);
+            return Task.FromResult(subscriptions.TryGetValue(scope, Require(id), out var entry) ? entry.State : null);
     }
 
     public Task<(StoredEventSubscription Subscription, EventDeliveryState State)?> GetWithStateAsync(TicketScope scope, EventSubscriptionId id, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
         lock (gate)
-            return Task.FromResult<(StoredEventSubscription, EventDeliveryState)?>(subscriptions.TryGetValue((scope, Require(id)), out var entry) ? (entry.Subscription, entry.State) : null);
+            return Task.FromResult<(StoredEventSubscription, EventDeliveryState)?>(subscriptions.TryGetValue(scope, Require(id), out var entry) ? (entry.Subscription, entry.State) : null);
     }
 
     public Task<IReadOnlyList<(StoredEventSubscription Subscription, EventDeliveryState State)>> ListWithStateAsync(TicketScope scope, CancellationToken cancellationToken = default)
@@ -329,7 +329,7 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
         ArgumentOutOfRangeException.ThrowIfNegative(afterSequence);
         lock (gate)
         {
-            if (!subscriptions.TryGetValue((scope, Require(id)), out var entry))
+            if (!subscriptions.TryGetValue(scope, Require(id), out var entry))
                 return Task.FromResult(false);
             foreach (var sequence in entry.DeadLetters.Keys.Where(sequence => sequence > afterSequence).ToList())
                 entry.DeadLetters.Remove(sequence);
@@ -346,7 +346,7 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IEventSubscriptionStore.MaximumDeadLetterRead);
         lock (gate)
-            return Task.FromResult<IReadOnlyList<EventDeadLetter>>(subscriptions.TryGetValue((scope, Require(id)), out var entry)
+            return Task.FromResult<IReadOnlyList<EventDeadLetter>>(subscriptions.TryGetValue(scope, Require(id), out var entry)
                 ? [.. entry.DeadLetters.Values.Where(letter => letter.Sequence > afterSequence).Take(limit)]
                 : []);
     }
@@ -367,7 +367,7 @@ public sealed class InMemoryEventStore(TimeProvider? time = null, int maximumEve
 
     private bool Leased(TicketScope scope, EventSubscriptionId id, long fence, out Entry entry)
     {
-        if (!subscriptions.TryGetValue((scope, Require(id)), out entry!))
+        if (!subscriptions.TryGetValue(scope, Require(id), out entry!))
             return false;
         return entry.Fence == fence && entry.LeaseUntil is { } until && until > time.GetUtcNow();
     }

@@ -5,6 +5,9 @@
     <StaticWebAssetBasePath>_content/TicketFlow.UI.Blazor</StaticWebAssetBasePath>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Shared/TupleDictionaryExtensions.cs" Link="Internal/TupleDictionaryExtensions.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="BlazorBlueprint.Components" />
     <PackageReference Include="BlazorBlueprint.Icons.Lucide" />

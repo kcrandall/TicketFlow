@@ -3,6 +3,9 @@
     <Description>Support reporting for TicketFlow: the conversation outbox projector (immutable facts and exactly-once rollups), Access-filtered overview, leaderboard and trend reports, audited CSV export, retention and a development in-memory store.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Shared/TupleDictionaryExtensions.cs" Link="Internal/TupleDictionaryExtensions.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../TicketFlow.Reporting.Abstractions/TicketFlow.Reporting.Abstractions.csproj" />
     <ProjectReference Include="../../Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
     <ProjectReference Include="../../Sla/TicketFlow.Sla.Abstractions/TicketFlow.Sla.Abstractions.csproj" />

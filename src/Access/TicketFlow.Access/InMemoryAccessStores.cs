@@ -114,7 +114,7 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
     {
         ArgumentNullException.ThrowIfNull(partition);
         lock (gate)
-            return Task.FromResult(grants.GetValueOrDefault((partition, id)));
+            return Task.FromResult(grants.GetValueOrDefault(partition, id));
     }
 
     public Task<IReadOnlyList<StoredAccessGrant>> ListForSubjectsAsync(AccessPartition partition, WorkspaceId workspace, IReadOnlyCollection<GrantSubject> subjects, CancellationToken cancellationToken = default)
@@ -131,11 +131,11 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
             {
                 if (seenSubjects is not null && !seenSubjects.Add(subject))
                     continue;
-                if (!bySubject.TryGetValue((partition, subject), out var ids))
+                if (!bySubject.TryGetValue(partition, subject, out var ids))
                     continue;
                 foreach (var id in ids)
                 {
-                    var entry = grants[(partition, id)];
+                    var entry = grants[partition, id];
                     if (entry.Grant.Workspace is not { } named || named == workspace)
                         result.Add(entry);
                 }
@@ -152,12 +152,12 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
         AccessGrantTargets.Validate(target, limit, after);
         lock (gate)
         {
-            if (!byTarget.TryGetValue((partition, target), out var ids) || ids.Count == 0)
+            if (!byTarget.TryGetValue(partition, target, out var ids) || ids.Count == 0)
                 return Task.FromResult<IReadOnlyList<StoredAccessGrant>>([]);
             var matching = new List<StoredAccessGrant>(Math.Min(ids.Count, limit));
             foreach (var id in ids)
                 if (after is not { } cursor || string.CompareOrdinal(id.Value, cursor.Value) > 0)
-                    matching.Add(grants[(partition, id)]);
+                    matching.Add(grants[partition, id]);
             if (matching.Count > 1)
                 matching.Sort(static (left, right) => string.CompareOrdinal(left.Grant.Id.Value, right.Grant.Id.Value));
             if (matching.Count > limit)
@@ -171,12 +171,12 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
         ArgumentNullException.ThrowIfNull(grant);
         lock (gate)
         {
-            if (grants.TryGetValue((grant.Partition, grant.Id), out var existing))
+            if (grants.TryGetValue(grant.Partition, grant.Id, out var existing))
                 return Result(new StoreConflict(existing.Revision));
             if (grants.Count >= MaximumEntries || CountForSubject(grant.Partition, grant.Subject, except: null) >= AccessLimits.MaximumGrantsPerSubject)
                 return Result(new StoreRejected<AccessWriteRejection>(AccessWriteRejection.CapacityExceeded));
             var stored = new StoredAccessGrant(grant, 1);
-            grants.Add((grant.Partition, grant.Id), stored);
+            grants.Add(grant.Partition, grant.Id, stored);
             IndexGrant(grant);
             return Result(new StoreApplied<StoredAccessGrant>(stored));
         }
@@ -188,7 +188,7 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         lock (gate)
         {
-            if (!grants.TryGetValue((grant.Partition, grant.Id), out var existing))
+            if (!grants.TryGetValue(grant.Partition, grant.Id, out var existing))
                 return Result(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
                 return Result(new StoreConflict(existing.Revision));
@@ -196,7 +196,7 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
                 return Result(new StoreRejected<AccessWriteRejection>(AccessWriteRejection.CapacityExceeded));
             UnindexGrant(existing.Grant);
             var stored = new StoredAccessGrant(grant, checked(existing.Revision + 1));
-            grants[(grant.Partition, grant.Id)] = stored;
+            grants[grant.Partition, grant.Id] = stored;
             IndexGrant(grant);
             return Result(new StoreApplied<StoredAccessGrant>(stored));
         }
@@ -208,11 +208,11 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         lock (gate)
         {
-            if (!grants.TryGetValue((partition, id), out var existing))
+            if (!grants.TryGetValue(partition, id, out var existing))
                 return Result(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
                 return Result(new StoreConflict(existing.Revision));
-            grants.Remove((partition, id));
+            grants.Remove(partition, id);
             UnindexGrant(existing.Grant);
             return Result(new StoreApplied<StoredAccessGrant>(existing));
         }
@@ -229,9 +229,9 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
             {
                 var (id, expectedRevision) = targets[i];
                 ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
-                if (grants.TryGetValue((partition, id), out var existing) && existing.Revision == expectedRevision)
+                if (grants.TryGetValue(partition, id, out var existing) && existing.Revision == expectedRevision)
                 {
-                    grants.Remove((partition, id));
+                    grants.Remove(partition, id);
                     UnindexGrant(existing.Grant);
                     removed.Add(existing);
                 }
@@ -279,7 +279,7 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
 
     private int CountForSubject(AccessPartition partition, GrantSubject subject, GrantId? except)
     {
-        if (!bySubject.TryGetValue((partition, subject), out var ids))
+        if (!bySubject.TryGetValue(partition, subject, out var ids))
             return 0;
         return except is { } excluded && ids.Contains(excluded) ? ids.Count - 1 : ids.Count;
     }

@@ -46,10 +46,10 @@ public static class AutomationCodec
     {
         AutomationJson.RequireProperties(root, "v", "name", "enabled", "priority", "stop", "auto", "trigger", "cond", "actions");
         AutomationJson.RequireVersion(root, FormatVersion);
-        return new AutomationRule(id, AutomationJson.String(root.GetProperty("name")), ReadTrigger(root.GetProperty("trigger")),
-            root.TryGetProperty("cond", out var condition) ? ReadCondition(condition, 1) : null, ReadActions(root.GetProperty("actions")),
-            AutomationJson.Int(root.GetProperty("priority")), AutomationJson.Bool(root.GetProperty("enabled")), AutomationJson.Bool(root.GetProperty("stop")),
-            AutomationJson.Bool(root.GetProperty("auto")));
+        return new AutomationRule(id, root.RequiredString("name"), ReadTrigger(root.GetProperty("trigger")),
+            root["cond"] is { } condition ? ReadCondition(condition, 1) : null, ReadActions(root.GetProperty("actions")),
+            root.RequiredInt("priority"), root.RequiredBool("enabled"), root.RequiredBool("stop"),
+            root.RequiredBool("auto"));
     });
 
     public static string SerializeMacro(Macro macro)
@@ -74,9 +74,9 @@ public static class AutomationCodec
     {
         AutomationJson.RequireProperties(root, "v", "name", "vis", "owner", "desc", "actions");
         AutomationJson.RequireVersion(root, FormatVersion);
-        return new Macro(id, AutomationJson.String(root.GetProperty("name")), AutomationJson.ParseKebab<MacroVisibility>(root.GetProperty("vis")),
-            AutomationJson.OptionalString(root, "owner") is { } owner ? new UserId(owner) : null, ReadActions(root.GetProperty("actions")),
-            AutomationJson.OptionalString(root, "desc"));
+        return new Macro(id, root.RequiredString("name"), root.RequiredKebab<MacroVisibility>("vis"),
+            root.OptionalString("owner") is { } owner ? new UserId(owner) : null, ReadActions(root.GetProperty("actions")),
+            root.OptionalString("desc"));
     });
 
     public static string SerializeCannedResponse(CannedResponse response)
@@ -107,14 +107,14 @@ public static class AutomationCodec
     {
         AutomationJson.RequireProperties(root, "v", "shortcut", "title", "default", "content", "variants");
         AutomationJson.RequireVersion(root, FormatVersion);
-        return new CannedResponse(id, AutomationJson.String(root.GetProperty("shortcut")), AutomationJson.String(root.GetProperty("title")),
-            AutomationJson.String(root.GetProperty("default")),
-            [.. AutomationJson.Array(root.GetProperty("variants")).Select(variant =>
+        return new CannedResponse(id, root.RequiredString("shortcut"), root.RequiredString("title"),
+            root.RequiredString("default"),
+            [.. root.RequiredArray("variants").Select(variant =>
             {
                 AutomationJson.RequireProperties(variant, "locale", "template");
-                return new CannedResponseVariant(AutomationJson.String(variant.GetProperty("locale")), new AutomationTemplate(AutomationJson.String(variant.GetProperty("template"))));
+                return new CannedResponseVariant(variant.RequiredString("locale"), new AutomationTemplate(variant.RequiredString("template")));
             })],
-            AutomationJson.ParseKebab<MessageContentType>(root.GetProperty("content")));
+            root.RequiredKebab<MessageContentType>("content"));
     });
 
     public static string SerializeExecution(AutomationExecution execution)
@@ -152,14 +152,14 @@ public static class AutomationCodec
     {
         AutomationJson.RequireProperties(root, "v", "id", "rule", "conv", "trigger", "event", "depth", "status", "supp", "started", "completed", "actions", "outcomes", "marker");
         AutomationJson.RequireVersion(root, FormatVersion);
-        return new AutomationExecution(Guid.ParseExact(AutomationJson.String(root.GetProperty("id")), "D"), new AutomationRuleId(AutomationJson.String(root.GetProperty("rule"))),
-            AutomationJson.OptionalString(root, "conv") is { } conversation ? new ConversationId(conversation) : null, AutomationJson.String(root.GetProperty("trigger")),
-            AutomationJson.ParseKebab<AutomationEventKind>(root.GetProperty("event")), AutomationJson.Int(root.GetProperty("depth")),
-            AutomationJson.ParseKebab<AutomationExecutionStatus>(root.GetProperty("status")),
-            root.TryGetProperty("supp", out var suppression) ? AutomationJson.ParseKebab<AutomationSuppression>(suppression) : null,
-            AutomationJson.Instant(root.GetProperty("started")), AutomationJson.OptionalInstant(root, "completed"), AutomationJson.Int(root.GetProperty("actions")),
-            [.. AutomationJson.Array(root.GetProperty("outcomes")).Select(ReadOutcome)],
-            root.TryGetProperty("marker", out var marker) ? AutomationJson.Long(marker) : null);
+        return new AutomationExecution(Guid.ParseExact(root.RequiredString("id"), "D"), new AutomationRuleId(root.RequiredString("rule")),
+            root.OptionalString("conv") is { } conversation ? new ConversationId(conversation) : null, root.RequiredString("trigger"),
+            root.RequiredKebab<AutomationEventKind>("event"), root.RequiredInt("depth"),
+            root.RequiredKebab<AutomationExecutionStatus>("status"),
+            root["supp"] is { } suppression ? AutomationJson.ParseKebab<AutomationSuppression>(suppression) : null,
+            root.RequiredInstant("started"), root.OptionalInstant("completed"), root.RequiredInt("actions"),
+            [.. root.RequiredArray("outcomes").Select(ReadOutcome)],
+            root["marker"] is { } marker ? marker.RequiredLong() : null);
     });
 
     /// <summary>Serializes an action list (used by rule and macro envelopes).</summary>
@@ -198,7 +198,7 @@ public static class AutomationCodec
                 break;
             case StatusChangedTrigger status:
                 writer.WriteString("t", "status-changed");
-                AutomationJson.WriteStrings(writer, "to", status.To.Select(AutomationJson.Name));
+                AutomationJson.WriteStrings(writer, "to", status.To.Select(item => item.WireName));
                 break;
             case AssignmentChangedTrigger:
                 writer.WriteString("t", "assignment-changed");
@@ -206,13 +206,13 @@ public static class AutomationCodec
             case SlaEventTrigger sla:
                 writer.WriteString("t", "sla-event");
                 AutomationJson.WriteStrings(writer, "kinds", sla.Kinds.Select(AutomationJson.Kebab));
-                AutomationJson.WriteStrings(writer, "metrics", sla.Metrics.Select(AutomationJson.Name));
+                AutomationJson.WriteStrings(writer, "metrics", sla.Metrics.Select(item => item.WireName));
                 break;
             case ScheduledTrigger scheduled:
                 writer.WriteString("t", "scheduled");
                 writer.WriteString("cron", scheduled.Schedule.Expression);
                 writer.WriteString("tz", scheduled.Schedule.TimeZoneId);
-                AutomationJson.WriteStrings(writer, "statuses", scheduled.Statuses.Select(AutomationJson.Name));
+                AutomationJson.WriteStrings(writer, "statuses", scheduled.Statuses.Select(item => item.WireName));
                 if (scheduled.Inbox is { } inbox)
                     writer.WriteString("inbox", inbox.Value);
                 writer.WriteNumber("max", scheduled.MaximumConversations);
@@ -226,7 +226,7 @@ public static class AutomationCodec
 
     private static AutomationTrigger ReadTrigger(JsonElement element)
     {
-        switch (AutomationJson.String(element.GetProperty("t")))
+        switch (element.RequiredString("t"))
         {
             case "conversation-created":
                 AutomationJson.RequireProperties(element, "t");
@@ -239,22 +239,22 @@ public static class AutomationCodec
                 return MessageSentTrigger.Instance;
             case "conversation-updated":
                 AutomationJson.RequireProperties(element, "t", "fields");
-                return new ConversationUpdatedTrigger(AutomationJson.Array(element.GetProperty("fields")).Select(AutomationJson.ParseKebab<ConversationUpdateField>));
+                return new ConversationUpdatedTrigger(element.RequiredArray("fields").Select(AutomationJson.ParseKebab<ConversationUpdateField>));
             case "status-changed":
                 AutomationJson.RequireProperties(element, "t", "to");
-                return new StatusChangedTrigger(AutomationJson.Array(element.GetProperty("to")).Select(AutomationJson.Status));
+                return new StatusChangedTrigger(element.RequiredArray("to").Select(AutomationJson.Status));
             case "assignment-changed":
                 AutomationJson.RequireProperties(element, "t");
                 return AssignmentChangedTrigger.Instance;
             case "sla-event":
                 AutomationJson.RequireProperties(element, "t", "kinds", "metrics");
-                return new SlaEventTrigger(AutomationJson.Array(element.GetProperty("kinds")).Select(AutomationJson.ParseKebab<SlaEventKind>),
-                    AutomationJson.Array(element.GetProperty("metrics")).Select(AutomationJson.Metric));
+                return new SlaEventTrigger(element.RequiredArray("kinds").Select(AutomationJson.ParseKebab<SlaEventKind>),
+                    element.RequiredArray("metrics").Select(AutomationJson.Metric));
             case "scheduled":
                 AutomationJson.RequireProperties(element, "t", "cron", "tz", "statuses", "inbox", "max");
-                return new ScheduledTrigger(new AutomationSchedule(AutomationJson.String(element.GetProperty("cron")), AutomationJson.String(element.GetProperty("tz"))),
-                    AutomationJson.Array(element.GetProperty("statuses")).Select(AutomationJson.Status),
-                    AutomationJson.OptionalString(element, "inbox") is { } inbox ? new InboxId(inbox) : null, AutomationJson.Int(element.GetProperty("max")));
+                return new ScheduledTrigger(new AutomationSchedule(element.RequiredString("cron"), element.RequiredString("tz")),
+                    element.RequiredArray("statuses").Select(AutomationJson.Status),
+                    element.OptionalString("inbox") is { } inbox ? new InboxId(inbox) : null, element.RequiredInt("max"));
             case "contact-updated":
                 AutomationJson.RequireProperties(element, "t");
                 return ContactUpdatedTrigger.Instance;
@@ -289,12 +289,12 @@ public static class AutomationCodec
                 break;
             case StatusIsCondition status:
                 writer.WriteString("op", "status");
-                AutomationJson.WriteStrings(writer, "values", status.Statuses.Select(AutomationJson.Name));
+                AutomationJson.WriteStrings(writer, "values", status.Statuses.Select(item => item.WireName));
                 break;
             case PriorityCondition priority:
                 writer.WriteString("op", "priority");
                 writer.WriteString("cmp", AutomationJson.Kebab(priority.Comparison));
-                writer.WriteString("value", AutomationJson.Name(priority.Priority));
+                writer.WriteString("value", priority.Priority.WireName);
                 break;
             case InboxIsCondition inbox:
                 writer.WriteString("op", "inbox");
@@ -352,54 +352,54 @@ public static class AutomationCodec
     {
         if (depth > AutomationCondition.MaximumDepth)
             throw new FormatException("The condition is too deep.");
-        switch (AutomationJson.String(element.GetProperty("op")))
+        switch (element.RequiredString("op"))
         {
             case "all":
                 AutomationJson.RequireProperties(element, "op", "items");
-                return new AllOfCondition([.. AutomationJson.Array(element.GetProperty("items")).Take(AutomationCondition.MaximumNodes + 1).Select(item => ReadCondition(item, depth + 1))]);
+                return new AllOfCondition([.. element.RequiredArray("items").Take(AutomationCondition.MaximumNodes + 1).Select(item => ReadCondition(item, depth + 1))]);
             case "any":
                 AutomationJson.RequireProperties(element, "op", "items");
-                return new AnyOfCondition([.. AutomationJson.Array(element.GetProperty("items")).Take(AutomationCondition.MaximumNodes + 1).Select(item => ReadCondition(item, depth + 1))]);
+                return new AnyOfCondition([.. element.RequiredArray("items").Take(AutomationCondition.MaximumNodes + 1).Select(item => ReadCondition(item, depth + 1))]);
             case "not":
                 AutomationJson.RequireProperties(element, "op", "item");
                 return new NegatedCondition(ReadCondition(element.GetProperty("item"), depth + 1));
             case "status":
                 AutomationJson.RequireProperties(element, "op", "values");
-                return new StatusIsCondition(AutomationJson.Array(element.GetProperty("values")).Select(AutomationJson.Status));
+                return new StatusIsCondition(element.RequiredArray("values").Select(AutomationJson.Status));
             case "priority":
                 AutomationJson.RequireProperties(element, "op", "cmp", "value");
-                return new PriorityCondition(AutomationJson.ParseKebab<PriorityComparison>(element.GetProperty("cmp")), AutomationJson.Priority(element.GetProperty("value")));
+                return new PriorityCondition(element.RequiredKebab<PriorityComparison>("cmp"), AutomationJson.Priority(element.GetProperty("value")));
             case "inbox":
                 AutomationJson.RequireProperties(element, "op", "values");
-                return new InboxIsCondition(AutomationJson.Strings(element.GetProperty("values")).Select(value => new InboxId(value)));
+                return new InboxIsCondition(element.RequiredStrings("values").Select(value => new InboxId(value)));
             case "team":
                 AutomationJson.RequireProperties(element, "op", "values", "none");
-                return new TeamIsCondition(AutomationJson.Strings(element.GetProperty("values")).Select(value => new TeamId(value)), AutomationJson.Bool(element.GetProperty("none")));
+                return new TeamIsCondition(element.RequiredStrings("values").Select(value => new TeamId(value)), element.RequiredBool("none"));
             case "assignee":
                 AutomationJson.RequireProperties(element, "op", "values", "none");
-                return new AssigneeIsCondition(AutomationJson.Strings(element.GetProperty("values")).Select(value => new UserId(value)), AutomationJson.Bool(element.GetProperty("none")));
+                return new AssigneeIsCondition(element.RequiredStrings("values").Select(value => new UserId(value)), element.RequiredBool("none"));
             case "labels":
                 AutomationJson.RequireProperties(element, "op", "target", "match", "values");
-                return new HasLabelsCondition(AutomationJson.ParseKebab<ConditionTarget>(element.GetProperty("target")), AutomationJson.ParseKebab<LabelMatch>(element.GetProperty("match")),
-                    AutomationJson.Strings(element.GetProperty("values")).Select(value => new LabelId(value)));
+                return new HasLabelsCondition(element.RequiredKebab<ConditionTarget>("target"), element.RequiredKebab<LabelMatch>("match"),
+                    element.RequiredStrings("values").Select(value => new LabelId(value)));
             case "channel":
                 AutomationJson.RequireProperties(element, "op", "values");
-                return new ChannelKindIsCondition(AutomationJson.Strings(element.GetProperty("values")).Select(value => new ChannelKind(value)));
+                return new ChannelKindIsCondition(element.RequiredStrings("values").Select(value => new ChannelKind(value)));
             case "attribute":
                 AutomationJson.RequireProperties(element, "op", "target", "key", "cmp", "values");
-                return new AttributeCondition(AutomationJson.ParseKebab<ConditionTarget>(element.GetProperty("target")), AutomationJson.String(element.GetProperty("key")),
-                    AutomationJson.ParseKebab<AttributeOperator>(element.GetProperty("cmp")), AutomationJson.Strings(element.GetProperty("values")));
+                return new AttributeCondition(element.RequiredKebab<ConditionTarget>("target"), element.RequiredString("key"),
+                    element.RequiredKebab<AttributeOperator>("cmp"), element.RequiredStrings("values"));
             case "message":
                 AutomationJson.RequireProperties(element, "op", "cmp", "value", "ci", "timeoutMs");
-                return new MessageContentCondition(AutomationJson.ParseKebab<MessageTextOperator>(element.GetProperty("cmp")), AutomationJson.String(element.GetProperty("value")),
-                    AutomationJson.Bool(element.GetProperty("ci")), TimeSpan.FromMilliseconds(AutomationJson.Int(element.GetProperty("timeoutMs"))));
+                return new MessageContentCondition(element.RequiredKebab<MessageTextOperator>("cmp"), element.RequiredString("value"),
+                    element.RequiredBool("ci"), TimeSpan.FromMilliseconds(element.RequiredInt("timeoutMs")));
             case "business-hours":
                 AutomationJson.RequireProperties(element, "op", "open");
-                return new BusinessHoursCondition(AutomationJson.Bool(element.GetProperty("open")));
+                return new BusinessHoursCondition(element.RequiredBool("open"));
             case "elapsed":
                 AutomationJson.RequireProperties(element, "op", "since", "cmp", "seconds");
-                return new ElapsedCondition(AutomationJson.ParseKebab<ConversationTimestamp>(element.GetProperty("since")),
-                    AutomationJson.ParseKebab<ElapsedComparison>(element.GetProperty("cmp")), TimeSpan.FromSeconds(AutomationJson.Long(element.GetProperty("seconds"))));
+                return new ElapsedCondition(element.RequiredKebab<ConversationTimestamp>("since"),
+                    element.RequiredKebab<ElapsedComparison>("cmp"), TimeSpan.FromSeconds(element.RequiredLong("seconds")));
             default:
                 throw new FormatException("Unknown condition operator.");
         }
@@ -414,7 +414,7 @@ public static class AutomationCodec
     }
 
     private static IReadOnlyList<AutomationAction> ReadActions(JsonElement element) =>
-        [.. AutomationJson.Array(element).Take(AutomationRule.MaximumActions + 1).Select(ReadAction)];
+        [.. element.RequiredArray().Take(AutomationRule.MaximumActions + 1).Select(ReadAction)];
 
     private static void WriteAction(Utf8JsonWriter writer, AutomationAction action)
     {
@@ -444,11 +444,11 @@ public static class AutomationCodec
                 break;
             case SetPriorityAction priority:
                 writer.WriteString("a", "set-priority");
-                writer.WriteString("priority", AutomationJson.Name(priority.Priority));
+                writer.WriteString("priority", priority.Priority.WireName);
                 break;
             case SetStatusAction status:
                 writer.WriteString("a", "set-status");
-                writer.WriteString("status", AutomationJson.Name(status.Status));
+                writer.WriteString("status", status.Status.WireName);
                 break;
             case SnoozeAction snooze:
                 writer.WriteString("a", "snooze");
@@ -489,23 +489,23 @@ public static class AutomationCodec
 
     private static AutomationAction ReadAction(JsonElement element)
     {
-        switch (AutomationJson.String(element.GetProperty("a")))
+        switch (element.RequiredString("a"))
         {
             case "assign-user":
                 AutomationJson.RequireProperties(element, "a", "user");
-                return new AssignUserAction(new UserId(AutomationJson.String(element.GetProperty("user"))));
+                return new AssignUserAction(new UserId(element.RequiredString("user")));
             case "assign-team":
                 AutomationJson.RequireProperties(element, "a", "team");
-                return new AssignTeamAction(new TeamId(AutomationJson.String(element.GetProperty("team"))));
+                return new AssignTeamAction(new TeamId(element.RequiredString("team")));
             case "assign-routing":
                 AutomationJson.RequireProperties(element, "a", "team");
-                return new AssignToRoutingAction(AutomationJson.OptionalString(element, "team") is { } team ? new TeamId(team) : null);
+                return new AssignToRoutingAction(element.OptionalString("team") is { } team ? new TeamId(team) : null);
             case "add-labels":
                 AutomationJson.RequireProperties(element, "a", "labels");
-                return new AddLabelsAction(AutomationJson.Strings(element.GetProperty("labels")).Select(label => new LabelId(label)));
+                return new AddLabelsAction(element.RequiredStrings("labels").Select(label => new LabelId(label)));
             case "remove-labels":
                 AutomationJson.RequireProperties(element, "a", "labels");
-                return new RemoveLabelsAction(AutomationJson.Strings(element.GetProperty("labels")).Select(label => new LabelId(label)));
+                return new RemoveLabelsAction(element.RequiredStrings("labels").Select(label => new LabelId(label)));
             case "set-priority":
                 AutomationJson.RequireProperties(element, "a", "priority");
                 return new SetPriorityAction(AutomationJson.Priority(element.GetProperty("priority")));
@@ -514,23 +514,23 @@ public static class AutomationCodec
                 return new SetStatusAction(AutomationJson.Status(element.GetProperty("status")));
             case "snooze":
                 AutomationJson.RequireProperties(element, "a", "seconds");
-                return new SnoozeAction(TimeSpan.FromSeconds(AutomationJson.Long(element.GetProperty("seconds"))));
+                return new SnoozeAction(TimeSpan.FromSeconds(element.RequiredLong("seconds")));
             case "set-attribute":
                 AutomationJson.RequireProperties(element, "a", "key", "value");
-                return new SetAttributeAction(AutomationJson.String(element.GetProperty("key")),
-                    element.TryGetProperty("value", out var value) ? ReadAttributeValue(value) : (ConversationAttributeValue?)null);
+                return new SetAttributeAction(element.RequiredString("key"),
+                    element["value"] is { } value ? ReadAttributeValue(value) : (ConversationAttributeValue?)null);
             case "send-reply":
                 AutomationJson.RequireProperties(element, "a", "response");
-                return new SendReplyAction(new CannedResponseId(AutomationJson.String(element.GetProperty("response"))));
+                return new SendReplyAction(new CannedResponseId(element.RequiredString("response")));
             case "add-note":
                 AutomationJson.RequireProperties(element, "a", "template");
-                return new AddNoteAction(new AutomationTemplate(AutomationJson.String(element.GetProperty("template"))));
+                return new AddNoteAction(new AutomationTemplate(element.RequiredString("template")));
             case "webhook":
                 AutomationJson.RequireProperties(element, "a", "destination");
-                return new SendWebhookAction(new WebhookDestinationId(AutomationJson.String(element.GetProperty("destination"))));
+                return new SendWebhookAction(new WebhookDestinationId(element.RequiredString("destination")));
             case "survey":
                 AutomationJson.RequireProperties(element, "a", "survey");
-                return new TriggerSurveyAction(AutomationJson.OptionalString(element, "survey"));
+                return new TriggerSurveyAction(element.OptionalString("survey"));
             case "sla-escalation":
                 AutomationJson.RequireProperties(element, "a");
                 return ExecuteSlaEscalationAction.Instance;
@@ -572,12 +572,12 @@ public static class AutomationCodec
     {
         AutomationJson.RequireProperties(element, "t", "v");
         var value = element.GetProperty("v");
-        return AutomationJson.String(element.GetProperty("t")) switch
+        return element.RequiredString("t") switch
         {
-            "text" => new ConversationTextValue(AutomationJson.String(value)),
-            "number" => new ConversationNumberValue(decimal.Parse(AutomationJson.String(value), NumberStyles.Number, CultureInfo.InvariantCulture)),
-            "boolean" => new ConversationBooleanValue(AutomationJson.Bool(value)),
-            "date" => new ConversationDateValue(DateOnly.ParseExact(AutomationJson.String(value), "yyyy-MM-dd", CultureInfo.InvariantCulture)),
+            "text" => new ConversationTextValue(value.RequiredString()),
+            "number" => new ConversationNumberValue(decimal.Parse(value.RequiredString(), NumberStyles.Number, CultureInfo.InvariantCulture)),
+            "boolean" => new ConversationBooleanValue(value.RequiredBool()),
+            "date" => new ConversationDateValue(DateOnly.ParseExact(value.RequiredString(), "yyyy-MM-dd", CultureInfo.InvariantCulture)),
             "list" => new ConversationListValue(AutomationJson.Strings(value)),
             _ => throw new FormatException("Unknown attribute value type."),
         };
@@ -613,20 +613,20 @@ public static class AutomationCodec
 
     private static AutomationActionOutcome ReadOutcome(JsonElement element)
     {
-        switch (AutomationJson.String(element.GetProperty("o")))
+        switch (element.RequiredString("o"))
         {
             case "applied":
                 AutomationJson.RequireProperties(element, "o", "seq");
-                return new AutomationActionApplied(AutomationJson.Array(element.GetProperty("seq")).Select(AutomationJson.Long));
+                return new AutomationActionApplied(element.RequiredArray("seq").Select(AutomationJson.Long));
             case "skipped":
                 AutomationJson.RequireProperties(element, "o", "reason");
-                return new AutomationActionSkipped(AutomationJson.String(element.GetProperty("reason")));
+                return new AutomationActionSkipped(element.RequiredString("reason"));
             case "refused":
                 AutomationJson.RequireProperties(element, "o", "reason");
-                return new AutomationActionRefused(AutomationJson.ParseKebab<AutomationActionRefusal>(element.GetProperty("reason")));
+                return new AutomationActionRefused(element.RequiredKebab<AutomationActionRefusal>("reason"));
             case "failed":
                 AutomationJson.RequireProperties(element, "o", "code");
-                return new AutomationActionFailed(AutomationJson.String(element.GetProperty("code")));
+                return new AutomationActionFailed(element.RequiredString("code"));
             default:
                 throw new FormatException("Unknown action outcome.");
         }
@@ -683,8 +683,8 @@ public static class AutomationEventCodec
             {
                 AutomationJson.RequireProperties(root, "v", "rule", "execution", "trigger", "depth", "applied", "skipped", "refused", "failed");
                 AutomationJson.RequireVersion(root, PayloadVersion);
-                return (new AutomationRuleId(AutomationJson.String(root.GetProperty("rule"))), Guid.ParseExact(AutomationJson.String(root.GetProperty("execution")), "D"),
-                    AutomationJson.Int(root.GetProperty("depth")));
+                return (new AutomationRuleId(root.RequiredString("rule")), Guid.ParseExact(root.RequiredString("execution"), "D"),
+                    root.RequiredInt("depth"));
             });
             return true;
         }

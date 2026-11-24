@@ -114,6 +114,37 @@ public enum ConversationPriority
     Urgent = 5,
 }
 
+public static class ConversationEnumExtensions
+{
+    extension(ConversationStatusKind status)
+    {
+        /// <summary>Stable lowercase wire name for this conversation status kind.</summary>
+        public string WireName => status switch
+        {
+            ConversationStatusKind.Open => "open",
+            ConversationStatusKind.Pending => "pending",
+            ConversationStatusKind.Snoozed => "snoozed",
+            ConversationStatusKind.Resolved => "resolved",
+            ConversationStatusKind.Closed => "closed",
+            _ => throw new ArgumentOutOfRangeException(nameof(status)),
+        };
+    }
+
+    extension(ConversationPriority priority)
+    {
+        /// <summary>Stable lowercase wire name for this conversation priority.</summary>
+        public string WireName => priority switch
+        {
+            ConversationPriority.None => "none",
+            ConversationPriority.Low => "low",
+            ConversationPriority.Medium => "medium",
+            ConversationPriority.High => "high",
+            ConversationPriority.Urgent => "urgent",
+            _ => throw new ArgumentOutOfRangeException(nameof(priority)),
+        };
+    }
+}
+
 /// <summary>
 /// Opaque channel correlation for a conversation: the channel kind token and the provider's thread identifier (an email thread
 /// root, an SMS number pair, a chat session). Correlation evidence only, never authentication; the identifier may contain

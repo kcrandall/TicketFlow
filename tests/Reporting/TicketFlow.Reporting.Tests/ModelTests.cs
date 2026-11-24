@@ -164,4 +164,23 @@ public sealed class ModelTests
         Assert.AreEqual("\"'=1,2\"", Encode("=1,2"));
         Assert.AreEqual("'@x", Encode("@x"));
     }
+
+    [TestMethod]
+    public void ReportMetricExtensionsExposeAllDurationAndWireNames()
+    {
+        CollectionAssert.AreEqual(ReportMetrics.All.ToArray(), ReportMetric.All.ToArray());
+        Assert.AreEqual(16, ReportMetric.All.Count);
+        foreach (var metric in ReportMetric.All)
+        {
+            Assert.AreEqual(ReportMetrics.IsDuration(metric), metric.IsDuration);
+            Assert.AreEqual(ReportMetricNames.Name(metric), metric.WireName);
+        }
+        Assert.IsTrue(ReportMetric.FirstResponseTime.IsDuration);
+        Assert.IsTrue(ReportMetric.ResolutionBusinessTime.IsDuration);
+        Assert.IsFalse(ReportMetric.ConversationCreated.IsDuration);
+        Assert.IsFalse(ReportMetric.SlaBreached.IsDuration);
+        Assert.AreEqual("first-response-business-time", ReportMetric.FirstResponseBusinessTime.WireName);
+        Assert.AreEqual("sla-achieved", ReportMetric.SlaAchieved.WireName);
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => _ = ((ReportMetric)999).WireName);
+    }
 }

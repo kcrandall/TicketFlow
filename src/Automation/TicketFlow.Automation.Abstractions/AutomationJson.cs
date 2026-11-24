@@ -97,30 +97,61 @@ internal static class AutomationJson
         }
     }
 
+    extension(JsonElement element)
+    {
+        public JsonElement? this[string name] => element.TryGetProperty(name, out var value) ? value : null;
+
+        public string RequiredString() => element.ValueKind == JsonValueKind.String ? element.GetString()! : throw new FormatException("A string is required.");
+
+        public string RequiredString(string name) => element.GetProperty(name).RequiredString();
+
+        public string? OptionalString(string name) =>
+            element[name] is { ValueKind: not JsonValueKind.Null } value ? value.RequiredString() : null;
+
+        public int RequiredInt() => element.ValueKind == JsonValueKind.Number ? element.GetInt32() : throw new FormatException("A number is required.");
+
+        public int RequiredInt(string name) => element.GetProperty(name).RequiredInt();
+
+        public long RequiredLong() => element.ValueKind == JsonValueKind.Number ? element.GetInt64() : throw new FormatException("A number is required.");
+
+        public long RequiredLong(string name) => element.GetProperty(name).RequiredLong();
+
+        public bool RequiredBool() => element.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => throw new FormatException("A boolean is required."),
+        };
+
+        public bool RequiredBool(string name) => element.GetProperty(name).RequiredBool();
+
+        public JsonElement.ArrayEnumerator RequiredArray() =>
+            element.ValueKind == JsonValueKind.Array ? element.EnumerateArray() : throw new FormatException("An array is required.");
+
+        public JsonElement.ArrayEnumerator RequiredArray(string name) => element.GetProperty(name).RequiredArray();
+
+        public IReadOnlyList<string> RequiredStrings(string name) => Strings(element.GetProperty(name));
+
+        public DateTimeOffset RequiredInstant() =>
+            DateTimeOffset.ParseExact(element.RequiredString(), "yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+
+        public DateTimeOffset RequiredInstant(string name) => element.GetProperty(name).RequiredInstant();
+
+        public DateTimeOffset? OptionalInstant(string name) =>
+            element[name] is { ValueKind: not JsonValueKind.Null } value ? value.RequiredInstant() : null;
+
+        public T RequiredKebab<T>(string name) where T : struct, Enum => ParseKebab<T>(element.GetProperty(name));
+    }
+
     public static void RequireVersion(JsonElement element, int version)
     {
-        if (Int(element.GetProperty("v")) != version)
+        if (element.RequiredInt("v") != version)
             throw new FormatException("Unsupported automation payload version.");
     }
 
-    public static string String(JsonElement element) => element.ValueKind == JsonValueKind.String ? element.GetString()! : throw new FormatException("A string is required.");
+    public static string String(JsonElement element) => element.RequiredString();
 
-    public static string? OptionalString(JsonElement parent, string name) =>
-        parent.TryGetProperty(name, out var value) && value.ValueKind != JsonValueKind.Null ? String(value) : null;
-
-    public static int Int(JsonElement element) => element.ValueKind == JsonValueKind.Number ? element.GetInt32() : throw new FormatException("A number is required.");
-
-    public static long Long(JsonElement element) => element.ValueKind == JsonValueKind.Number ? element.GetInt64() : throw new FormatException("A number is required.");
-
-    public static bool Bool(JsonElement element) => element.ValueKind switch
-    {
-        JsonValueKind.True => true,
-        JsonValueKind.False => false,
-        _ => throw new FormatException("A boolean is required."),
-    };
-
-    public static JsonElement.ArrayEnumerator Array(JsonElement element) =>
-        element.ValueKind == JsonValueKind.Array ? element.EnumerateArray() : throw new FormatException("An array is required.");
+    public static long Long(JsonElement element) => element.RequiredLong();
 
     public static IReadOnlyList<string> Strings(JsonElement element)
     {
@@ -132,7 +163,7 @@ internal static class AutomationJson
         var result = new string[count];
         var index = 0;
         foreach (var item in element.EnumerateArray())
-            result[index++] = String(item);
+            result[index++] = item.RequiredString();
         return result;
     }
 
@@ -151,23 +182,7 @@ internal static class AutomationJson
         writer.WriteString(name, chars[..written]);
     }
 
-    public static DateTimeOffset Instant(JsonElement element) =>
-        DateTimeOffset.ParseExact(String(element), "yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
-
-    public static DateTimeOffset? OptionalInstant(JsonElement parent, string name) =>
-        parent.TryGetProperty(name, out var value) && value.ValueKind != JsonValueKind.Null ? Instant(value) : null;
-
-    public static string Name(ConversationPriority priority) => priority switch
-    {
-        ConversationPriority.None => "none",
-        ConversationPriority.Low => "low",
-        ConversationPriority.Medium => "medium",
-        ConversationPriority.High => "high",
-        ConversationPriority.Urgent => "urgent",
-        _ => throw new ArgumentOutOfRangeException(nameof(priority)),
-    };
-
-    public static ConversationPriority Priority(JsonElement element) => String(element) switch
+    public static ConversationPriority Priority(JsonElement element) => element.RequiredString() switch
     {
         "none" => ConversationPriority.None,
         "low" => ConversationPriority.Low,
@@ -177,17 +192,7 @@ internal static class AutomationJson
         _ => throw new FormatException("Unknown priority."),
     };
 
-    public static string Name(ConversationStatusKind status) => status switch
-    {
-        ConversationStatusKind.Open => "open",
-        ConversationStatusKind.Pending => "pending",
-        ConversationStatusKind.Snoozed => "snoozed",
-        ConversationStatusKind.Resolved => "resolved",
-        ConversationStatusKind.Closed => "closed",
-        _ => throw new ArgumentOutOfRangeException(nameof(status)),
-    };
-
-    public static ConversationStatusKind Status(JsonElement element) => String(element) switch
+    public static ConversationStatusKind Status(JsonElement element) => element.RequiredString() switch
     {
         "open" => ConversationStatusKind.Open,
         "pending" => ConversationStatusKind.Pending,
@@ -197,15 +202,7 @@ internal static class AutomationJson
         _ => throw new FormatException("Unknown status."),
     };
 
-    public static string Name(SlaMetric metric) => metric switch
-    {
-        SlaMetric.FirstResponse => "first-response",
-        SlaMetric.NextResponse => "next-response",
-        SlaMetric.Resolution => "resolution",
-        _ => throw new ArgumentOutOfRangeException(nameof(metric)),
-    };
-
-    public static SlaMetric Metric(JsonElement element) => String(element) switch
+    public static SlaMetric Metric(JsonElement element) => element.RequiredString() switch
     {
         "first-response" => SlaMetric.FirstResponse,
         "next-response" => SlaMetric.NextResponse,
@@ -219,7 +216,7 @@ internal static class AutomationJson
 
     public static T ParseKebab<T>(JsonElement element) where T : struct, Enum
     {
-        var text = String(element);
+        var text = element.RequiredString();
         return EnumKebabCache<T>.FromKebab.TryGetValue(text, out var value)
             ? value
             : throw new FormatException($"Unknown {typeof(T).Name} value.");

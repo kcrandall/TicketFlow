@@ -3,6 +3,9 @@
     <Description>Optional hosted workers for TicketFlow: BackgroundService loops for the conversation outbox, routing maintenance, SLA timers, automation schedules and contact follower, contact-merge catch-up, survey dispatch, live-chat session pruning, assistant maintenance, integration event delivery, retention and followers and reporting retention, with jittered backoff, health checks, metrics and durable checkpoints.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Shared/TupleDictionaryExtensions.cs" Link="Internal/TupleDictionaryExtensions.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" />
   </ItemGroup>
   <ItemGroup>

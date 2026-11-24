@@ -3,6 +3,9 @@
     <Description>Authorized staff identity linking with no-escalation checks, the trusted external-subject resolver, agent profiles and development in-memory stores for TicketFlow.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Shared/TupleDictionaryExtensions.cs" Link="Internal/TupleDictionaryExtensions.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../TicketFlow.Identity.Abstractions/TicketFlow.Identity.Abstractions.csproj" />
     <ProjectReference Include="../../Workspaces/TicketFlow.Workspaces.Abstractions/TicketFlow.Workspaces.Abstractions.csproj" />
   </ItemGroup>

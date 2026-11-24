@@ -36,7 +36,7 @@ public sealed class InMemoryStaffIdentityStore : IStaffIdentityStore
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(identity);
         lock (gate)
-            return Task.FromResult(links.GetValueOrDefault((scope, identity.Provider, identity.Subject)));
+            return Task.FromResult(links.GetValueOrDefault(scope, identity.Provider, identity.Subject));
     }
 
     public Task<IReadOnlyList<StoredStaffIdentityLink>> ListForUserAsync(TicketScope scope, UserId user, CancellationToken cancellationToken = default)
@@ -101,7 +101,7 @@ public sealed class InMemoryStaffIdentityStore : IStaffIdentityStore
     {
         ArgumentNullException.ThrowIfNull(scope);
         lock (gate)
-            return Task.FromResult(profiles.GetValueOrDefault((scope, user)));
+            return Task.FromResult(profiles.GetValueOrDefault(scope, user));
     }
 
     public Task<StaffIdentityProfileWriteResult> PutProfileAsync(TicketScope scope, StaffProfile profile, DateTimeOffset updatedAt, long? expectedRevision, StaffIdentityAuditEvent audit,
@@ -115,7 +115,7 @@ public sealed class InMemoryStaffIdentityStore : IStaffIdentityStore
         lock (gate)
         {
             StaffIdentityProfileWriteResult result;
-            var existing = profiles.GetValueOrDefault((scope, profile.User));
+            var existing = profiles.GetValueOrDefault(scope, profile.User);
             if (expectedRevision is null && existing is not null)
                 result = new StaffIdentityWriteConflict(existing.Revision);
             else if (expectedRevision is not null && existing is null)
@@ -126,7 +126,7 @@ public sealed class InMemoryStaffIdentityStore : IStaffIdentityStore
             {
                 var at = new DateTimeOffset(updatedAt.UtcTicks - updatedAt.UtcTicks % 10, TimeSpan.Zero);
                 var stored = new StoredStaffProfile(scope, profile, at, existing is null ? 1 : checked(existing.Revision + 1));
-                profiles[(scope, profile.User)] = stored;
+                profiles[scope, profile.User] = stored;
                 this.audit.Add(audit);
                 result = new StaffIdentityProfileWriteApplied(stored);
             }

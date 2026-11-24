@@ -35,7 +35,7 @@ public sealed class PostgresReportingStore : IReportingStore
     private static readonly string ScopeKeyWhereT = "t." + ScopeKeyWhere.Replace(" AND ", " AND t.", StringComparison.Ordinal);
     private static readonly string ScopeKeyWhereF = "f." + ScopeKeyWhere.Replace(" AND ", " AND f.", StringComparison.Ordinal);
     private static readonly string FactColumnsR = string.Join(", ", FactColumns.Split(", ").Select(column => "r." + column));
-    private static readonly short[] DurationMetrics = [.. ReportMetrics.All.Where(ReportMetrics.IsDuration).Select(metric => (short)metric)];
+    private static readonly short[] DurationMetrics = [.. ReportMetric.All.Where(metric => metric.IsDuration).Select(metric => (short)metric)];
 
     private static readonly PostgresAccessFilterColumns RollupColumns = Columns("r.agent_id", "r.no_labels");
     private static readonly PostgresAccessFilterColumns FactFilterColumns = Columns("r.agent_id", "r.labels");
@@ -631,7 +631,7 @@ public sealed class PostgresReportingStore : IReportingStore
     {
         try
         {
-            return new ReportAggregateRow(reader.GetInt32(0), reader.IsDBNull(1) ? null : reader.GetString(1), Metric(reader.GetInt16(2)), reader.GetInt32(3),
+            return new ReportAggregateRow(reader.GetInt32(0), reader.NullableText(1), Metric(reader.GetInt16(2)), reader.GetInt32(3),
                 reader.GetInt64(4), reader.GetInt64(5), reader.GetInt64(6), reader.GetInt64(7));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
@@ -648,11 +648,11 @@ public sealed class PostgresReportingStore : IReportingStore
                 throw new FormatException("Unsupported reporting state format version.");
             var rawLabels = reader.GetFieldValue<string[]>(9);
             var labels = ToLabelIds(rawLabels);
-            var state = new ReportConversationState(new ConversationId(reader.GetString(0)), new InboxId(reader.GetString(2)), reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.GetFieldValue<DateTimeOffset>(4), Enum<ConversationStatusKind>(reader.GetInt16(5)), reader.IsDBNull(6) ? null : new UserId(reader.GetString(6)),
-                reader.IsDBNull(7) ? null : new TeamId(reader.GetString(7)), Enum<ConversationPriority>(reader.GetInt16(8)),
-                labels, reader.IsDBNull(10) ? null : reader.GetFieldValue<DateTimeOffset>(10),
-                reader.IsDBNull(11) ? null : reader.GetFieldValue<DateTimeOffset>(11), reader.GetInt32(12), reader.GetInt64(13));
+            var state = new ReportConversationState(new ConversationId(reader.GetString(0)), new InboxId(reader.GetString(2)), reader.NullableText(3),
+                reader.GetFieldValue<DateTimeOffset>(4), Enum<ConversationStatusKind>(reader.GetInt16(5)), reader.NullableText(6) is { } agent ? new UserId(agent) : null,
+                reader.NullableText(7) is { } team ? new TeamId(team) : null, Enum<ConversationPriority>(reader.GetInt16(8)),
+                labels, reader.NullableInstant(10),
+                reader.NullableInstant(11), reader.GetInt32(12), reader.GetInt64(13));
             return new StoredReportConversation(scope, state, reader.GetInt64(14));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
@@ -669,8 +669,8 @@ public sealed class PostgresReportingStore : IReportingStore
                 throw new FormatException("Unsupported report fact format version.");
             var rawLabels = reader.GetFieldValue<string[]>(9);
             var labels = ToLabelIds(rawLabels);
-            var dimensions = new ReportDimensions(new InboxId(reader.GetString(4)), reader.IsDBNull(5) ? null : new TeamId(reader.GetString(5)),
-                reader.IsDBNull(6) ? null : new UserId(reader.GetString(6)), reader.IsDBNull(7) ? null : reader.GetString(7), Enum<ConversationPriority>(reader.GetInt16(8)),
+            var dimensions = new ReportDimensions(new InboxId(reader.GetString(4)), reader.NullableText(5) is { } team ? new TeamId(team) : null,
+                reader.NullableText(6) is { } agent ? new UserId(agent) : null, reader.NullableText(7), Enum<ConversationPriority>(reader.GetInt16(8)),
                 labels);
             return new ReportFact(reader.GetGuid(0), Metric(reader.GetInt16(1)), new ConversationId(reader.GetString(2)), reader.GetFieldValue<DateTimeOffset>(3), dimensions,
                 reader.GetInt64(10));

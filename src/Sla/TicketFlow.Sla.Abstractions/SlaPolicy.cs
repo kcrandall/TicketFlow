@@ -17,6 +17,21 @@ public enum SlaMetric
     Resolution = 3,
 }
 
+public static class SlaMetricExtensions
+{
+    extension(SlaMetric metric)
+    {
+        /// <summary>Stable lowercase kebab-case wire name for this SLA metric.</summary>
+        public string WireName => metric switch
+        {
+            SlaMetric.FirstResponse => "first-response",
+            SlaMetric.NextResponse => "next-response",
+            SlaMetric.Resolution => "resolution",
+            _ => throw new ArgumentOutOfRangeException(nameof(metric)),
+        };
+    }
+}
+
 /// <summary>How a rule measures durations. Persisted numerically; never renumber.</summary>
 public enum SlaClockBasis
 {

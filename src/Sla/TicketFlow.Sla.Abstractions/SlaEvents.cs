@@ -121,14 +121,14 @@ public static class SlaEventCodec
                         writer.WriteString("calendar", calendar.Value);
                     writer.WriteStartObject("targets");
                     foreach (var metric in Enum.GetValues<SlaMetric>())
-                        SlaJson.WriteOptionalDuration(writer, SlaJson.Name(metric), applied.Targets.For(metric));
+                        SlaJson.WriteOptionalDuration(writer, metric.WireName, applied.Targets.For(metric));
                     writer.WriteEndObject();
                     SlaJson.WriteInstant(writer, "at", applied.At);
                     break;
                 case SlaWarningEvent warning:
                     writer.WriteString("key", warning.Key);
                     writer.WriteString("policy", warning.Policy.Value);
-                    writer.WriteString("metric", SlaJson.Name(warning.Metric));
+                    writer.WriteString("metric", warning.Metric.WireName);
                     writer.WriteNumber("cycle", warning.Cycle);
                     writer.WriteNumber("pct", warning.ThresholdPercent);
                     SlaJson.WriteDuration(writer, "target", warning.Target);
@@ -139,7 +139,7 @@ public static class SlaEventCodec
                 case SlaBreachedEvent breached:
                     writer.WriteString("key", breached.Key);
                     writer.WriteString("policy", breached.Policy.Value);
-                    writer.WriteString("metric", SlaJson.Name(breached.Metric));
+                    writer.WriteString("metric", breached.Metric.WireName);
                     writer.WriteNumber("cycle", breached.Cycle);
                     SlaJson.WriteDuration(writer, "target", breached.Target);
                     SlaJson.WriteInstant(writer, "at", breached.At);
@@ -148,7 +148,7 @@ public static class SlaEventCodec
                 case SlaMetEvent met:
                     writer.WriteString("key", met.Key);
                     writer.WriteString("policy", met.Policy.Value);
-                    writer.WriteString("metric", SlaJson.Name(met.Metric));
+                    writer.WriteString("metric", met.Metric.WireName);
                     writer.WriteNumber("cycle", met.Cycle);
                     SlaJson.WriteDuration(writer, "target", met.Target);
                     SlaJson.WriteDuration(writer, "elapsed", met.Elapsed);
@@ -177,28 +177,28 @@ public static class SlaEventCodec
                     var targets = root.GetProperty("targets");
                     SlaJson.RequireProperties(targets, "first-response", "next-response", "resolution");
                     result = new SlaAppliedEvent(Key(root), Policy(root), root.GetProperty("policyRevision").GetInt64(), root.GetProperty("rule").GetInt32(),
-                        SlaText.RequireText(SlaJson.String(root.GetProperty("ruleName")), SlaRule.MaximumNameLength, "ruleName"), SlaJson.Basis(root.GetProperty("basis")),
-                        SlaJson.OptionalString(root, "calendar") is { } calendar ? new BusinessCalendarId(calendar) : null,
-                        new SlaTargets(SlaJson.OptionalDuration(targets, "first-response"), SlaJson.OptionalDuration(targets, "next-response"), SlaJson.OptionalDuration(targets, "resolution")),
-                        SlaJson.Instant(root.GetProperty("at")));
+                        SlaText.RequireText(root.RequiredString("ruleName"), SlaRule.MaximumNameLength, "ruleName"), SlaJson.Basis(root.GetProperty("basis")),
+                        root.OptionalString("calendar") is { } calendar ? new BusinessCalendarId(calendar) : null,
+                        new SlaTargets(targets.OptionalDuration("first-response"), targets.OptionalDuration("next-response"), targets.OptionalDuration("resolution")),
+                        root.RequiredInstant("at"));
                     break;
                 }
                 case WarningKind:
                     SlaJson.RequireProperties(root, "v", "key", "policy", "metric", "cycle", "pct", "target", "at", "dueAt", "actions");
                     result = new SlaWarningEvent(Key(root), Policy(root), SlaJson.Metric(root.GetProperty("metric")), root.GetProperty("cycle").GetInt32(),
-                        root.GetProperty("pct").GetInt32(), SlaJson.Duration(root.GetProperty("target")), SlaJson.Instant(root.GetProperty("at")),
-                        SlaJson.OptionalInstant(root, "dueAt"), SlaJson.Actions(root.GetProperty("actions")));
+                        root.GetProperty("pct").GetInt32(), root.RequiredDuration("target"), root.RequiredInstant("at"),
+                        root.OptionalInstant("dueAt"), SlaJson.Actions(root.GetProperty("actions")));
                     break;
                 case BreachedKind:
                     SlaJson.RequireProperties(root, "v", "key", "policy", "metric", "cycle", "target", "at", "actions");
                     result = new SlaBreachedEvent(Key(root), Policy(root), SlaJson.Metric(root.GetProperty("metric")), root.GetProperty("cycle").GetInt32(),
-                        SlaJson.Duration(root.GetProperty("target")), SlaJson.Instant(root.GetProperty("at")), SlaJson.Actions(root.GetProperty("actions")));
+                        root.RequiredDuration("target"), root.RequiredInstant("at"), SlaJson.Actions(root.GetProperty("actions")));
                     break;
                 case MetKind:
                     SlaJson.RequireProperties(root, "v", "key", "policy", "metric", "cycle", "target", "elapsed", "breached", "at");
                     result = new SlaMetEvent(Key(root), Policy(root), SlaJson.Metric(root.GetProperty("metric")), root.GetProperty("cycle").GetInt32(),
-                        SlaJson.Duration(root.GetProperty("target")), SlaJson.Duration(root.GetProperty("elapsed")), SlaJson.Bool(root.GetProperty("breached")),
-                        SlaJson.Instant(root.GetProperty("at")));
+                        root.RequiredDuration("target"), root.RequiredDuration("elapsed"), root.RequiredBool("breached"),
+                        root.RequiredInstant("at"));
                     break;
                 default:
                     throw new FormatException("Unknown SLA event kind.");
@@ -226,7 +226,7 @@ public static class SlaEventCodec
         }
     }
 
-    private static string Key(System.Text.Json.JsonElement root) => SlaText.RequireText(SlaJson.String(root.GetProperty("key")), MaximumKeyLength, "key");
+    private static string Key(System.Text.Json.JsonElement root) => SlaText.RequireText(root.RequiredString("key"), MaximumKeyLength, "key");
 
-    private static SlaPolicyId Policy(System.Text.Json.JsonElement root) => new(SlaJson.String(root.GetProperty("policy")));
+    private static SlaPolicyId Policy(System.Text.Json.JsonElement root) => new(root.RequiredString("policy"));
 }

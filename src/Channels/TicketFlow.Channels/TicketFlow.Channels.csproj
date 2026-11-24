@@ -3,6 +3,9 @@
     <Description>Channel runtime for TicketFlow: inbound pipeline (inbox binding, contact resolve-or-create, thread correlation, idempotent append), outbound dispatcher on the conversation outbox with retries and dead-letter, delivery status ingestion, reply-window enforcement, endpoint administration and development in-memory channel state stores.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Shared/TupleDictionaryExtensions.cs" Link="Internal/TupleDictionaryExtensions.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../TicketFlow.Channels.Abstractions/TicketFlow.Channels.Abstractions.csproj" />
     <ProjectReference Include="../../Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />
   </ItemGroup>

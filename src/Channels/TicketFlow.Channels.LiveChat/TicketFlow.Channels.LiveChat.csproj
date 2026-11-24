@@ -3,6 +3,9 @@
     <Description>Live-chat channel for TicketFlow: widget configuration per inbox, visitor sessions with hashed rotating tokens, origin checks, HMAC and signed-token identity verification, visitor messages through the inbound pipeline, realtime agent replies with fetch-on-reconnect cursors, typing, read receipts, attachments and help-center deflection.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Shared/TupleDictionaryExtensions.cs" Link="Internal/TupleDictionaryExtensions.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <InternalsVisibleTo Include="TicketFlow.Channels.LiveChat.Tests" />
   </ItemGroup>
   <ItemGroup>

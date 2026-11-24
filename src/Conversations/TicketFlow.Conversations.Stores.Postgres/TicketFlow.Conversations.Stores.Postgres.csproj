@@ -3,6 +3,9 @@
     <Description>Optional durable PostgreSQL conversation, timeline, message delivery, attribute definition and multi-consumer outbox storage for TicketFlow conversations.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Shared/PostgresReaderExtensions.cs" Link="Internal/PostgresReaderExtensions.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
     <ProjectReference Include="../../Access/TicketFlow.Access.Stores.Postgres/TicketFlow.Access.Stores.Postgres.csproj" />
     <ProjectReference Include="../../Stores/TicketFlow.Stores.Migrations.Postgres/TicketFlow.Stores.Migrations.Postgres.csproj" />

@@ -3,6 +3,9 @@
     <Description>Public integration event stream for TicketFlow: the conversation outbox projector (consumer events), contact and survey followers, routing observer, Access-checked subscriptions, an at-least-once fan-out delivery engine with per-conversation ordering, backoff, dead letters and replay, in-process subscribers, retention and a development in-memory store.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Shared/TupleDictionaryExtensions.cs" Link="Internal/TupleDictionaryExtensions.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../TicketFlow.Events.Abstractions/TicketFlow.Events.Abstractions.csproj" />
     <ProjectReference Include="../../Conversations/TicketFlow.Conversations.Abstractions/TicketFlow.Conversations.Abstractions.csproj" />
     <ProjectReference Include="../../Contacts/TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj" />

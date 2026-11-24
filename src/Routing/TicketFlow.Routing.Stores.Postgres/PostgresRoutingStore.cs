@@ -208,10 +208,6 @@ public sealed partial class PostgresRoutingStore : IRoutingPolicyStore, IAgentAv
 
     private static DateTimeOffset Instant(DateTimeOffset value) => new(value.UtcTicks - value.UtcTicks % 10, TimeSpan.Zero);
 
-    private static string? NullableText(NpgsqlDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
-
-    private static DateTimeOffset? NullableInstant(NpgsqlDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetFieldValue<DateTimeOffset>(ordinal);
-
     private static void AddScope(NpgsqlCommand command, TicketScope scope) => AddScope(command.Parameters, scope);
 
     private static void AddScope(NpgsqlParameterCollection parameters, TicketScope scope)

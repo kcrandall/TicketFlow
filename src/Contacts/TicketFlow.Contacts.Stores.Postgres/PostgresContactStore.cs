@@ -452,14 +452,14 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
                     }
                     var contact = new Contact(
                         new ContactId(id),
-                        new ContactProfile(NullableText(reader, 2), NullableText(reader, 3), NullableText(reader, 4), NullableText(reader, 5), NullableText(reader, 6)),
+                        new ContactProfile(reader.NullableText(2), reader.NullableText(3), reader.NullableText(4), reader.NullableText(5), reader.NullableText(6)),
                         identities.GetValueOrDefault(id) ?? [],
                         ContactJsonCodec.DeserializeAttributes(reader.GetString(7)),
                         labels,
                         reader.GetBoolean(9),
                         reader.GetFieldValue<DateTimeOffset>(11),
                         reader.GetFieldValue<DateTimeOffset>(12),
-                        reader.IsDBNull(10) ? null : new ContactId(reader.GetString(10)));
+                        reader.NullableText(10) is { } mergedInto ? new ContactId(mergedInto) : null);
                     var stored = new StoredContact(scope, contact, reader.GetInt64(13));
                     result[stored.Id] = stored;
                 }
@@ -471,8 +471,6 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
         }
         return result;
     }
-
-    private static string? NullableText(NpgsqlDataReader reader, int ordinal) => reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
 
     private static void AddScope(NpgsqlCommand command, TicketScope scope)
     {

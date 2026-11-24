@@ -3,6 +3,9 @@
     <Description>Optional durable PostgreSQL staff identity mapping, agent profile and audit storage for TicketFlow.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Shared/PostgresReaderExtensions.cs" Link="Internal/PostgresReaderExtensions.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../TicketFlow.Identity.Abstractions/TicketFlow.Identity.Abstractions.csproj" />
     <ProjectReference Include="../../Stores/TicketFlow.Stores.Migrations.Postgres/TicketFlow.Stores.Migrations.Postgres.csproj" />
     <PackageReference Include="Npgsql" />

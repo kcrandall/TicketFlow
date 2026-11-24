@@ -25,7 +25,7 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(configurationId);
         lock (gate)
-            return Task.FromResult(endpoints.GetValueOrDefault((scope, kind, configurationId)));
+            return Task.FromResult(endpoints.GetValueOrDefault(scope, kind, configurationId));
     }
 
     public Task<StoredChannelEndpoint?> FindByAddressAsync(AccessPartition partition, ChannelKind kind, string address, CancellationToken cancellationToken = default)
@@ -108,7 +108,7 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
     {
         ArgumentNullException.ThrowIfNull(scope);
         lock (gate)
-            return Task.FromResult(states.GetValueOrDefault((scope, conversation)));
+            return Task.FromResult(states.GetValueOrDefault(scope, conversation));
     }
 
     public Task<StoreWriteResult<StoredChannelConversationState, ChannelWriteRejection>> WriteAsync(TicketScope scope, ChannelConversationState state, long? expectedRevision, CancellationToken cancellationToken = default)
@@ -147,7 +147,7 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
     {
         ArgumentNullException.ThrowIfNull(scope);
         lock (gate)
-            return Task.FromResult(states.Remove((scope, conversation)));
+            return Task.FromResult(states.Remove(scope, conversation));
     }
 
     public Task<int> AddAsync(TicketScope scope, InboxId inbox, ConversationId conversation, IReadOnlyList<ChannelMessageReference> references, DateTimeOffset recordedAt,
@@ -186,7 +186,7 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
         lock (gate)
         {
             foreach (var reference in references)
-                if (reference is not null && this.references.TryGetValue((scope, inbox, reference), out var stored))
+                if (reference is not null && this.references.TryGetValue(scope, inbox, reference, out var stored))
                     return Task.FromResult<ConversationId?>(stored.Conversation);
             return Task.FromResult<ConversationId?>(null);
         }
@@ -204,7 +204,7 @@ public sealed class InMemoryChannelStore : IChannelEndpointStore, IChannelConver
     {
         ArgumentNullException.ThrowIfNull(scope);
         lock (gate)
-            return Task.FromResult(dispatches.GetValueOrDefault((scope, conversation, message)));
+            return Task.FromResult(dispatches.GetValueOrDefault(scope, conversation, message));
     }
 
     public Task<StoreWriteResult<StoredChannelDispatch, ChannelWriteRejection>> WriteAsync(TicketScope scope, ChannelDispatch dispatch, long? expectedRevision, CancellationToken cancellationToken = default)

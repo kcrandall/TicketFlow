@@ -32,7 +32,7 @@ public sealed class InMemoryReportingStore : IReportingStore
         Require(conversation);
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
-            return Task.FromResult(states.GetValueOrDefault((scope, conversation)));
+            return Task.FromResult(states.GetValueOrDefault(scope, conversation));
     }
 
     public Task<ReportWriteResult> ApplyAsync(TicketScope scope, ReportProjection projection, long? expectedRevision, CancellationToken cancellationToken = default)
@@ -51,13 +51,13 @@ public sealed class InMemoryReportingStore : IReportingStore
             var inserted = new List<ReportFact>();
             var seen = new HashSet<(Guid, ReportMetric)>();
             foreach (var fact in projection.Facts)
-                if (seen.Add((fact.SourceId, fact.Metric)) && !facts.ContainsKey((scope, fact.SourceId, fact.Metric)))
+                if (seen.Add((fact.SourceId, fact.Metric)) && !facts.ContainsKey(scope, fact.SourceId, fact.Metric))
                     inserted.Add(fact);
             if (facts.Count + inserted.Count > MaximumFacts)
                 return Task.FromResult<ReportWriteResult>(new ReportWriteRejected(ReportWriteRejection.CapacityExceeded));
             foreach (var fact in inserted)
             {
-                facts[(scope, fact.SourceId, fact.Metric)] = fact;
+                facts[scope, fact.SourceId, fact.Metric] = fact;
                 AddCells(scope, fact);
             }
             var stored = new StoredReportConversation(scope, projection.State, (current?.Revision ?? 0) + 1);
@@ -74,10 +74,10 @@ public sealed class InMemoryReportingStore : IReportingStore
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
-            var current = states.GetValueOrDefault((scope, conversation));
+            var current = states.GetValueOrDefault(scope, conversation);
             if (current?.Revision != expectedRevision)
                 return Task.FromResult<ReportWriteResult>(new ReportWriteConflict(current?.Revision));
-            states.Remove((scope, conversation));
+            states.Remove(scope, conversation);
             return Task.FromResult<ReportWriteResult>(new ReportWriteApplied(current, 0));
         }
     }
@@ -109,7 +109,7 @@ public sealed class InMemoryReportingStore : IReportingStore
 
         CellValue GetGroup(DateTimeOffset cell, string? group, ReportMetric metric, int cellBin)
         {
-            var bin = query.Histograms && ReportMetrics.IsDuration(metric) ? cellBin : 0;
+            var bin = query.Histograms && metric.IsDuration ? cellBin : 0;
             var bucket = query.Boundaries.Count == 2 ? 0 : ReportBuckets.IndexOf(query.Boundaries, cell);
             var groupKey = (bucket, group, metric, bin);
             if (!groups.TryGetValue(groupKey, out var total))

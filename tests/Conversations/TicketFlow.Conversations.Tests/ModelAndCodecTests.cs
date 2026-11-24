@@ -183,4 +183,22 @@ public sealed class ModelAndCodecTests
         Assert.IsTrue(catalog.Find(ConversationPermissions.ManageAttributes)!.IsSensitive);
         Assert.AreEqual("conversation.attribute.plan", ConversationFieldPaths.Attribute("plan").Value);
     }
+
+    [TestMethod]
+    public void ConversationEnumWireNamesAreStable()
+    {
+        Assert.AreEqual("open", ConversationStatusKind.Open.WireName);
+        Assert.AreEqual("pending", ConversationStatusKind.Pending.WireName);
+        Assert.AreEqual("snoozed", ConversationStatusKind.Snoozed.WireName);
+        Assert.AreEqual("resolved", ConversationStatusKind.Resolved.WireName);
+        Assert.AreEqual("closed", ConversationStatusKind.Closed.WireName);
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => _ = ((ConversationStatusKind)99).WireName);
+
+        Assert.AreEqual("none", ConversationPriority.None.WireName);
+        Assert.AreEqual("low", ConversationPriority.Low.WireName);
+        Assert.AreEqual("medium", ConversationPriority.Medium.WireName);
+        Assert.AreEqual("high", ConversationPriority.High.WireName);
+        Assert.AreEqual("urgent", ConversationPriority.Urgent.WireName);
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => _ = ((ConversationPriority)99).WireName);
+    }
 }

@@ -142,7 +142,7 @@ public sealed class InMemoryAutomationRuleStore(TimeProvider? time = null) : IAu
             var result = rules.Delete(scope, id.Value, expectedRevision, (value, revision) => new StoredAutomationRule(scope, value, revision));
             if (result.Value is StoreApplied<StoredAutomationRule>)
             {
-                timers.Remove((scope, id.Value));
+                timers.Remove(scope, id.Value);
                 versions[scope] = versions.GetValueOrDefault(scope) + 1;
             }
             return Task.FromResult(result);
@@ -196,8 +196,8 @@ public sealed class InMemoryAutomationRuleStore(TimeProvider? time = null) : IAu
 
     private void SetTimer(TicketScope scope, string id, DateTimeOffset? dueAt)
     {
-        var fence = timers.TryGetValue((scope, id), out var timer) ? timer.Fence + 1 : 0;
-        timers[(scope, id)] = (AutomationTextInstant.Of(dueAt), null, fence);
+        var fence = timers.TryGetValue(scope, id, out var timer) ? timer.Fence + 1 : 0;
+        timers[scope, id] = (AutomationTextInstant.Of(dueAt), null, fence);
     }
 }
 
@@ -340,7 +340,7 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
         ArgumentNullException.ThrowIfNull(scope);
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
-            return Task.FromResult(causes.GetValueOrDefault((scope, conversation.Value, sequence)));
+            return Task.FromResult(causes.GetValueOrDefault(scope, conversation.Value, sequence));
     }
 
     public Task<int> CountSinceAsync(TicketScope scope, ConversationId conversation, DateTimeOffset since, int limit, CancellationToken cancellationToken = default)
@@ -393,7 +393,7 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
         RequireName(name);
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
-            return Task.FromResult(checkpoints.TryGetValue((scope, name), out var value) ? value : (long?)null);
+            return Task.FromResult(checkpoints.TryGetValue(scope, name, out var value) ? value : (long?)null);
     }
 
     public Task<bool> SetCheckpointAsync(TicketScope scope, string name, long value, long? expected, CancellationToken cancellationToken = default)
@@ -404,10 +404,10 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
-            var current = checkpoints.TryGetValue((scope, name), out var stored) ? stored : (long?)null;
+            var current = checkpoints.TryGetValue(scope, name, out var stored) ? stored : (long?)null;
             if (current != expected)
                 return Task.FromResult(false);
-            checkpoints[(scope, name)] = value;
+            checkpoints[scope, name] = value;
             return Task.FromResult(true);
         }
     }
@@ -425,7 +425,7 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
             return;
         var cause = new AutomationCause(execution.Id, execution.Rule, execution.Depth);
         for (var i = 0; i < sequences.Count; i++)
-            causes[(scope, conversation.Value, sequences[i])] = cause;
+            causes[scope, conversation.Value, sequences[i]] = cause;
     }
 
     private void Evict(ScopeBucket bucket)
@@ -449,8 +449,8 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
         keys.Remove(Key(stored.Scope, stored.Execution.Rule, stored.Execution.Conversation, stored.Execution.TriggerKey));
         if (stored.Execution.Conversation is { } conversation)
             foreach (var sequence in stored.Execution.ProducedSequences)
-                if (causes.TryGetValue((stored.Scope, conversation.Value, sequence), out var cause) && cause.Execution == stored.Id)
-                    causes.Remove((stored.Scope, conversation.Value, sequence));
+                if (causes.TryGetValue(stored.Scope, conversation.Value, sequence, out var cause) && cause.Execution == stored.Id)
+                    causes.Remove(stored.Scope, conversation.Value, sequence);
     }
 
     private static (TicketScope, string, string, string) Key(TicketScope scope, AutomationRuleId rule, ConversationId? conversation, string triggerKey) =>

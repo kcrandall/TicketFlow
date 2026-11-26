@@ -75,7 +75,17 @@ public sealed partial class CatalogTests
         CollectionAssert.AreEquivalent(new[] { "owner", "admin", "supervisor", "agent", "light-agent" }, TicketFlowToolCatalog.Find("conversations_add_note")!.GrantedByBuiltInRoles.ToList());
         CollectionAssert.AreEquivalent(new[] { "owner" }, TicketFlowToolCatalog.Find("helpcenter_publish")!.GrantedByBuiltInRoles.ToList());
         CollectionAssert.AreEquivalent(new[] { "owner", "admin", "supervisor", "viewer" }, TicketFlowToolCatalog.Find("reports_overview")!.GrantedByBuiltInRoles.ToList());
+        CollectionAssert.AreEquivalent(new[] { "owner" }, TicketFlowToolCatalog.RolesGranting([TicketFlowMcpPermissions.AccessManageTenant]).ToList());
+        CollectionAssert.AreEquivalent(new[] { "owner", "admin" }, TicketFlowToolCatalog.Find("access_activate_break_glass")!.GrantedByBuiltInRoles.ToList());
+        CollectionAssert.AreEquivalent(new[] { "owner", "admin" }, TicketFlowToolCatalog.Find("access_list_service_accounts")!.GrantedByBuiltInRoles.ToList());
         Assert.IsTrue(TicketFlowToolCatalog.Find("canned_responses_render")!.AnyOf);
+        Assert.IsTrue(TicketFlowToolCatalog.Find("access_list_grants")!.AnyOf);
+        Assert.IsTrue(TicketFlowToolCatalog.Find("access_create_grant")!.AnyOf);
+        Assert.IsTrue(TicketFlowToolCatalog.Find("access_list_break_glass")!.AnyOf);
+        Assert.IsTrue(TicketFlowToolCatalog.Find("access_list_service_accounts")!.AnyOf);
+        Assert.IsTrue(TicketFlowToolCatalog.Find("access_list_federation_mappings")!.AnyOf);
+        Assert.AreEqual(TicketFlowMcpPermissions.AccessManageTenant, AccessPermissions.AccessManageTenant.Value);
+        Assert.AreEqual(TicketFlowMcpPermissions.AccessBreakGlass, AccessPermissions.AccessBreakGlass.Value);
     }
 
     [TestMethod]

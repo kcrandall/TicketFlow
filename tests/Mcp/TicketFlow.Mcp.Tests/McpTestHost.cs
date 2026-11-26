@@ -28,6 +28,9 @@ internal sealed class TestCaller
 {
     public string? User { get; set; } = "owner";
     public string? ApiClient { get; set; }
+    public IReadOnlyList<string> Teams { get; set; } = [];
+    public IReadOnlyList<string> ExternalRoles { get; set; } = [];
+    public string? IdentityProvider { get; set; }
 }
 
 /// <summary>
@@ -54,14 +57,15 @@ internal sealed class McpTestHost : IAsyncDisposable
     public ContactId Contact { get; private set; }
     public ConversationId Conversation { get; private set; }
 
-    public static async Task<McpTestHost> CreateAsync(Action<TicketFlowMcpOptions>? configure = null, bool features = true, bool assist = true)
+    public static async Task<McpTestHost> CreateAsync(Action<TicketFlowMcpOptions>? configure = null, bool features = true, bool assist = true,
+        Action<AccessControlOptions>? configureAccess = null)
     {
         var scope = TestScopes.Create();
         var services = new ServiceCollection();
         services.AddSingleton<Microsoft.Extensions.Logging.ILoggerFactory>(Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance);
         services.AddSingleton(typeof(Microsoft.Extensions.Logging.ILogger<>), typeof(Microsoft.Extensions.Logging.Abstractions.NullLogger<>));
         services.AddSingleton<TestCaller>();
-        var ticketFlow = services.AddTicketFlow().AddAccessControl().AddInMemoryAccessStores().AddWorkspaces().AddInMemoryWorkspaceStores();
+        var ticketFlow = services.AddTicketFlow().AddAccessControl(configureAccess).AddInMemoryAccessStores().AddWorkspaces().AddInMemoryWorkspaceStores();
         if (features)
             ticketFlow.AddContacts().AddInMemoryContactStores()
                 .AddConversations().AddInMemoryConversationStores()
@@ -82,8 +86,11 @@ internal sealed class McpTestHost : IAsyncDisposable
             {
                 var test = caller.Services.GetRequiredService<TestCaller>();
                 var target = AccessPartition.From(scope).InWorkspace(workspace);
-                PrincipalRef? principal = test.ApiClient is { } client ? new ApiClientPrincipal(target, new ApiClientId(client))
-                    : test.User is { } user ? new UserPrincipal(target, new UserId(user)) : null;
+                PrincipalRef? principal = test.ApiClient is { } client
+                    ? new ApiClientPrincipal(target, new ApiClientId(client), test.ExternalRoles, test.IdentityProvider)
+                    : test.User is { } user
+                        ? new UserPrincipal(target, new UserId(user), test.Teams.Select(team => new TeamId(team)), test.ExternalRoles, test.IdentityProvider)
+                        : null;
                 return ValueTask.FromResult(principal);
             };
             configure?.Invoke(options);
@@ -181,10 +188,14 @@ internal sealed class McpTestHost : IAsyncDisposable
     }
 
     /// <summary>Calls a tool as <paramref name="user"/> (or the API client) and returns the structured content.</summary>
-    public async Task<(bool IsError, JsonElement Content)> CallAsync(string tool, Dictionary<string, object?>? arguments = null, string? user = "owner", string? apiClient = null)
+    public async Task<(bool IsError, JsonElement Content)> CallAsync(string tool, Dictionary<string, object?>? arguments = null, string? user = "owner", string? apiClient = null,
+        IReadOnlyList<string>? teams = null, IReadOnlyList<string>? externalRoles = null, string? identityProvider = null)
     {
         Caller.User = user;
         Caller.ApiClient = apiClient;
+        Caller.Teams = teams ?? [];
+        Caller.ExternalRoles = externalRoles ?? [];
+        Caller.IdentityProvider = identityProvider;
         var result = await Client.CallToolAsync(tool, arguments ?? []);
         Assert.IsNotNull(result.StructuredContent, $"{tool} returned no structured content.");
         var text = Assert.IsInstanceOfType<TextContentBlock>(Assert.ContainsSingle(result.Content)).Text;

@@ -186,6 +186,52 @@ public sealed class AllToolsTests
         var grant = await Call("access_create_grant", new() { ["subjectKind"] = "team", ["subjectId"] = "tier1", ["role"] = "viewer", ["scope"] = "inbox", ["targetId"] = "support" });
         await Call("access_revoke_grant", new() { ["grantId"] = grant.GetProperty("id").GetString(), ["expectedRevision"] = grant.GetProperty("revision").GetInt64() });
 
+        await Call("access_list_break_glass");
+        var breakGlass = await Call("access_activate_break_glass", new()
+        {
+            ["role"] = "agent", ["justification"] = "Incident INC-1001 verification", ["durationMinutes"] = 30,
+        });
+        await Call("access_revoke_break_glass", new()
+        {
+            ["grantId"] = breakGlass.GetProperty("id").GetString(), ["expectedRevision"] = breakGlass.GetProperty("revision").GetInt64(),
+        });
+
+        await Call("access_list_service_accounts");
+        var sa = await Call("access_create_service_account", new()
+        {
+            ["clientId"] = "sa-all-tools", ["displayName"] = "All Tools Bot", ["description"] = "Verification",
+        });
+        sa = await Call("access_set_service_account_enabled", new()
+        {
+            ["clientId"] = "sa-all-tools", ["isEnabled"] = false, ["reason"] = "pause", ["expectedVersion"] = sa.GetProperty("version").GetInt64(),
+        });
+        sa = await Call("access_set_service_account_enabled", new()
+        {
+            ["clientId"] = "sa-all-tools", ["isEnabled"] = true, ["expectedVersion"] = sa.GetProperty("version").GetInt64(),
+        });
+        await Call("access_list_api_keys", new() { ["clientId"] = "sa-all-tools" });
+        var issuedKey = await Call("access_issue_api_key", new() { ["clientId"] = "sa-all-tools", ["name"] = "primary" });
+        await Call("access_revoke_api_key", new()
+        {
+            ["keyId"] = issuedKey.GetProperty("key").GetProperty("id").GetString(),
+            ["reason"] = "done",
+            ["expectedVersion"] = issuedKey.GetProperty("key").GetProperty("version").GetInt64(),
+        });
+        await Call("access_delete_service_account", new()
+        {
+            ["clientId"] = "sa-all-tools", ["expectedVersion"] = sa.GetProperty("version").GetInt64(),
+        });
+
+        await Call("access_list_federation_mappings");
+        var fedMapping = await Call("access_upsert_federation_mapping", new()
+        {
+            ["provider"] = "okta", ["externalRole"] = "support-agents", ["role"] = "agent", ["description"] = "Okta agents",
+        });
+        await Call("access_delete_federation_mapping", new()
+        {
+            ["mappingId"] = fedMapping.GetProperty("id").GetString(), ["expectedVersion"] = fedMapping.GetProperty("version").GetInt64(),
+        });
+
         // No model provider is configured here, so the assistant tools are exercised on their authorization path: agents lack assist:use.
         await Call("assist_summarize", new() { ["conversationId"] = conversation }, "agent", "forbidden");
         await Call("assist_draft_reply", new() { ["conversationId"] = conversation, ["instructions"] = "be brief" }, "agent", "forbidden");
@@ -263,7 +309,8 @@ public sealed class AllToolsTests
         {
             "conversations_list" or "routing_queue" or "sla_risk_list" or "contacts_list_link_suggestions" or "routing_list_agents" or "routing_list_policies" or "sla_list_policies"
                 or "automation_list_rules" or "macros_list" or "canned_responses_list" or "helpcenter_list_portals" or "surveys_list" or "admin_get_workspace"
-                or "admin_list_inboxes" or "admin_list_teams" or "admin_list_calendars" or "access_list_roles" or "access_list_grants" or "access_list_field_policies" => [],
+                or "admin_list_inboxes" or "admin_list_teams" or "admin_list_calendars" or "access_list_roles" or "access_list_grants" or "access_list_field_policies"
+                or "access_list_break_glass" or "access_list_service_accounts" or "access_list_federation_mappings" => [],
             "conversations_get" or "conversations_timeline" or "sla_get_status" or "assist_summarize" or "assist_draft_reply" or "assist_triage" => new() { ["conversationId"] = conversation },
             "conversations_start" => new() { ["inboxId"] = "support", ["contactId"] = host.Contact.Value },
             "conversations_reply" or "conversations_add_note" => new() { ["conversationId"] = conversation, ["body"] = "x" },
@@ -381,6 +428,16 @@ public sealed class AllToolsTests
             "access_create_field_policy" => new() { ["field"] = "contact.phone", ["appliesTo"] = new[] { "contact:read" } },
             "access_update_field_policy" => new() { ["field"] = "contact.email", ["expectedRevision"] = 1L, ["appliesTo"] = new[] { "contact:read" } },
             "access_delete_field_policy" => new() { ["field"] = "contact.email", ["expectedRevision"] = 1L },
+            "access_activate_break_glass" => new() { ["role"] = "agent", ["justification"] = "Incident INC-9999 verification", ["durationMinutes"] = 30 },
+            "access_revoke_break_glass" => new() { ["grantId"] = "seed-1", ["expectedRevision"] = 1L },
+            "access_create_service_account" => new() { ["clientId"] = "sa-denied", ["displayName"] = "Denied Bot" },
+            "access_set_service_account_enabled" => new() { ["clientId"] = "sa-denied", ["isEnabled"] = false },
+            "access_delete_service_account" => new() { ["clientId"] = "sa-denied" },
+            "access_list_api_keys" => new() { ["clientId"] = "sa-denied" },
+            "access_issue_api_key" => new() { ["clientId"] = "sa-denied", ["name"] = "denied-key" },
+            "access_revoke_api_key" => new() { ["keyId"] = "key-denied" },
+            "access_upsert_federation_mapping" => new() { ["provider"] = "okta", ["externalRole"] = "agents", ["role"] = "agent" },
+            "access_delete_federation_mapping" => new() { ["mappingId"] = "map-denied" },
             _ => throw new AssertFailedException($"No denied-call arguments for {tool}."),
         };
     }

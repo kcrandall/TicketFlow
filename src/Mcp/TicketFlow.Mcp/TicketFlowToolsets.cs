@@ -48,7 +48,7 @@ public enum TicketFlowToolsets
     /// <summary>Workspace settings, inboxes, teams and membership, business calendars and channel endpoints.</summary>
     Admin = 1 << 8,
 
-    /// <summary>Roles, grants and field policies. Sensitive: every decision is audited by Access; plug in deliberately.</summary>
+    /// <summary>Roles, grants, field policies, break-glass elevation, service accounts, API keys and role federation. Sensitive: every decision is audited by Access; plug in deliberately.</summary>
     Access = 1 << 9,
 
     /// <summary>Assistant summaries, reply drafts and triage suggestions.</summary>
@@ -82,7 +82,7 @@ public static class TicketFlowToolsetCatalog
         new(TicketFlowToolsets.Surveys, "surveys", "Survey definitions, responses and CSAT/NPS aggregates.", typeof(ISurveyService)),
         new(TicketFlowToolsets.Reports, "reports", "Support overview, agent leaderboard and trends.", typeof(IReportingService)),
         new(TicketFlowToolsets.Admin, "admin", "Workspace settings, inboxes, teams and membership, business calendars and channel endpoints.", typeof(IWorkspaceSettingsService)),
-        new(TicketFlowToolsets.Access, "access", "Roles, grants and field policies (sensitive; Access audits every decision).", typeof(IAccessAdministrator)),
+        new(TicketFlowToolsets.Access, "access", "Roles, grants, field policies, break-glass elevation, service accounts, API keys and role federation (sensitive; Access audits every decision).", typeof(IAccessAdministrator)),
         new(TicketFlowToolsets.Assist, "assist", "Assistant conversation summaries, reply drafts and triage suggestions.", typeof(IAssistService)),
     ];
 

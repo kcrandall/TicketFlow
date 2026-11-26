@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using TicketFlow.Access;
 
 namespace TicketFlow.Mcp;
 
@@ -17,14 +18,17 @@ namespace TicketFlow.Mcp;
 public sealed class TicketFlowMcpRegistry
 {
     private readonly IServiceProviderIsService? isService;
+    private readonly IServiceScopeFactory? scopeFactory;
     private readonly ConcurrentDictionary<string, bool> toolEnabled = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<TicketFlowToolsets, bool> toolsetServices = new();
+    private readonly ConcurrentDictionary<Type, bool> serviceAvailable = new();
     private string? cachedGuide;
 
-    internal TicketFlowMcpRegistry(TicketFlowToolsets registered, IServiceProviderIsService? isService)
+    internal TicketFlowMcpRegistry(TicketFlowToolsets registered, IServiceProviderIsService? isService, IServiceScopeFactory? scopeFactory = null)
     {
         Registered = registered;
         this.isService = isService;
+        this.scopeFactory = scopeFactory;
     }
 
     /// <summary>The toolsets whose tools were added to the MCP server.</summary>
@@ -33,6 +37,7 @@ public sealed class TicketFlowMcpRegistry
     /// <summary>Whether every feature service <paramref name="tool"/> calls is registered.</summary>
     public bool ServicesAvailable(TicketFlowToolDescriptor tool)
     {
+        ArgumentNullException.ThrowIfNull(tool);
         for (var i = 0; i < tool.Services.Count; i++)
             if (!IsRegistered(tool.Services[i]))
                 return false;
@@ -51,7 +56,34 @@ public sealed class TicketFlowMcpRegistry
 
     internal string GetOrRenderGuide(Func<TicketFlowMcpRegistry, string> render) => cachedGuide ??= render(this);
 
-    private bool IsRegistered(Type service) => isService?.IsService(service) ?? false;
+    private bool IsRegistered(Type service) =>
+        serviceAvailable.GetOrAdd(service, static (type, self) => self.CheckServiceAvailable(type), this);
+
+    private bool CheckServiceAvailable(Type service)
+    {
+        if (isService is null || !isService.IsService(service))
+            return false;
+        if (service == typeof(IServiceAccountService))
+            return (isService.IsService(typeof(IServiceAccountStore)) && isService.IsService(typeof(IApiKeyStore))) || CanResolve(service);
+        if (service == typeof(IRoleFederationService))
+            return isService.IsService(typeof(IRoleFederationMappingStore)) || CanResolve(service);
+        return true;
+    }
+
+    private bool CanResolve(Type service)
+    {
+        if (scopeFactory is null)
+            return false;
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+            return scope.ServiceProvider.GetService(service) is not null;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
 }
 
 public static class TicketFlowMcpServerBuilderExtensions
@@ -85,7 +117,7 @@ public static class TicketFlowMcpServerBuilderExtensions
         {
             state = new TicketFlowMcpRegistrationState();
             services.AddSingleton(state);
-            services.AddSingleton(provider => new TicketFlowMcpRegistry(state.Toolsets, provider.GetService<IServiceProviderIsService>()));
+            services.AddSingleton(provider => new TicketFlowMcpRegistry(state.Toolsets, provider.GetService<IServiceProviderIsService>(), provider.GetService<IServiceScopeFactory>()));
         }
         foreach (var tool in TicketFlowToolCatalog.Tools)
         {

@@ -120,6 +120,108 @@ public sealed class SelfToolTests
         }
     }
 
+    [TestMethod]
+    public async Task WhoAmIReportsIdentityProviderExternalRolesAndFederatedGrantsAndRespectsFederatedOnly()
+    {
+        await using (var merged = await McpTestHost.CreateAsync(configureAccess: access =>
+        {
+            access.RoleFederation.Mode = RoleFederationMode.MergeWithLocalGrants;
+            access.RoleFederation.StaticMappings["ext-viewer"] = BuiltInRoles.Viewer.Id;
+        }))
+        {
+            await using (var scope = merged.Services.CreateAsyncScope())
+            {
+                var mappings = scope.ServiceProvider.GetRequiredService<IRoleFederationMappingStore>();
+                await mappings.UpsertAsync(
+                    new RoleFederationMappingId("okta-agent"),
+                    new RoleFederationMapping("okta", "support-agents", BuiltInRoles.Agent.Id, AccessPartition.From(merged.Scope), new WorkspaceGrantScope(merged.Scope.WorkspaceId)),
+                    isEnabled: true,
+                    "seed");
+            }
+
+            // Matching provider activates dynamic mapping + static mapping
+            var (_, me) = await merged.CallAsync("whoami", user: "nobody", externalRoles: ["support-agents", "ext-viewer"], identityProvider: "okta");
+            var principal = me.GetProperty("principal");
+            Assert.AreEqual("okta", principal.GetProperty("identityProvider").GetString());
+            CollectionAssert.AreEquivalent(new[] { "ext-viewer", "support-agents" }, Strings(principal.GetProperty("externalRoles")));
+            var roles = Strings(me.GetProperty("roles"));
+            CollectionAssert.Contains(roles, "agent");
+            CollectionAssert.Contains(roles, "viewer");
+            var grants = me.GetProperty("grants").EnumerateArray().ToList();
+            Assert.IsTrue(grants.Any(g => string.Equals(g.GetProperty("role").GetString(), "agent", StringComparison.Ordinal)
+                && string.Equals(g.GetProperty("kind").GetString(), "federated", StringComparison.Ordinal)));
+            CollectionAssert.Contains(Strings(me.GetProperty("workspacePermissions")), "conversation:reply");
+
+            // Wrong provider ignores okta-pinned dynamic mapping, keeps static mapping
+            var (_, wrongProvider) = await merged.CallAsync("whoami", user: "nobody", externalRoles: ["support-agents", "ext-viewer"], identityProvider: "azuread");
+            var wrongRoles = Strings(wrongProvider.GetProperty("roles"));
+            CollectionAssert.DoesNotContain(wrongRoles, "agent", "Okta-pinned mapping must not apply to azuread callers.");
+            CollectionAssert.Contains(wrongRoles, "viewer");
+            CollectionAssert.DoesNotContain(Strings(wrongProvider.GetProperty("workspacePermissions")), "conversation:reply");
+        }
+
+        // FederatedOnly mode must NOT report ignored local non-admin allow grants as active, while still showing federated roles and preserved local admin grants.
+        await using (var fedOnly = await McpTestHost.CreateAsync(features: false, configureAccess: access =>
+        {
+            access.RoleFederation.Mode = RoleFederationMode.FederatedOnly;
+            access.RoleFederation.StaticMappings["idp-viewer"] = BuiltInRoles.Viewer.Id;
+        }))
+        {
+            // "agent" has a local Agent allow grant, which FederatedOnly ignores; external role grants Viewer.
+            var (_, agentFed) = await fedOnly.CallAsync("whoami", user: "agent", externalRoles: ["idp-viewer"], identityProvider: "okta");
+            var agentRoles = Strings(agentFed.GetProperty("roles"));
+            CollectionAssert.Contains(agentRoles, "viewer");
+            CollectionAssert.DoesNotContain(agentRoles, "agent", "Ignored local non-admin allow grants must not appear as active in FederatedOnly mode.");
+            CollectionAssert.DoesNotContain(Strings(agentFed.GetProperty("workspacePermissions")), "conversation:reply");
+            CollectionAssert.Contains(Strings(agentFed.GetProperty("workspacePermissions")), "conversation:read");
+
+            // "owner" has a local Owner grant; with AllowAdministrativeRoles = false, local admin grant stays preserved for admin permissions.
+            var (_, ownerFed) = await fedOnly.CallAsync("whoami", new() { ["includeSensitive"] = true }, user: "owner", externalRoles: ["idp-viewer"], identityProvider: "okta");
+            var ownerRoles = Strings(ownerFed.GetProperty("roles"));
+            CollectionAssert.Contains(ownerRoles, "owner");
+            CollectionAssert.Contains(ownerRoles, "viewer");
+            CollectionAssert.Contains(Strings(ownerFed.GetProperty("workspacePermissions")), "access:manage");
+        }
+    }
+
+    [TestMethod]
+    public async Task ToolListHideUnpermittedRespectsAnyOfForBreakGlassAndTenantAdmin()
+    {
+        await using var host = await McpTestHost.CreateAsync(options =>
+        {
+            options.ToolList = TicketFlowToolListMode.HideUnpermitted;
+            options.ProbeSensitivePermissions = true;
+        });
+
+        await using (var scope = host.Services.CreateAsyncScope())
+        {
+            var roles = scope.ServiceProvider.GetRequiredService<IAccessRoleStore>();
+            var grants = scope.ServiceProvider.GetRequiredService<IAccessGrantStore>();
+            await roles.CreateAsync(host.Scope, new AccessRole(new RoleId("oncall"), "On-Call", [AccessPermissions.AccessBreakGlass]));
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-oncall"), AccessPartition.From(host.Scope), new TicketFlow.Core.UserId("oncall-user"),
+                new RoleId("oncall"), new WorkspaceGrantScope(host.Scope.WorkspaceId)));
+            await roles.CreateAsync(host.Scope, new AccessRole(new RoleId("tenant-ops"), "Tenant Ops", [AccessPermissions.AccessManageTenant]));
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-tenant-ops"), AccessPartition.From(host.Scope), new TicketFlow.Core.UserId("tenant-only"),
+                new RoleId("tenant-ops"), new WorkspaceGrantScope(host.Scope.WorkspaceId)));
+        }
+
+        host.Caller.User = "oncall-user";
+        var onCallTools = (await host.Client.ListToolsAsync()).Select(t => t.Name).ToList();
+        CollectionAssert.Contains(onCallTools, "access_activate_break_glass");
+        CollectionAssert.Contains(onCallTools, "access_list_break_glass");
+        CollectionAssert.DoesNotContain(onCallTools, "access_list_roles");
+        CollectionAssert.DoesNotContain(onCallTools, "access_list_service_accounts");
+
+        host.Caller.User = "tenant-only";
+        var tenantTools = (await host.Client.ListToolsAsync()).Select(t => t.Name).ToList();
+        CollectionAssert.Contains(tenantTools, "access_list_grants");
+        CollectionAssert.Contains(tenantTools, "access_create_grant");
+        CollectionAssert.Contains(tenantTools, "access_list_service_accounts");
+        CollectionAssert.Contains(tenantTools, "access_list_federation_mappings");
+        CollectionAssert.DoesNotContain(tenantTools, "access_list_roles");
+        CollectionAssert.DoesNotContain(tenantTools, "access_activate_break_glass");
+    }
+
     private static List<string> Strings(JsonElement array) => [.. array.EnumerateArray().Select(item => item.GetString()!)];
 
     private static async Task<int> AuditCountAsync(McpTestHost host)

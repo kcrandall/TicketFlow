@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using TicketFlow.Access;
@@ -20,7 +21,7 @@ public sealed class SelfTools(TicketFlowToolContext context)
     private const string WorkspaceHelp = "Workspace identifier; defaults to the server's default workspace.";
 
     [McpServerTool(Name = "whoami", Title = "Who am I", ReadOnly = true, Idempotent = true, UseStructuredContent = true, OutputSchemaType = typeof(WhoAmIOutput))]
-    [Description("Returns the calling TicketFlow principal (kind, id, teams), its scope, a summary of its own access grants, the catalog permissions it holds on some resource (heldPermissions, including team/inbox grants) and workspace-wide (workspacePermissions). Sensitive permissions are only probed when includeSensitive is true because every sensitive decision is audited.")]
+    [Description("Returns the calling TicketFlow principal (kind, id, teams, identityProvider, externalRoles), its scope, a summary of its active local and federated access grants, the catalog permissions it holds on some resource (heldPermissions, including team/inbox grants) and workspace-wide (workspacePermissions). Sensitive permissions are only probed when includeSensitive is true because every sensitive decision is audited.")]
     [TicketFlowTool]
     public Task<CallToolResult> WhoAmI(
         [Description(WorkspaceHelp)] string? workspace = null,
@@ -223,43 +224,247 @@ public sealed class SelfTools(TicketFlowToolContext context)
         AccessDenialReason.NoMatchingGrant => "No allow grant of a role containing this permission applies to you for this resource (check team/inbox scope and grant conditions). An administrator can grant one of the listed roles.",
         AccessDenialReason.ExplicitDeny => "A deny grant applies to you for this resource and overrides every allow.",
         AccessDenialReason.FilterLimitExceeded => "The access plan exceeded its size limit and failed closed.",
+        AccessDenialReason.ServiceAccountDisabled => "The calling service account is disabled.",
         _ => "Denied.",
     };
 
     private async Task<List<GrantSummaryOutput>> OwnGrantsAsync(PrincipalRef principal, CancellationToken cancellationToken)
     {
-        if (context.Services.GetService<IAccessGrantStore>() is not { } store)
+        GrantSubject? primarySubject = principal switch
+        {
+            UserPrincipal user => user.UserId,
+            ApiClientPrincipal client => client.ClientId,
+            AutomationPrincipal => null,
+            SystemPrincipal => null,
+        };
+        if (primarySubject is null)
             return [];
+
         List<GrantSubject> subjects = principal switch
         {
             UserPrincipal user => [user.UserId, .. user.Teams.Select(team => (GrantSubject)team)],
             ApiClientPrincipal client => [client.ClientId],
-            AutomationPrincipal => [],
-            SystemPrincipal => [],
+            _ => [],
         };
-        if (subjects.Count == 0)
-            return [];
-        var grants = await store.ListForSubjectsAsync(AccessPartition.From(principal.Scope), principal.Scope.WorkspaceId, subjects, cancellationToken);
-        return
-        [
-            .. grants.Select(stored => stored.Grant).OrderBy(grant => grant.Id.Value, StringComparer.Ordinal).Select(grant => new GrantSummaryOutput(
-                grant.Role.Value,
-                BuiltInRoles.IsBuiltIn(grant.Role),
-                TicketFlowToolJson.Token(grant.Effect),
-                TicketFlowToolJson.Token(grant.Kind),
-                Subject(grant.Subject),
-                grant.Scope switch
+
+        var federation = context.Services.GetService<IOptions<AccessControlOptions>>()?.Value.RoleFederation;
+        var mode = federation?.Mode ?? RoleFederationMode.Disabled;
+        var ignoreLocalAllows = mode == RoleFederationMode.FederatedOnly;
+        var preserveLocalAdminOnly = ignoreLocalAllows && federation?.AllowAdministrativeRoles != true;
+        var roleStore = context.Services.GetService<IAccessRoleStore>();
+        var catalog = context.Services.GetService<IPermissionCatalog>();
+        var now = (context.Services.GetService<TimeProvider>() ?? TimeProvider.System).GetUtcNow();
+        var partition = AccessPartition.From(principal.Scope);
+        Dictionary<RoleId, AccessRole>? customRoles = null;
+
+        async Task<Dictionary<RoleId, AccessRole>> LoadCustomRolesAsync()
+        {
+            if (customRoles is not null)
+                return customRoles;
+            customRoles = [];
+            if (roleStore is null)
+                return customRoles;
+            var listed = await roleStore.ListAsync(principal.Scope, cancellationToken).ConfigureAwait(false);
+            for (var i = 0; i < listed.Count; i++)
+                customRoles[listed[i].Role.Id] = listed[i].Role;
+            return customRoles;
+        }
+
+        var summaries = new List<GrantSummaryOutput>();
+        if (context.Services.GetService<IAccessGrantStore>() is { } store)
+        {
+            var grants = await store.ListForSubjectsAsync(partition, principal.Scope.WorkspaceId, subjects, cancellationToken).ConfigureAwait(false);
+            foreach (var grant in grants.Select(stored => stored.Grant).OrderBy(grant => grant.Id.Value, StringComparer.Ordinal))
+            {
+                if (ignoreLocalAllows && grant.Effect == GrantEffect.Allow && grant.Kind != GrantKind.BreakGlass)
                 {
-                    TenantGrantScope => "tenant",
-                    WorkspaceGrantScope => "workspace",
-                    TeamGrantScope team => "team:" + team.Team.Value,
-                    InboxGrantScope inbox => "inbox:" + inbox.Inbox.Value,
-                },
-                grant.Condition is not null,
-                grant.ValidFrom,
-                grant.ValidUntil)),
-        ];
+                    if (!preserveLocalAdminOnly || !grant.IsValidAt(now))
+                        continue;
+                    var role = BuiltInRoles.Find(grant.Role);
+                    if (role is null && grant.Scope is not TenantGrantScope)
+                        role = (await LoadCustomRolesAsync().ConfigureAwait(false)).GetValueOrDefault(grant.Role);
+                    if (role is null || !HasCatalogAdminPermission(role, catalog))
+                        continue;
+                }
+
+                summaries.Add(new GrantSummaryOutput(
+                    grant.Role.Value,
+                    BuiltInRoles.IsBuiltIn(grant.Role),
+                    TicketFlowToolJson.Token(grant.Effect),
+                    TicketFlowToolJson.Token(grant.Kind),
+                    Subject(grant.Subject),
+                    ScopeToken(grant.Scope),
+                    grant.Condition is not null,
+                    grant.ValidFrom,
+                    grant.ValidUntil));
+            }
+        }
+
+        if (federation is not null && mode != RoleFederationMode.Disabled)
+            await AppendFederatedGrantsAsync(principal, primarySubject.Value, partition, federation, catalog, LoadCustomRolesAsync, summaries, cancellationToken).ConfigureAwait(false);
+
+        return summaries;
     }
+
+    private async Task AppendFederatedGrantsAsync(
+        PrincipalRef principal,
+        GrantSubject primarySubject,
+        AccessPartition partition,
+        RoleFederationOptions federation,
+        IPermissionCatalog? catalog,
+        Func<Task<Dictionary<RoleId, AccessRole>>> loadCustomRolesAsync,
+        List<GrantSummaryOutput> summaries,
+        CancellationToken cancellationToken)
+    {
+        HashSet<string>? teamTokens = null;
+        if (federation.MapTeamsAsExternalRoles && principal is UserPrincipal userPrincipal && userPrincipal.Teams.Count > 0)
+        {
+            teamTokens = new HashSet<string>(userPrincipal.Teams.Count, StringComparer.OrdinalIgnoreCase);
+            foreach (var team in userPrincipal.Teams)
+                teamTokens.Add(team.Value);
+        }
+
+        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var role in principal.ExternalRoles)
+            candidates.Add(role);
+        if (teamTokens is not null)
+            foreach (var team in teamTokens)
+                candidates.Add(team);
+
+        if (candidates.Count == 0)
+            return;
+
+        var matches = new List<(RoleId RoleId, GrantScope? ExplicitScope)>();
+        var seen = new HashSet<(RoleId RoleId, GrantScope? ExplicitScope)>();
+
+        void AddMatch(RoleId roleId, GrantScope? explicitScope)
+        {
+            if (federation.AllowedRoles.Count > 0 && !federation.AllowedRoles.Contains(roleId))
+                return;
+            if (seen.Add((roleId, explicitScope)))
+                matches.Add((roleId, explicitScope));
+        }
+
+        foreach (var token in candidates)
+            if (federation.StaticMappings.TryGetValue(token, out var staticRoleId))
+                AddMatch(staticRoleId, explicitScope: null);
+
+        if (context.Services.GetService<IRoleFederationMappingStore>() is { } mappingStore)
+        {
+            var storedMappings = await mappingStore.ListForPartitionAsync(partition, includeDisabled: false, cancellationToken).ConfigureAwait(false);
+            foreach (var stored in storedMappings)
+            {
+                if (!stored.IsEnabled
+                    || stored.Mapping.Partition != partition
+                    || (stored.Mapping.Workspace is { } mappingWorkspace && mappingWorkspace != principal.Scope.WorkspaceId))
+                    continue;
+
+                var externalRole = stored.Mapping.ExternalRole;
+                var inExternalRoles = principal.ExternalRoles.Contains(externalRole);
+                var inTeamTokens = teamTokens is not null && teamTokens.Contains(externalRole);
+                if (!inExternalRoles && !inTeamTokens)
+                    continue;
+
+                var providerMatched = (inExternalRoles && MatchesMappingProvider(stored.Mapping.Provider, principal.IdentityProvider, matchedByTeamOnly: false))
+                    || (inTeamTokens && MatchesMappingProvider(stored.Mapping.Provider, principal.IdentityProvider, matchedByTeamOnly: true));
+                if (!providerMatched)
+                    continue;
+
+                AddMatch(stored.Mapping.RoleId, stored.Mapping.Scope);
+            }
+        }
+
+        if (federation.AllowDirectRoleIdMatching)
+            foreach (var token in candidates)
+                if (RoleId.TryParse(token.Trim().ToLowerInvariant(), out var directRoleId))
+                    AddMatch(directRoleId, explicitScope: null);
+
+        if (matches.Count == 0)
+            return;
+
+        matches.Sort(static (left, right) => left.RoleId.CompareTo(right.RoleId));
+        var defaultWorkspaceScope = new WorkspaceGrantScope(principal.Scope.WorkspaceId);
+        var subjectText = Subject(primarySubject);
+
+        for (var i = 0; i < matches.Count; i++)
+        {
+            var (roleId, explicitScope) = matches[i];
+            var role = BuiltInRoles.Find(roleId);
+            if (role is null && explicitScope is not TenantGrantScope)
+                role = (await loadCustomRolesAsync().ConfigureAwait(false)).GetValueOrDefault(roleId);
+            if (role is null || (explicitScope is TenantGrantScope && !role.IsBuiltIn))
+                continue;
+
+            if (!federation.AllowAdministrativeRoles && !HasNonAdministrativePermission(role, catalog))
+                continue;
+
+            var grantScope = explicitScope is TenantGrantScope && role.IsBuiltIn
+                ? TenantGrantScope.Instance
+                : explicitScope ?? defaultWorkspaceScope;
+
+            summaries.Add(new GrantSummaryOutput(
+                role.Id.Value,
+                role.IsBuiltIn,
+                "allow",
+                "federated",
+                subjectText,
+                ScopeToken(grantScope),
+                Conditional: false,
+                ValidFrom: null,
+                ValidUntil: null));
+        }
+    }
+
+    private static bool MatchesMappingProvider(string mappingProvider, string? principalProvider, bool matchedByTeamOnly)
+    {
+        if (matchedByTeamOnly)
+            return string.Equals(mappingProvider, "local", StringComparison.OrdinalIgnoreCase);
+        if (string.Equals(mappingProvider, "*", StringComparison.Ordinal))
+            return true;
+        return principalProvider is not null && string.Equals(mappingProvider, principalProvider, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsAdministrativePermission(Permission permission) =>
+        permission == AccessPermissions.AccessManage
+        || permission == AccessPermissions.AccessManageTenant
+        || permission == AccessPermissions.AccessBreakGlass;
+
+    private static bool HasCatalogAdminPermission(AccessRole role, IPermissionCatalog? catalog) =>
+        (role.Includes(AccessPermissions.AccessManage) && (catalog is null || catalog.Contains(AccessPermissions.AccessManage)))
+        || (role.Includes(AccessPermissions.AccessManageTenant) && (catalog is null || catalog.Contains(AccessPermissions.AccessManageTenant)))
+        || (role.Includes(AccessPermissions.AccessBreakGlass) && (catalog is null || catalog.Contains(AccessPermissions.AccessBreakGlass)));
+
+    private static bool HasNonAdministrativePermission(AccessRole role, IPermissionCatalog? catalog)
+    {
+        var hasAdmin = role.IncludesAllPermissions
+            || role.Permissions.Contains(AccessPermissions.AccessManage)
+            || role.Permissions.Contains(AccessPermissions.AccessManageTenant)
+            || role.Permissions.Contains(AccessPermissions.AccessBreakGlass);
+        if (!hasAdmin)
+            return true;
+        if (role.IncludesAllPermissions)
+        {
+            if (catalog is null)
+                return true;
+            var defs = catalog.Definitions;
+            for (var i = 0; i < defs.Count; i++)
+                if (!IsAdministrativePermission(defs[i].Permission))
+                    return true;
+            return false;
+        }
+        foreach (var permission in role.Permissions)
+            if ((catalog is null || catalog.Contains(permission)) && !IsAdministrativePermission(permission))
+                return true;
+        return false;
+    }
+
+    private static string ScopeToken(GrantScope scope) => scope switch
+    {
+        TenantGrantScope => "tenant",
+        WorkspaceGrantScope => "workspace",
+        TeamGrantScope team => "team:" + team.Team.Value,
+        InboxGrantScope inbox => "inbox:" + inbox.Inbox.Value,
+    };
 
     private static string Subject(GrantSubject subject) => subject switch
     {
@@ -275,13 +480,19 @@ public sealed class SelfTools(TicketFlowToolContext context)
             TicketFlowToolCatalog.RolesGranting(permission));
     }
 
-    internal static PrincipalOutput Principal(PrincipalRef principal) => principal switch
+    internal static PrincipalOutput Principal(PrincipalRef principal)
     {
-        UserPrincipal user => new("user", user.UserId.Value, [.. user.Teams.Select(team => team.Value).Order(StringComparer.Ordinal)]),
-        ApiClientPrincipal client => new("apiClient", client.ClientId.Value, []),
-        AutomationPrincipal automation => new("automation", automation.AutomationId, []),
-        SystemPrincipal system => new("system", system.Component, []),
-    };
+        IReadOnlyList<string> externalRoles = principal.ExternalRoles.Count == 0
+            ? []
+            : [.. principal.ExternalRoles.Order(StringComparer.Ordinal)];
+        return principal switch
+        {
+            UserPrincipal user => new("user", user.UserId.Value, [.. user.Teams.Select(team => team.Value).Order(StringComparer.Ordinal)], user.IdentityProvider, externalRoles),
+            ApiClientPrincipal client => new("apiClient", client.ClientId.Value, [], client.IdentityProvider, externalRoles),
+            AutomationPrincipal automation => new("automation", automation.AutomationId, [], null, []),
+            SystemPrincipal system => new("system", system.Component, [], null, []),
+        };
+    }
 
     private static ScopeOutput Scope(TicketScope scope) => new(scope.TenantId, scope.ProjectId, scope.EnvironmentId, scope.AppId, scope.WorkspaceId.Value);
 

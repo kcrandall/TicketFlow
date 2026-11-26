@@ -251,16 +251,29 @@ Verdicts come from `IAccessQueryPlanner.HeldAnywhereAsync`: a permission counts 
 | Tool | Annotations | Requires |
 | --- | --- | --- |
 | `access_list_roles` | read-only, idempotent | `access:manage` |
-| `access_list_grants` | read-only, idempotent | `access:manage` |
+| `access_list_grants` | read-only, idempotent | `access:manage` or `access:manage-tenant` |
 | `access_list_field_policies` | read-only, idempotent | `access:manage` |
-| `access_create_grant` | destructive | `access:manage` |
-| `access_revoke_grant` | destructive | `access:manage` |
+| `access_create_grant` | destructive | `access:manage` or `access:manage-tenant` |
+| `access_revoke_grant` | destructive | `access:manage` or `access:manage-tenant` |
 | `access_create_role` | destructive | `access:manage` |
 | `access_update_role` | destructive, idempotent | `access:manage` |
 | `access_delete_role` | destructive | `access:manage` |
 | `access_create_field_policy` | destructive | `access:manage` |
 | `access_update_field_policy` | destructive, idempotent | `access:manage` |
 | `access_delete_field_policy` | destructive | `access:manage` |
+| `access_list_break_glass` | read-only, idempotent | `access:break-glass` or `access:manage` |
+| `access_activate_break_glass` | destructive | `access:break-glass` |
+| `access_revoke_break_glass` | destructive | `access:manage` |
+| `access_list_service_accounts` | read-only, idempotent | `access:manage` or `access:manage-tenant` |
+| `access_create_service_account` | destructive | `access:manage` or `access:manage-tenant` |
+| `access_set_service_account_enabled` | destructive, idempotent | `access:manage` or `access:manage-tenant` |
+| `access_delete_service_account` | destructive | `access:manage` or `access:manage-tenant` |
+| `access_list_api_keys` | read-only, idempotent | `access:manage` or `access:manage-tenant` |
+| `access_issue_api_key` | destructive | `access:manage` or `access:manage-tenant` |
+| `access_revoke_api_key` | destructive | `access:manage` or `access:manage-tenant` |
+| `access_list_federation_mappings` | read-only, idempotent | `access:manage` or `access:manage-tenant` |
+| `access_upsert_federation_mapping` | destructive, idempotent | `access:manage` or `access:manage-tenant` |
+| `access_delete_federation_mapping` | destructive | `access:manage` or `access:manage-tenant` |
 
 ### `assist`
 
@@ -280,10 +293,12 @@ Verdicts come from `IAccessQueryPlanner.HeldAnywhereAsync`: a permission counts 
 
 ## Sample host
 
-`samples/TicketFlow.SampleHost` maps the MCP endpoint at `/mcp` (stateless Streamable HTTP, `RequireAuthorization`) with every
-`Standard` toolset, `DefaultWorkspace = acme` and `WithTicketFlowHostPrincipals()`. The development handler accepts
-`X-Dev-Api-Key: <client>`, which emits IdentityFlow API-key claims, so `AddIdentityFlowPrincipals()` maps the caller to an
-`ApiClientPrincipal`. The IdentityFlow mapper prefixes API client ids with `idf:` by default (`IdentityFlowPrincipalOptions.ApiClientIdPrefix`), so the seed grants API client `idf:mcp-assistant` the built-in **Agent** role.
+`samples/TicketFlow.SampleHost` maps the MCP endpoint at `/mcp` (stateless Streamable HTTP, `RequireAuthorization`, `Cache-Control: no-store`) with
+`TicketFlowToolsets.All`, `DefaultWorkspace = acme` and `WithTicketFlowHostPrincipals()`. Hybrid authentication routes `X-Api-Key` /
+`Authorization: Bearer tf_sa_*` to `TicketFlowApiKeyAuthenticationHandler` and all other requests to the primary scheme (the development
+handler in Development, which accepts `X-Dev-User`, the `tf-dev-user` cookie, or `X-Dev-Api-Key: <client>`). The IdentityFlow mapper prefixes
+IdentityFlow API client ids with `idf:` by default (`IdentityFlowPrincipalOptions.ApiClientIdPrefix`), while TicketFlow service-account keys
+(`tf_sa_*`) map to their unprefixed `ApiClientId` (`sa-ticket-sync`, `sa-reporting-export`).
 
 ```bash
 dotnet run --project samples/TicketFlow.SampleHost

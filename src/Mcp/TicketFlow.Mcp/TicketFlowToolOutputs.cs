@@ -37,7 +37,7 @@ public sealed record AttributeOutput(string Key, string Type, bool Sensitive, At
 public sealed record DefinitionOutput(string Id, long Revision, JsonElement Definition);
 
 // Self-awareness
-public sealed record PrincipalOutput(string Kind, string Id, IReadOnlyList<string> Teams);
+public sealed record PrincipalOutput(string Kind, string Id, IReadOnlyList<string> Teams, string? IdentityProvider = null, IReadOnlyList<string>? ExternalRoles = null);
 
 public sealed record ScopeOutput(string Tenant, string Project, string Environment, string App, string Workspace);
 
@@ -243,9 +243,27 @@ public sealed record GrantSubjectOutput(string Kind, string Id);
 public sealed record GrantScopeOutput(string Kind, string? Id);
 
 public sealed record GrantOutput(string Id, GrantSubjectOutput Subject, string Role, GrantScopeOutput Scope, string Effect, bool Conditional, DateTimeOffset? ValidFrom,
-    DateTimeOffset? ValidUntil, string Kind, long Revision);
+    DateTimeOffset? ValidUntil, string Kind, long Revision, string? Justification = null);
 
 public sealed record FieldPolicyOutput(string Field, IReadOnlyList<string> AppliesTo, IReadOnlyList<string> UnmaskedRoles, string? RevealPermission, long Revision);
+
+public sealed record ServiceAccountOutput(string ClientId, string DisplayName, string? Description, GrantScopeOutput Scope, bool IsEnabled, long Version,
+    DateTimeOffset CreatedAtUtc, string CreatedByPrincipalId, DateTimeOffset UpdatedAtUtc, string UpdatedByPrincipalId, DateTimeOffset? DisabledAtUtc, string? DisabledReason);
+
+public sealed record ServiceAccountDeletedOutput(string ClientId);
+
+public sealed record ApiKeyOutput(string Id, string ClientId, string Name, string KeyPrefix, long Version, DateTimeOffset CreatedAtUtc, string CreatedByPrincipalId,
+    DateTimeOffset? ExpiresAtUtc, DateTimeOffset? LastUsedAtUtc, DateTimeOffset? RevokedAtUtc, string? RevocationReason);
+
+public sealed record IssuedApiKeyOutput(ApiKeyOutput Key, string PlaintextKey, string Warning)
+{
+    public override string ToString() => "IssuedApiKeyOutput { <redacted> }";
+}
+
+public sealed record RoleFederationMappingOutput(string Id, string Provider, string ExternalRole, string Role, GrantScopeOutput Scope, string? Description, bool IsEnabled,
+    long Version, DateTimeOffset CreatedAtUtc, string CreatedByPrincipalId, DateTimeOffset UpdatedAtUtc, string UpdatedByPrincipalId);
+
+public sealed record RoleFederationMappingDeletedOutput(string Id);
 
 // Assist
 public sealed record AssistUsageOutput(string Model, long InputTokens, long OutputTokens, Guid UsageId);
@@ -316,9 +334,19 @@ public sealed record AssistTriageOutput(IReadOnlyList<AssistSuggestionOutput> La
 [JsonSerializable(typeof(RoleOutput))]
 [JsonSerializable(typeof(ToolList<RoleOutput>))]
 [JsonSerializable(typeof(GrantOutput))]
+[JsonSerializable(typeof(ToolList<GrantOutput>))]
 [JsonSerializable(typeof(ToolPage<GrantOutput>))]
 [JsonSerializable(typeof(FieldPolicyOutput))]
 [JsonSerializable(typeof(ToolList<FieldPolicyOutput>))]
+[JsonSerializable(typeof(ServiceAccountOutput))]
+[JsonSerializable(typeof(ToolList<ServiceAccountOutput>))]
+[JsonSerializable(typeof(ServiceAccountDeletedOutput))]
+[JsonSerializable(typeof(ApiKeyOutput))]
+[JsonSerializable(typeof(ToolList<ApiKeyOutput>))]
+[JsonSerializable(typeof(IssuedApiKeyOutput))]
+[JsonSerializable(typeof(RoleFederationMappingOutput))]
+[JsonSerializable(typeof(ToolList<RoleFederationMappingOutput>))]
+[JsonSerializable(typeof(RoleFederationMappingDeletedOutput))]
 [JsonSerializable(typeof(AssistSummaryOutput))]
 [JsonSerializable(typeof(AssistDraftOutput))]
 [JsonSerializable(typeof(AssistTriageOutput))]

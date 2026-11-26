@@ -42,6 +42,8 @@ public static class TicketFlowMcpPermissions
     public const string TeamManage = "team:manage";
     public const string ChannelRead = "channel:read";
     public const string AccessManage = "access:manage";
+    public const string AccessManageTenant = "access:manage-tenant";
+    public const string AccessBreakGlass = "access:break-glass";
     public const string AgentStatusUpdate = "agent-status:update";
     public const string AgentStatusManage = "agent-status:manage";
     public const string AssistUse = "assist:use";

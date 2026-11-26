@@ -158,7 +158,11 @@ public static class SampleHostApp
         // (the seed grants mcp-assistant the built-in Agent role). Authentication and the authorization policy stay with the host.
         services.AddMcpServer()
             .WithHttpTransport(options => options.Stateless = true)
-            .WithTicketFlowTools(options => options.DefaultWorkspace = settings.Workspace.Value)
+            .WithTicketFlowTools(options =>
+            {
+                options.Toolsets = TicketFlowToolsets.All;
+                options.DefaultWorkspace = settings.Workspace.Value;
+            })
             .WithTicketFlowHostPrincipals();
 
         var health = services.AddHealthChecks().AddTicketFlowWorkers();

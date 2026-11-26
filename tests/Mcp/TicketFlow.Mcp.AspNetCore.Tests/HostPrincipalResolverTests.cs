@@ -32,12 +32,78 @@ public sealed class HostPrincipalResolverTests
             "Without an authenticated caller nothing is resolved, even if the request carried a user.");
     }
 
+    [TestMethod]
+    public async Task PreservesExternalRolesIdentityProviderAndEnforcesScopePinning()
+    {
+        var scope = TestScopes.Create();
+        var otherWorkspace = new WorkspaceId("other-ws");
+        var partition = AccessPartition.From(scope);
+        var accessor = new HttpContextAccessor { HttpContext = new DefaultHttpContext() };
+        var claimsResolver = new ClaimsPrincipalResolver();
+        var resolver = new HostMcpPrincipalResolver(accessor, new FixedPartition(partition, []), principals: null, accessResolver: claimsResolver);
+
+        // External identity with roles and provider
+        var externalUser = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim("sub", "alice"),
+            new Claim("role", "support-agents"),
+            new Claim("role", "triage"),
+            new Claim("idp", "okta"),
+            new Claim("tenant_id", scope.TenantId),
+            new Claim("project_id", scope.ProjectId),
+            new Claim("environment_id", scope.EnvironmentId),
+            new Claim("app_id", scope.AppId),
+        ], "ExternalIdentity"));
+
+        var resolvedUser = await resolver.ResolveAsync(new TicketFlowMcpCaller(externalUser, new ServiceCollection().BuildServiceProvider()), scope.WorkspaceId);
+        var userPrincipal = Assert.IsInstanceOfType<UserPrincipal>(resolvedUser);
+        Assert.AreEqual("alice", userPrincipal.UserId.Value);
+        Assert.AreEqual("okta", userPrincipal.IdentityProvider);
+        CollectionAssert.AreEquivalent(new[] { "support-agents", "triage" }, userPrincipal.ExternalRoles.ToList());
+
+        // Workspace-pinned service account API key: allowed in pinned workspace, rejected in another workspace
+        var workspacePinnedKey = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim("client_id", "sa-ws-only"),
+            new Claim("amr", "api_key"),
+            new Claim("api_key_id", "key-1"),
+            new Claim("tenant_id", scope.TenantId),
+            new Claim("project_id", scope.ProjectId),
+            new Claim("environment_id", scope.EnvironmentId),
+            new Claim("app_id", scope.AppId),
+            new Claim("workspace_id", scope.WorkspaceId.Value),
+        ], "ApiKey"));
+
+        var pinnedOk = await resolver.ResolveAsync(new TicketFlowMcpCaller(workspacePinnedKey, new ServiceCollection().BuildServiceProvider()), scope.WorkspaceId);
+        Assert.IsInstanceOfType<ApiClientPrincipal>(pinnedOk);
+        var pinnedRejected = await resolver.ResolveAsync(new TicketFlowMcpCaller(workspacePinnedKey, new ServiceCollection().BuildServiceProvider()), otherWorkspace);
+        Assert.IsNull(pinnedRejected, "Workspace-pinned API key must be rejected for another workspace.");
+
+        // Tenant-scoped service account API key (no workspace_id claim): allowed across workspaces in the same partition
+        var tenantScopedKey = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim("client_id", "sa-tenant"),
+            new Claim("amr", "api_key"),
+            new Claim("api_key_id", "key-2"),
+            new Claim("tenant_id", scope.TenantId),
+            new Claim("project_id", scope.ProjectId),
+            new Claim("environment_id", scope.EnvironmentId),
+            new Claim("app_id", scope.AppId),
+        ], "ApiKey"));
+
+        var tenantInFirst = await resolver.ResolveAsync(new TicketFlowMcpCaller(tenantScopedKey, new ServiceCollection().BuildServiceProvider()), scope.WorkspaceId);
+        var tenantInSecond = await resolver.ResolveAsync(new TicketFlowMcpCaller(tenantScopedKey, new ServiceCollection().BuildServiceProvider()), otherWorkspace);
+        Assert.AreEqual(scope.WorkspaceId, Assert.IsInstanceOfType<ApiClientPrincipal>(tenantInFirst).Scope.WorkspaceId);
+        Assert.AreEqual(otherWorkspace, Assert.IsInstanceOfType<ApiClientPrincipal>(tenantInSecond).Scope.WorkspaceId);
+    }
+
     private sealed class FixedPartition(AccessPartition partition, List<ClaimsPrincipal> seen) : ITicketFlowPartitionResolver
     {
         public ValueTask<AccessPartition?> ResolveAsync(HttpContext httpContext, CancellationToken cancellationToken = default)
         {
             seen.Add(httpContext.User);
-            Assert.AreEqual("support.example.test", httpContext.Request.Host.Host, "Partition resolution still sees the request line.");
+            if (httpContext.Request.Host.HasValue)
+                Assert.AreEqual("support.example.test", httpContext.Request.Host.Host, "Partition resolution still sees the request line.");
             return ValueTask.FromResult<AccessPartition?>(partition);
         }
     }

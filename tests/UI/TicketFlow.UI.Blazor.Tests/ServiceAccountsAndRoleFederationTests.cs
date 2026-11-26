@@ -1,0 +1,685 @@
+using System.Net;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using TicketFlow.Access;
+using TicketFlow.Access.AspNetCore;
+using TicketFlow.Contacts;
+using TicketFlow.Conversations;
+using TicketFlow.Core;
+using TicketFlow.Hosting.AspNetCore;
+using TicketFlow.SampleHost;
+using TicketFlow.Workspaces;
+
+namespace TicketFlow.UI.Blazor.Tests;
+
+[TestClass]
+public sealed partial class ServiceAccountsAndRoleFederationTests
+{
+    [TestMethod]
+    public async Task ServiceAccountsFullLifecycleAndApiKeyAuthEndToEnd()
+    {
+        await using var app = await StartSampleHostAsync();
+        using var admin = CreateDevClient(app, "admin");
+        using var rawClient = app.GetTestServer().CreateClient();
+
+        // 1. Seeded demo service accounts are rendered and demo API key authenticates
+        var initialHtml = await GetStringAsync(admin, "/support/access/service-accounts");
+        StringAssert.Contains(initialHtml, "Ticket Sync Worker");
+        StringAssert.Contains(initialHtml, "Reporting Exporter");
+        StringAssert.Contains(initialHtml, "tf_sa_demo0001…");
+        StringAssert.Contains(initialHtml, "tf_sa_demo0002…");
+
+        using (var demoReq = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            demoReq.Headers.Add("X-Api-Key", SampleSeeder.DemoReportingExportApiKey);
+            using var demoResp = await rawClient.SendAsync(demoReq);
+            Assert.AreEqual(HttpStatusCode.OK, demoResp.StatusCode);
+            StringAssert.Contains(await demoResp.Content.ReadAsStringAsync(), "Reporting Exporter");
+        }
+
+        // 2. Create service account with initial role (Viewer)
+        var (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/service-accounts");
+        using (var createResp = await PostAsync(admin, "/support/access/service-accounts", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "access.serviceaccount.create",
+            ["_return"] = "/support/access/service-accounts",
+            ["name"] = "E2E Lifecycle Bot",
+            ["clientId"] = "sa-e2e-lifecycle",
+            ["scope"] = "workspace",
+            ["role"] = "viewer",
+            ["description"] = "End-to-end test service account",
+        }))
+        {
+            Assert.AreEqual(HttpStatusCode.Redirect, createResp.StatusCode);
+            Assert.AreEqual("/support/access/service-accounts", createResp.Headers.Location?.OriginalString);
+        }
+
+        var afterCreateHtml = await GetStringAsync(admin, "/support/access/service-accounts");
+        StringAssert.Contains(afterCreateHtml, "data-service-account=\"sa-e2e-lifecycle\"");
+        StringAssert.Contains(afterCreateHtml, "E2E Lifecycle Bot");
+        StringAssert.Contains(afterCreateHtml, "Viewer");
+
+        // 3. Update display name & description
+        var saCard = ExtractServiceAccountCard(afterCreateHtml, "sa-e2e-lifecycle");
+        var saVersion = ExtractRevision(saCard);
+        (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/service-accounts");
+        using (var updateResp = await PostAsync(admin, "/support/access/service-accounts", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "access.serviceaccount.update",
+            ["_revision"] = saVersion,
+            ["clientId"] = "sa-e2e-lifecycle",
+            ["name"] = "E2E Lifecycle Bot v2",
+            ["description"] = "Updated description",
+        }))
+        {
+            Assert.AreEqual(HttpStatusCode.Redirect, updateResp.StatusCode);
+        }
+
+        var afterUpdateHtml = await GetStringAsync(admin, "/support/access/service-accounts");
+        StringAssert.Contains(afterUpdateHtml, "E2E Lifecycle Bot v2");
+
+        // 4. Issue API key (one-time plaintext key via PageState, Cache-Control: no-store, no flash cookie)
+        (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/service-accounts");
+        string firstKey;
+        using (var issueResp = await PostAsync(admin, "/support/access/service-accounts", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "access.serviceaccount.key.create",
+            ["clientId"] = "sa-e2e-lifecycle",
+            ["name"] = "primary-e2e-key",
+            ["expiresDays"] = "90",
+        }))
+        {
+            Assert.AreEqual(HttpStatusCode.OK, issueResp.StatusCode);
+            Assert.IsTrue(issueResp.Headers.CacheControl?.NoStore, "Issued API key response must carry Cache-Control: no-store.");
+            Assert.IsFalse(
+                issueResp.Headers.TryGetValues("Set-Cookie", out var setCookies)
+                && setCookies.Any(c => c.StartsWith("tf-flash=", StringComparison.Ordinal)),
+                "Issued API key must never be stored in a cookie.");
+
+            var issueHtml = await issueResp.Content.ReadAsStringAsync();
+            StringAssert.Contains(issueHtml, "data-issued-api-key");
+            StringAssert.Contains(issueHtml, "X-Api-Key");
+            StringAssert.Contains(issueHtml, "Authorization: Bearer");
+            firstKey = ExtractIssuedApiKey(issueHtml);
+            StringAssert.StartsWith(firstKey, "tf_sa_");
+        }
+
+        // 5. Subsequent GET must NOT contain the plaintext key (only the non-secret prefix)
+        var afterIssueHtml = await GetStringAsync(admin, "/support/access/service-accounts");
+        Assert.IsFalse(afterIssueHtml.Contains(firstKey, StringComparison.Ordinal), "Plaintext key must never appear on subsequent GET.");
+        var firstPrefix = firstKey[..firstKey.IndexOf('.')];
+        StringAssert.Contains(afterIssueHtml, $"{firstPrefix}…");
+
+        // 6. Call UI with X-Api-Key: 200 on allowed page, 403 on admin page
+        using (var allowedReq = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            allowedReq.Headers.Add("X-Api-Key", firstKey);
+            using var resp = await rawClient.SendAsync(allowedReq);
+            Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+            StringAssert.Contains(await resp.Content.ReadAsStringAsync(), "E2E Lifecycle Bot v2");
+        }
+        using (var adminReq = new HttpRequestMessage(HttpMethod.Get, "/support/access"))
+        {
+            adminReq.Headers.Add("X-Api-Key", firstKey);
+            using var resp = await rawClient.SendAsync(adminReq);
+            Assert.AreEqual(HttpStatusCode.Forbidden, resp.StatusCode);
+        }
+
+        // 7. Call UI with Authorization: Bearer: 200 on allowed page, 403 on admin page
+        using (var bearerAllowed = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            bearerAllowed.Headers.Add("Authorization", $"Bearer {firstKey}");
+            using var resp = await rawClient.SendAsync(bearerAllowed);
+            Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+        }
+        using (var bearerAdmin = new HttpRequestMessage(HttpMethod.Get, "/support/access/service-accounts"))
+        {
+            bearerAdmin.Headers.Add("Authorization", $"Bearer {firstKey}");
+            using var resp = await rawClient.SendAsync(bearerAdmin);
+            Assert.AreEqual(HttpStatusCode.Forbidden, resp.StatusCode);
+        }
+
+        // 8. Invalid API key returns 401 with Cache-Control: no-store (never redirects to LoginPath)
+        using (var invalidHeaderReq = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            invalidHeaderReq.Headers.Add("X-Api-Key", "tf_sa_00000000.invalid_secret");
+            using var resp = await rawClient.SendAsync(invalidHeaderReq);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+            Assert.IsTrue(resp.Headers.CacheControl?.NoStore);
+        }
+        using (var invalidBearerReq = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            invalidBearerReq.Headers.Add("Authorization", "Bearer tf_sa_00000000.invalid_secret");
+            using var resp = await rawClient.SendAsync(invalidBearerReq);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+            Assert.IsTrue(resp.Headers.CacheControl?.NoStore);
+        }
+
+        // 9. Revoke first key -> calling UI with revoked key returns 401
+        saCard = ExtractServiceAccountCard(afterIssueHtml, "sa-e2e-lifecycle");
+        var firstKeyId = ExtractFirstKeyId(saCard);
+        (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/service-accounts");
+        using (var revokeResp = await PostAsync(admin, "/support/access/service-accounts", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "access.serviceaccount.key.revoke",
+            ["keyId"] = firstKeyId,
+        }))
+        {
+            Assert.AreEqual(HttpStatusCode.Redirect, revokeResp.StatusCode);
+        }
+
+        using (var revokedReq = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            revokedReq.Headers.Add("X-Api-Key", firstKey);
+            using var resp = await rawClient.SendAsync(revokedReq);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+        }
+
+        // 10. Issue a second key, disable SA -> 401, re-enable SA -> 200
+        (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/service-accounts");
+        string secondKey;
+        using (var issueSecond = await PostAsync(admin, "/support/access/service-accounts", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "access.serviceaccount.key.create",
+            ["clientId"] = "sa-e2e-lifecycle",
+            ["name"] = "secondary-e2e-key",
+        }))
+        {
+            Assert.AreEqual(HttpStatusCode.OK, issueSecond.StatusCode);
+            secondKey = ExtractIssuedApiKey(await issueSecond.Content.ReadAsStringAsync());
+        }
+
+        // Verify second key works while enabled
+        using (var okReq = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            okReq.Headers.Add("X-Api-Key", secondKey);
+            using var resp = await rawClient.SendAsync(okReq);
+            Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+        }
+
+        // Disable SA
+        (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/service-accounts");
+        using (var disableResp = await PostAsync(admin, "/support/access/service-accounts", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "access.serviceaccount.disable",
+            ["clientId"] = "sa-e2e-lifecycle",
+        }))
+        {
+            Assert.AreEqual(HttpStatusCode.Redirect, disableResp.StatusCode);
+        }
+
+        using (var disabledReq = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            disabledReq.Headers.Add("X-Api-Key", secondKey);
+            using var resp = await rawClient.SendAsync(disabledReq);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+        }
+
+        // Re-enable SA
+        (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/service-accounts");
+        using (var enableResp = await PostAsync(admin, "/support/access/service-accounts", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "access.serviceaccount.enable",
+            ["clientId"] = "sa-e2e-lifecycle",
+        }))
+        {
+            Assert.AreEqual(HttpStatusCode.Redirect, enableResp.StatusCode);
+        }
+
+        using (var reenabledReq = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            reenabledReq.Headers.Add("X-Api-Key", secondKey);
+            using var resp = await rawClient.SendAsync(reenabledReq);
+            Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+        }
+
+        // Grant additional role via inline grant action
+        (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/service-accounts");
+        using (var grantResp = await PostAsync(admin, "/support/access/service-accounts", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "access.serviceaccount.grant",
+            ["clientId"] = "sa-e2e-lifecycle",
+            ["role"] = "agent",
+            ["scope"] = "workspace",
+            ["effect"] = "Allow",
+            ["justification"] = "Upgrade to Agent",
+        }))
+        {
+            Assert.AreEqual(HttpStatusCode.Redirect, grantResp.StatusCode);
+        }
+
+        var afterGrantHtml = await GetStringAsync(admin, "/support/access/service-accounts");
+        StringAssert.Contains(ExtractServiceAccountCard(afterGrantHtml, "sa-e2e-lifecycle"), "Upgrade to Agent");
+
+        // 11. Delete SA -> calling UI with second key returns 401
+        (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/service-accounts");
+        using (var deleteResp = await PostAsync(admin, "/support/access/service-accounts", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "access.serviceaccount.delete",
+            ["clientId"] = "sa-e2e-lifecycle",
+        }))
+        {
+            Assert.AreEqual(HttpStatusCode.Redirect, deleteResp.StatusCode);
+        }
+
+        using (var deletedReq = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            deletedReq.Headers.Add("X-Api-Key", secondKey);
+            using var resp = await rawClient.SendAsync(deletedReq);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+        }
+
+        var afterDeleteHtml = await GetStringAsync(admin, "/support/access/service-accounts");
+        Assert.IsFalse(afterDeleteHtml.Contains("data-service-account=\"sa-e2e-lifecycle\"", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task RoleFederationUiAndWellKnownRoleCatalogEndpoint()
+    {
+        await using var app = await StartSampleHostAsync();
+        using var admin = CreateDevClient(app, "admin");
+        using var viewer = CreateDevClient(app, "viewer");
+        using var anonymous = app.GetTestServer().CreateClient();
+
+        // 1. Role Federation UI renders mode, seeded mappings, provider datalist, and role catalog
+        var html = await GetStringAsync(admin, "/support/access/federation");
+        StringAssert.Contains(html, "data-federation-status");
+        StringAssert.Contains(html, "MergeWithLocalGrants");
+        StringAssert.Contains(html, "idf:support-agents");
+        StringAssert.Contains(html, "idf:support-viewers");
+        StringAssert.Contains(html, "oauth2-proxy");
+        StringAssert.Contains(html, "/.well-known/ticketflow-roles");
+        StringAssert.Contains(html, "IRoleFederationService");
+        StringAssert.Contains(html, "tf-role-catalog-json");
+
+        // 2. Non-admin gets 403 on Role Federation UI
+        using (var viewerUiResp = await viewer.GetAsync("/support/access/federation"))
+        {
+            Assert.AreEqual(HttpStatusCode.Forbidden, viewerUiResp.StatusCode);
+        }
+
+        // 3. Create, toggle, and delete a mapping via UI forms
+        var (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/federation");
+        using (var createResp = await PostAsync(admin, "/support/access/federation", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "access.federation.create",
+            ["provider"] = "okta",
+            ["externalRole"] = "okta-support-supervisors",
+            ["role"] = "supervisor",
+            ["scope"] = "workspace",
+            ["description"] = "Okta supervisor sync",
+        }))
+        {
+            Assert.AreEqual(HttpStatusCode.Redirect, createResp.StatusCode);
+        }
+
+        var afterCreate = await GetStringAsync(admin, "/support/access/federation");
+        StringAssert.Contains(afterCreate, "okta-support-supervisors");
+        var mappingRow = ExtractFederationMappingRow(afterCreate, "okta-support-supervisors");
+        var mappingId = ExtractFederationMappingId(mappingRow);
+        var mappingVersion = ExtractRevision(mappingRow);
+
+        // Toggle disable
+        (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/federation");
+        using (var toggleResp = await PostAsync(admin, "/support/access/federation", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "access.federation.toggle",
+            ["_revision"] = mappingVersion,
+            ["id"] = mappingId,
+            ["provider"] = "okta",
+            ["externalRole"] = "okta-support-supervisors",
+            ["role"] = "supervisor",
+            ["scope"] = "workspace",
+            ["description"] = "Okta supervisor sync",
+            ["enabled"] = "false",
+        }))
+        {
+            Assert.AreEqual(HttpStatusCode.Redirect, toggleResp.StatusCode);
+        }
+
+        var afterDisable = await GetStringAsync(admin, "/support/access/federation");
+        var disabledRow = ExtractFederationMappingRow(afterDisable, "okta-support-supervisors");
+        StringAssert.Contains(disabledRow, "Disabled");
+
+        // Delete mapping
+        (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/federation");
+        using (var deleteResp = await PostAsync(admin, "/support/access/federation", cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "access.federation.delete",
+            ["_revision"] = ExtractRevision(disabledRow),
+            ["id"] = mappingId,
+        }))
+        {
+            Assert.AreEqual(HttpStatusCode.Redirect, deleteResp.StatusCode);
+        }
+
+        var afterDelete = await GetStringAsync(admin, "/support/access/federation");
+        Assert.IsFalse(afterDelete.Contains("okta-support-supervisors", StringComparison.Ordinal));
+
+        // 4. /.well-known/ticketflow-roles endpoint: 401 unauthenticated, 403 non-admin, 200 admin
+        using (var unauthCatalog = await anonymous.GetAsync("/.well-known/ticketflow-roles"))
+        {
+            Assert.AreEqual(HttpStatusCode.Unauthorized, unauthCatalog.StatusCode);
+        }
+        using (var viewerCatalog = await viewer.GetAsync("/.well-known/ticketflow-roles"))
+        {
+            Assert.AreEqual(HttpStatusCode.Forbidden, viewerCatalog.StatusCode);
+        }
+        using (var adminCatalog = await admin.GetAsync("/.well-known/ticketflow-roles"))
+        {
+            Assert.AreEqual(HttpStatusCode.OK, adminCatalog.StatusCode);
+            using var doc = JsonDocument.Parse(await adminCatalog.Content.ReadAsStringAsync());
+            var roles = doc.RootElement.GetProperty("roles");
+            Assert.IsGreaterThanOrEqualTo(BuiltInRoles.All.Count, roles.GetArrayLength());
+
+            var agentRole = roles.EnumerateArray().First(r => r.GetProperty("roleId").GetProperty("value").GetString() == "agent");
+            var agentMappings = agentRole.GetProperty("mappings").EnumerateArray().Select(m => m.GetProperty("externalRole").GetString()).ToList();
+            CollectionAssert.Contains(agentMappings, "idf:support-agents");
+        }
+    }
+
+    [TestMethod]
+    public async Task ExternalIdentityFlowProxyTerminationAndRolesOnlyMode()
+    {
+        const string proxySecret = "e2e-identityflow-proxy-secret-999";
+        var partition = new AccessPartition("ext-tenant", "ext-proj", "prod", "support");
+        var workspace = new WorkspaceId("ext-ws");
+        var scope = partition.InWorkspace(workspace);
+
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+
+        builder.Services.AddTicketFlow()
+            .AddAccessControl(options =>
+            {
+                options.RoleFederation.Mode = RoleFederationMode.MergeWithLocalGrants;
+                options.RoleFederation.MapTeamsAsExternalRoles = true;
+            })
+            .AddInMemoryAccessStores()
+            .AddWorkspaces()
+            .AddInMemoryWorkspaceStores()
+            .AddContacts()
+            .AddInMemoryContactStores()
+            .AddConversations()
+            .AddInMemoryConversationStores()
+            .AddTicketFlowEndpoints(options => options.Partition = partition)
+            .AddTicketFlowBlazorUI(options =>
+            {
+                options.BasePath = "/support";
+                options.ProductName = "Federated Support";
+                options.Workspace = workspace;
+                options.ManageApiKeysInUI = false;
+                options.LoginPath = null;
+            });
+
+        builder.Services.AddTicketFlowExternalIdentityAuthentication(options =>
+        {
+            options.UseIdentityFlowDefaults(sharedSecret: proxySecret, acceptFederatedRoles: true);
+        });
+        builder.Services.AddAuthorization();
+
+        await using var app = builder.Build();
+        app.UseAuthentication();
+        app.UseAuthorization();
+        app.MapTicketFlowBlazorUI();
+        app.MapTicketFlowRoleCatalogEndpoint(defaultScope: scope);
+
+        // Seed workspace settings, local Owner grant for local-admin, and a federated mapping for idf:support-agents -> Agent
+        await app.Services.GetRequiredService<IWorkspaceSettingsStore>()
+            .CreateAsync(scope, new WorkspaceSettings("Federated Support", "en", "UTC"));
+        await app.Services.GetRequiredService<IAccessGrantStore>()
+            .CreateAsync(new AccessGrant(
+                new GrantId("ext-owner"),
+                partition,
+                new UserId("local-admin"),
+                BuiltInRoles.Owner.Id,
+                new WorkspaceGrantScope(workspace)));
+        await app.Services.GetRequiredService<IRoleFederationMappingStore>()
+            .UpsertAsync(
+                new RoleFederationMappingId("ext-fed-agents"),
+                new RoleFederationMapping("identityflow", "idf:support-agents", BuiltInRoles.Agent.Id, partition, new WorkspaceGrantScope(workspace)),
+                isEnabled: true,
+                "system:seed");
+
+        await app.StartAsync();
+        using var client = app.GetTestServer().CreateClient();
+
+        // 1. Spoofed header (missing secret) -> 401 Unauthorized, no redirect
+        using (var spoofedMissing = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            spoofedMissing.Headers.Add("X-Auth-Subject", "local-admin");
+            using var resp = await client.SendAsync(spoofedMissing);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+            Assert.IsTrue(resp.Headers.CacheControl?.NoStore);
+        }
+
+        // Spoofed header (wrong secret) -> 401 Unauthorized
+        using (var spoofedWrong = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            spoofedWrong.Headers.Add("X-IdentityFlow-Proxy-Secret", "wrong-secret");
+            spoofedWrong.Headers.Add("X-Auth-Subject", "local-admin");
+            using var resp = await client.SendAsync(spoofedWrong);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+        }
+
+        // 2. Terminated user with federated role renders display name, gets 200 on allowed route & 403 on admin route
+        using (var userAllowed = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            userAllowed.Headers.Add("X-IdentityFlow-Proxy-Secret", proxySecret);
+            userAllowed.Headers.Add("X-Auth-Subject", "ext-elena");
+            userAllowed.Headers.Add("X-Auth-Name", "Elena Vance");
+            userAllowed.Headers.Add("X-Auth-Email", "elena@acme.test");
+            userAllowed.Headers.Add("X-Auth-Roles", "idf:support-agents");
+            using var resp = await client.SendAsync(userAllowed);
+            Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+            var body = await resp.Content.ReadAsStringAsync();
+            StringAssert.Contains(body, "Elena Vance");
+        }
+        using (var userAdmin = new HttpRequestMessage(HttpMethod.Get, "/support/access"))
+        {
+            userAdmin.Headers.Add("X-IdentityFlow-Proxy-Secret", proxySecret);
+            userAdmin.Headers.Add("X-Auth-Subject", "ext-elena");
+            userAdmin.Headers.Add("X-Auth-Name", "Elena Vance");
+            userAdmin.Headers.Add("X-Auth-Roles", "idf:support-agents");
+            using var resp = await client.SendAsync(userAdmin);
+            Assert.AreEqual(HttpStatusCode.Forbidden, resp.StatusCode);
+        }
+
+        // 3. Terminated service account (X-Auth-Client-Id + X-Auth-Principal-Type: service_account) gets federated role
+        using (var saAllowed = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
+        {
+            saAllowed.Headers.Add("X-IdentityFlow-Proxy-Secret", proxySecret);
+            saAllowed.Headers.Add("X-Auth-Client-Id", "idf-triage-bot");
+            saAllowed.Headers.Add("X-Auth-Principal-Type", "service_account");
+            saAllowed.Headers.Add("X-Auth-Name", "Triage Bot");
+            saAllowed.Headers.Add("X-Auth-Roles", "idf:support-agents");
+            using var resp = await client.SendAsync(saAllowed);
+            Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+            var body = await resp.Content.ReadAsStringAsync();
+            StringAssert.Contains(body, "Triage Bot");
+        }
+        using (var saAdmin = new HttpRequestMessage(HttpMethod.Get, "/support/access"))
+        {
+            saAdmin.Headers.Add("X-IdentityFlow-Proxy-Secret", proxySecret);
+            saAdmin.Headers.Add("X-Auth-Client-Id", "idf-triage-bot");
+            saAdmin.Headers.Add("X-Auth-Principal-Type", "service_account");
+            saAdmin.Headers.Add("X-Auth-Roles", "idf:support-agents");
+            using var resp = await client.SendAsync(saAdmin);
+            Assert.AreEqual(HttpStatusCode.Forbidden, resp.StatusCode);
+        }
+
+        // 4. Service Accounts tab is hidden in roles-only mode (ManageApiKeysInUI = false), Role Federation tab is shown
+        using (var adminAccessReq = new HttpRequestMessage(HttpMethod.Get, "/support/access"))
+        {
+            adminAccessReq.Headers.Add("X-IdentityFlow-Proxy-Secret", proxySecret);
+            adminAccessReq.Headers.Add("X-Auth-Subject", "local-admin");
+            adminAccessReq.Headers.Add("X-Auth-Name", "Local Admin");
+            using var resp = await client.SendAsync(adminAccessReq);
+            Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+            var accessHtml = await resp.Content.ReadAsStringAsync();
+            Assert.IsFalse(accessHtml.Contains("/support/access/service-accounts", StringComparison.Ordinal), "Service Accounts tab must be hidden when ManageApiKeysInUI is false.");
+            StringAssert.Contains(accessHtml, "/support/access/federation");
+        }
+
+        // Direct GET to /support/access/service-accounts shows external-IdP notice and no create/issue forms
+        using (var directSaReq = new HttpRequestMessage(HttpMethod.Get, "/support/access/service-accounts"))
+        {
+            directSaReq.Headers.Add("X-IdentityFlow-Proxy-Secret", proxySecret);
+            directSaReq.Headers.Add("X-Auth-Subject", "local-admin");
+            using var resp = await client.SendAsync(directSaReq);
+            Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+            var saHtml = await resp.Content.ReadAsStringAsync();
+            StringAssert.Contains(saHtml, "Service accounts managed externally");
+            Assert.IsFalse(saHtml.Contains("access.serviceaccount.create", StringComparison.Ordinal));
+            Assert.IsFalse(saHtml.Contains("access.serviceaccount.key.create", StringComparison.Ordinal));
+
+            // Defense-in-depth: posting access.serviceaccount.create is forbidden when ManageApiKeysInUI is false
+            var token = TokenPattern().Match(saHtml).Groups[1].Value;
+            var cookie = resp.Headers.GetValues("Set-Cookie").First(v => v.StartsWith(".AspNetCore.Antiforgery", StringComparison.Ordinal)).Split(';')[0];
+            using var postReq = new HttpRequestMessage(HttpMethod.Post, "/support/access/service-accounts")
+            {
+                Content = new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["__RequestVerificationToken"] = token,
+                    ["_action"] = "access.serviceaccount.create",
+                    ["name"] = "Blocked SA",
+                }),
+            };
+            postReq.Headers.Add("X-IdentityFlow-Proxy-Secret", proxySecret);
+            postReq.Headers.Add("X-Auth-Subject", "local-admin");
+            postReq.Headers.Add("Cookie", cookie);
+            using var postResp = await client.SendAsync(postReq);
+            Assert.AreEqual(HttpStatusCode.Forbidden, postResp.StatusCode);
+        }
+
+        await app.StopAsync();
+    }
+
+    private static async Task<WebApplication> StartSampleHostAsync()
+    {
+        var app = SampleHostApp.Build(["--environment", "Development"], builder =>
+        {
+            builder.WebHost.UseTestServer();
+            builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["TicketFlow:Storage"] = "InMemory",
+                ["TicketFlow:DevelopmentAuthentication"] = "true",
+            });
+        });
+        await SampleHostApp.InitializeAsync(app, seed: true);
+        await app.StartAsync();
+        return app;
+    }
+
+    private static HttpClient CreateDevClient(WebApplication app, string user)
+    {
+        var client = app.GetTestServer().CreateClient();
+        client.DefaultRequestHeaders.Add("X-Dev-User", user);
+        return client;
+    }
+
+    private static async Task<string> GetStringAsync(HttpClient client, string path)
+    {
+        using var response = await client.GetAsync(path);
+        Assert.AreEqual(HttpStatusCode.OK, response.StatusCode, path);
+        return await response.Content.ReadAsStringAsync();
+    }
+
+    private static async Task<(string Token, string Cookie)> GetAntiforgeryAsync(HttpClient client, string path)
+    {
+        using var response = await client.GetAsync(path);
+        Assert.AreEqual(HttpStatusCode.OK, response.StatusCode, path);
+        var html = await response.Content.ReadAsStringAsync();
+        var token = TokenPattern().Match(html).Groups[1].Value;
+        var cookie = response.Headers.GetValues("Set-Cookie").First(v => v.StartsWith(".AspNetCore.Antiforgery", StringComparison.Ordinal)).Split(';')[0];
+        Assert.IsFalse(string.IsNullOrEmpty(token));
+        return (token, cookie);
+    }
+
+    private static async Task<HttpResponseMessage> PostAsync(HttpClient client, string path, string cookie, Dictionary<string, string> form)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = new FormUrlEncodedContent(form) };
+        request.Headers.Add("Cookie", cookie);
+        return await client.SendAsync(request);
+    }
+
+    private static string ExtractIssuedApiKey(string html)
+    {
+        var match = IssuedKeyPattern().Match(html);
+        Assert.IsTrue(match.Success, "Expected data-issued-api-key-value in response HTML.");
+        return WebUtility.HtmlDecode(match.Groups[1].Value.Trim());
+    }
+
+    private static string ExtractServiceAccountCard(string html, string clientId)
+    {
+        var marker = $"data-service-account=\"{clientId}\"";
+        var start = html.IndexOf(marker, StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, start, $"Missing service account card '{clientId}'.");
+        var next = html.IndexOf("data-service-account=\"", start + marker.Length, StringComparison.Ordinal);
+        return next > start ? html[start..next] : html[start..];
+    }
+
+    private static string ExtractFederationMappingRow(string html, string externalRole)
+    {
+        var idx = html.IndexOf(externalRole, StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, idx, $"Missing federation mapping '{externalRole}'.");
+        var start = html.LastIndexOf("<tr ", idx, StringComparison.Ordinal);
+        var end = html.IndexOf("</tr>", idx, StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, start);
+        Assert.IsGreaterThan(start, end);
+        return html[start..(end + 5)];
+    }
+
+    private static string ExtractFederationMappingId(string rowHtml)
+    {
+        var match = FederationMappingIdPattern().Match(rowHtml);
+        Assert.IsTrue(match.Success, "Missing data-federation-mapping attribute.");
+        return match.Groups[1].Value;
+    }
+
+    private static string ExtractRevision(string fragment)
+    {
+        var match = RevisionPattern().Match(fragment);
+        Assert.IsTrue(match.Success, "Missing _revision hidden input.");
+        return match.Groups[1].Value;
+    }
+
+    private static string ExtractFirstKeyId(string cardHtml)
+    {
+        var match = KeyIdPattern().Match(cardHtml);
+        Assert.IsTrue(match.Success, "Missing keyId hidden input in service account card.");
+        return match.Groups[1].Value;
+    }
+
+    [GeneratedRegex("name=\"__RequestVerificationToken\" value=\"([^\"]+)\"")]
+    private static partial Regex TokenPattern();
+
+    [GeneratedRegex("name=\"_revision\" value=\"(\\d+)\"")]
+    private static partial Regex RevisionPattern();
+
+    [GeneratedRegex("data-issued-api-key-value[^>]*>([^<]+)<")]
+    private static partial Regex IssuedKeyPattern();
+
+    [GeneratedRegex("name=\"keyId\" value=\"([^\"]+)\"")]
+    private static partial Regex KeyIdPattern();
+
+    [GeneratedRegex("data-federation-mapping=\"([^\"]+)\"")]
+    private static partial Regex FederationMappingIdPattern();
+}

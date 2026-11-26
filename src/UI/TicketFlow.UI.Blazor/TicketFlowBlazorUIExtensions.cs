@@ -96,7 +96,10 @@ public static class TicketFlowBlazorUIEndpointExtensions
         if (!await antiforgery.IsRequestValidAsync(http))
             return TypedResults.Problem(statusCode: StatusCodes.Status400BadRequest, title: "The form expired. Reload the page and try again.");
         if (http.User.Identity?.IsAuthenticated != true)
+        {
+            http.Response.Headers.CacheControl = "no-store";
             return TypedResults.Unauthorized();
+        }
         var form = await http.Request.ReadFormAsync(http.RequestAborted);
         var options = http.RequestServices.GetRequiredService<IOptions<TicketFlowBlazorUIOptions>>().Value;
         var returnTo = UiUrls.SafeReturn(options.BasePath, form["_return"].ToString() is { Length: > 0 } posted ? posted : http.Request.Path + http.Request.QueryString);
@@ -110,7 +113,10 @@ public static class TicketFlowBlazorUIEndpointExtensions
         }
         var session = await TicketFlowUISession.ResolveAsync(http);
         if (session.State == UiSessionState.Unauthenticated)
+        {
+            http.Response.Headers.CacheControl = "no-store";
             return TypedResults.Unauthorized();
+        }
         var route = UiRoutes.Match(session.Path);
         // Authorization of the page comes first and never depends on the posted form: a section the viewer cannot open renders
         // "Access denied" (403) and its action does not run. Services still authorize the command itself.
@@ -166,11 +172,22 @@ public static class TicketFlowBlazorUIEndpointExtensions
 
     private static IResult SignIn(HttpContext http, TicketFlowBlazorUIOptions options)
     {
+        if (HasApiAuthHeaders(http))
+        {
+            http.Response.Headers.CacheControl = "no-store";
+            return TypedResults.Unauthorized();
+        }
         if (options.LoginPath is not { Length: > 0 } login)
+        {
+            http.Response.Headers.CacheControl = "no-store";
             return TypedResults.Challenge();
+        }
         var returnUrl = http.Request.PathBase + http.Request.Path + http.Request.QueryString;
         return TypedResults.Redirect(UiUrls.Combine(login, string.Empty, (options.ReturnUrlParameter, returnUrl)));
     }
+
+    private static bool HasApiAuthHeaders(HttpContext http) =>
+        http.Request.Headers.ContainsKey("X-Api-Key") || http.Request.Headers.ContainsKey("Authorization");
 
     private static async Task<IResult> ExportAsync(HttpContext http, string? from, string? to)
     {

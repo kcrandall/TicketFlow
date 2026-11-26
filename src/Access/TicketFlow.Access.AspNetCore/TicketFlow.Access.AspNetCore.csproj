@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>ASP.NET Core authentication handlers and endpoint helpers for TicketFlow external identity termination, service-account API keys, hybrid authentication, claims scope resolution, and role catalog discovery.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TicketFlow.Access.Abstractions/TicketFlow.Access.Abstractions.csproj" />
+    <ProjectReference Include="../TicketFlow.Access/TicketFlow.Access.csproj" />
+  </ItemGroup>
+</Project>

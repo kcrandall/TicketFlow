@@ -15,7 +15,9 @@ public sealed class PermissionCacheTests
         var cache = new UiSensitivePermissionCache(time);
         var plain = UiSensitivePermissionCache.Key(new UserPrincipal(UiTestSupport.Scope, new UserId("agent")));
         var inTeam = UiSensitivePermissionCache.Key(new UserPrincipal(UiTestSupport.Scope, new UserId("agent"), [new TeamId("tier1")]));
+        var withExternalRole = UiSensitivePermissionCache.Key(new UserPrincipal(UiTestSupport.Scope, new UserId("agent"), externalRoles: ["idf:support-agents"]));
         Assert.AreNotEqual(plain, inTeam, "A team change must not reuse a snapshot taken for other grants.");
+        Assert.AreNotEqual(plain, withExternalRole, "An external role change must not reuse a cached snapshot.");
 
         cache.Set(plain, new HashSet<Permission> { AccessPermissions.AccessManage }, TimeSpan.FromSeconds(60));
         Assert.IsTrue(cache.TryGet(plain, out var held));

@@ -79,6 +79,13 @@ public interface IAccessGrantStore
 
     Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> DeleteAsync(AccessPartition partition, GrantId id, long expectedRevision, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Grants for <paramref name="subject"/> across every scope in <paramref name="partition"/>, ordered by grant identifier (ordinal).
+    /// Default implementation falls back to <see cref="ListForSubjectsAsync"/> for <paramref name="fallbackWorkspace"/>.
+    /// </summary>
+    Task<IReadOnlyList<StoredAccessGrant>> ListAllForSubjectAsync(AccessPartition partition, GrantSubject subject, WorkspaceId fallbackWorkspace, CancellationToken cancellationToken = default) =>
+        ListForSubjectsAsync(partition, fallbackWorkspace, [subject], cancellationToken);
+
     /// <summary>Deletes multiple revision-fenced grants in one batch, returning those that were removed.</summary>
     async Task<IReadOnlyList<StoredAccessGrant>> DeleteManyAsync(AccessPartition partition, IReadOnlyList<(GrantId Id, long ExpectedRevision)> targets, CancellationToken cancellationToken = default)
     {

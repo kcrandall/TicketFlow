@@ -3,7 +3,17 @@ using TicketFlow.Core;
 namespace TicketFlow.Access;
 
 /// <summary>A valid grant with its resolved role; <see cref="Role"/> is null when the role cannot be resolved.</summary>
-internal sealed record ResolvedGrant(AccessGrant Grant, AccessRole? Role);
+internal sealed record ResolvedGrant(
+    AccessGrant Grant,
+    AccessRole? Role,
+    IReadOnlySet<Permission>? EffectivePermissions = null,
+    bool IsRoleStripped = false)
+{
+    public bool Includes(Permission permission) =>
+        EffectivePermissions is not null
+            ? EffectivePermissions.Contains(permission)
+            : Role?.Includes(permission) == true;
+}
 
 /// <summary>Grants loaded once for one principal in one workspace scope at one instant.</summary>
 internal sealed class AccessContext(PrincipalRef principal, TicketScope scope, DateTimeOffset now, IReadOnlyList<ResolvedGrant> grants)
@@ -46,11 +56,42 @@ internal readonly struct SimplePointResult(AccessDenialReason? denial, bool used
 /// (or whose role cannot be resolved) and whose condition is not false denies; otherwise an applicable allow whose role includes
 /// the permission and whose condition is true allows.
 /// </summary>
-internal sealed class AccessEngine(IPermissionCatalog catalog, IAccessGrantStore grants, IAccessRoleStore roles, TimeProvider time)
+internal sealed class AccessEngine(
+    IPermissionCatalog catalog,
+    IAccessGrantStore grants,
+    IAccessRoleStore roles,
+    TimeProvider time,
+    AccessControlOptions? options = null,
+    IServiceAccountStore? serviceAccounts = null,
+    IRoleFederationMappingStore? roleFederationMappings = null)
 {
+    private readonly AccessControlOptions options = options ?? new AccessControlOptions();
+
     public IPermissionCatalog Catalog { get; } = catalog;
 
     public DateTimeOffset Now => time.GetUtcNow();
+
+    public async ValueTask<(AccessDenialReason? Denial, StoredServiceAccount? ServiceAccount)> CheckServiceAccountAsync(
+        PrincipalRef principal,
+        TicketScope scope,
+        AccessResource? resource,
+        CancellationToken cancellationToken)
+    {
+        if (principal is not ApiClientPrincipal client || serviceAccounts is null)
+            return (null, null);
+
+        var stored = await serviceAccounts.FindAsync(AccessPartition.From(scope), client.ClientId, cancellationToken).ConfigureAwait(false);
+        if (stored is null)
+            return (null, null);
+
+        if (!stored.IsEnabled)
+            return (AccessDenialReason.ServiceAccountDisabled, stored);
+
+        var withinScope = resource is not null
+            ? stored.Account.AppliesTo(resource)
+            : stored.Account.AppliesTo(scope);
+        return withinScope ? (null, stored) : (AccessDenialReason.ScopeMismatch, stored);
+    }
 
     public AccessDenialReason? Precheck(PrincipalRef principal, Permission permission, TicketScope scope) =>
         Precheck(principal, Catalog.Contains(permission), scope);
@@ -100,12 +141,14 @@ internal sealed class AccessEngine(IPermissionCatalog catalog, IAccessGrantStore
         SystemPrincipal => false,
     };
 
-    public async Task<AccessContext> LoadAsync(PrincipalRef principal, TicketScope scope, CancellationToken cancellationToken)
+    public async Task<AccessContext> LoadAsync(PrincipalRef principal, TicketScope scope, CancellationToken cancellationToken, bool forAdministration = false)
     {
         var subjects = Subjects(principal) ?? throw new InvalidOperationException("The principal cannot hold grants.");
         var now = time.GetUtcNow();
         var partition = AccessPartition.From(scope);
         var stored = await grants.ListForSubjectsAsync(partition, scope.WorkspaceId, subjects, cancellationToken).ConfigureAwait(false);
+        var ignoreLocalAllows = options.RoleFederation.Mode == RoleFederationMode.FederatedOnly
+            && (!forAdministration || options.RoleFederation.AllowAdministrativeRoles);
         var valid = new List<AccessGrant>(stored.Count);
         RoleId? singleCustomRole = null;
         var multipleCustomRoles = false;
@@ -116,6 +159,8 @@ internal sealed class AccessEngine(IPermissionCatalog catalog, IAccessGrantStore
             if (grant.Partition != partition || (grant.Workspace is { } workspace && workspace != scope.WorkspaceId) || !SubjectMatches(principal, grant.Subject))
                 throw new InvalidOperationException("The grant store returned a grant outside the requested scope or subjects.");
             if (!grant.IsValidAt(now))
+                continue;
+            if (ignoreLocalAllows && grant.Effect == GrantEffect.Allow)
                 continue;
             valid.Add(grant);
             if (!multipleCustomRoles && grant.Scope is not TenantGrantScope && !BuiltInRoles.IsBuiltIn(grant.Role))
@@ -152,6 +197,24 @@ internal sealed class AccessEngine(IPermissionCatalog catalog, IAccessGrantStore
                         : resolvedSingleCustom is not null && resolvedSingleCustom.Id == grant.Role ? resolvedSingleCustom : null);
             resolved.Add(new(grant, role));
         }
+
+        if (options.RoleFederation.Mode != RoleFederationMode.Disabled
+            && (!forAdministration || options.RoleFederation.AllowAdministrativeRoles))
+        {
+            var federated = await RoleFederationSupport.ResolveFederatedGrantsAsync(
+                principal,
+                scope,
+                options.RoleFederation,
+                roleFederationMappings,
+                roles,
+                Catalog,
+                custom,
+                forAdministration,
+                cancellationToken).ConfigureAwait(false);
+            if (federated.Count > 0)
+                resolved.AddRange(federated);
+        }
+
         return new(principal, scope, now, resolved);
     }
 
@@ -174,13 +237,13 @@ internal sealed class AccessEngine(IPermissionCatalog catalog, IAccessGrantStore
             switch (grant.Effect)
             {
                 case GrantEffect.Deny:
-                    if ((candidate.Role is null || candidate.Role.Includes(permission)) && Evaluate(grant.Condition, context, resource) != false)
+                    if ((candidate.Role is null || candidate.Includes(permission)) && Evaluate(grant.Condition, context, resource) != false)
                         return PointResult.Deny(AccessDenialReason.ExplicitDeny);
                     break;
                 case GrantEffect.Allow:
                     if (tenantAllowsOnly && grant.Scope is not TenantGrantScope)
                         break;
-                    if (candidate.Role?.Includes(permission) == true && Evaluate(grant.Condition, context, resource) == true)
+                    if (candidate.Includes(permission) && Evaluate(grant.Condition, context, resource) == true)
                     {
                         if (grant.Kind == GrantKind.BreakGlass)
                             (breakGlass ??= []).Add(candidate);
@@ -214,7 +277,7 @@ internal sealed class AccessEngine(IPermissionCatalog catalog, IAccessGrantStore
             switch (grant.Effect)
             {
                 case GrantEffect.Deny:
-                    if ((candidate.Role is null || candidate.Role.Includes(permission)) && Evaluate(grant.Condition, context, resource) != false)
+                    if ((candidate.Role is null || candidate.Includes(permission)) && Evaluate(grant.Condition, context, resource) != false)
                         return SimplePointResult.Deny(AccessDenialReason.ExplicitDeny);
                     break;
                 case GrantEffect.Allow:
@@ -222,10 +285,10 @@ internal sealed class AccessEngine(IPermissionCatalog catalog, IAccessGrantStore
                         break;
                     if (grant.Kind == GrantKind.BreakGlass)
                     {
-                        if (!hasBreakGlass && !hasStandard && candidate.Role?.Includes(permission) == true && Evaluate(grant.Condition, context, resource) == true)
+                        if (!hasBreakGlass && !hasStandard && candidate.Includes(permission) && Evaluate(grant.Condition, context, resource) == true)
                             hasBreakGlass = true;
                     }
-                    else if (!hasStandard && candidate.Role?.Includes(permission) == true && Evaluate(grant.Condition, context, resource) == true)
+                    else if (!hasStandard && candidate.Includes(permission) && Evaluate(grant.Condition, context, resource) == true)
                         hasStandard = true;
                     break;
             }

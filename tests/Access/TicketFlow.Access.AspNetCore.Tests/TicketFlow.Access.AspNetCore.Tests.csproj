@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Access/TicketFlow.Access.AspNetCore/TicketFlow.Access.AspNetCore.csproj" />
+    <ProjectReference Include="../../../src/TicketFlow/TicketFlow.csproj" />
+    <ProjectReference Include="../../TicketFlow.Testing/TicketFlow.Testing.csproj" />
+  </ItemGroup>
+</Project>

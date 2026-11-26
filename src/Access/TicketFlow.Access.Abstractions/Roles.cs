@@ -10,12 +10,25 @@ public readonly record struct RoleId : IComparable<RoleId>
 
     private readonly string? value;
 
+    private RoleId(string value, bool _) => this.value = value;
+
     public RoleId(string value) => this.value = AccessText.RequireToken(value, MaximumLength, nameof(value), "Role identifiers");
 
     /// <exception cref="InvalidOperationException">The identifier is <c>default</c>.</exception>
     public string Value => value ?? throw new InvalidOperationException("The RoleId is uninitialized.");
 
     public bool IsInitialized => value is not null;
+
+    public static bool TryParse(string? value, out RoleId roleId)
+    {
+        if (value is not null && AccessText.IsToken(value.AsSpan(), MaximumLength))
+        {
+            roleId = new RoleId(value, true);
+            return true;
+        }
+        roleId = default;
+        return false;
+    }
 
     public int CompareTo(RoleId other) => string.CompareOrdinal(value, other.value);
 

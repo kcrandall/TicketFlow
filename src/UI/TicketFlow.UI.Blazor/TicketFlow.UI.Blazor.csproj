@@ -13,6 +13,7 @@
     <PackageReference Include="BlazorBlueprint.Icons.Lucide" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="../../Access/TicketFlow.Access/TicketFlow.Access.csproj" />
     <ProjectReference Include="../../Hosting/TicketFlow.Hosting.AspNetCore/TicketFlow.Hosting.AspNetCore.csproj" />
     <ProjectReference Include="../../Reporting/TicketFlow.Reporting.Abstractions/TicketFlow.Reporting.Abstractions.csproj" />
   </ItemGroup>

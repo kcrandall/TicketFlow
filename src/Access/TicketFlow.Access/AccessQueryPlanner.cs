@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Options;
 using TicketFlow.Core;
 
 namespace TicketFlow.Access;
@@ -12,13 +13,23 @@ public sealed class AccessQueryPlanner : IAccessQueryPlanner
     private readonly AccessEngine engine;
     private readonly IAccessAuditSink audit;
 
-    public AccessQueryPlanner(IPermissionCatalog catalog, IAccessGrantStore grants, IAccessRoleStore roles, IAccessAuditSink audit, TimeProvider time)
+    public AccessQueryPlanner(
+        IPermissionCatalog catalog,
+        IAccessGrantStore grants,
+        IAccessRoleStore roles,
+        IAccessAuditSink audit,
+        TimeProvider time,
+        IOptions<AccessControlOptions>? options = null,
+        IServiceAccountStore? serviceAccounts = null,
+        IRoleFederationMappingStore? roleFederationMappings = null)
     {
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(grants);
         ArgumentNullException.ThrowIfNull(roles);
         ArgumentNullException.ThrowIfNull(time);
-        engine = new(catalog, grants, roles, time);
+        var resolvedOptions = options?.Value;
+        resolvedOptions?.Validate();
+        engine = new(catalog, grants, roles, time, resolvedOptions, serviceAccounts, roleFederationMappings);
         this.audit = audit ?? throw new ArgumentNullException(nameof(audit));
     }
 
@@ -35,8 +46,16 @@ public sealed class AccessQueryPlanner : IAccessQueryPlanner
             return DenyAllFilter.Instance;
         }
 
+        var (serviceAccountDenial, serviceAccount) = await engine.CheckServiceAccountAsync(query.Principal, query.Scope, resource: null, cancellationToken).ConfigureAwait(false);
+        if (serviceAccountDenial is { } saReason)
+        {
+            if (sensitive)
+                await RecordAsync(query, DenyAllFilter.Instance, false, saReason, engine.Now, cancellationToken).ConfigureAwait(false);
+            return DenyAllFilter.Instance;
+        }
+
         var context = await engine.LoadAsync(query.Principal, query.Scope, cancellationToken).ConfigureAwait(false);
-        return await PlanAsync(query, context, sensitive, cancellationToken).ConfigureAwait(false);
+        return await PlanAsync(query, context, serviceAccount, sensitive, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Plans every permission against one grant snapshot (one store load instead of one per permission).</summary>
@@ -45,6 +64,9 @@ public sealed class AccessQueryPlanner : IAccessQueryPlanner
         var loaded = AccessDecisionContexts.Validate(principal, scope, permissions);
         var held = new HashSet<Permission>();
         AccessContext? context = null;
+        var serviceAccountChecked = false;
+        AccessDenialReason? serviceAccountDenial = null;
+        StoredServiceAccount? serviceAccount = null;
         foreach (var permission in loaded)
         {
             var query = new AccessQuery(principal, permission, scope);
@@ -56,14 +78,25 @@ public sealed class AccessQueryPlanner : IAccessQueryPlanner
                     await RecordAsync(query, DenyAllFilter.Instance, false, reason, engine.Now, cancellationToken).ConfigureAwait(false);
                 continue;
             }
+            if (!serviceAccountChecked)
+            {
+                (serviceAccountDenial, serviceAccount) = await engine.CheckServiceAccountAsync(principal, scope, resource: null, cancellationToken).ConfigureAwait(false);
+                serviceAccountChecked = true;
+            }
+            if (serviceAccountDenial is { } saReason)
+            {
+                if (sensitive)
+                    await RecordAsync(query, DenyAllFilter.Instance, false, saReason, engine.Now, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
             context ??= await engine.LoadAsync(principal, scope, cancellationToken).ConfigureAwait(false);
-            if (await PlanAsync(query, context, sensitive, cancellationToken).ConfigureAwait(false) is not DenyAllFilter)
+            if (await PlanAsync(query, context, serviceAccount, sensitive, cancellationToken).ConfigureAwait(false) is not DenyAllFilter)
                 held.Add(permission);
         }
         return held;
     }
 
-    private async Task<AccessFilter> PlanAsync(AccessQuery query, AccessContext context, bool sensitive, CancellationToken cancellationToken)
+    private async Task<AccessFilter> PlanAsync(AccessQuery query, AccessContext context, StoredServiceAccount? serviceAccount, bool sensitive, CancellationToken cancellationToken)
     {
         var permission = query.Permission;
         var allows = new List<AccessFilter>();
@@ -76,11 +109,11 @@ public sealed class AccessQueryPlanner : IAccessQueryPlanner
             switch (grant.Effect)
             {
                 case GrantEffect.Deny:
-                    if (candidate.Role is null || candidate.Role.Includes(permission))
+                    if (candidate.Role is null || candidate.Includes(permission))
                         denies.Add(AccessFilters.Not(AccessFilters.And(ScopeTerm(grant.Scope), Translate(grant.Condition, context))));
                     break;
                 case GrantEffect.Allow:
-                    if (candidate.Role?.Includes(permission) != true)
+                    if (!candidate.Includes(permission))
                         break;
                     var term = AccessFilters.And(ScopeTerm(grant.Scope), Translate(grant.Condition, context));
                     // Allow terms sit in a positive position under the root conjunction, so an unknown term can never make a row
@@ -96,7 +129,8 @@ public sealed class AccessQueryPlanner : IAccessQueryPlanner
         AccessFilter filter;
         try
         {
-            filter = AccessFilters.And([new ScopeFilter(query.Scope), AccessFilters.Or(allows), .. denies]);
+            var serviceAccountTerm = serviceAccount is not null ? ScopeTerm(serviceAccount.Account.Scope) : AllowAllFilter.Instance;
+            filter = AccessFilters.And([new ScopeFilter(query.Scope), serviceAccountTerm, AccessFilters.Or(allows), .. denies]);
         }
         catch (AccessFilterLimitExceededException)
         {

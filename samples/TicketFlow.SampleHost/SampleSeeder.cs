@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using TicketFlow.Access;
 using TicketFlow.Channels;
 using TicketFlow.Channels.LiveChat;
@@ -13,9 +15,9 @@ namespace TicketFlow.SampleHost;
 /// <summary>
 /// Idempotent demo provisioning (existing records are left unchanged): workspace settings, a live-chat inbox with widget and channel
 /// endpoint (<see cref="WidgetKey"/>), the <c>tier1</c> team, users <c>admin</c> (Owner), <c>agent1</c> and <c>agent2</c> (Agent),
-/// grant-holding API clients for the channel worker, routing engine, SLA tracker, automation and the MCP agent, a public help-center portal with one
-/// published article and a CSAT survey. Grants and stores are written directly (trusted provisioning), feature content through the
-/// authorized services as <c>admin</c>.
+/// grant-holding API clients for the channel worker, routing engine, SLA tracker, automation and the MCP agent, demo service accounts
+/// with hashed API keys, demo IdentityFlow role federation mappings, a public help-center portal with one published article and a CSAT survey.
+/// Grants and stores are written directly (trusted provisioning), feature content through the authorized services as <c>admin</c>.
 /// </summary>
 public static class SampleSeeder
 {
@@ -28,6 +30,18 @@ public static class SampleSeeder
     /// granted the built-in Agent role.
     /// </summary>
     public static ApiClientId McpAssistant { get; } = new("idf:mcp-assistant");
+
+    /// <summary>Demo service account for ticket synchronization (Agent role).</summary>
+    public static ApiClientId TicketSyncServiceAccount { get; } = new("sa-ticket-sync");
+
+    /// <summary>Demo service account for read-only reporting exports (Viewer role).</summary>
+    public static ApiClientId ReportingExportServiceAccount { get; } = new("sa-reporting-export");
+
+    /// <summary>Development-only seeded API key for <see cref="TicketSyncServiceAccount"/> (stored as SHA-256 hash only).</summary>
+    public const string DemoTicketSyncApiKey = "tf_sa_demo0001.demo_ticket_sync_key_not_for_production";
+
+    /// <summary>Development-only seeded API key for <see cref="ReportingExportServiceAccount"/> (stored as SHA-256 hash only).</summary>
+    public const string DemoReportingExportApiKey = "tf_sa_demo0002.demo_reporting_export_key_not_for_production";
 
     private static readonly InboxId ChatInbox = new("web-chat");
 
@@ -63,6 +77,8 @@ public static class SampleSeeder
         await GrantAsync("agent2", new UserId("agent2"), BuiltInRoles.Agent.Id);
         await GrantAsync("mcp-assistant", McpAssistant, BuiltInRoles.Agent.Id);
 
+        await SeedServiceAccountsAndFederationAsync(services, partition, scope, GrantAsync, cancellationToken);
+
         await services.GetRequiredService<IInboxStore>().CreateAsync(scope, new Inbox(ChatInbox, "Website chat", new ChannelBinding(new ChannelKind("livechat"), "cfg-web"),
             greetingMessage: "Hi! How can we help today?"), cancellationToken);
         await services.GetRequiredService<ITeamStore>().CreateAsync(scope, new Team(new TeamId("tier1"), "Tier 1", "First-line support",
@@ -88,5 +104,63 @@ public static class SampleSeeder
         await services.GetRequiredService<ConversationOutboxDispatcher>().RegisterAsync(cancellationToken);
         await SampleDemoData.SeedAsync(services, settings, cancellationToken);
         logger.LogInformation("Seeded the sample workspace (widget key {WidgetKey}; users admin, agent1, agent2).", WidgetKey);
+    }
+
+    private static async Task SeedServiceAccountsAndFederationAsync(
+        IServiceProvider services,
+        AccessPartition partition,
+        TicketScope scope,
+        Func<string, GrantSubject, RoleId, Task> grantAsync,
+        CancellationToken cancellationToken)
+    {
+        var workspaceScope = new WorkspaceGrantScope(scope.WorkspaceId);
+
+        if (services.GetService<IServiceAccountStore>() is { } serviceAccounts
+            && services.GetService<IApiKeyStore>() is { } apiKeys)
+        {
+            var demoAccounts = new (ApiClientId ClientId, string DisplayName, string Description, RoleId Role, string GrantKey, ApiKeyId KeyId, string KeyName, string PlaintextKey)[]
+            {
+                (TicketSyncServiceAccount, "Ticket Sync Worker", "Syncs support ticket updates with external issue trackers.", BuiltInRoles.Agent.Id, "sa-ticket-sync",
+                    new ApiKeyId("seed-key-ticket-sync"), "demo-sync-key", DemoTicketSyncApiKey),
+                (ReportingExportServiceAccount, "Reporting Exporter", "Read-only export of support metrics and conversation summaries.", BuiltInRoles.Viewer.Id, "sa-reporting-export",
+                    new ApiKeyId("seed-key-reporting-export"), "demo-export-key", DemoReportingExportApiKey),
+            };
+
+            foreach (var demo in demoAccounts)
+            {
+                if (await serviceAccounts.FindAsync(partition, demo.ClientId, cancellationToken) is null)
+                    await serviceAccounts.CreateAsync(new ServiceAccount(demo.ClientId, partition, workspaceScope, demo.DisplayName, demo.Description), "system:seed", cancellationToken);
+
+                await grantAsync(demo.GrantKey, demo.ClientId, demo.Role);
+
+                if (await apiKeys.FindByIdAsync(partition, demo.KeyId, cancellationToken) is null)
+                {
+                    var prefix = demo.PlaintextKey[..demo.PlaintextKey.IndexOf('.')];
+                    var hashHex = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(demo.PlaintextKey)));
+                    await apiKeys.CreateAsync(demo.KeyId, partition, demo.ClientId, demo.KeyName, prefix, hashHex, "system:seed", expiresAtUtc: null, cancellationToken);
+                }
+            }
+        }
+
+        if (services.GetService<IRoleFederationMappingStore>() is { } federationMappings)
+        {
+            var demoMappings = new (RoleFederationMappingId Id, string ExternalRole, RoleId Role, string Description)[]
+            {
+                (new RoleFederationMappingId("seed-fed-idf-support-agents"), "idf:support-agents", BuiltInRoles.Agent.Id,
+                    "Maps IdentityFlow support agents group to the TicketFlow Agent role."),
+                (new RoleFederationMappingId("seed-fed-idf-support-viewers"), "idf:support-viewers", BuiltInRoles.Viewer.Id,
+                    "Maps IdentityFlow support viewers group to the TicketFlow Viewer role."),
+            };
+
+            foreach (var demo in demoMappings)
+                if (await federationMappings.FindAsync(partition, demo.Id, cancellationToken) is null)
+                    await federationMappings.UpsertAsync(
+                        demo.Id,
+                        new RoleFederationMapping("identityflow", demo.ExternalRole, demo.Role, partition, workspaceScope, demo.Description),
+                        isEnabled: true,
+                        "system:seed",
+                        expectedVersion: null,
+                        cancellationToken);
+        }
     }
 }

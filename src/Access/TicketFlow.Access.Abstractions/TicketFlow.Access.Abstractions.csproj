@@ -5,4 +5,8 @@
   <ItemGroup>
     <ProjectReference Include="../../TicketFlow.Core/TicketFlow.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="TicketFlow.Access" />
+    <InternalsVisibleTo Include="TicketFlow.Access.AspNetCore" />
+  </ItemGroup>
 </Project>

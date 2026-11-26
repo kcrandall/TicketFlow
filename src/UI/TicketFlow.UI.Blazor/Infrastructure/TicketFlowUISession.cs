@@ -140,14 +140,14 @@ public sealed class TicketFlowUISession
             if (displayNameResolved)
                 return cachedDisplayName!;
             var user = Http.User;
-            cachedDisplayName = ClaimDisplayName(user) ?? UserName(UserId);
+            cachedDisplayName = ClaimDisplayName(user) ?? (principal is ApiClientPrincipal client ? client.ClientId.Value : UserName(UserId));
             displayNameResolved = true;
             return cachedDisplayName;
         }
     }
 
     private static string? ClaimDisplayName(ClaimsPrincipal user) =>
-        user.FindFirstValue("name") ?? user.FindFirstValue(ClaimTypes.Name) ?? user.Identity?.Name;
+        user.FindFirstValue("display_name") ?? user.FindFirstValue("name") ?? user.FindFirstValue(ClaimTypes.Name) ?? user.Identity?.Name;
 
     public string? Email => Http.User.FindFirstValue("email") ?? Http.User.FindFirstValue(ClaimTypes.Email);
 
@@ -238,13 +238,95 @@ public sealed class TicketFlowUISession
             return new TicketFlowUISession(http, options, UiSessionState.Unauthenticated, null, null, none, theme);
         var workspace = options.ResolveWorkspace is { } resolveWorkspace ? await resolveWorkspace(http).ConfigureAwait(false) : options.Workspace;
         var partitions = services.GetService<ITicketFlowPartitionResolver>();
-        var resolver = services.GetService<ITicketFlowPrincipalResolver>();
-        if (workspace is not { } id || partitions is null || resolver is null || await partitions.ResolveAsync(http, http.RequestAborted).ConfigureAwait(false) is not { } partition)
+        var ticketFlowResolver = services.GetService<ITicketFlowPrincipalResolver>();
+        var accessResolver = services.GetService<IAccessPrincipalResolver>();
+        if (workspace is not { } id || (ticketFlowResolver is null && accessResolver is null))
+            return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, null, null, none, theme);
+        var partition = partitions is not null
+            ? await partitions.ResolveAsync(http, http.RequestAborted).ConfigureAwait(false)
+            : PartitionFromClaims(http.User);
+        if (partition is null)
             return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, null, null, none, theme);
         var scope = partition.InWorkspace(id);
-        if (await resolver.ResolveAsync(http, scope, http.RequestAborted).ConfigureAwait(false) is not { } principal || principal.Scope != scope)
+        var principal = await ResolvePrincipalAsync(http, scope, ticketFlowResolver, accessResolver).ConfigureAwait(false);
+        if (principal is null || principal.Scope != scope)
             return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, scope, null, none, theme);
         return new TicketFlowUISession(http, options, UiSessionState.Ready, scope, principal, none, theme);
+    }
+
+    private static async Task<PrincipalRef?> ResolvePrincipalAsync(
+        HttpContext http,
+        TicketScope scope,
+        ITicketFlowPrincipalResolver? ticketFlowResolver,
+        IAccessPrincipalResolver? accessResolver)
+    {
+        if (accessResolver is not null && PreferAccessPrincipalResolver(http.User))
+            if (await accessResolver.ResolveAsync(http.User, scope, http.RequestAborted).ConfigureAwait(false) is { } direct)
+                return direct;
+
+        PrincipalRef? principal = null;
+        if (ticketFlowResolver is not null)
+            principal = await ticketFlowResolver.ResolveAsync(http, scope, http.RequestAborted).ConfigureAwait(false);
+
+        if (principal is null && accessResolver is not null)
+            return await accessResolver.ResolveAsync(http.User, scope, http.RequestAborted).ConfigureAwait(false);
+
+        if (principal is not null && principal.ExternalRoles.Count == 0 && accessResolver is not null && HasRoleClaims(http.User))
+        {
+            var resolved = await accessResolver.ResolveAsync(http.User, scope, http.RequestAborted).ConfigureAwait(false);
+            if (resolved is not null && resolved.ExternalRoles.Count > 0)
+            {
+                if (principal is UserPrincipal user && resolved is UserPrincipal resolvedUser && user.UserId == resolvedUser.UserId)
+                    return new UserPrincipal(scope, user.UserId, user.Teams.Count > 0 ? user.Teams : resolvedUser.Teams, resolvedUser.ExternalRoles);
+                if (principal is ApiClientPrincipal client && resolved is ApiClientPrincipal resolvedClient && client.ClientId == resolvedClient.ClientId)
+                    return new ApiClientPrincipal(scope, client.ClientId, resolvedClient.ExternalRoles);
+            }
+        }
+
+        return principal;
+    }
+
+    private static bool PreferAccessPrincipalResolver(ClaimsPrincipal user)
+    {
+        if (string.Equals(user.Identity?.AuthenticationType, "ApiKey", StringComparison.OrdinalIgnoreCase))
+            return true;
+        foreach (var claim in user.Claims)
+        {
+            if (string.Equals(claim.Type, "amr", StringComparison.OrdinalIgnoreCase)
+                && (string.Equals(claim.Value, "api_key", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(claim.Value, "external", StringComparison.OrdinalIgnoreCase)))
+                return true;
+            if (string.Equals(claim.Type, "api_key_id", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(claim.Type, "principal_type", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    private static bool HasRoleClaims(ClaimsPrincipal user)
+    {
+        foreach (var claim in user.Claims)
+            if (claim.Type is "role" or "roles" or ClaimTypes.Role && !string.IsNullOrWhiteSpace(claim.Value))
+                return true;
+        return false;
+    }
+
+    private static AccessPartition? PartitionFromClaims(ClaimsPrincipal user)
+    {
+        var tenant = user.FindFirstValue("tenant_id");
+        var project = user.FindFirstValue("project_id");
+        var environment = user.FindFirstValue("environment_id") ?? user.FindFirstValue("environment");
+        var app = user.FindFirstValue("app_id") ?? user.FindFirstValue("app_name");
+        if (string.IsNullOrWhiteSpace(tenant) || string.IsNullOrWhiteSpace(project) || string.IsNullOrWhiteSpace(environment) || string.IsNullOrWhiteSpace(app))
+            return null;
+        try
+        {
+            return new AccessPartition(tenant.Trim(), project.Trim(), environment.Trim(), app.Trim());
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
     }
 
     /// <summary>Resolves the session of <paramref name="http"/>: authentication state, scope, principal, permission snapshot and theme.</summary>
@@ -422,13 +504,19 @@ public sealed class UiSensitivePermissionCache(TimeProvider time)
     private static readonly IReadOnlySet<Permission> Empty = new HashSet<Permission>();
     private readonly ConcurrentDictionary<string, (DateTimeOffset Expires, IReadOnlySet<Permission> Permissions)> entries = new(StringComparer.Ordinal);
 
-    public static string Key(PrincipalRef principal) => principal switch
+    public static string Key(PrincipalRef principal)
     {
-        UserPrincipal user => $"{principal.Scope}|u|{user.UserId.Value}|{string.Join(',', user.Teams.Select(team => team.Value).Order(StringComparer.Ordinal))}",
-        ApiClientPrincipal client => $"{principal.Scope}|c|{client.ClientId.Value}",
-        AutomationPrincipal automation => $"{principal.Scope}|a|{automation.AutomationId}",
-        SystemPrincipal system => $"{principal.Scope}|s|{system.Component}",
-    };
+        var externalRoles = principal.ExternalRoles.Count == 0
+            ? string.Empty
+            : "|" + string.Join(',', principal.ExternalRoles.Order(StringComparer.OrdinalIgnoreCase));
+        return principal switch
+        {
+            UserPrincipal user => $"{principal.Scope}|u|{user.UserId.Value}|{string.Join(',', user.Teams.Select(team => team.Value).Order(StringComparer.Ordinal))}{externalRoles}",
+            ApiClientPrincipal client => $"{principal.Scope}|c|{client.ClientId.Value}{externalRoles}",
+            AutomationPrincipal automation => $"{principal.Scope}|a|{automation.AutomationId}",
+            SystemPrincipal system => $"{principal.Scope}|s|{system.Component}",
+        };
+    }
 
     public bool TryGet(string key, out IReadOnlySet<Permission> permissions)
     {

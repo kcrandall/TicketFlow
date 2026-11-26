@@ -218,6 +218,22 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
         }
     }
 
+    public Task<IReadOnlyList<StoredAccessGrant>> ListAllForSubjectAsync(AccessPartition partition, GrantSubject subject, WorkspaceId fallbackWorkspace, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        lock (gate)
+        {
+            if (!bySubject.TryGetValue(partition, subject, out var ids) || ids.Count == 0)
+                return Task.FromResult<IReadOnlyList<StoredAccessGrant>>([]);
+            var result = new List<StoredAccessGrant>(ids.Count);
+            foreach (var id in ids)
+                result.Add(grants[partition, id]);
+            if (result.Count > 1)
+                result.Sort(static (left, right) => string.CompareOrdinal(left.Grant.Id.Value, right.Grant.Id.Value));
+            return Task.FromResult<IReadOnlyList<StoredAccessGrant>>(result);
+        }
+    }
+
     public Task<IReadOnlyList<StoredAccessGrant>> DeleteManyAsync(AccessPartition partition, IReadOnlyList<(GrantId Id, long ExpectedRevision)> targets, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(partition);

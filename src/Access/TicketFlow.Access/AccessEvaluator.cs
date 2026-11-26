@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Options;
 using TicketFlow.Core;
 
 namespace TicketFlow.Access;
@@ -18,13 +19,18 @@ public sealed class AccessEvaluator : IAccessEvaluator
         IAccessRoleStore roles,
         IAccessFieldPolicyStore policies,
         IAccessAuditSink audit,
-        TimeProvider time)
+        TimeProvider time,
+        IOptions<AccessControlOptions>? options = null,
+        IServiceAccountStore? serviceAccounts = null,
+        IRoleFederationMappingStore? roleFederationMappings = null)
     {
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(grants);
         ArgumentNullException.ThrowIfNull(roles);
         ArgumentNullException.ThrowIfNull(time);
-        engine = new(catalog, grants, roles, time);
+        var resolvedOptions = options?.Value;
+        resolvedOptions?.Validate();
+        engine = new(catalog, grants, roles, time, resolvedOptions, serviceAccounts, roleFederationMappings);
         this.policies = policies ?? throw new ArgumentNullException(nameof(policies));
         this.audit = audit ?? throw new ArgumentNullException(nameof(audit));
     }
@@ -39,6 +45,15 @@ public sealed class AccessEvaluator : IAccessEvaluator
         if (AccessEngine.Precheck(request.Principal, definition is not null, resource.Scope) is { } reason)
         {
             AccessDecision rejected = new AccessDenied(permission, reason);
+            if (sensitive)
+                await RecordDecisionAsync(request, rejected, engine.Now, cancellationToken).ConfigureAwait(false);
+            return rejected;
+        }
+
+        var (serviceAccountDenial, _) = await engine.CheckServiceAccountAsync(request.Principal, resource.Scope, resource, cancellationToken).ConfigureAwait(false);
+        if (serviceAccountDenial is { } saReason)
+        {
+            AccessDecision rejected = new AccessDenied(permission, saReason);
             if (sensitive)
                 await RecordDecisionAsync(request, rejected, engine.Now, cancellationToken).ConfigureAwait(false);
             return rejected;
@@ -59,6 +74,10 @@ public sealed class AccessEvaluator : IAccessEvaluator
         ArgumentNullException.ThrowIfNull(request);
         var resource = request.Resource;
         if (engine.Precheck(request.Principal, request.ReadPermission, resource.Scope) is not null)
+            return await RefuseAsync(request, RevealRefusal.ReadDenied, engine.Now, cancellationToken).ConfigureAwait(false);
+
+        var (serviceAccountDenial, _) = await engine.CheckServiceAccountAsync(request.Principal, resource.Scope, resource, cancellationToken).ConfigureAwait(false);
+        if (serviceAccountDenial is not null)
             return await RefuseAsync(request, RevealRefusal.ReadDenied, engine.Now, cancellationToken).ConfigureAwait(false);
 
         var context = await engine.LoadAsync(request.Principal, resource.Scope, cancellationToken).ConfigureAwait(false);
@@ -109,11 +128,11 @@ public sealed class AccessEvaluator : IAccessEvaluator
             return MaskOutcome.Masked;
         var standard = result.StandardAllows;
         for (var i = 0; i < standard.Count; i++)
-            if (unmasked.Contains(standard[i].Grant.Role))
+            if (!standard[i].IsRoleStripped && unmasked.Contains(standard[i].Grant.Role))
                 return MaskOutcome.UnmaskedByStandard;
         var breakGlass = result.BreakGlassAllows;
         for (var i = 0; i < breakGlass.Count; i++)
-            if (unmasked.Contains(breakGlass[i].Grant.Role))
+            if (!breakGlass[i].IsRoleStripped && unmasked.Contains(breakGlass[i].Grant.Role))
                 return MaskOutcome.UnmaskedByBreakGlass;
         return MaskOutcome.Masked;
     }
@@ -222,6 +241,14 @@ public sealed class AccessEvaluator : IAccessEvaluator
         }
 
         AccessContext? context = null;
+        StoredServiceAccount? serviceAccount = null;
+        AccessDenialReason? serviceAccountDenial = null;
+        if (anyAllowed)
+        {
+            (serviceAccountDenial, serviceAccount) = await engine.CheckServiceAccountAsync(principal, scope, resource: null, cancellationToken).ConfigureAwait(false);
+            if (serviceAccountDenial is not null)
+                anyAllowed = false;
+        }
         if (anyAllowed)
         {
             var contextTask = engine.LoadAsync(principal, scope, cancellationToken);
@@ -248,13 +275,13 @@ public sealed class AccessEvaluator : IAccessEvaluator
                 }
             }
         }
-        return new BatchContext(this, principal, scope, loaded, entries, context);
+        return new BatchContext(this, principal, scope, loaded, entries, context, serviceAccount, serviceAccountDenial);
     }
 
     private readonly record struct LoadedPermission(AccessDenialReason? Precheck, bool Sensitive, AccessFieldPolicy[]? Policies);
 
     private sealed class BatchContext(AccessEvaluator owner, PrincipalRef principal, TicketScope scope, IReadOnlySet<Permission> permissions,
-        Dictionary<Permission, LoadedPermission> entries, AccessContext? context) : IAccessDecisionContext
+        Dictionary<Permission, LoadedPermission> entries, AccessContext? context, StoredServiceAccount? serviceAccount, AccessDenialReason? serviceAccountDenial) : IAccessDecisionContext
     {
         public PrincipalRef Principal { get; } = principal;
         public TicketScope Scope { get; } = scope;
@@ -268,7 +295,9 @@ public sealed class AccessEvaluator : IAccessEvaluator
             AccessDecision decision;
             if (entry.Precheck is { } reason)
                 decision = new AccessDenied(permission, reason);
-            else if (resource.Scope != Scope)
+            else if (serviceAccountDenial is { } saDenial)
+                decision = new AccessDenied(permission, saDenial);
+            else if (resource.Scope != Scope || (serviceAccount is not null && !serviceAccount.Account.AppliesTo(resource)))
                 decision = new AccessDenied(permission, AccessDenialReason.ScopeMismatch);
             else if (entry.Policies is null)
             {

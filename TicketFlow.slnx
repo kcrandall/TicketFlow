@@ -1,6 +1,7 @@
 <Solution>
   <Project Path="src/Access/TicketFlow.Access.Abstractions/TicketFlow.Access.Abstractions.csproj" />
   <Project Path="src/Access/TicketFlow.Access/TicketFlow.Access.csproj" />
+  <Project Path="src/Access/TicketFlow.Access.AspNetCore/TicketFlow.Access.AspNetCore.csproj" />
   <Project Path="src/Access/TicketFlow.Access.Stores.Postgres/TicketFlow.Access.Stores.Postgres.csproj" />
   <Project Path="src/Contacts/TicketFlow.Contacts.Abstractions/TicketFlow.Contacts.Abstractions.csproj" />
   <Project Path="src/Contacts/TicketFlow.Contacts/TicketFlow.Contacts.csproj" />
@@ -35,6 +36,7 @@
   <Project Path="src/Workspaces/TicketFlow.Workspaces.Stores.Postgres/TicketFlow.Workspaces.Stores.Postgres.csproj" />
   <Project Path="tests/Access/TicketFlow.Access.StoreContracts/TicketFlow.Access.StoreContracts.csproj" />
   <Project Path="tests/Access/TicketFlow.Access.Tests/TicketFlow.Access.Tests.csproj" />
+  <Project Path="tests/Access/TicketFlow.Access.AspNetCore.Tests/TicketFlow.Access.AspNetCore.Tests.csproj" />
   <Project Path="tests/Access/TicketFlow.Access.Stores.Postgres.Tests/TicketFlow.Access.Stores.Postgres.Tests.csproj" />
   <Project Path="tests/Contacts/TicketFlow.Contacts.StoreContracts/TicketFlow.Contacts.StoreContracts.csproj" />
   <Project Path="tests/Contacts/TicketFlow.Contacts.Tests/TicketFlow.Contacts.Tests.csproj" />

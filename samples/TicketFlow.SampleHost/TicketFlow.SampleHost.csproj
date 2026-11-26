@@ -11,6 +11,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/TicketFlow/TicketFlow.csproj" />
     <ProjectReference Include="../../src/Access/TicketFlow.Access/TicketFlow.Access.csproj" />
+    <ProjectReference Include="../../src/Access/TicketFlow.Access.AspNetCore/TicketFlow.Access.AspNetCore.csproj" />
     <ProjectReference Include="../../src/Workspaces/TicketFlow.Workspaces/TicketFlow.Workspaces.csproj" />
     <ProjectReference Include="../../src/Contacts/TicketFlow.Contacts/TicketFlow.Contacts.csproj" />
     <ProjectReference Include="../../src/Conversations/TicketFlow.Conversations/TicketFlow.Conversations.csproj" />

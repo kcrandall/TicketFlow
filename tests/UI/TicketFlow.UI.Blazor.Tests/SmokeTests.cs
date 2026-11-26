@@ -96,6 +96,8 @@ public sealed partial class SmokeTests
     [DataRow("/support/access/grants", "New grant")]
     [DataRow("/support/access/field-policies", "contact.phone")]
     [DataRow("/support/access/break-glass", "Activate")]
+    [DataRow("/support/access/service-accounts", "Ticket Sync Worker")]
+    [DataRow("/support/access/federation", "idf:support-agents")]
     [DataRow("/support/settings", "Acme Support")]
     [DataRow("/support/settings/theme", "Color theme")]
     public async Task AdminPagesRenderWithStaticSsr(string path, string expected)
@@ -245,7 +247,8 @@ public sealed partial class SmokeTests
         ("/support/channels", "channel.endpoint.create"), ("/support/routing", "routing.policy.save"), ("/support/sla", "sla.policy.save"),
         ("/support/automation", "automation.rule.save"), ("/support/help-center", "helpcenter.collection.create"), ("/support/surveys", "survey.toggle"),
         ("/support/access", "access.role.save"), ("/support/access/grants", "access.grant.create"), ("/support/access/field-policies", "access.field.create"),
-        ("/support/access/break-glass", "access.breakglass"), ("/support/settings", "settings.save"),
+        ("/support/access/break-glass", "access.breakglass"), ("/support/access/service-accounts", "access.serviceaccount.create"),
+        ("/support/access/federation", "access.federation.create"), ("/support/settings", "settings.save"),
     ];
 
     [TestMethod]

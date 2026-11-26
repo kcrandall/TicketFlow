@@ -1,7 +1,27 @@
-<TabLinks Tabs="@([new TabLinks.Tab("Roles", Session.Url("access"), Active == "roles"), new TabLinks.Tab("Grants", Session.Url("access/grants"), Active == "grants"),
-                  new TabLinks.Tab("Field policies", Session.Url("access/field-policies"), Active == "fields"), new TabLinks.Tab("Break-glass", Session.Url("access/break-glass"), Active == "break-glass")])" />
+<TabLinks Tabs="@Tabs" />
 
 @code {
-    [CascadingParameter] public TicketFlowUISession Session { get; set; } = default!;
+    [CascadingParameter] public TicketFlowUISession? Session { get; set; }
     [Parameter] public string Active { get; set; } = "roles";
+
+    private IReadOnlyList<TabLinks.Tab> Tabs
+    {
+        get
+        {
+            var tabs = new List<TabLinks.Tab>(6)
+            {
+                new("Roles", TabUrl("access"), Active == "roles"),
+                new("Grants", TabUrl("access/grants"), Active == "grants"),
+                new("Field policies", TabUrl("access/field-policies"), Active == "fields"),
+                new("Break-glass", TabUrl("access/break-glass"), Active == "break-glass"),
+            };
+            if (Session is null || (Session.Options.ManageApiKeysInUI && Session.Has<IServiceAccountService>()))
+                tabs.Add(new("Service Accounts", TabUrl("access/service-accounts"), Active == "service-accounts"));
+            if (Session is null || Session.Has<IRoleFederationService>())
+                tabs.Add(new("Role Federation", TabUrl("access/federation"), Active == "federation"));
+            return tabs;
+        }
+    }
+
+    private string TabUrl(string path) => Session?.Url(path) ?? "/" + path;
 }

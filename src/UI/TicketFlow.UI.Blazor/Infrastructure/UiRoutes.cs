@@ -45,6 +45,8 @@ public static class UiRoutes
             ("access/grants", typeof(AccessGrantsPage), "access"),
             ("access/field-policies", typeof(FieldPoliciesPage), "access"),
             ("access/break-glass", typeof(BreakGlassPage), "access"),
+            ("access/service-accounts", typeof(ServiceAccountsPage), "access"),
+            ("access/federation", typeof(RoleFederationPage), "access"),
             ("settings", typeof(SettingsPage), "settings"),
             ("settings/theme", typeof(ThemeSettingsPage), "settings"),
         }.Select(item =>

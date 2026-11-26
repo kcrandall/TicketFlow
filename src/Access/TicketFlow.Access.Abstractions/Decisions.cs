@@ -80,6 +80,9 @@ public enum AccessDenialReason
 
     /// <summary>A query plan would exceed <see cref="AccessFilter.MaximumNodes"/>; the planner returned deny-all.</summary>
     FilterLimitExceeded = 6,
+
+    /// <summary>The acting API client belongs to a disabled service account.</summary>
+    ServiceAccountDisabled = 7,
 }
 
 /// <summary>Request to reveal one masked field. The value itself never passes through the access engine.</summary>

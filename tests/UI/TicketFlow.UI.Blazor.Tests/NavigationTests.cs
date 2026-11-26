@@ -83,6 +83,10 @@ public sealed class NavigationTests
         Assert.AreEqual(typeof(TicketFlow.UI.Blazor.Pages.ConversationDetailPage), detail.Component);
         Assert.AreEqual("c-1001", detail.Parameters["Id"]);
         Assert.AreEqual("automation", UiRoutes.Match("automation/rules/tag-refunds")!.Section);
+        Assert.AreEqual(typeof(TicketFlow.UI.Blazor.Pages.ServiceAccountsPage), UiRoutes.Match("access/service-accounts")!.Component);
+        Assert.AreEqual("access", UiRoutes.Match("access/service-accounts")!.Section);
+        Assert.AreEqual(typeof(TicketFlow.UI.Blazor.Pages.RoleFederationPage), UiRoutes.Match("access/federation")!.Component);
+        Assert.AreEqual("access", UiRoutes.Match("access/federation")!.Section);
         Assert.IsNull(UiRoutes.Match("conversations/a/b"));
         Assert.IsNull(UiRoutes.Match("unknown"));
     }

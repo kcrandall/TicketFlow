@@ -73,6 +73,12 @@ public sealed class TicketFlowBlazorUIOptions
     /// <summary>Rows per list page (default 25, 1-100).</summary>
     public int PageSize { get; set; } = 25;
 
+    /// <summary>
+    /// Shows the Service Accounts &amp; API Keys management tab and forms in the Access UI (default true).
+    /// Set to <see langword="false"/> when an external identity provider manages service accounts and API keys and TicketFlow only consumes roles.
+    /// </summary>
+    public bool ManageApiKeysInUI { get; set; } = true;
+
     internal void Validate()
     {
         if (string.IsNullOrWhiteSpace(BasePath) || !BasePath.StartsWith('/') || (BasePath.Length > 1 && BasePath.EndsWith('/')) || BasePath.Contains("//", StringComparison.Ordinal))

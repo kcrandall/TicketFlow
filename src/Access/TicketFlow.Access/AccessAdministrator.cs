@@ -25,7 +25,9 @@ public sealed class AccessAdministrator : IAccessAdministrator
         IAccessFieldPolicyStore policies,
         IAccessAuditSink audit,
         TimeProvider time,
-        IOptions<AccessControlOptions> options)
+        IOptions<AccessControlOptions> options,
+        IServiceAccountStore? serviceAccounts = null,
+        IRoleFederationMappingStore? roleFederationMappings = null)
     {
         ArgumentNullException.ThrowIfNull(catalog);
         ArgumentNullException.ThrowIfNull(time);
@@ -36,7 +38,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         ArgumentNullException.ThrowIfNull(options);
         this.options = options.Value;
         this.options.Validate();
-        engine = new(catalog, grants, roles, time);
+        engine = new(catalog, grants, roles, time, this.options, serviceAccounts, roleFederationMappings);
     }
 
     public async Task<TicketResult<AccessChangeApplied<StoredAccessRole>>> CreateRoleAsync(PrincipalRef actor, AccessRole role, CancellationToken cancellationToken = default)
@@ -305,6 +307,9 @@ public sealed class AccessAdministrator : IAccessAdministrator
         var items = Bounded(conferrals, nameof(conferrals));
         if (engine.Precheck(actor, AccessPermissions.AccessManage, actor.Scope) is { } reason)
             return Refused(["The actor is not authorized."], reason);
+        var (serviceAccountDenial, _) = await engine.CheckServiceAccountAsync(actor, actor.Scope, resource: null, cancellationToken).ConfigureAwait(false);
+        if (serviceAccountDenial is { } saReason)
+            return Refused(["The actor is not authorized."], saReason);
         var now = engine.Now;
         AccessContext? context = null;
         Dictionary<RoleId, AccessRole>? custom = null;
@@ -331,7 +336,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
             }
             if (role is null)
                 continue;
-            context ??= await engine.LoadAsync(actor, actor.Scope, cancellationToken).ConfigureAwait(false);
+            context ??= await engine.LoadAsync(actor, actor.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
             var tenantOnly = grant.Scope is TenantGrantScope;
             if (items.Count > 1)
                 decisionCache ??= [];
@@ -377,7 +382,10 @@ public sealed class AccessAdministrator : IAccessAdministrator
             return AccessCheckPassed.Instance;
         if (engine.Precheck(actor, AccessPermissions.AccessManage, actor.Scope) is { } reason)
             return Refused(["The actor is not authorized."], reason);
-        var context = await engine.LoadAsync(actor, actor.Scope, cancellationToken).ConfigureAwait(false);
+        var (serviceAccountDenial, _) = await engine.CheckServiceAccountAsync(actor, actor.Scope, resource: null, cancellationToken).ConfigureAwait(false);
+        if (serviceAccountDenial is { } saReason)
+            return Refused(["The actor is not authorized."], saReason);
+        var context = await engine.LoadAsync(actor, actor.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
         for (var i = 0; i < items.Count; i++)
         {
             var grant = items[i];
@@ -510,7 +518,10 @@ public sealed class AccessAdministrator : IAccessAdministrator
     {
         if (engine.Precheck(actor, permission, resource.Scope) is { } reason)
             return (new(TicketFailureKind.Forbidden, ["The actor is not authorized."], reason), context);
-        context ??= await engine.LoadAsync(actor, resource.Scope, cancellationToken).ConfigureAwait(false);
+        var (serviceAccountDenial, _) = await engine.CheckServiceAccountAsync(actor, resource.Scope, resource, cancellationToken).ConfigureAwait(false);
+        if (serviceAccountDenial is { } saReason)
+            return (new(TicketFailureKind.Forbidden, ["The actor is not authorized."], saReason), context);
+        context ??= await engine.LoadAsync(actor, resource.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
         var result = AccessEngine.EvaluateSimple(context, permission, resource, includeBreakGlass: false, tenantAllowsOnly);
         return (result.Denial is { } denial ? new(TicketFailureKind.Forbidden, ["The actor is not authorized."], denial) : null, context);
     }

@@ -5,6 +5,7 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.FileProviders;
 using Npgsql;
 using TicketFlow.Access;
+using TicketFlow.Access.AspNetCore;
 using TicketFlow.Access.Stores.Postgres;
 using TicketFlow.Automation;
 using TicketFlow.Automation.Stores.Postgres;
@@ -70,7 +71,11 @@ public static class SampleHostApp
         services.AddSingleton<TimeProvider>(clock);
 
         var ticketFlow = services.AddTicketFlow()
-            .AddAccessControl()
+            .AddAccessControl(options =>
+            {
+                options.RoleFederation.Mode = RoleFederationMode.MergeWithLocalGrants;
+                options.RoleFederation.MapTeamsAsExternalRoles = true;
+            })
             .AddWorkspaces()
             .AddContacts()
             .AddConversations()
@@ -107,6 +112,8 @@ public static class SampleHostApp
                 .AddPostgresAutomationStores(dataSource).AddPostgresHelpCenterStores(dataSource).AddPostgresSurveyStores(dataSource)
                 .AddPostgresChannelStores(dataSource).AddPostgresLiveChatStores(dataSource).AddPostgresWorkerCheckpoints(dataSource)
                 .AddPostgresReportingStores(dataSource).AddPostgresStaffIdentityStores(dataSource).AddPostgresEventStores(dataSource);
+            // Fill in in-memory service account, API key, and role federation mapping stores where Postgres stores are not yet registered (TryAdd preserves Postgres stores).
+            ticketFlow.AddInMemoryAccessStores();
         }
         else
         {
@@ -154,17 +161,23 @@ public static class SampleHostApp
         if (settings.UsePostgres)
             health.AddCheck<PostgresHealthCheck>("postgres");
 
-        // Authentication. The development handler is for local use only and refuses to run outside Development. Production hosts plug in
-        // IdentityFlow (cookies, JWT bearer, API keys, PATs); AddIdentityFlowRealtimePrincipals() maps those users to TicketFlow principals.
-        if (configuration.GetValue<bool>("TicketFlow:DevelopmentAuthentication"))
+        // Authentication. Hybrid auth routes X-Api-Key / Bearer tf_sa_... to TicketFlowApiKeyAuthenticationHandler and everything else
+        // to the host's primary scheme (development handler in Development). Production hosts plug in IdentityFlow (cookies, JWT bearer,
+        // or reverse-proxy ExternalIdentity) as the primary scheme.
+        if (developmentAuthentication)
         {
             if (!builder.Environment.IsDevelopment())
                 throw new InvalidOperationException("TicketFlow:DevelopmentAuthentication is only allowed in the Development environment.");
-            services.AddAuthentication(DevelopmentAuthenticationHandler.SchemeName)
+            services
+                .AddTicketFlowHybridAuthentication(
+                    primaryScheme: DevelopmentAuthenticationHandler.SchemeName,
+                    configureApiKey: apiKey => apiKey.DefaultScope = settings.Scope)
                 .AddScheme<AuthenticationSchemeOptions, DevelopmentAuthenticationHandler>(DevelopmentAuthenticationHandler.SchemeName, null);
         }
         else
-            services.AddAuthentication();
+            services.AddTicketFlowApiKeyAuthentication(
+                configure: apiKey => apiKey.DefaultScope = settings.Scope,
+                setAsDefault: true);
         services.AddAuthorization();
         // Anonymous endpoints (public portal, survey responses, visitor hub, uploads) are limited per client IP. Behind a proxy, configure
         // forwarded headers first so RemoteIpAddress is the client's address.
@@ -188,6 +201,7 @@ public static class SampleHostApp
 
         app.MapTicketFlowWorkspaces();
         app.MapTicketFlowAccess();
+        app.MapTicketFlowRoleCatalogEndpoint(defaultScope: settings.Scope);
         app.MapTicketFlowContacts();
         app.MapTicketFlowConversations();
         app.MapTicketFlowRouting();

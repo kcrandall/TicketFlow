@@ -1,0 +1,352 @@
+@inherits UiPageBase
+@using System.Text.Json
+@using Microsoft.Extensions.Options
+@using TicketFlow.Workspaces
+
+<PageHeader Title="Access" Description="Map external identity provider roles and groups (IdentityFlow, OIDC, OAuth2-Proxy) to TicketFlow roles, and export TicketFlow's role catalog for IdP sync." />
+<AccessTabs Active="federation" />
+
+<AccessGate Denied="Denied">
+    @if (federationOptions is not null)
+    {
+        var isEnabledMode = federationOptions.Mode != RoleFederationMode.Disabled;
+        <div class="tf-alert @(isEnabledMode ? "tf-alert--info" : "tf-alert--warning")" data-federation-status>
+            <LucideIcon Name="@(isEnabledMode ? "globe" : "triangle-alert")" Size="16" Class="tf-alert__icon" />
+            <div class="tf-alert__body tf-stack tf-stack--sm" style="gap:6px">
+                <div class="tf-row" style="gap:8px">
+                    <span class="tf-alert__title">Role federation mode: @federationOptions.Mode</span>
+                    <span class="tf-badge @(isEnabledMode ? "tf-badge--info" : "tf-badge--warning")">@federationOptions.Mode</span>
+                    <BbBadge Variant="BadgeVariant.Outline">
+                        AllowAdministrativeRoles: @(federationOptions.AllowAdministrativeRoles ? "On" : "Off")
+                    </BbBadge>
+                    <BbBadge Variant="BadgeVariant.Outline">
+                        MapTeamsAsExternalRoles: @(federationOptions.MapTeamsAsExternalRoles ? "On" : "Off")
+                    </BbBadge>
+                </div>
+                <div class="tf-small tf-muted">
+                    @ModeSummary(federationOptions.Mode)
+                </div>
+            </div>
+        </div>
+    }
+
+    <div class="tf-card">
+        <div class="tf-card__header">
+            <div>
+                <div class="tf-card__title">External role mappings (@mappings.Count)</div>
+                <div class="tf-card__description">Map external role or group claims from your identity provider onto TicketFlow roles for a target scope.</div>
+            </div>
+        </div>
+        <div class="tf-card__content tf-card__content--flush">
+            <div class="tf-table-wrap">
+                <table class="tf-table">
+                    <thead>
+                        <tr>
+                            <th>Provider</th>
+                            <th>External role / group</th>
+                            <th>Target role</th>
+                            <th>Scope</th>
+                            <th>Status</th>
+                            <th>Description</th>
+                            <th class="tf-num"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var stored in mappings)
+                        {
+                            var mapping = stored.Mapping;
+                            <tr data-federation-mapping="@stored.Id.Value">
+                                <td class="tf-nowrap">
+                                    <BbBadge Variant="BadgeVariant.Secondary">@mapping.Provider</BbBadge>
+                                </td>
+                                <td class="tf-nowrap">
+                                    <span class="tf-code tf-mono">@mapping.ExternalRole</span>
+                                </td>
+                                <td class="tf-nowrap">
+                                    <span class="tf-badge">@RoleLabel(mapping.RoleId)</span>
+                                </td>
+                                <td class="tf-nowrap">
+                                    <BbBadge Variant="BadgeVariant.Outline">@ScopeLabel(mapping.Scope)</BbBadge>
+                                </td>
+                                <td class="tf-nowrap">
+                                    @if (stored.IsEnabled)
+                                    {
+                                        <span class="tf-badge tf-badge--success">Active</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="tf-badge tf-badge--warning">Disabled</span>
+                                    }
+                                </td>
+                                <td class="tf-small tf-muted" style="max-width:260px">
+                                    @(string.IsNullOrWhiteSpace(mapping.Description) ? "—" : mapping.Description)
+                                </td>
+                                <td class="tf-num tf-nowrap">
+                                    <div class="tf-row" style="gap:6px;justify-content:flex-end">
+                                        <TfForm Action="access.federation.toggle"
+                                                Revision="stored.Version"
+                                                Class="tf-inline-form">
+                                            <input type="hidden" name="id" value="@stored.Id.Value" />
+                                            <input type="hidden" name="provider" value="@mapping.Provider" />
+                                            <input type="hidden" name="externalRole" value="@mapping.ExternalRole" />
+                                            <input type="hidden" name="role" value="@mapping.RoleId.Value" />
+                                            <input type="hidden" name="scope" value="@MappingScopeValue(mapping.Scope)" />
+                                            <input type="hidden" name="description" value="@(mapping.Description ?? string.Empty)" />
+                                            <input type="hidden" name="enabled" value="@(stored.IsEnabled ? "false" : "true")" />
+                                            <button type="submit" class="tf-button tf-button--outline tf-button--xs">
+                                                @(stored.IsEnabled ? "Disable" : "Enable")
+                                            </button>
+                                        </TfForm>
+                                        <TfForm Action="access.federation.delete"
+                                                Revision="stored.Version"
+                                                Class="tf-inline-form">
+                                            <input type="hidden" name="id" value="@stored.Id.Value" />
+                                            <button type="submit" class="tf-button tf-button--ghost tf-button--xs" style="color:var(--destructive)">
+                                                Delete
+                                            </button>
+                                        </TfForm>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                        @if (mappings.Count == 0)
+                        {
+                            <tr>
+                                <td colspan="7" class="tf-muted">No external role mappings configured in this workspace.</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="tf-card">
+        <div class="tf-card__header">
+            <div>
+                <div class="tf-card__title">New external role mapping</div>
+                <div class="tf-card__description">Translate an external provider role or group claim into a TicketFlow role. Use <span class="tf-code">*</span> as provider to match any issuer.</div>
+            </div>
+        </div>
+        <div class="tf-card__content">
+            <TfForm Action="access.federation.create" Class="tf-form">
+                <div class="tf-form-grid">
+                    <div class="tf-field">
+                        <label class="tf-label" for="tf-fed-provider">Provider</label>
+                        <input id="tf-fed-provider"
+                               name="provider"
+                               class="tf-input tf-mono"
+                               list="tf-fed-providers"
+                               required
+                               maxlength="128"
+                               placeholder="identityflow"
+                               value="@CreateFormValue("provider", "identityflow")" />
+                        <datalist id="tf-fed-providers">
+                            @foreach (var suggestion in ProviderSuggestions)
+                            {
+                                <option value="@suggestion" />
+                            }
+                        </datalist>
+                    </div>
+                    <div class="tf-field">
+                        <label class="tf-label" for="tf-fed-external-role">External role / group</label>
+                        <input id="tf-fed-external-role"
+                               name="externalRole"
+                               class="tf-input tf-mono"
+                               required
+                               maxlength="256"
+                               placeholder="idf:support-agents"
+                               value="@CreateFormValue("externalRole")" />
+                    </div>
+                    <div class="tf-field">
+                        <label class="tf-label" for="tf-fed-role">Target TicketFlow role</label>
+                        <select id="tf-fed-role" name="role" class="tf-select">
+                            @foreach (var entry in roleNames)
+                            {
+                                <option value="@entry.Key" selected="@(CreateFormValue("role") == entry.Key)">@entry.Value</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="tf-field">
+                        <label class="tf-label" for="tf-fed-scope">Scope</label>
+                        <select id="tf-fed-scope" name="scope" class="tf-select">
+                            @if (CanManageTenant)
+                            {
+                                <option value="tenant" selected="@(CreateFormValue("scope", "workspace") == "tenant")">Tenant</option>
+                            }
+                            <option value="workspace" selected="@(CreateFormValue("scope", "workspace") == "workspace")">Whole workspace</option>
+                            @foreach (var team in Teams)
+                            {
+                                var optionValue = $"team:{team.Id.Value}";
+                                <option value="@optionValue" selected="@(CreateFormValue("scope", "workspace") == optionValue)">Team · @team.Name</option>
+                            }
+                            @foreach (var inbox in Inboxes)
+                            {
+                                var optionValue = $"inbox:{inbox.Inbox.Id.Value}";
+                                <option value="@optionValue" selected="@(CreateFormValue("scope", "workspace") == optionValue)">Inbox · @inbox.Inbox.Name</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="tf-field tf-field--full">
+                        <label class="tf-label" for="tf-fed-desc">Description (optional)</label>
+                        <input id="tf-fed-desc"
+                               name="description"
+                               class="tf-input"
+                               maxlength="1024"
+                               placeholder="Why members of this external role receive this TicketFlow role"
+                               value="@CreateFormValue("description")" />
+                    </div>
+                </div>
+                <div class="tf-form-actions">
+                    <BbButton Type="ButtonType.Submit">
+                        <LucideIcon Name="globe" Size="14" />Create mapping
+                    </BbButton>
+                </div>
+            </TfForm>
+        </div>
+    </div>
+
+    <div class="tf-card">
+        <div class="tf-card__header">
+            <div>
+                <div class="tf-card__title">Exportable role catalog for external IdP sync</div>
+                <div class="tf-card__description">
+                    Built-in and custom TicketFlow roles with their permissions and active federation mappings for synchronizing into an external identity provider.
+                </div>
+            </div>
+            @if (!string.IsNullOrEmpty(catalogJson))
+            {
+                <button type="button"
+                        class="tf-button tf-button--outline tf-button--xs"
+                        data-copy-target="#tf-role-catalog-json"
+                        data-copy-feedback="Copied!">
+                    <LucideIcon Name="copy" Size="12" />
+                    <span>Copy JSON</span>
+                </button>
+            }
+        </div>
+        <div class="tf-card__content tf-stack tf-stack--sm">
+            <div class="tf-small tf-muted">
+                External identity providers can poll the JSON endpoint at <span class="tf-code">/.well-known/ticketflow-roles</span>
+                (mapped via <span class="tf-code">MapTicketFlowRoleCatalogEndpoint</span>), or inject
+                <span class="tf-code">IRoleFederationService</span> in-process when hosted on the same ASP.NET Core server.
+            </div>
+            @if (!string.IsNullOrEmpty(catalogJson))
+            {
+                <pre class="tf-pre" style="max-height:360px;overflow:auto"><code id="tf-role-catalog-json">@catalogJson</code></pre>
+            }
+            else
+            {
+                <div class="tf-small tf-muted">Role catalog is unavailable for the current workspace.</div>
+            }
+        </div>
+    </div>
+</AccessGate>
+
+@code {
+    private static readonly string[] ProviderSuggestions =
+    [
+        "identityflow",
+        "oidc",
+        "okta",
+        "entra-id",
+        "keycloak",
+        "oauth2-proxy",
+        "*",
+    ];
+
+    private static readonly JsonSerializerOptions CatalogJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+    };
+
+    private readonly List<StoredRoleFederationMapping> mappings = [];
+    private readonly Dictionary<string, string> roleNames = new(StringComparer.Ordinal);
+    private RoleFederationOptions? federationOptions;
+    private string? catalogJson;
+
+    private bool CanManageTenant => Session.Can(AccessPermissions.AccessManageTenant);
+
+    private string? CreateFormValue(string field, string? fallback = null) =>
+        string.Equals(Session.FormValue("_action", null), "access.federation.create", StringComparison.OrdinalIgnoreCase)
+            ? Session.FormValue(field, fallback)
+            : fallback;
+
+    private string RoleLabel(RoleId roleId) => roleNames.GetValueOrDefault(roleId.Value, roleId.Value);
+
+    private string ScopeLabel(GrantScope scope) => scope switch
+    {
+        TenantGrantScope => "Tenant",
+        WorkspaceGrantScope => "Workspace",
+        TeamGrantScope team => "Team · " + TeamName(team.Team),
+        InboxGrantScope inbox => "Inbox · " + InboxName(inbox.Inbox),
+    };
+
+    private static string MappingScopeValue(GrantScope scope) => scope switch
+    {
+        TenantGrantScope => "tenant",
+        WorkspaceGrantScope => "workspace",
+        TeamGrantScope team => $"team:{team.Team.Value}",
+        InboxGrantScope inbox => $"inbox:{inbox.Inbox.Value}",
+    };
+
+    private static string ModeSummary(RoleFederationMode mode) => mode switch
+    {
+        RoleFederationMode.Disabled =>
+            "External role claims are currently ignored during authorization. Enable MergeWithLocalGrants or FederatedOnly in AccessControlOptions.RoleFederation to activate these mappings.",
+        RoleFederationMode.MergeWithLocalGrants =>
+            "External role mappings are merged with local TicketFlow grants. Explicit Deny grants always take precedence.",
+        RoleFederationMode.FederatedOnly =>
+            "Standard Allow permissions are resolved exclusively from external role mappings (local Deny grants still apply).",
+        _ => string.Empty,
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Service<IRoleFederationService>() is not { } federationService)
+        {
+            Denied = true;
+            return;
+        }
+
+        federationOptions = Service<IOptions<AccessControlOptions>>()?.Value.RoleFederation;
+
+        var workspaceTask = LoadWorkspaceAsync();
+        var mappingsTask = federationService.ListMappingsAsync(Actor, includeDisabled: true, Aborted).AsTask();
+        var catalogTask = federationService.GetRoleCatalogAsync(Actor, Aborted).AsTask();
+        var admin = Service<IAccessAdministrator>();
+        var rolesTask = admin?.ListRolesAsync(Actor, Aborted);
+
+        if (rolesTask is not null)
+            await Task.WhenAll(workspaceTask, mappingsTask, catalogTask, rolesTask);
+        else
+            await Task.WhenAll(workspaceTask, mappingsTask, catalogTask);
+
+        switch (mappingsTask.Result)
+        {
+            case TicketValue<IReadOnlyList<StoredRoleFederationMapping>> ok:
+                mappings.AddRange(
+                    ok.Value
+                        .OrderBy(static item => item.Mapping.Provider, StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(static item => item.Mapping.ExternalRole, StringComparer.OrdinalIgnoreCase));
+                break;
+            case TicketFailure:
+                Denied = true;
+                return;
+        }
+
+        if (catalogTask.Result is TicketValue<FederatedRoleCatalog> catalogSuccess)
+        {
+            catalogJson = JsonSerializer.Serialize(catalogSuccess.Value, CatalogJsonOptions);
+            foreach (var role in catalogSuccess.Value.Roles)
+                roleNames[role.RoleId.Value] = role.DisplayName;
+        }
+
+        if (rolesTask?.Result is TicketValue<IReadOnlyList<AccessRoleListing>> roleListings)
+            foreach (var listing in roleListings.Value)
+                roleNames[listing.Role.Id.Value] = listing.Role.Name;
+        else if (roleNames.Count == 0)
+            foreach (var builtIn in BuiltInRoles.All)
+                roleNames[builtIn.Id.Value] = builtIn.Name;
+    }
+}

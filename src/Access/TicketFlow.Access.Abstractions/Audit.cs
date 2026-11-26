@@ -21,6 +21,16 @@ public enum AccessAuditKind
     FieldPolicyUpdated = 11,
     FieldPolicyDeleted = 12,
     BreakGlassActivated = 13,
+    ServiceAccountCreated = 14,
+    ServiceAccountUpdated = 15,
+    ServiceAccountEnabled = 16,
+    ServiceAccountDisabled = 17,
+    ServiceAccountDeleted = 18,
+    ApiKeyCreated = 19,
+    ApiKeyRevoked = 20,
+    RoleFederationMappingCreated = 21,
+    RoleFederationMappingUpdated = 22,
+    RoleFederationMappingDeleted = 23,
 }
 
 public enum AccessAuditOutcome

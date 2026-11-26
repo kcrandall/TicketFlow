@@ -12,6 +12,9 @@ public sealed class AccessControlOptions
     /// <summary>Minimum non-whitespace justification length for break-glass activation. Default 10.</summary>
     public int MinimumBreakGlassJustificationLength { get; set; } = 10;
 
+    /// <summary>External identity role federation settings. Disabled by default.</summary>
+    public RoleFederationOptions RoleFederation { get; } = new();
+
     /// <exception cref="ArgumentOutOfRangeException">An option is out of range.</exception>
     public void Validate()
     {
@@ -19,5 +22,6 @@ public sealed class AccessControlOptions
             throw new ArgumentOutOfRangeException(nameof(MaximumBreakGlassDuration), "Break-glass duration must be positive and at most 24 hours.");
         if (MinimumBreakGlassJustificationLength is < 1 or > AccessGrant.MaximumJustificationLength)
             throw new ArgumentOutOfRangeException(nameof(MinimumBreakGlassJustificationLength));
+        RoleFederation.Validate();
     }
 }

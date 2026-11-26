@@ -1,3 +1,5 @@
+using System.Collections.Frozen;
+
 namespace TicketFlow.Core;
 
 /// <summary>
@@ -6,8 +8,43 @@ namespace TicketFlow.Core;
 /// </summary>
 public closed record PrincipalRef
 {
+    /// <summary>Maximum number of external role names carried in one snapshot.</summary>
+    public const int MaximumExternalRoles = 256;
+
     private protected PrincipalRef(TicketScope scope) => Scope = scope ?? throw new ArgumentNullException(nameof(scope));
 
     /// <summary>The full scope the principal acts within.</summary>
     public TicketScope Scope { get; }
+
+    /// <summary>External identity provider role names carried at resolution time for optional role federation.</summary>
+    public virtual IReadOnlySet<string> ExternalRoles => FrozenSet<string>.Empty;
+
+    protected static IReadOnlySet<string> SnapshotExternalRoles(IEnumerable<string>? externalRoles)
+    {
+        if (externalRoles is null)
+            return FrozenSet<string>.Empty;
+
+        var snapshot = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var role in externalRoles)
+        {
+            if (string.IsNullOrWhiteSpace(role))
+                continue;
+
+            var normalized = TicketScope.RequireIdentifier(role.Trim(), nameof(externalRoles));
+            if (snapshot.Add(normalized) && snapshot.Count > MaximumExternalRoles)
+                throw new ArgumentException($"A principal can carry at most {MaximumExternalRoles} external roles.", nameof(externalRoles));
+        }
+
+        return snapshot.Count == 0
+            ? FrozenSet<string>.Empty
+            : snapshot.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    protected static int ComputeExternalRolesHash(IReadOnlySet<string> externalRoles)
+    {
+        var hash = 0;
+        foreach (var role in externalRoles)
+            hash ^= StringComparer.OrdinalIgnoreCase.GetHashCode(role);
+        return hash;
+    }
 }

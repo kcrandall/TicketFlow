@@ -34,163 +34,177 @@ public sealed class MailboxMimeNormalizer(IMailboxAttachmentStore attachmentStor
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(rawMimeBytes);
 
-        using var stream = new MemoryStream(rawMimeBytes, writable: false);
-        var mime = await MimeMessage.LoadAsync(stream, cancellationToken).ConfigureAwait(false);
-
-        var messageId = NormalizeMessageId(mime.MessageId) ?? $"uid:{uidValidity}:{uid}";
-
-        // Check seen Message-Id BEFORE uploading any attachments to blob storage so rescans/duplicates never leak blobs.
-        if (isSeen is not null && await isSeen(messageId, cancellationToken).ConfigureAwait(false))
-            return (messageId, null, null, AlreadySeen: true);
-
-        // Extract sender from Reply-To (when present and valid) else From; email headers are never verified authentication.
-        var senderBox = mime.ReplyTo.Mailboxes.FirstOrDefault(m => !string.IsNullOrWhiteSpace(m.Address))
-            ?? mime.From.Mailboxes.FirstOrDefault(m => !string.IsNullOrWhiteSpace(m.Address));
-        if (senderBox is null)
-            return (messageId, null, "missing-sender", AlreadySeen: false);
-
-        var inReplyTo = NormalizeMessageId(mime.InReplyTo);
-        var references = new List<string>();
-        var seenRefs = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var rawRef in mime.References)
-        {
-            var normalized = NormalizeMessageId(rawRef);
-            if (normalized is not null && seenRefs.Add(normalized))
-            {
-                references.Add(normalized);
-                if (references.Count >= InboundChannelMessage.MaximumReferences)
-                    break;
-            }
-        }
-        if (inReplyTo is not null && references.Count < InboundChannelMessage.MaximumReferences && seenRefs.Add(inReplyTo))
-            references.Add(inReplyTo);
-
-        var attachments = new List<AttachmentRef>();
-        byte[]? chunk = null;
+        var fallbackMessageId = $"uid:{uidValidity}:{uid}";
+        var messageId = fallbackMessageId;
         try
         {
-            foreach (var entity in mime.Attachments)
+            using var stream = new MemoryStream(rawMimeBytes, writable: false);
+            var mime = await MimeMessage.LoadAsync(stream, cancellationToken).ConfigureAwait(false);
+
+            messageId = NormalizeMessageId(mime.MessageId) ?? fallbackMessageId;
+
+            // Check seen Message-Id BEFORE uploading any attachments to blob storage so rescans/duplicates never leak blobs.
+            if (isSeen is not null && await isSeen(messageId, cancellationToken).ConfigureAwait(false))
+                return (messageId, null, null, AlreadySeen: true);
+
+            // Extract and validate sender & message metadata BEFORE uploading attachments so invalid/poison messages never orphan blobs.
+            var senderBox = mime.ReplyTo.Mailboxes.FirstOrDefault(m => !string.IsNullOrWhiteSpace(m.Address))
+                ?? mime.From.Mailboxes.FirstOrDefault(m => !string.IsNullOrWhiteSpace(m.Address));
+            if (senderBox is null)
+                return (messageId, null, "missing-sender", AlreadySeen: false);
+
+            var sender = new ChannelSenderEvidence(ContactIdentityKind.Email, senderBox.Address.Trim(), verified: false);
+
+            var inReplyTo = NormalizeMessageId(mime.InReplyTo);
+            var references = new List<string>();
+            var seenRefs = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var rawRef in mime.References)
             {
-                if (attachments.Count >= config.MaximumAttachments)
-                    break;
-                if (entity is MimePart { Content: not null } part)
+                var normalized = NormalizeMessageId(rawRef);
+                if (normalized is not null && seenRefs.Add(normalized))
                 {
-                    chunk ??= ArrayPool<byte>.Shared.Rent(8192);
-                    await using var decoded = part.Content.Open();
-                    using var buffer = new MemoryStream();
-                    long total = 0;
-                    var oversized = false;
-                    int read;
-                    while ((read = await decoded.ReadAsync(chunk.AsMemory(0, 8192), cancellationToken).ConfigureAwait(false)) > 0)
-                    {
-                        total += read;
-                        if (total > config.MaximumAttachmentBytes)
-                        {
-                            oversized = true;
-                            break;
-                        }
-                        await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                    }
-                    if (oversized || total == 0)
-                        continue;
-                    buffer.Position = 0;
-                    var fileName = SanitizeFileName(part.FileName ?? "attachment.bin");
-                    var mediaType = SanitizeMediaType(part.ContentType?.MimeType ?? "application/octet-stream");
-                    var stored = await attachmentStore.StoreAsync(config.Scope, config.ConfigurationId,
-                        new MailboxAttachmentUpload(fileName, mediaType, total, buffer), cancellationToken).ConfigureAwait(false);
-                    attachments.Add(stored);
+                    references.Add(normalized);
+                    if (references.Count >= InboundChannelMessage.MaximumReferences)
+                        break;
                 }
             }
+            if (inReplyTo is not null && references.Count < InboundChannelMessage.MaximumReferences && seenRefs.Add(inReplyTo))
+                references.Add(inReplyTo);
+
+            var rawText = mime.TextBody is { } text ? ChannelText.SanitizeBody(text, ConversationMessageLimits.MaximumBodyBytes) : null;
+            var bodyText = string.IsNullOrWhiteSpace(rawText) ? null : rawText;
+            var rawHtml = mime.HtmlBody is { } html ? ChannelText.SanitizeBody(html, ConversationMessageLimits.MaximumBodyBytes * 2) : null;
+            var bodyHtml = string.IsNullOrWhiteSpace(rawHtml) ? null : rawHtml;
+            var subject = SanitizeHeaderText(mime.Subject, InboundChannelMessage.MaximumSubjectLength);
+            var displayName = SanitizeHeaderText(senderBox.Name, InboundChannelMessage.MaximumDisplayNameLength);
+            var receivedAt = mime.Date == default ? fallbackReceivedAt.ToUniversalTime() : mime.Date.ToUniversalTime();
+
+            var attachments = new List<AttachmentRef>();
+            byte[]? chunk = null;
+            try
+            {
+                foreach (var entity in mime.Attachments)
+                {
+                    if (attachments.Count >= config.MaximumAttachments)
+                        break;
+                    if (entity is MimePart { Content: not null } part)
+                    {
+                        chunk ??= ArrayPool<byte>.Shared.Rent(8192);
+                        await using var decoded = part.Content.Open();
+                        using var buffer = new MemoryStream();
+                        long total = 0;
+                        var oversized = false;
+                        int read;
+                        while ((read = await decoded.ReadAsync(chunk.AsMemory(0, 8192), cancellationToken).ConfigureAwait(false)) > 0)
+                        {
+                            total += read;
+                            if (total > config.MaximumAttachmentBytes)
+                            {
+                                oversized = true;
+                                break;
+                            }
+                            await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                        }
+                        if (oversized || total == 0)
+                            continue;
+                        buffer.Position = 0;
+                        var fileName = SanitizeFileName(part.FileName ?? "attachment.bin");
+                        var mediaType = SanitizeMediaType(part.ContentType?.MimeType ?? "application/octet-stream");
+                        var stored = await attachmentStore.StoreAsync(config.Scope, config.ConfigurationId,
+                            new MailboxAttachmentUpload(fileName, mediaType, total, buffer), cancellationToken).ConfigureAwait(false);
+                        attachments.Add(stored);
+                    }
+                }
+            }
+            finally
+            {
+                if (chunk is not null)
+                    ArrayPool<byte>.Shared.Return(chunk);
+            }
+
+            if (bodyText is null && bodyHtml is null && attachments.Count == 0)
+                return (messageId, null, "empty-message", AlreadySeen: false);
+
+            var inbound = new InboundChannelMessage(
+                scope: config.Scope,
+                channel: config.Channel,
+                configurationId: config.ConfigurationId,
+                externalMessageId: messageId,
+                sender: sender,
+                receivedAt: receivedAt,
+                bodyText: bodyText,
+                bodyHtml: bodyHtml,
+                attachments: attachments,
+                externalThreadId: null,
+                inReplyTo: inReplyTo,
+                references: references,
+                subject: subject,
+                senderDisplayName: displayName);
+            return (messageId, inbound, null, AlreadySeen: false);
         }
-        finally
+        catch (Exception ex) when (ex is ArgumentException or FormatException)
         {
-            if (chunk is not null)
-                ArrayPool<byte>.Shared.Return(chunk);
+            return (messageId, null, "invalid-message", AlreadySeen: false);
         }
-
-        var bodyText = TruncateUtf8(mime.TextBody, ConversationMessageLimits.MaximumBodyBytes);
-        var bodyHtml = TruncateUtf8(mime.HtmlBody, ConversationMessageLimits.MaximumBodyBytes * 2);
-        if (string.IsNullOrWhiteSpace(bodyText) && string.IsNullOrWhiteSpace(bodyHtml) && attachments.Count == 0)
-            return (messageId, null, "empty-message", AlreadySeen: false);
-
-        var subject = string.IsNullOrWhiteSpace(mime.Subject) ? null : TruncateChars(mime.Subject.Trim(), InboundChannelMessage.MaximumSubjectLength);
-        var displayName = string.IsNullOrWhiteSpace(senderBox.Name) ? null : TruncateChars(senderBox.Name.Trim(), InboundChannelMessage.MaximumDisplayNameLength);
-        var receivedAt = mime.Date == default ? fallbackReceivedAt.ToUniversalTime() : mime.Date.ToUniversalTime();
-
-        var inbound = new InboundChannelMessage(
-            scope: config.Scope,
-            channel: config.Channel,
-            configurationId: config.ConfigurationId,
-            externalMessageId: messageId,
-            sender: new ChannelSenderEvidence(ContactIdentityKind.Email, senderBox.Address.Trim(), verified: false),
-            receivedAt: receivedAt,
-            bodyText: string.IsNullOrWhiteSpace(bodyText) ? null : bodyText,
-            bodyHtml: string.IsNullOrWhiteSpace(bodyHtml) ? null : bodyHtml,
-            attachments: attachments,
-            externalThreadId: null,
-            inReplyTo: inReplyTo,
-            references: references,
-            subject: subject,
-            senderDisplayName: displayName);
-        return (messageId, inbound, null, AlreadySeen: false);
     }
 
-    /// <summary>Normalizes a RFC 5322 Message-Id (strips surrounding angle brackets and trims whitespace; bounded to channel limits).</summary>
-    public static string? NormalizeMessageId(string? raw)
+    /// <summary>Normalizes a RFC 5322 Message-Id (strips surrounding angle brackets, trims whitespace and enforces channel text rules).</summary>
+    public static string? NormalizeMessageId(string? raw) => ChannelText.NormalizeReference(raw);
+
+    private static string? SanitizeHeaderText(string? raw, int maxChars)
     {
-        if (string.IsNullOrWhiteSpace(raw))
+        if (string.IsNullOrWhiteSpace(raw) || maxChars <= 0)
             return null;
-        var span = raw.AsSpan().Trim();
-        if (span.Length > 2 && span[0] == '<' && span[^1] == '>')
-            span = span[1..^1].Trim();
-        if (span.Length == 0)
-            return null;
-        if (span.Length > ChannelText.MaximumExternalIdLength)
-            span = span[..ChannelText.MaximumExternalIdLength];
-        return span.Length == raw.Length ? raw : span.ToString();
+        var span = raw.AsSpan();
+        var builder = new StringBuilder(Math.Min(span.Length, maxChars));
+        Span<char> encoded = stackalloc char[2];
+        var pendingSpace = false;
+        var index = 0;
+        while (index < span.Length)
+        {
+            var status = Rune.DecodeFromUtf16(span[index..], out var rune, out var consumed);
+            index += Math.Max(consumed, 1);
+            if (status != OperationStatus.Done)
+                continue;
+            if (Rune.IsWhiteSpace(rune))
+            {
+                if (builder.Length > 0)
+                    pendingSpace = true;
+                continue;
+            }
+            if (rune.Value is < ' ' or (>= 0x7F and <= 0x9F))
+                continue;
+            var needed = rune.Utf16SequenceLength + (pendingSpace ? 1 : 0);
+            if (builder.Length + needed > maxChars)
+                break;
+            if (pendingSpace)
+            {
+                builder.Append(' ');
+                pendingSpace = false;
+            }
+            var written = rune.EncodeToUtf16(encoded);
+            builder.Append(encoded[..written]);
+        }
+        return builder.Length == 0 ? null : builder.ToString();
     }
 
     private static string SanitizeFileName(string name)
     {
-        var trimmed = Path.GetFileName(name.Trim());
-        if (string.IsNullOrWhiteSpace(trimmed))
-            trimmed = "attachment.bin";
-        return trimmed.Length <= AttachmentRef.MaximumFileNameLength ? trimmed : trimmed[..AttachmentRef.MaximumFileNameLength];
+        var lastSlash = name.LastIndexOfAny(['/', '\\']);
+        var segment = lastSlash >= 0 ? name[(lastSlash + 1)..] : name;
+        return SanitizeHeaderText(segment, AttachmentRef.MaximumFileNameLength) ?? "attachment.bin";
     }
 
     private static string SanitizeMediaType(string mediaType)
     {
         var trimmed = mediaType.AsSpan().Trim();
-        if (trimmed.Length == 0 || !trimmed.Contains('/') || trimmed.Length > AttachmentRef.MaximumMediaTypeLength)
+        if (trimmed.Length == 0 || !trimmed.Contains('/') || trimmed.Length > AttachmentRef.MaximumMediaTypeLength || !ChannelText.IsClean(trimmed))
             return "application/octet-stream";
         for (var i = 0; i < trimmed.Length; i++)
             if (char.IsWhiteSpace(trimmed[i]))
                 return "application/octet-stream";
         return trimmed.Length == mediaType.Length ? mediaType : trimmed.ToString();
     }
-
-    private static string? TruncateUtf8(string? text, int maxBytes)
-    {
-        if (text is null)
-            return null;
-        if (text.Length <= maxBytes / 3 || Encoding.UTF8.GetByteCount(text) <= maxBytes)
-            return text;
-        var span = text.AsSpan();
-        var bytes = 0;
-        var index = 0;
-        while (index < span.Length)
-        {
-            var status = Rune.DecodeFromUtf16(span[index..], out var rune, out var consumed);
-            var size = status == OperationStatus.Done ? rune.Utf8SequenceLength : 3;
-            if (bytes + size > maxBytes)
-                break;
-            bytes += size;
-            index += Math.Max(consumed, 1);
-        }
-        return text[..index];
-    }
-
-    private static string TruncateChars(string text, int maxChars) => text.Length <= maxChars ? text : text[..maxChars];
 }
 
 /// <summary>

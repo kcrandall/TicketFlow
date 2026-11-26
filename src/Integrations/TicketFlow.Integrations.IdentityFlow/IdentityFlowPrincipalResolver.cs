@@ -37,6 +37,8 @@ public sealed class IdentityFlowPrincipalResolver(
     public async ValueTask<PrincipalRef?> ResolveAsync(ClaimsPrincipal user, TicketScope scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
+        if (!VerifyScopeClaims(user, scope))
+            return null;
         switch (IdentityFlowClaimsMapper.Map(user, options.Value))
         {
             case { Kind: IdentityFlowPrincipalKind.User } identity:
@@ -64,8 +66,6 @@ public sealed class IdentityFlowPrincipalResolver(
                     ? new UserPrincipal(resolvedUser.Scope, resolvedUser.UserId, resolvedUser.Teams, userRoles, userProvider)
                     : resolvedUser;
             case { Kind: IdentityFlowPrincipalKind.ApiClient } identity:
-                if (IsTicketFlowApiKey(user) && !VerifyScopeClaims(user, scope))
-                    return null;
                 var clientRoles = claimsResolver.ExtractExternalRoles(user);
                 var clientProvider = claimsResolver.TryGetIdentityProvider(user);
                 return new ApiClientPrincipal(scope, new ApiClientId(identity.Id), clientRoles, clientProvider);
@@ -73,11 +73,6 @@ public sealed class IdentityFlowPrincipalResolver(
                 return null;
         }
     }
-
-    private static bool IsTicketFlowApiKey(ClaimsPrincipal? user) =>
-        user?.Identity is { IsAuthenticated: true } identity
-        && string.Equals(identity.AuthenticationType, IdentityFlowClaimsMapper.TicketFlowApiKeyScheme, StringComparison.Ordinal)
-        && user.HasClaim(static c => string.Equals(c.Type, IdentityFlowClaimsMapper.TicketFlowApiKeyIdClaim, StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(c.Value));
 
     private static bool VerifyScopeClaims(ClaimsPrincipal? user, TicketScope scope)
     {

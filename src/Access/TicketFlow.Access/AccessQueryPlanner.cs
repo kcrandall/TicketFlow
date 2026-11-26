@@ -99,12 +99,22 @@ public sealed class AccessQueryPlanner : IAccessQueryPlanner
     private async Task<AccessFilter> PlanAsync(AccessQuery query, AccessContext context, StoredServiceAccount? serviceAccount, bool sensitive, CancellationToken cancellationToken)
     {
         var permission = query.Permission;
+        var includeBreakGlass = !AccessEngine.IsAdministrativePermission(permission);
+        var tenantAllowsOnly = AccessEngine.RequiresTenantAllowOnly(permission);
+        if (tenantAllowsOnly && serviceAccount is not null && !AccessEngine.ScopeContains(serviceAccount.Account.Scope, TenantGrantScope.Instance))
+        {
+            if (sensitive)
+                await RecordAsync(query, DenyAllFilter.Instance, false, AccessDenialReason.ScopeMismatch, context.Now, cancellationToken).ConfigureAwait(false);
+            return DenyAllFilter.Instance;
+        }
         var allows = new List<AccessFilter>();
         var denies = new List<AccessFilter>();
         var usedBreakGlass = false;
         foreach (var candidate in context.Grants)
         {
             var grant = candidate.Grant;
+            if (!includeBreakGlass && grant.Kind == GrantKind.BreakGlass)
+                continue;
             // Grant conditions are bounded (≤ 64 nodes), so individual terms cannot exceed the filter limit.
             switch (grant.Effect)
             {
@@ -113,6 +123,8 @@ public sealed class AccessQueryPlanner : IAccessQueryPlanner
                         denies.Add(AccessFilters.Not(AccessFilters.And(ScopeTerm(grant.Scope), Translate(grant.Condition, context))));
                     break;
                 case GrantEffect.Allow:
+                    if (tenantAllowsOnly && grant.Scope is not TenantGrantScope)
+                        break;
                     if (!candidate.Includes(permission))
                         break;
                     var term = AccessFilters.And(ScopeTerm(grant.Scope), Translate(grant.Condition, context));

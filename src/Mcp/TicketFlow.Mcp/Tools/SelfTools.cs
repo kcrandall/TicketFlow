@@ -45,7 +45,7 @@ public sealed class SelfTools(TicketFlowToolContext context)
                 Principal(principal),
                 Scope(principal.Scope),
                 grants,
-                [.. grants.Select(grant => grant.Role).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)],
+                [.. grants.Where(grant => string.Equals(grant.Effect, "allow", StringComparison.Ordinal)).Select(grant => grant.Role).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)],
                 heldNames,
                 [.. workspaceLevel.Where(pair => pair.Value == true).Select(pair => pair.Key).Order(StringComparer.Ordinal)],
                 includeSensitive,
@@ -276,14 +276,16 @@ public sealed class SelfTools(TicketFlowToolContext context)
             var grants = await store.ListForSubjectsAsync(partition, principal.Scope.WorkspaceId, subjects, cancellationToken).ConfigureAwait(false);
             foreach (var grant in grants.Select(stored => stored.Grant).OrderBy(grant => grant.Id.Value, StringComparer.Ordinal))
             {
+                if (!grant.IsValidAt(now))
+                    continue;
                 if (ignoreLocalAllows && grant.Effect == GrantEffect.Allow && grant.Kind != GrantKind.BreakGlass)
                 {
-                    if (!preserveLocalAdminOnly || !grant.IsValidAt(now))
+                    if (!preserveLocalAdminOnly)
                         continue;
                     var role = BuiltInRoles.Find(grant.Role);
                     if (role is null && grant.Scope is not TenantGrantScope)
                         role = (await LoadCustomRolesAsync().ConfigureAwait(false)).GetValueOrDefault(grant.Role);
-                    if (role is null || !HasCatalogAdminPermission(role, catalog))
+                    if (role is null || !HasCatalogAdminPermission(role, grant.Scope, catalog))
                         continue;
                 }
 
@@ -429,9 +431,9 @@ public sealed class SelfTools(TicketFlowToolContext context)
         || permission == AccessPermissions.AccessManageTenant
         || permission == AccessPermissions.AccessBreakGlass;
 
-    private static bool HasCatalogAdminPermission(AccessRole role, IPermissionCatalog? catalog) =>
+    private static bool HasCatalogAdminPermission(AccessRole role, GrantScope scope, IPermissionCatalog? catalog) =>
         (role.Includes(AccessPermissions.AccessManage) && (catalog is null || catalog.Contains(AccessPermissions.AccessManage)))
-        || (role.Includes(AccessPermissions.AccessManageTenant) && (catalog is null || catalog.Contains(AccessPermissions.AccessManageTenant)))
+        || (scope is TenantGrantScope && role.Includes(AccessPermissions.AccessManageTenant) && (catalog is null || catalog.Contains(AccessPermissions.AccessManageTenant)))
         || (role.Includes(AccessPermissions.AccessBreakGlass) && (catalog is null || catalog.Contains(AccessPermissions.AccessBreakGlass)));
 
     private static bool HasNonAdministrativePermission(AccessRole role, IPermissionCatalog? catalog)

@@ -47,17 +47,25 @@ internal static class TicketFlowToolListFilter
                 }
             }
             var decisions = await DecideAsync(services, request.User, options, permissions, cancellationToken).ConfigureAwait(false);
+            var hideUnpermitted = options.ToolList == TicketFlowToolListMode.HideUnpermitted;
             var listed = new List<Tool>(tools.Count);
             for (var i = 0; i < tools.Count; i++)
             {
                 var (tool, descriptor) = tools[i];
-                if (descriptor is null || decisions is null)
+                if (descriptor is null)
                 {
                     listed.Add(tool);
                     continue;
                 }
+                if (decisions is null)
+                {
+                    if (hideUnpermitted && descriptor.Permissions.Count > 0)
+                        continue;
+                    listed.Add(tool);
+                    continue;
+                }
                 var permitted = TicketFlowPermissionProbe.Satisfies(descriptor, decisions);
-                if (options.ToolList == TicketFlowToolListMode.HideUnpermitted && permitted == false)
+                if (hideUnpermitted && descriptor.Permissions.Count > 0 && permitted is not true)
                     continue;
                 listed.Add(Mark(tool, permitted));
             }

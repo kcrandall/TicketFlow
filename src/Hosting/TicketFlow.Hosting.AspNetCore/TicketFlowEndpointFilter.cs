@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Metadata;
+using Microsoft.Net.Http.Headers;
 
 namespace TicketFlow.Hosting.AspNetCore;
 
@@ -85,9 +86,18 @@ internal sealed class TicketFlowEndpointFilter : IEndpointFilter
         }
     }
 
-    private static bool IsJson(HttpRequest request) =>
-        request.ContentType is { } type && (type.StartsWith("application/json", StringComparison.OrdinalIgnoreCase)
-            || type.Contains("+json", StringComparison.OrdinalIgnoreCase));
+    private static bool IsJson(HttpRequest request)
+    {
+        if (request.ContentType is not { Length: > 0 } contentType
+            || !MediaTypeHeaderValue.TryParse(contentType, out var parsed))
+            return false;
+        var mediaType = parsed.MediaType;
+        if (mediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase))
+            return true;
+        return mediaType.Length > "application/+json".Length
+            && mediaType.StartsWith("application/", StringComparison.OrdinalIgnoreCase)
+            && mediaType.EndsWith("+json", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static string Message(Exception error)
     {

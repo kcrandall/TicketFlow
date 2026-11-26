@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using static TicketFlow.Hosting.AspNetCore.Tests.EndpointHost;
 
 namespace TicketFlow.Hosting.AspNetCore.Tests;
@@ -139,10 +140,69 @@ public sealed class FoundationTests
         CollectionAssert.Contains(permissions, "conversation:read");
         CollectionAssert.DoesNotContain(permissions, "access:manage", "Sensitive permissions are probed only on request (audited).");
         var sensitive = await JsonAsync(await host.Client().GetAsync($"{Api}/me?includeSensitive=true"));
-        CollectionAssert.Contains(sensitive.GetProperty("workspacePermissions").EnumerateArray().Select(item => item.GetString()).ToList(), "access:manage");
+        var sensitivePerms = sensitive.GetProperty("workspacePermissions").EnumerateArray().Select(item => item.GetString()).ToList();
+        CollectionAssert.Contains(sensitivePerms, "access:manage");
+        CollectionAssert.DoesNotContain(sensitivePerms, "access:manage-tenant", "Workspace-only Owner must not report access:manage-tenant.");
+
+        using (var scope = host.App.Services.CreateScope())
+        {
+            var grants = scope.ServiceProvider.GetRequiredService<TicketFlow.Access.IAccessGrantStore>();
+            await grants.CreateAsync(new TicketFlow.Access.AccessGrant(
+                new TicketFlow.Access.GrantId("seed-tenant-owner"),
+                TicketFlow.Access.AccessPartition.From(host.Scope),
+                new TicketFlow.Core.UserId("tenant-owner"),
+                TicketFlow.Access.BuiltInRoles.Owner.Id,
+                TicketFlow.Access.TenantGrantScope.Instance));
+        }
+        var tenantOwner = await JsonAsync(await host.Client("tenant-owner").GetAsync($"{Api}/me?includeSensitive=true"));
+        CollectionAssert.Contains(tenantOwner.GetProperty("workspacePermissions").EnumerateArray().Select(item => item.GetString()).ToList(), "access:manage-tenant");
+
         var agent = await JsonAsync(await host.Client("agent").GetAsync($"{Api}/me?includeSensitive=true"));
         CollectionAssert.DoesNotContain(agent.GetProperty("workspacePermissions").EnumerateArray().Select(item => item.GetString()).ToList(), "access:manage");
         var stranger = await JsonAsync(await host.Client("stranger").GetAsync($"{Api}/me"));
         Assert.AreEqual(0, stranger.GetProperty("workspacePermissions").GetArrayLength());
+    }
+
+    [TestMethod]
+    public async Task PostCsrfGuardInspectsOnlyMediaTypeEssence()
+    {
+        await using var host = await CreateAsync();
+        var client = host.Client();
+        var endpoint = $"{Api}/routing/agents/me/heartbeat";
+
+        foreach (var spoofed in new[]
+        {
+            "text/plain; foo=+json",
+            "application/x-www-form-urlencoded; x=+json",
+            "multipart/form-data; boundary=+json",
+            "application/jsonfoo",
+            "application/+json",
+            "text/vnd.custom+json",
+        })
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+            {
+                Content = new StringContent("{}"),
+            };
+            request.Content.Headers.Remove("Content-Type");
+            request.Content.Headers.TryAddWithoutValidation("Content-Type", spoofed);
+            var response = await client.SendAsync(request);
+            Assert.AreEqual(HttpStatusCode.BadRequest, response.StatusCode, $"Expected 400 for spoofed Content-Type '{spoofed}'.");
+            Assert.AreEqual("json-or-header-required", (await JsonAsync(response)).GetProperty("code").GetString(), $"Expected CSRF rejection for '{spoofed}'.");
+        }
+
+        // Valid application/json with parameters passes the CSRF guard
+        var validJson = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json"),
+        };
+        Assert.AreNotEqual(HttpStatusCode.BadRequest, (await client.SendAsync(validJson)).StatusCode);
+
+        // Valid application/*+json essence passes the CSRF guard (not rejected as json-or-header-required)
+        var validStructured = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/vnd.api+json"),
+        };
+        Assert.AreNotEqual(HttpStatusCode.BadRequest, (await client.SendAsync(validStructured)).StatusCode);
     }
 }

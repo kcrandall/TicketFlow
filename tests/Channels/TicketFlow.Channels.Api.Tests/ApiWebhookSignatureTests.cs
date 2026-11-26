@@ -87,6 +87,31 @@ public sealed class ApiWebhookSignatureTests
         Assert.AreEqual(ApiWebhookRejection.Replayed, Reason(small.Verify(Key, "tf1-other", other, otherSignature, Body, Now)), "A full guard fails closed.");
     }
 
+    [TestMethod]
+    public void ReplayGuardValidatesBoundsAndEnforcesCustomWindow()
+    {
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new ApiWebhookReplayGuard(maximumAge: TimeSpan.Zero));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new ApiWebhookReplayGuard(maximumAge: TimeSpan.FromSeconds(-1)));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new ApiWebhookReplayGuard(maximumAge: TimeSpan.FromHours(2)));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new ApiWebhookReplayGuard(futureSkew: TimeSpan.FromSeconds(-1)));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new ApiWebhookReplayGuard(futureSkew: TimeSpan.FromMinutes(6)));
+
+        var tight = new ApiWebhookReplayGuard(maximumAge: TimeSpan.FromSeconds(30), futureSkew: TimeSpan.FromSeconds(10));
+        var (oldTs, oldSig) = Sign(Now.AddSeconds(-45), "tf1-old");
+        Assert.AreEqual(ApiWebhookRejection.Expired, Reason(tight.Verify(Key, "tf1-old", oldTs, oldSig, Body, Now)));
+        var (futureTs, futureSig) = Sign(Now.AddSeconds(20), "tf1-fut");
+        Assert.AreEqual(ApiWebhookRejection.FromFuture, Reason(tight.Verify(Key, "tf1-fut", futureTs, futureSig, Body, Now)));
+        var (okTs, okSig) = Sign(Now.AddSeconds(-10), "tf1-ok");
+        Assert.IsInstanceOfType<ApiWebhookVerified>(tight.Verify(Key, "tf1-ok", okTs, okSig, Body, Now).Value);
+        Assert.AreEqual(ApiWebhookRejection.Replayed, Reason(tight.Verify(Key, "tf1-ok", okTs, okSig, Body, Now.AddSeconds(5))));
+
+        var zeroSkew = new ApiWebhookReplayGuard(maximumAge: TimeSpan.FromMinutes(1), futureSkew: TimeSpan.Zero);
+        var (edgeTs, edgeSig) = Sign(Now, "tf1-edge");
+        Assert.IsInstanceOfType<ApiWebhookVerified>(zeroSkew.Verify(Key, "tf1-edge", edgeTs, edgeSig, Body, Now).Value);
+        Assert.AreEqual(ApiWebhookRejection.Replayed, Reason(zeroSkew.Verify(Key, "tf1-edge", edgeTs, edgeSig, Body, Now.AddMinutes(1))),
+            "Entry must not be evicted at the exact boundary while ApiWebhookSignature.Verify still accepts it.");
+    }
+
     private static ApiWebhookRejection Reason(ApiWebhookVerification verification) => verification switch
     {
         ApiWebhookVerified => throw new AssertFailedException("Expected a rejection."),

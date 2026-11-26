@@ -5,9 +5,7 @@ namespace TicketFlow.Access;
 internal static class RoleFederationSupport
 {
     public static bool IsAdministrativePermission(Permission permission) =>
-        permission == AccessPermissions.AccessManage
-        || permission == AccessPermissions.AccessManageTenant
-        || permission == AccessPermissions.AccessBreakGlass;
+        AccessEngine.IsAdministrativePermission(permission);
 
     public static HashSet<string> CollectCandidateExternalRoles(PrincipalRef principal, RoleFederationOptions options)
     {

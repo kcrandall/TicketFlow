@@ -132,6 +132,14 @@ internal sealed class AccessEngine(
         InboxGrantScope inbox => candidate is InboxGrantScope c && c.Workspace == inbox.Workspace && c.Inbox == inbox.Inbox,
     };
 
+    public static bool IsAdministrativePermission(Permission permission) =>
+        permission == AccessPermissions.AccessManage
+        || permission == AccessPermissions.AccessManageTenant
+        || permission == AccessPermissions.AccessBreakGlass;
+
+    public static bool RequiresTenantAllowOnly(Permission permission) =>
+        permission == AccessPermissions.AccessManageTenant;
+
     public AccessDenialReason? Precheck(PrincipalRef principal, Permission permission, TicketScope scope) =>
         Precheck(principal, Catalog.Contains(permission), scope);
 

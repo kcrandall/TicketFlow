@@ -224,8 +224,30 @@ public sealed class AccessTools(TicketFlowToolContext context)
             var target = BreakGlassTarget(principal.Scope, scope ?? "workspace", targetId);
             var now = (context.Services.GetService<TimeProvider>() ?? TimeProvider.System).GetUtcNow();
             var listed = await Administrator.ListGrantsAsync(principal, target, AccessLimits.MaximumTargetPage, null, cancellationToken);
-            if (listed is TicketValue<IReadOnlyList<StoredAccessGrant>> ok)
-                return new ToolList<GrantOutput>([.. ok.Value.Where(item => item.Grant.Kind == GrantKind.BreakGlass && (includeExpired || item.Grant.IsValidAt(now))).Select(Grant)]);
+            if (listed is TicketValue<IReadOnlyList<StoredAccessGrant>> firstPage)
+            {
+                var breakGlass = new List<GrantOutput>();
+                var page = firstPage.Value;
+                while (true)
+                {
+                    for (var i = 0; i < page.Count; i++)
+                    {
+                        var item = page[i];
+                        if (item.Grant.Kind == GrantKind.BreakGlass && (includeExpired || item.Grant.IsValidAt(now)))
+                            breakGlass.Add(Grant(item));
+                    }
+                    if (page.Count < AccessLimits.MaximumTargetPage)
+                        break;
+                    var after = page[^1].Grant.Id;
+                    var next = await Administrator.ListGrantsAsync(principal, target, AccessLimits.MaximumTargetPage, after, cancellationToken);
+                    if (next is not TicketValue<IReadOnlyList<StoredAccessGrant>> nextPage)
+                        return Refused((TicketFailure)next.Value!, "The break-glass grant");
+                    page = nextPage.Value;
+                    if (page.Count == 0 || page[^1].Grant.Id == after)
+                        break;
+                }
+                return new ToolList<GrantOutput>(breakGlass);
+            }
 
             var refused = (TicketFailure)listed.Value!;
             if (refused.Kind == TicketFailureKind.Forbidden
@@ -284,12 +306,12 @@ public sealed class AccessTools(TicketFlowToolContext context)
         {
             var id = new GrantId(grantId);
             if (context.Services.GetService<IAccessGrantStore>() is { } grantStore
-                && await grantStore.GetAsync(AccessPartition.From(principal.Scope), id, cancellationToken) is { } existing
-                && existing.Grant.Kind != GrantKind.BreakGlass)
+                && await grantStore.GetAsync(AccessPartition.From(principal.Scope), id, cancellationToken) is { } existing)
             {
-                if (await Administrator.CheckCanRevokeAsync(principal, [existing.Grant], cancellationToken) is TicketFailure denied)
-                    return Refused(denied, "The break-glass grant");
-                return TicketFlowToolError.Invalid(["The specified grant is not a break-glass grant; use access_revoke_grant instead."]);
+                if (await Administrator.CheckCanRevokeAsync(principal, [existing.Grant], cancellationToken) is TicketFailure)
+                    return TicketFlowToolError.Forbidden();
+                if (existing.Grant.Kind != GrantKind.BreakGlass)
+                    return TicketFlowToolError.Invalid(["The specified grant is not a break-glass grant; use access_revoke_grant instead."]);
             }
             return Map(await Administrator.RevokeGrantAsync(principal, id, expectedRevision, cancellationToken), Grant, "The break-glass grant");
         }, cancellationToken);

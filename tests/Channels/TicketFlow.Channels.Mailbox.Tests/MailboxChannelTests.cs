@@ -185,4 +185,103 @@ public sealed class MailboxChannelTests
         using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true });
         Assert.IsNotNull(provider.GetRequiredService<IMailboxCheckpointStore>());
     }
+
+    [TestMethod]
+    public async Task PoisonPillMimeMessagesAreSanitizedOrSkippedWithoutWedgingInboxOrOrphaningAttachments()
+    {
+        var clock = TestClock.Create(Now);
+        var factory = new FakeClientFactory { UidValidity = 77 };
+
+        // Direct unit check on NormalizeMessageId against ChannelText rules (control chars / oversized)
+        Assert.IsNull(MailboxMimeNormalizer.NormalizeMessageId("<bad\tid@customer.example.com>"));
+        Assert.IsNull(MailboxMimeNormalizer.NormalizeMessageId("<bad\x1bid@customer.example.com>"));
+        Assert.IsNull(MailboxMimeNormalizer.NormalizeMessageId($"<{new string('x', 1100)}@customer.example.com>"));
+
+        // UID 1: folded tabs & C0/C1 control characters in Subject, DisplayName, FileName, plus invalid Message-Id and mixed References.
+        var rawSanitized = Encoding.UTF8.GetBytes(
+            "From: \"Ada\tLovelace\x07\" <ada@customer.example.com>\r\n" +
+            "To: support@acme.example.com\r\n" +
+            "Message-ID: <bad\x1bid@customer.example.com>\r\n" +
+            "In-Reply-To: <bad\x1breply@customer.example.com>\r\n" +
+            "References: <good-ref@customer.example.com> <bad\x1bref@customer.example.com>\r\n" +
+            "Subject: Invoice\r\n\tquestion\x07\r\n" +
+            "MIME-Version: 1.0\r\n" +
+            "Content-Type: multipart/mixed; boundary=\"b1\"\r\n" +
+            "\r\n" +
+            "--b1\r\n" +
+            "Content-Type: text/plain; charset=utf-8\r\n" +
+            "\r\n" +
+            "Body text\r\n" +
+            "--b1\r\n" +
+            "Content-Type: application/pdf\r\n" +
+            "Content-Disposition: attachment; filename=\"sub/my\tfile\x07.pdf\"\r\n" +
+            "\r\n" +
+            "%PDF-1.4\r\n" +
+            "--b1--\r\n");
+        factory.Messages[1] = new MailboxFetchedMessage(1, rawSanitized.Length, rawSanitized);
+
+        // UID 2: poison message with oversized (>1024) invalid sender address AND an attachment -> must skip without uploading attachment!
+        var longLocal = new string('a', 1100);
+        var rawPoisonSender = Encoding.UTF8.GetBytes(
+            $"From: {longLocal}@evil.example.com\r\n" +
+            "To: support@acme.example.com\r\n" +
+            "Message-ID: <poison-sender@evil.example.com>\r\n" +
+            "Subject: Poison\r\n" +
+            "MIME-Version: 1.0\r\n" +
+            "Content-Type: multipart/mixed; boundary=\"b2\"\r\n" +
+            "\r\n" +
+            "--b2\r\n" +
+            "Content-Type: text/plain\r\n" +
+            "\r\n" +
+            "Poison body\r\n" +
+            "--b2\r\n" +
+            "Content-Type: application/octet-stream\r\n" +
+            "Content-Disposition: attachment; filename=\"orphan.bin\"\r\n" +
+            "\r\n" +
+            "ORPHAN_PAYLOAD\r\n" +
+            "--b2--\r\n");
+        factory.Messages[2] = new MailboxFetchedMessage(2, rawPoisonSender.Length, rawPoisonSender);
+
+        // UID 3: completely invalid MIME bytes (triggers FormatException) -> must skip and advance checkpoint!
+        var rawCorrupt = Encoding.UTF8.GetBytes("not valid mime at all");
+        factory.Messages[3] = new MailboxFetchedMessage(3, rawCorrupt.Length, rawCorrupt);
+
+        // UID 4: valid follow-up email -> proves inbox was NOT wedged!
+        factory.Messages[4] = MimeBytes(4, "<ok-4@customer.example.com>", "bob@customer.example.com", "Healthy", "Still flowing");
+
+        var checkpoints = new InMemoryMailboxCheckpointStore();
+        var attachments = new CountingAttachmentStore();
+        var pipeline = new RecordingPipeline();
+        var poller = new MailboxPoller(factory, new StaticMailboxCredentialProvider(new MailboxCredentials("u", "p")),
+            checkpoints, new MailboxMimeNormalizer(attachments), pipeline, clock);
+        var config = new MailboxEndpointConfig(Scope, "imap-support", "imap.example.com");
+
+        var result = await poller.PollAsync(Ingestor, config);
+        Assert.AreEqual((4, 2, 0, 2, 77u, 4u), (result.Fetched, result.Ingested, result.Deduplicated, result.Skipped, result.UidValidity, result.LastUid));
+        Assert.AreEqual(2, pipeline.Received.Count);
+
+        var msg1 = pipeline.Received[0];
+        Assert.AreEqual("uid:77:1", msg1.ExternalMessageId, "Invalid Message-Id must fall back to uid:{uidValidity}:{uid}.");
+        Assert.IsNull(msg1.InReplyTo, "Invalid In-Reply-To must be dropped.");
+        CollectionAssert.AreEqual(new[] { "good-ref@customer.example.com" }, msg1.References.ToArray());
+        Assert.AreEqual("Invoice question", msg1.Subject);
+        Assert.AreEqual("Ada Lovelace", msg1.SenderDisplayName);
+        Assert.AreEqual(1, msg1.Attachments.Count);
+        Assert.AreEqual("my file.pdf", msg1.Attachments[0].FileName);
+
+        Assert.AreEqual(1, attachments.UploadCount, "Poison UID 2 must NOT upload attachments before metadata validation.");
+        Assert.AreEqual("ok-4@customer.example.com", pipeline.Received[1].ExternalMessageId);
+    }
+
+    private sealed class CountingAttachmentStore : IMailboxAttachmentStore
+    {
+        private readonly InMemoryMailboxAttachmentStore inner = new();
+        public int UploadCount { get; private set; }
+
+        public Task<AttachmentRef> StoreAsync(TicketScope scope, string configurationId, MailboxAttachmentUpload upload, CancellationToken cancellationToken = default)
+        {
+            UploadCount++;
+            return inner.StoreAsync(scope, configurationId, upload, cancellationToken);
+        }
+    }
 }

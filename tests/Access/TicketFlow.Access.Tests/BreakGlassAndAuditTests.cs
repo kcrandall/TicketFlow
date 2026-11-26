@@ -82,8 +82,11 @@ public sealed class BreakGlassAndAuditTests
         Assert.AreEqual(AccessAuditKind.FilterPlanned, fixture.Audit.Snapshot()[^1].Kind);
         Assert.IsTrue(fixture.Audit.Snapshot()[^1].UsedBreakGlass);
 
-        // Break-glass grants never authorize further break-glass or management, and cannot be modified.
-        Assert.AreEqual("refused:Invalid", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(responder, stored, 1)));
+        // Break-glass grants never authorize further break-glass or management, and cannot be modified even by an admin.
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(responder, stored, 1)));
+        var admin = fixture.User("admin");
+        await fixture.GrantAsync(admin.UserId, BuiltInRoles.Admin);
+        Assert.AreEqual("refused:Invalid", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(admin, stored, 1)));
 
         fixture.Clock.Advance(TimeSpan.FromMinutes(30));
         var before = fixture.Audit.Snapshot().Count;

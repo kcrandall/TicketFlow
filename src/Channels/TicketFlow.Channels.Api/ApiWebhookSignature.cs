@@ -172,12 +172,22 @@ public sealed class ApiWebhookReplayGuard
     private readonly Lock gate = new();
     private readonly HashSet<(string Id, DateTimeOffset At)> seen = [];
     private readonly PriorityQueue<(string Id, DateTimeOffset At), DateTimeOffset> expiry = new();
+    private readonly TimeSpan maximumAge;
+    private readonly TimeSpan futureSkew;
     private readonly TimeSpan retention;
     private readonly int capacity;
 
     public ApiWebhookReplayGuard(TimeSpan? maximumAge = null, TimeSpan? futureSkew = null, int capacity = 100_000)
     {
-        retention = (maximumAge ?? ApiWebhookSignature.DefaultMaximumAge) + (futureSkew ?? ApiWebhookSignature.DefaultFutureSkew);
+        var age = maximumAge ?? ApiWebhookSignature.DefaultMaximumAge;
+        var future = futureSkew ?? ApiWebhookSignature.DefaultFutureSkew;
+        if (age <= TimeSpan.Zero || age > TimeSpan.FromHours(1))
+            throw new ArgumentOutOfRangeException(nameof(maximumAge), "Replay windows must be positive and at most 1 hour.");
+        if (future < TimeSpan.Zero || future > TimeSpan.FromMinutes(5))
+            throw new ArgumentOutOfRangeException(nameof(futureSkew), "Future skew must be non-negative and at most 5 minutes.");
+        this.maximumAge = age;
+        this.futureSkew = future;
+        retention = age + future;
         ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
         this.capacity = capacity;
     }
@@ -185,12 +195,12 @@ public sealed class ApiWebhookReplayGuard
     /// <summary>Verifies the signature and records the request; a repeat of an accepted request is <see cref="ApiWebhookRejection.Replayed"/>.</summary>
     public ApiWebhookVerification Verify(ReadOnlySpan<byte> key, string? deliveryId, string? timestamp, string? signature, ReadOnlySpan<byte> body, DateTimeOffset now)
     {
-        var result = ApiWebhookSignature.Verify(key, deliveryId, timestamp, signature, body, now);
+        var result = ApiWebhookSignature.Verify(key, deliveryId, timestamp, signature, body, now, maximumAge, futureSkew);
         if (result.Value is not ApiWebhookVerified verified)
             return result;
         lock (gate)
         {
-            while (expiry.TryPeek(out var oldest, out var until) && until <= now)
+            while (expiry.TryPeek(out var oldest, out var until) && until < now)
             {
                 expiry.Dequeue();
                 seen.Remove(oldest);

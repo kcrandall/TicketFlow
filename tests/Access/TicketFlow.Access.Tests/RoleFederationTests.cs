@@ -105,10 +105,21 @@ public sealed class RoleFederationTests
 
         var fedOwner = new UserPrincipal(fixture.Scope, new UserId("fed-owner"), externalRoles: ["idp-owner"]);
         Assert.AreEqual("allowed", await fixture.DescribeAsync(fedOwner, AccessPermissions.AccessManage));
-        Assert.AreEqual("allowed", await fixture.DescribeAsync(fedOwner, AccessPermissions.AccessManageTenant));
+        Assert.AreEqual("denied:NoMatchingGrant", await fixture.DescribeAsync(fedOwner, AccessPermissions.AccessManageTenant),
+            "Static mappings synthesize workspace-scoped grants and must not confer tenant-scoped access:manage-tenant.");
 
         var createRole = await fixture.Admin.CreateRoleAsync(fedOwner, new AccessRole(new RoleId("fed-custom"), "Federated Custom", [AccessPermissions.ConversationRead]));
         Assert.AreEqual("applied", AccessFixture.Describe(createRole));
+
+        // Explicit tenant-scoped dynamic mapping DOES confer access:manage-tenant when AllowAdministrativeRoles is true.
+        var mappingStore = fixture.Provider.GetRequiredService<IRoleFederationMappingStore>();
+        await mappingStore.UpsertAsync(
+            new RoleFederationMappingId("tenant-owner-map"),
+            new RoleFederationMapping("identityflow", "idp-tenant-owner", BuiltInRoles.Owner.Id, fixture.Partition, TenantGrantScope.Instance),
+            isEnabled: true,
+            "seed");
+        var fedTenantOwner = new UserPrincipal(fixture.Scope, new UserId("fed-tenant-owner"), externalRoles: ["idp-tenant-owner"], identityProvider: "identityflow");
+        Assert.AreEqual("allowed", await fixture.DescribeAsync(fedTenantOwner, AccessPermissions.AccessManageTenant));
     }
 
     [TestMethod]
@@ -426,5 +437,42 @@ public sealed class RoleFederationTests
         Assert.IsTrue(staleDelete.TryGetValue(out TicketFailure staleDeleteFailure));
         Assert.AreEqual(TicketFailureKind.Conflict, staleDeleteFailure.Kind);
         Assert.AreEqual(1L, staleDeleteFailure.CurrentRevision);
+    }
+
+    [TestMethod]
+    public async Task UpsertMappingDoesNotLeakCrossWorkspaceOrTenantVersion()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var federation = scope.ServiceProvider.GetRequiredService<IRoleFederationService>();
+
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        var wsAdmin = fixture.User("ws-admin");
+        await fixture.GrantAsync(wsAdmin.UserId, BuiltInRoles.Admin, fixture.Workspace);
+
+        var otherWs = new WorkspaceId("ws-other");
+        var otherOwner = new UserPrincipal(fixture.Partition.InWorkspace(otherWs), new UserId("owner"));
+        var otherId = new RoleFederationMappingId("map-other-ws");
+        Assert.IsTrue((await federation.UpsertMappingAsync(otherOwner, otherId,
+            new RoleFederationMapping("okta", "other-agents", BuiltInRoles.Agent.Id, fixture.Partition, new WorkspaceGrantScope(otherWs)))).IsSuccess);
+        Assert.IsTrue((await federation.UpsertMappingAsync(otherOwner, otherId,
+            new RoleFederationMapping("okta", "other-agents", BuiltInRoles.Viewer.Id, fixture.Partition, new WorkspaceGrantScope(otherWs)), expectedVersion: 1)).IsSuccess);
+
+        var tenantId = new RoleFederationMappingId("map-tenant");
+        Assert.IsTrue((await federation.UpsertMappingAsync(owner, tenantId,
+            new RoleFederationMapping("okta", "tenant-viewers", BuiltInRoles.Viewer.Id, fixture.Partition, TenantGrantScope.Instance))).IsSuccess);
+
+        foreach (var targetId in new[] { otherId, tenantId })
+        {
+            foreach (var version in new long?[] { 0, 1, 99 })
+            {
+                var attempt = await federation.UpsertMappingAsync(wsAdmin, targetId,
+                    new RoleFederationMapping("okta", "probe", BuiltInRoles.Viewer.Id, fixture.Partition, fixture.Workspace), expectedVersion: version);
+                Assert.IsTrue(attempt.TryGetValue(out TicketFailure failure));
+                Assert.AreEqual(TicketFailureKind.Forbidden, failure.Kind, $"UpsertMappingAsync leaked cross-scope oracle for {targetId} version {version}.");
+                Assert.IsNull(failure.CurrentRevision);
+            }
+        }
     }
 }

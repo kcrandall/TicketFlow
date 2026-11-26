@@ -93,8 +93,18 @@ public sealed class SelfToolTests
         var visible = (await hide.Client.ListToolsAsync()).Select(tool => tool.Name).ToList();
         CollectionAssert.DoesNotContain(visible, "conversations_reply");
         CollectionAssert.Contains(visible, "conversations_add_note");
-        CollectionAssert.Contains(visible, "conversations_delete", "Unprobed sensitive tools stay listed.");
+        CollectionAssert.DoesNotContain(visible, "conversations_delete", "Unprobed sensitive tools fail closed under HideUnpermitted.");
         CollectionAssert.Contains(visible, "describe_tools");
+
+        // Unresolvable caller (decisions is null) fails closed for all permission-gated tools under HideUnpermitted.
+        hide.Caller.User = null;
+        hide.Caller.ApiClient = null;
+        var anonVisible = (await hide.Client.ListToolsAsync()).Select(tool => tool.Name).ToList();
+        CollectionAssert.DoesNotContain(anonVisible, "conversations_add_note");
+        CollectionAssert.DoesNotContain(anonVisible, "conversations_reply");
+        CollectionAssert.DoesNotContain(anonVisible, "conversations_delete");
+        CollectionAssert.Contains(anonVisible, "whoami");
+        CollectionAssert.Contains(anonVisible, "describe_tools");
     }
 
     [TestMethod]
@@ -200,9 +210,17 @@ public sealed class SelfToolTests
             await roles.CreateAsync(host.Scope, new AccessRole(new RoleId("oncall"), "On-Call", [AccessPermissions.AccessBreakGlass]));
             await grants.CreateAsync(new AccessGrant(new GrantId("g-oncall"), AccessPartition.From(host.Scope), new TicketFlow.Core.UserId("oncall-user"),
                 new RoleId("oncall"), new WorkspaceGrantScope(host.Scope.WorkspaceId)));
-            await roles.CreateAsync(host.Scope, new AccessRole(new RoleId("tenant-ops"), "Tenant Ops", [AccessPermissions.AccessManageTenant]));
-            await grants.CreateAsync(new AccessGrant(new GrantId("g-tenant-ops"), AccessPartition.From(host.Scope), new TicketFlow.Core.UserId("tenant-only"),
-                new RoleId("tenant-ops"), new WorkspaceGrantScope(host.Scope.WorkspaceId)));
+            // Tenant-scoped Owner + workspace deny of AccessManage & AccessBreakGlass leaves ONLY AccessManageTenant active.
+            await roles.CreateAsync(host.Scope, new AccessRole(new RoleId("deny-ws-admin"), "Deny WS Admin", [AccessPermissions.AccessManage, AccessPermissions.AccessBreakGlass]));
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-tenant-only"), AccessPartition.From(host.Scope), new TicketFlow.Core.UserId("tenant-only"),
+                BuiltInRoles.Owner.Id, TenantGrantScope.Instance));
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-tenant-only-deny"), AccessPartition.From(host.Scope), new TicketFlow.Core.UserId("tenant-only"),
+                new RoleId("deny-ws-admin"), new WorkspaceGrantScope(host.Scope.WorkspaceId), GrantEffect.Deny));
+
+            // Workspace-scoped role with AccessManageTenant must NOT satisfy tenant-only tools.
+            await roles.CreateAsync(host.Scope, new AccessRole(new RoleId("ws-tenant-ops"), "WS Tenant Ops", [AccessPermissions.AccessManageTenant]));
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-ws-tenant-ops"), AccessPartition.From(host.Scope), new TicketFlow.Core.UserId("ws-tenant-fake"),
+                new RoleId("ws-tenant-ops"), new WorkspaceGrantScope(host.Scope.WorkspaceId)));
         }
 
         host.Caller.User = "oncall-user";
@@ -220,6 +238,38 @@ public sealed class SelfToolTests
         CollectionAssert.Contains(tenantTools, "access_list_federation_mappings");
         CollectionAssert.DoesNotContain(tenantTools, "access_list_roles");
         CollectionAssert.DoesNotContain(tenantTools, "access_activate_break_glass");
+
+        host.Caller.User = "ws-tenant-fake";
+        var fakeTenantTools = (await host.Client.ListToolsAsync()).Select(t => t.Name).ToList();
+        CollectionAssert.DoesNotContain(fakeTenantTools, "access_list_grants");
+        CollectionAssert.DoesNotContain(fakeTenantTools, "access_list_service_accounts");
+    }
+
+    [TestMethod]
+    public async Task WhoAmIFiltersExpiredAndFutureLocalGrantsAndExcludesDenyFromRoles()
+    {
+        await using var host = await McpTestHost.CreateAsync(features: false);
+        var now = DateTimeOffset.UtcNow;
+        await using (var scope = host.Services.CreateAsyncScope())
+        {
+            var grants = scope.ServiceProvider.GetRequiredService<IAccessGrantStore>();
+            var partition = AccessPartition.From(host.Scope);
+            var ws = new WorkspaceGrantScope(host.Scope.WorkspaceId);
+            var subject = new TicketFlow.Core.UserId("windowed");
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-expired"), partition, subject, BuiltInRoles.Supervisor.Id, ws, validUntil: now.AddMinutes(-5)));
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-future"), partition, subject, BuiltInRoles.Admin.Id, ws, validFrom: now.AddMinutes(30)));
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-active"), partition, subject, BuiltInRoles.Viewer.Id, ws, validFrom: now.AddMinutes(-5), validUntil: now.AddHours(1)));
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-deny"), partition, subject, BuiltInRoles.Agent.Id, ws, GrantEffect.Deny));
+        }
+
+        var (_, me) = await host.CallAsync("whoami", user: "windowed");
+        var grantRoles = me.GetProperty("grants").EnumerateArray().Select(g => g.GetProperty("role").GetString()!).ToList();
+        CollectionAssert.Contains(grantRoles, "viewer");
+        CollectionAssert.DoesNotContain(grantRoles, "supervisor", "Expired local grant must be filtered out.");
+        CollectionAssert.DoesNotContain(grantRoles, "admin", "Future local grant must be filtered out.");
+
+        var activeRoles = Strings(me.GetProperty("roles"));
+        CollectionAssert.AreEquivalent(new[] { "viewer" }, activeRoles, "Only active allow grants should appear in roles.");
     }
 
     private static List<string> Strings(JsonElement array) => [.. array.EnumerateArray().Select(item => item.GetString()!)];

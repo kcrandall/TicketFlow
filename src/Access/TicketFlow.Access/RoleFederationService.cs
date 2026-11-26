@@ -85,14 +85,24 @@ public sealed class RoleFederationService : IRoleFederationService
             return await RefuseAsync<StoredRoleFederationMapping>(actor, AccessAuditKind.RoleFederationMappingCreated, requiredPermission, targetResource, mapping.RoleId,
                 scopeFailure, cancellationToken).ConfigureAwait(false);
 
+        if (expectedVersion is < 0)
+            return await RefuseAsync<StoredRoleFederationMapping>(actor, AccessAuditKind.RoleFederationMappingCreated, requiredPermission, targetResource, mapping.RoleId,
+                TicketFailure.Invalid("Expected version cannot be negative."), cancellationToken).ConfigureAwait(false);
+
         var existing = await mappingStore.FindAsync(mapping.Partition, mappingId, cancellationToken).ConfigureAwait(false);
         var auditKind = existing is null ? AccessAuditKind.RoleFederationMappingCreated : AccessAuditKind.RoleFederationMappingUpdated;
 
+        // Authorize existing mapping scope BEFORE evaluating expectedVersion or role validation to prevent cross-scope version/existence oracles.
+        if (existing is not null)
+        {
+            var existingRequiredPermission = GetRequiredAdminPermission(existing.Mapping.Scope);
+            var (existingScopeFailure, _) = await AuthorizeScopeManagementAsync(actor, existing.Mapping.Partition, existing.Mapping.Scope, existingRequiredPermission, context, cancellationToken).ConfigureAwait(false);
+            if (existingScopeFailure is not null)
+                return await RefuseAsync<StoredRoleFederationMapping>(actor, auditKind, existingRequiredPermission, targetResource, existing.Mapping.RoleId, existingScopeFailure, cancellationToken).ConfigureAwait(false);
+        }
+
         if (expectedVersion is { } expectedUpsert)
         {
-            if (expectedUpsert < 0)
-                return await RefuseAsync<StoredRoleFederationMapping>(actor, auditKind, requiredPermission, targetResource, mapping.RoleId,
-                    TicketFailure.Invalid("Expected version cannot be negative."), cancellationToken).ConfigureAwait(false);
             var currentVersion = existing?.Version ?? 0;
             if (currentVersion != expectedUpsert)
                 return await RefuseAsync<StoredRoleFederationMapping>(actor, auditKind, requiredPermission, targetResource, mapping.RoleId,
@@ -111,10 +121,6 @@ public sealed class RoleFederationService : IRoleFederationService
         if (existing is not null)
         {
             var existingRequiredPermission = GetRequiredAdminPermission(existing.Mapping.Scope);
-            var (existingScopeFailure, _) = await AuthorizeScopeManagementAsync(actor, existing.Mapping.Partition, existing.Mapping.Scope, existingRequiredPermission, context, cancellationToken).ConfigureAwait(false);
-            if (existingScopeFailure is not null)
-                return await RefuseAsync<StoredRoleFederationMapping>(actor, auditKind, existingRequiredPermission, targetResource, existing.Mapping.RoleId, existingScopeFailure, cancellationToken).ConfigureAwait(false);
-
             var existingRole = await FindRoleAsync(actor.Scope, existing.Mapping.RoleId, existing.Mapping.Scope, cancellationToken).ConfigureAwait(false);
             if (existingRole is not null)
             {

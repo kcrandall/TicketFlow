@@ -236,6 +236,34 @@ public sealed class PrincipalMappingTests
         Assert.AreEqual("identityflow", realtimePrincipal.IdentityProvider);
     }
 
+    [TestMethod]
+    public async Task ResolverEnforcesScopeClaimPinningForUsersAndOAuthApiClients()
+    {
+        var scope = TestScopes.Create(tenantId: "t1", projectId: "p1", environmentId: "prod", appId: "app1", workspaceId: "ws-a");
+        var otherWorkspace = TestScopes.Create(tenantId: "t1", projectId: "p1", environmentId: "prod", appId: "app1", workspaceId: "ws-b");
+        var otherTenant = TestScopes.Create(tenantId: "t2", projectId: "p1", environmentId: "prod", appId: "app1", workspaceId: "ws-a");
+        var resolver = new IdentityFlowPrincipalResolver(new FakeTeams(), Options.Create(new IdentityFlowPrincipalOptions()));
+
+        var pinnedUser = Authenticated(
+            ("sub", Subject),
+            ("tenant_id", scope.TenantId),
+            ("project_id", scope.ProjectId),
+            ("environment_id", scope.EnvironmentId),
+            ("app_id", scope.AppId),
+            ("workspace_id", scope.WorkspaceId.Value));
+        Assert.IsInstanceOfType<UserPrincipal>(await resolver.ResolveAsync(pinnedUser, scope));
+        Assert.IsNull(await resolver.ResolveAsync(pinnedUser, otherWorkspace), "User with workspace_id claim must fail closed in another workspace.");
+        Assert.IsNull(await resolver.ResolveAsync(pinnedUser, otherTenant), "User with tenant_id claim must fail closed in another tenant.");
+
+        var pinnedOAuthClient = Authenticated(
+            ("identityflow:client_id", "sync-bot"),
+            ("tenant_id", scope.TenantId),
+            ("workspace", scope.WorkspaceId.Value));
+        Assert.IsInstanceOfType<ApiClientPrincipal>(await resolver.ResolveAsync(pinnedOAuthClient, scope));
+        Assert.IsNull(await resolver.ResolveAsync(pinnedOAuthClient, otherWorkspace), "OAuth API client with workspace claim must fail closed in another workspace.");
+        Assert.IsNull(await resolver.ResolveAsync(pinnedOAuthClient, otherTenant), "OAuth API client with tenant_id claim must fail closed in another tenant.");
+    }
+
     private static ClaimsPrincipal Authenticated(params (string Type, string Value)[] claims) =>
         new(new ClaimsIdentity(claims.Select(claim => new Claim(claim.Type, claim.Value)), "IdentityFlow"));
 

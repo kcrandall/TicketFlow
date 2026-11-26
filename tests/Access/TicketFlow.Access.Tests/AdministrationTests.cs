@@ -160,4 +160,109 @@ public sealed class AdministrationTests
         Assert.AreEqual(grant, (await fixture.Grants.GetAsync(fixture.Partition, grant.Id))!.Grant);
         Assert.IsEmpty(sink.Events);
     }
+
+    [TestMethod]
+    public async Task CrossWorkspaceAndUnauthorizedGrantMutationsReturnUniformForbiddenBeforeFencingOrBreakGlassChecks()
+    {
+        var (fixture, owner, admin, agent) = await CreateAsync();
+        using var _ = fixture;
+        var otherWorkspace = new WorkspaceId("ws-other");
+        var now = fixture.Clock.GetUtcNow();
+
+        var otherStd = new AccessGrant(new GrantId("g-other-std"), fixture.Partition, new UserId("bob"), BuiltInRoles.Viewer.Id, new WorkspaceGrantScope(otherWorkspace));
+        await fixture.SeedAsync(otherStd);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await fixture.Grants.UpdateAsync(
+            new AccessGrant(otherStd.Id, fixture.Partition, new UserId("bob"), BuiltInRoles.Agent.Id, new WorkspaceGrantScope(otherWorkspace)), 1)).Value);
+
+        var otherBg = new AccessGrant(new GrantId("g-other-bg"), fixture.Partition, new UserId("bob"), BuiltInRoles.Supervisor.Id, new WorkspaceGrantScope(otherWorkspace),
+            validFrom: now, validUntil: now.AddHours(1), justification: "Incident 999 cross-ws", kind: GrantKind.BreakGlass);
+        await fixture.SeedAsync(otherBg);
+
+        var tenantGrant = new AccessGrant(new GrantId("g-tenant-only"), fixture.Partition, new UserId("carol"), BuiltInRoles.Viewer.Id, TenantGrantScope.Instance);
+        await fixture.SeedAsync(tenantGrant);
+
+        // Workspace-A admin probing workspace-B and tenant grants with wrong or matching revisions must always receive uniform Forbidden (never Conflict/Invalid).
+        foreach (var probeId in new[] { otherStd.Id, otherBg.Id, tenantGrant.Id })
+        {
+            foreach (var rev in new[] { 1L, 2L, 999L })
+            {
+                var upd = (TicketFailure)(await fixture.Admin.UpdateGrantAsync(admin,
+                    new AccessGrant(probeId, fixture.Partition, new UserId("x"), BuiltInRoles.Viewer.Id, fixture.Workspace), rev)).Value!;
+                Assert.AreEqual(TicketFailureKind.Forbidden, upd.Kind, $"UpdateGrantAsync leaked oracle for {probeId} rev {rev}: {upd.Kind}");
+                Assert.IsNull(upd.CurrentRevision);
+
+                var revRes = (TicketFailure)(await fixture.Admin.RevokeGrantAsync(admin, probeId, rev)).Value!;
+                Assert.AreEqual(TicketFailureKind.Forbidden, revRes.Kind, $"RevokeGrantAsync leaked oracle for {probeId} rev {rev}: {revRes.Kind}");
+                Assert.IsNull(revRes.CurrentRevision);
+            }
+        }
+
+        // Batch RevokeGrantsAsync must also return uniform Forbidden without revision oracle for cross-workspace/tenant grants.
+        var batch = await fixture.Admin.RevokeGrantsAsync(admin, [(otherStd.Id, 999L), (otherBg.Id, 999L), (tenantGrant.Id, 999L)]);
+        foreach (var item in batch)
+        {
+            var failure = (TicketFailure)item.Value!;
+            Assert.AreEqual(TicketFailureKind.Forbidden, failure.Kind);
+            Assert.IsNull(failure.CurrentRevision);
+        }
+
+        // Unauthorized agent receives Forbidden for both existing and nonexistent grants (no existence oracle).
+        var ownGrant = new AccessGrant(new GrantId("g-own"), fixture.Partition, new UserId("bob"), BuiltInRoles.Viewer.Id, fixture.Workspace);
+        await fixture.SeedAsync(ownGrant);
+        foreach (var probeId in new[] { ownGrant.Id, new GrantId("g-does-not-exist"), otherStd.Id })
+        {
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(agent,
+                new AccessGrant(probeId, fixture.Partition, new UserId("x"), BuiltInRoles.Viewer.Id, fixture.Workspace), 999)));
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(agent, probeId, 999)));
+        }
+        var agentBatch = await fixture.Admin.RevokeGrantsAsync(agent, [(ownGrant.Id, 999L), (new GrantId("g-does-not-exist"), 999L)]);
+        foreach (var item in agentBatch)
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(item));
+
+        // Tenant owner still has full authority over tenant grants.
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(owner, tenantGrant.Id, 1)));
+    }
+
+    [TestMethod]
+    public async Task EvaluatorAndPlannerRequireTenantScopeAndStandardGrantsForAdministrativePermissions()
+    {
+        using var fixture = AccessFixture.Create();
+        var tenantOwner = fixture.User("tenant-owner");
+        await fixture.GrantAsync(tenantOwner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        var wsOwner = fixture.User("ws-owner");
+        await fixture.GrantAsync(wsOwner.UserId, BuiltInRoles.Owner, fixture.Workspace);
+
+        // Tenant-scoped Owner passes both AccessManage and AccessManageTenant in evaluator, batch context and planner.
+        Assert.AreEqual("allowed", await fixture.DescribeAsync(tenantOwner, AccessPermissions.AccessManage));
+        Assert.AreEqual("allowed", await fixture.DescribeAsync(tenantOwner, AccessPermissions.AccessManageTenant));
+        Assert.AreNotSame(DenyAllFilter.Instance, await fixture.Planner.PlanAsync(new AccessQuery(tenantOwner, AccessPermissions.AccessManageTenant, fixture.Scope)));
+
+        // Workspace-scoped Owner passes AccessManage, but is DENIED AccessManageTenant in evaluator, batch context and planner.
+        Assert.AreEqual("allowed", await fixture.DescribeAsync(wsOwner, AccessPermissions.AccessManage));
+        Assert.AreEqual("denied:NoMatchingGrant", await fixture.DescribeAsync(wsOwner, AccessPermissions.AccessManageTenant));
+        var wsBatch = await fixture.Evaluator.LoadDecisionContextAsync(wsOwner, fixture.Scope, [AccessPermissions.AccessManage, AccessPermissions.AccessManageTenant]);
+        Assert.IsTrue((await wsBatch.DecideAsync(AccessPermissions.AccessManage, fixture.Resource())).IsPermitted);
+        Assert.IsFalse((await wsBatch.DecideAsync(AccessPermissions.AccessManageTenant, fixture.Resource())).IsPermitted);
+        Assert.AreSame(DenyAllFilter.Instance, await fixture.Planner.PlanAsync(new AccessQuery(wsOwner, AccessPermissions.AccessManageTenant, fixture.Scope)));
+        var wsHeld = await fixture.Planner.HeldAnywhereAsync(wsOwner, fixture.Scope, [AccessPermissions.AccessManage, AccessPermissions.AccessManageTenant]);
+        Assert.Contains(AccessPermissions.AccessManage, wsHeld);
+        Assert.DoesNotContain(AccessPermissions.AccessManageTenant, wsHeld);
+
+        // Break-glass grants NEVER satisfy administrative permissions in evaluator or planner.
+        var bgUser = fixture.User("bg-admin");
+        var bgRole = await fixture.CustomRoleAsync("bg-all-admin", AccessPermissions.AccessManage, AccessPermissions.AccessManageTenant, AccessPermissions.AccessBreakGlass, AccessPermissions.ConversationRead);
+        var now = fixture.Clock.GetUtcNow();
+        await fixture.SeedAsync(new AccessGrant(new GrantId("g-bg-admin"), fixture.Partition, bgUser.UserId, bgRole.Id, fixture.Workspace,
+            validFrom: now, validUntil: now.AddHours(1), justification: "Incident 123 testing admin break-glass block", kind: GrantKind.BreakGlass));
+        Assert.AreEqual("allowed:break-glass", await fixture.DescribeAsync(bgUser, AccessPermissions.ConversationRead));
+        Assert.AreEqual("denied:NoMatchingGrant", await fixture.DescribeAsync(bgUser, AccessPermissions.AccessManage));
+        Assert.AreEqual("denied:NoMatchingGrant", await fixture.DescribeAsync(bgUser, AccessPermissions.AccessManageTenant));
+        Assert.AreEqual("denied:NoMatchingGrant", await fixture.DescribeAsync(bgUser, AccessPermissions.AccessBreakGlass));
+        var bgHeld = await fixture.Planner.HeldAnywhereAsync(bgUser, fixture.Scope, [AccessPermissions.ConversationRead, AccessPermissions.AccessManage, AccessPermissions.AccessManageTenant, AccessPermissions.AccessBreakGlass]);
+        Assert.Contains(AccessPermissions.ConversationRead, bgHeld);
+        Assert.DoesNotContain(AccessPermissions.AccessManage, bgHeld);
+        Assert.DoesNotContain(AccessPermissions.AccessManageTenant, bgHeld);
+        Assert.DoesNotContain(AccessPermissions.AccessBreakGlass, bgHeld);
+    }
 }

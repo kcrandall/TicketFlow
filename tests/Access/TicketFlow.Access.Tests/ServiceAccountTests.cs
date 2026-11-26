@@ -501,6 +501,36 @@ public sealed partial class ServiceAccountTests
         Assert.AreEqual(TicketFailureKind.Forbidden, bgFailure.Kind);
     }
 
+    [TestMethod]
+    public async Task CreateServiceAccountDoesNotLeakCrossWorkspaceOrTenantVersion()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<IServiceAccountService>();
+
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        var wsAdmin = fixture.User("ws-admin");
+        await fixture.GrantAsync(wsAdmin.UserId, BuiltInRoles.Admin, fixture.Workspace);
+
+        var otherWs = new WorkspaceId("ws-other");
+        var otherOwner = new UserPrincipal(fixture.Partition.InWorkspace(otherWs), new UserId("owner"));
+        var otherClient = new ApiClientId("sa-other-ws-secret");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(otherOwner, new ServiceAccount(otherClient, fixture.Partition, new WorkspaceGrantScope(otherWs), "Other WS"))).IsSuccess);
+        Assert.IsTrue((await service.UpdateServiceAccountAsync(otherOwner, otherClient, "Other WS v2", expectedVersion: 1)).IsSuccess);
+
+        var tenantClient = new ApiClientId("sa-tenant-secret");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(tenantClient, fixture.Partition, TenantGrantScope.Instance, "Tenant SA"))).IsSuccess);
+
+        foreach (var probeId in new[] { otherClient, tenantClient })
+        {
+            var attempt = await service.CreateServiceAccountAsync(wsAdmin, new ServiceAccount(probeId, fixture.Partition, fixture.Workspace, "Probe"));
+            Assert.IsTrue(attempt.TryGetValue(out TicketFailure failure));
+            Assert.AreEqual(TicketFailureKind.Forbidden, failure.Kind, $"CreateServiceAccountAsync leaked cross-scope version for {probeId}.");
+            Assert.IsNull(failure.CurrentRevision);
+        }
+    }
+
     private sealed class CancellingOnDeleteServiceAccountStore(IServiceAccountStore inner, CancellationTokenSource cts) : IServiceAccountStore
     {
         public ValueTask<StoredServiceAccount?> FindAsync(AccessPartition partition, ApiClientId clientId, CancellationToken cancellationToken = default) =>

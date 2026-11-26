@@ -50,7 +50,11 @@ public sealed class AccessEvaluator : IAccessEvaluator
             return rejected;
         }
 
-        var (serviceAccountDenial, _) = await engine.CheckServiceAccountAsync(request.Principal, resource.Scope, resource, cancellationToken).ConfigureAwait(false);
+        var tenantAllowsOnly = AccessEngine.RequiresTenantAllowOnly(permission);
+        var includeBreakGlass = !AccessEngine.IsAdministrativePermission(permission);
+        var (serviceAccountDenial, _) = tenantAllowsOnly
+            ? await engine.CheckServiceAccountForGrantScopeAsync(request.Principal, resource.Scope, TenantGrantScope.Instance, cancellationToken).ConfigureAwait(false)
+            : await engine.CheckServiceAccountAsync(request.Principal, resource.Scope, resource, cancellationToken).ConfigureAwait(false);
         if (serviceAccountDenial is { } saReason)
         {
             AccessDecision rejected = new AccessDenied(permission, saReason);
@@ -60,7 +64,7 @@ public sealed class AccessEvaluator : IAccessEvaluator
         }
 
         var context = await engine.LoadAsync(request.Principal, resource.Scope, cancellationToken).ConfigureAwait(false);
-        var result = AccessEngine.Evaluate(context, permission, resource, includeBreakGlass: true);
+        var result = AccessEngine.Evaluate(context, permission, resource, includeBreakGlass, tenantAllowsOnly);
         var decision = result.Denial is { } denial
             ? new AccessDenied(permission, denial)
             : await MaskAsync(context, permission, resource, result, cancellationToken).ConfigureAwait(false);
@@ -81,7 +85,7 @@ public sealed class AccessEvaluator : IAccessEvaluator
             return await RefuseAsync(request, RevealRefusal.ReadDenied, engine.Now, cancellationToken).ConfigureAwait(false);
 
         var context = await engine.LoadAsync(request.Principal, resource.Scope, cancellationToken).ConfigureAwait(false);
-        var read = AccessEngine.Evaluate(context, request.ReadPermission, resource, includeBreakGlass: true);
+        var read = AccessEngine.Evaluate(context, request.ReadPermission, resource, !AccessEngine.IsAdministrativePermission(request.ReadPermission), AccessEngine.RequiresTenantAllowOnly(request.ReadPermission));
         if (!read.Allowed)
             return await RefuseAsync(request, RevealRefusal.ReadDenied, context.Now, cancellationToken).ConfigureAwait(false);
 
@@ -100,7 +104,7 @@ public sealed class AccessEvaluator : IAccessEvaluator
             case MaskOutcome.Masked:
                 if (policy.RevealPermission is not { } revealPermission || !engine.Catalog.Contains(revealPermission))
                     return await RefuseAsync(request, RevealRefusal.NotRevealable, context.Now, cancellationToken).ConfigureAwait(false);
-                var reveal = AccessEngine.EvaluateSimple(context, revealPermission, resource, includeBreakGlass: true);
+                var reveal = AccessEngine.EvaluateSimple(context, revealPermission, resource, !AccessEngine.IsAdministrativePermission(revealPermission), AccessEngine.RequiresTenantAllowOnly(revealPermission));
                 if (!reveal.Allowed)
                     return await RefuseAsync(request, RevealRefusal.RevealDenied, context.Now, cancellationToken).ConfigureAwait(false);
                 usedBreakGlass |= reveal.UsedBreakGlass;
@@ -203,7 +207,7 @@ public sealed class AccessEvaluator : IAccessEvaluator
                         reveal = cached;
                     else
                     {
-                        reveal = AccessEngine.EvaluateSimple(context, revealPermission, resource, includeBreakGlass: true);
+                        reveal = AccessEngine.EvaluateSimple(context, revealPermission, resource, !AccessEngine.IsAdministrativePermission(revealPermission), AccessEngine.RequiresTenantAllowOnly(revealPermission));
                         if (cachedRevealPerm is null)
                         {
                             cachedRevealPerm = revealPermission;
@@ -292,21 +296,25 @@ public sealed class AccessEvaluator : IAccessEvaluator
             if (!entries.TryGetValue(permission, out var entry))
                 throw new ArgumentException("The permission was not loaded into this decision context.", nameof(permission));
             ArgumentNullException.ThrowIfNull(resource);
+            var tenantAllowsOnly = AccessEngine.RequiresTenantAllowOnly(permission);
+            var includeBreakGlass = !AccessEngine.IsAdministrativePermission(permission);
             AccessDecision decision;
             if (entry.Precheck is { } reason)
                 decision = new AccessDenied(permission, reason);
             else if (serviceAccountDenial is { } saDenial)
                 decision = new AccessDenied(permission, saDenial);
-            else if (resource.Scope != Scope || (serviceAccount is not null && !serviceAccount.Account.AppliesTo(resource)))
+            else if (resource.Scope != Scope
+                || (serviceAccount is not null && !serviceAccount.Account.AppliesTo(resource))
+                || (tenantAllowsOnly && serviceAccount is not null && !AccessEngine.ScopeContains(serviceAccount.Account.Scope, TenantGrantScope.Instance)))
                 decision = new AccessDenied(permission, AccessDenialReason.ScopeMismatch);
             else if (entry.Policies is null)
             {
-                var simple = AccessEngine.EvaluateSimple(context!, permission, resource, includeBreakGlass: true);
+                var simple = AccessEngine.EvaluateSimple(context!, permission, resource, includeBreakGlass, tenantAllowsOnly);
                 decision = simple.Denial is { } denial ? new AccessDenied(permission, denial) : new AccessAllowed(permission, simple.UsedBreakGlass);
             }
             else
             {
-                var result = AccessEngine.Evaluate(context!, permission, resource, includeBreakGlass: true);
+                var result = AccessEngine.Evaluate(context!, permission, resource, includeBreakGlass, tenantAllowsOnly);
                 decision = result.Denial is { } denial ? new AccessDenied(permission, denial) : owner.MaskFiltered(context!, permission, resource, result, entry.Policies);
             }
             // Same audit semantics as AuthorizeAsync: sensitive permissions and every decision relying on break-glass are recorded

@@ -299,4 +299,67 @@ public sealed class AccessToolTests
         Assert.IsFalse(registry.IsEnabled(TicketFlowToolCatalog.Find("access_list_federation_mappings")!),
             "Role federation tools must be disabled when role federation mapping store is not registered.");
     }
+
+    [TestMethod]
+    public async Task ListBreakGlassPaginatesPastMaximumTargetPage()
+    {
+        await using var host = await McpTestHost.CreateAsync(features: false);
+        await using (var scope = host.Services.CreateAsyncScope())
+        {
+            var grants = scope.ServiceProvider.GetRequiredService<IAccessGrantStore>();
+            var partition = AccessPartition.From(host.Scope);
+            var target = new WorkspaceGrantScope(host.Scope.WorkspaceId);
+            for (var i = 0; i < AccessLimits.MaximumTargetPage + 10; i++)
+                await grants.CreateAsync(new AccessGrant(
+                    new GrantId($"std-{i:D5}"),
+                    partition,
+                    new UserId($"u-{i}"),
+                    BuiltInRoles.Viewer.Id,
+                    target));
+
+            var now = DateTimeOffset.UtcNow;
+            await grants.CreateAsync(new AccessGrant(
+                new GrantId("zzz-bg-after-page"),
+                partition,
+                new UserId("responder"),
+                BuiltInRoles.Supervisor.Id,
+                target,
+                validFrom: now.AddMinutes(-1),
+                validUntil: now.AddHours(1),
+                justification: "Incident 1010 pagination check",
+                kind: GrantKind.BreakGlass));
+        }
+
+        var (failed, listed) = await host.CallAsync("access_list_break_glass", user: "owner");
+        Assert.IsFalse(failed, listed.GetRawText());
+        var ids = listed.GetProperty("items").EnumerateArray().Select(item => item.GetProperty("id").GetString()).ToList();
+        CollectionAssert.Contains(ids, "zzz-bg-after-page");
+    }
+
+    [TestMethod]
+    public async Task RevokeBreakGlassReturnsUniformForbiddenForCrossWorkspaceGrants()
+    {
+        await using var host = await McpTestHost.CreateAsync(features: false);
+        var otherWorkspace = new WorkspaceId("ws-other");
+        await using (var scope = host.Services.CreateAsyncScope())
+        {
+            var grants = scope.ServiceProvider.GetRequiredService<IAccessGrantStore>();
+            var partition = AccessPartition.From(host.Scope);
+            var now = DateTimeOffset.UtcNow;
+            await grants.CreateAsync(new AccessGrant(new GrantId("other-std"), partition, new UserId("bob"), BuiltInRoles.Viewer.Id, new WorkspaceGrantScope(otherWorkspace)));
+            await grants.CreateAsync(new AccessGrant(new GrantId("other-bg"), partition, new UserId("bob"), BuiltInRoles.Supervisor.Id, new WorkspaceGrantScope(otherWorkspace),
+                validFrom: now, validUntil: now.AddHours(1), justification: "Cross-workspace incident 42", kind: GrantKind.BreakGlass));
+            await grants.CreateAsync(new AccessGrant(new GrantId("tenant-std"), partition, new UserId("bob"), BuiltInRoles.Viewer.Id, TenantGrantScope.Instance));
+        }
+
+        foreach (var id in new[] { "other-std", "other-bg", "tenant-std" })
+        {
+            var (failed, body) = await host.CallAsync("access_revoke_break_glass", new()
+            {
+                ["grantId"] = id, ["expectedRevision"] = 999L,
+            }, user: "owner");
+            Assert.IsTrue(failed);
+            Assert.AreEqual("forbidden", McpTestHost.Code(body), $"access_revoke_break_glass leaked oracle for {id}: {body.GetRawText()}");
+        }
+    }
 }

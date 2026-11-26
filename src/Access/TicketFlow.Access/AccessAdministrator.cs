@@ -131,19 +131,26 @@ public sealed class AccessAdministrator : IAccessAdministrator
         RequireActor(actor);
         ArgumentNullException.ThrowIfNull(grant);
         var change = GrantChange(AccessAuditKind.GrantUpdated, actor, grant);
-        var refusal = ValidateRevision(expectedRevision);
-        AccessContext? context = null;
-        if (refusal is null && grant.Partition == AccessPartition.From(actor.Scope))
+        var (refusal, context) = await AuthorizeTargetWithContextAsync(actor, grant, context: null, cancellationToken).ConfigureAwait(false);
+        refusal ??= ValidateRevision(expectedRevision);
+        if (refusal is null)
         {
             var existing = await grants.GetAsync(grant.Partition, grant.Id, cancellationToken).ConfigureAwait(false);
-            if (Fence(existing?.Revision, expectedRevision) is { } fenced)
-                refusal = fenced;
-            else if (existing!.Grant.Kind == GrantKind.BreakGlass)
-                refusal = new(TicketFailureKind.Invalid, ["Break-glass grants cannot be modified; revoke them instead."]);
-            else
+            if (existing is not null)
+            {
                 (refusal, context) = await AuthorizeTargetWithContextAsync(actor, existing.Grant, context, cancellationToken).ConfigureAwait(false);
+                if (refusal is null)
+                {
+                    if (Fence(existing.Revision, expectedRevision) is { } fenced)
+                        refusal = fenced;
+                    else if (existing.Grant.Kind == GrantKind.BreakGlass)
+                        refusal = new(TicketFailureKind.Invalid, ["Break-glass grants cannot be modified; revoke them instead."]);
+                }
+            }
+            else
+                refusal = Fence(null, expectedRevision);
         }
-        refusal ??= await AuthorizeGrantAsync(actor, grant, context, cancellationToken).ConfigureAwait(false);
+        refusal ??= await ValidateGrantAndPermissionsAsync(actor, grant, context!, cancellationToken).ConfigureAwait(false);
         if (refusal is not null)
             return await RefuseAsync<StoredAccessGrant>(change, refusal, cancellationToken).ConfigureAwait(false);
         return await CompleteAsync(change, await grants.UpdateAsync(grant, expectedRevision, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
@@ -156,14 +163,19 @@ public sealed class AccessAdministrator : IAccessAdministrator
             throw new ArgumentException("A grant identifier is required.", nameof(grant));
         var change = new Change(AccessAuditKind.GrantRevoked, actor, Grant: grant);
         var partition = AccessPartition.From(actor.Scope);
-        var refusal = ValidateRevision(expectedRevision);
+        var (refusal, context) = await AuthorizeAnyGrantManagementAsync(actor, context: null, cancellationToken).ConfigureAwait(false);
+        refusal ??= ValidateRevision(expectedRevision);
         if (refusal is null)
         {
             var existing = await grants.GetAsync(partition, grant, cancellationToken).ConfigureAwait(false);
-            refusal = Fence(existing?.Revision, expectedRevision)
-                ?? (await AuthorizeTargetWithContextAsync(actor, existing!.Grant, context: null, cancellationToken).ConfigureAwait(false)).Refusal;
             if (existing is not null)
+            {
                 change = GrantChange(AccessAuditKind.GrantRevoked, actor, existing.Grant);
+                (refusal, context) = await AuthorizeTargetWithContextAsync(actor, existing.Grant, context, cancellationToken).ConfigureAwait(false);
+                refusal ??= Fence(existing.Revision, expectedRevision);
+            }
+            else
+                refusal = Fence(null, expectedRevision);
         }
         if (refusal is not null)
             return await RefuseAsync<StoredAccessGrant>(change, refusal, cancellationToken).ConfigureAwait(false);
@@ -179,29 +191,32 @@ public sealed class AccessAdministrator : IAccessAdministrator
         if (grants.Count == 1)
             return [await RevokeGrantAsync(actor, grants[0].Id, grants[0].ExpectedRevision, cancellationToken).ConfigureAwait(false)];
 
+        for (var i = 0; i < grants.Count; i++)
+            if (!grants[i].Id.IsInitialized)
+                throw new ArgumentException("A grant identifier is required.", nameof(grants));
+
         var partition = AccessPartition.From(actor.Scope);
         var results = new TicketResult<AccessChangeApplied<StoredAccessGrant>>[grants.Count];
         var toDelete = new List<(int Index, StoredAccessGrant Existing, Change Change)>(grants.Count);
-        AccessContext? context = null;
+        var (baseRefusal, context) = await AuthorizeAnyGrantManagementAsync(actor, context: null, cancellationToken).ConfigureAwait(false);
 
         for (var i = 0; i < grants.Count; i++)
         {
             var (grantId, expectedRevision) = grants[i];
-            if (!grantId.IsInitialized)
-                throw new ArgumentException("A grant identifier is required.", nameof(grants));
             var change = new Change(AccessAuditKind.GrantRevoked, actor, Grant: grantId);
-            var refusal = ValidateRevision(expectedRevision);
+            var refusal = baseRefusal ?? ValidateRevision(expectedRevision);
             StoredAccessGrant? existing = null;
             if (refusal is null)
             {
                 existing = await this.grants.GetAsync(partition, grantId, cancellationToken).ConfigureAwait(false);
-                refusal = Fence(existing?.Revision, expectedRevision);
                 if (existing is not null)
                 {
                     change = GrantChange(AccessAuditKind.GrantRevoked, actor, existing.Grant);
-                    if (refusal is null)
-                        (refusal, context) = await AuthorizeTargetWithContextAsync(actor, existing.Grant, context, cancellationToken).ConfigureAwait(false);
+                    (refusal, context) = await AuthorizeTargetWithContextAsync(actor, existing.Grant, context, cancellationToken).ConfigureAwait(false);
+                    refusal ??= Fence(existing.Revision, expectedRevision);
                 }
+                else
+                    refusal = Fence(null, expectedRevision);
             }
             if (refusal is not null)
                 results[i] = await RefuseAsync<StoredAccessGrant>(change, refusal, cancellationToken).ConfigureAwait(false);
@@ -611,13 +626,38 @@ public sealed class AccessAdministrator : IAccessAdministrator
     }
 
     /// <summary>
+    /// Pre-authorizes that the actor holds at least one standard administrative grant in its scope before probing grant existence.
+    /// </summary>
+    private async Task<(Refusal? Refusal, AccessContext? Context)> AuthorizeAnyGrantManagementAsync(PrincipalRef actor, AccessContext? context, CancellationToken cancellationToken)
+    {
+        if (engine.Precheck(actor, AccessPermissions.AccessManage, actor.Scope) is { } reason)
+            return (new(TicketFailureKind.Forbidden, ["The actor is not authorized."], reason), context);
+        var (serviceAccountDenial, _) = await engine.CheckServiceAccountAsync(actor, actor.Scope, resource: null, cancellationToken).ConfigureAwait(false);
+        if (serviceAccountDenial is { } saReason)
+            return (new(TicketFailureKind.Forbidden, ["The actor is not authorized."], saReason), context);
+        context ??= await engine.LoadAsync(actor, actor.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
+        var loadedGrants = context.Grants;
+        for (var i = 0; i < loadedGrants.Count; i++)
+        {
+            var candidate = loadedGrants[i];
+            var grant = candidate.Grant;
+            if (grant.Effect != GrantEffect.Allow || grant.Kind == GrantKind.BreakGlass)
+                continue;
+            if (candidate.Includes(AccessPermissions.AccessManage)
+                || (grant.Scope is TenantGrantScope && candidate.Includes(AccessPermissions.AccessManageTenant)))
+                return (null, context);
+        }
+        return (new(TicketFailureKind.Forbidden, ["The actor is not authorized."], AccessDenialReason.NoMatchingGrant), context);
+    }
+
+    /// <summary>
     /// Authorizes management of a grant's target. Tenant grants need <c>access:manage-tenant</c> from a tenant-scoped grant; a
     /// workspace-scoped Owner cannot manage tenant grants.
     /// </summary>
     private async Task<(Refusal? Refusal, AccessContext? Context)> AuthorizeTargetWithContextAsync(PrincipalRef actor, AccessGrant grant, AccessContext? context, CancellationToken cancellationToken)
     {
         if (grant.Partition != AccessPartition.From(actor.Scope) || (grant.Workspace is { } workspace && workspace != actor.Scope.WorkspaceId))
-            return (new(TicketFailureKind.Forbidden, ["The grant is outside the actor's scope."], AccessDenialReason.ScopeMismatch), context);
+            return (new(TicketFailureKind.Forbidden, ["The actor is not authorized."], AccessDenialReason.ScopeMismatch), context);
         var (saDenial, _) = await engine.CheckServiceAccountForGrantScopeAsync(actor, actor.Scope, grant.Scope, cancellationToken).ConfigureAwait(false);
         if (saDenial is { } saReason)
             return (new(TicketFailureKind.Forbidden, ["The actor is not authorized."], saReason), context);
@@ -631,6 +671,11 @@ public sealed class AccessAdministrator : IAccessAdministrator
         var (refusal, loadedContext) = await AuthorizeTargetWithContextAsync(actor, grant, context, cancellationToken).ConfigureAwait(false);
         if (refusal is not null)
             return refusal;
+        return await ValidateGrantAndPermissionsAsync(actor, grant, loadedContext!, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<Refusal?> ValidateGrantAndPermissionsAsync(PrincipalRef actor, AccessGrant grant, AccessContext loadedContext, CancellationToken cancellationToken)
+    {
         if (grant.Kind == GrantKind.BreakGlass)
             return new(TicketFailureKind.Invalid, ["Break-glass grants are created only through break-glass activation."]);
 
@@ -640,7 +685,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         if (grant.Effect == GrantEffect.Deny)
             return null;
         var granted = role!.IncludesAllPermissions ? engine.Catalog.Definitions.Select(definition => definition.Permission) : role.Permissions;
-        return RequireHeld(loadedContext!, granted, AccessEngine.Target(actor.Scope, grant.Scope), grant.Scope is TenantGrantScope);
+        return RequireHeld(loadedContext, granted, AccessEngine.Target(actor.Scope, grant.Scope), grant.Scope is TenantGrantScope);
     }
 
     private async Task<TicketResult<AccessChangeApplied<T>>> RefuseAsync<T>(Change change, Refusal refusal, CancellationToken cancellationToken, long? currentRevision = null)

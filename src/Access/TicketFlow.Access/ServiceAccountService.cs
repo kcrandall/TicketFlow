@@ -115,11 +115,19 @@ public sealed class ServiceAccountService : IServiceAccountService
                 new TicketFailure(TicketFailureKind.Rejected, [$"Service account client identifier '{account.ClientId.Value}' is reserved for internal TicketFlow workers."], Code: "reserved-client-id"),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        var existingGrantsFailure = await ValidateExistingGrantsForCreateAsync(context!, actor.Scope, account, cancellationToken).ConfigureAwait(false);
-        if (existingGrantsFailure is not null)
-            return await RefuseAsync<StoredServiceAccount>(actor, AccessAuditKind.ServiceAccountCreated, requiredPermission, targetResource, existingGrantsFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
-
         if (await serviceAccountStore.FindAsync(account.Partition, account.ClientId, cancellationToken).ConfigureAwait(false) is { } existingAccount)
+        {
+            var existingRequiredPermission = GetRequiredAdminPermission(existingAccount.Account.Scope);
+            var (existingScopeFailure, _) = await AuthorizeScopeManagementAsync(actor, existingAccount.Account.Partition, existingAccount.Account.Scope, existingRequiredPermission, context, cancellationToken).ConfigureAwait(false);
+            if (existingScopeFailure is not null)
+                return await RefuseAsync<StoredServiceAccount>(
+                    actor,
+                    AccessAuditKind.ServiceAccountCreated,
+                    existingRequiredPermission,
+                    targetResource,
+                    existingScopeFailure,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+
             return await RefuseAsync<StoredServiceAccount>(
                 actor,
                 AccessAuditKind.ServiceAccountCreated,
@@ -127,6 +135,11 @@ public sealed class ServiceAccountService : IServiceAccountService
                 targetResource,
                 TicketFailure.Conflict(existingAccount.Version, [$"Service account '{account.ClientId.Value}' already exists."], code: "already-exists"),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+
+        var existingGrantsFailure = await ValidateExistingGrantsForCreateAsync(context!, actor.Scope, account, cancellationToken).ConfigureAwait(false);
+        if (existingGrantsFailure is not null)
+            return await RefuseAsync<StoredServiceAccount>(actor, AccessAuditKind.ServiceAccountCreated, requiredPermission, targetResource, existingGrantsFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var existingKeys = await apiKeyStore.ListForClientAsync(account.Partition, account.ClientId, includeInactive: false, cancellationToken).ConfigureAwait(false);
         var now = engine.Now;

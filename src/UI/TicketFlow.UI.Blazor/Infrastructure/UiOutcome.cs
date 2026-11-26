@@ -40,11 +40,29 @@ public sealed record UiOutcome(UiOutcomeKind Kind, string Title, IReadOnlyList<s
     {
         TicketFailureKind.Forbidden => Forbidden() with { Messages = failure.Errors.Count > 0 ? failure.Errors : Forbidden().Messages },
         TicketFailureKind.NotFound => NotFound(),
-        TicketFailureKind.Conflict => Conflict(failure.CurrentRevision),
+        TicketFailureKind.Conflict => ConflictFromFailure(failure),
         TicketFailureKind.Invalid => new(UiOutcomeKind.Invalid, "Check the values and try again", failure.Errors.Count > 0 ? failure.Errors : ["The request was not valid."]),
         TicketFailureKind.Rejected => new(UiOutcomeKind.Rejected, "The change was rejected", failure.Errors.Count > 0 ? failure.Errors : ["Rejected"]),
         _ => throw new ArgumentOutOfRangeException(nameof(failure)),
     };
+
+    private static UiOutcome ConflictFromFailure(TicketFailure failure)
+    {
+        if (string.IsNullOrEmpty(failure.Code) || string.Equals(failure.Code, "concurrency-conflict", StringComparison.OrdinalIgnoreCase))
+            return Conflict(failure.CurrentRevision);
+
+        var title = failure.Code switch
+        {
+            "already-exists" or "taken" => "That record already exists",
+            "service-account-disabled" => "Service account is disabled",
+            "already-revoked" => "API key is already revoked",
+            "role-in-use" => "Role is still in use",
+            "existing-grants-conflict" => "Existing grants conflict with this service account",
+            _ => "The request conflicts with existing state",
+        };
+        var messages = failure.Errors.Count > 0 ? failure.Errors : ["Review the current state and try again."];
+        return new(UiOutcomeKind.Conflict, title, messages, failure.CurrentRevision);
+    }
 
     /// <summary>Maps a domain-specific refusal reason (contacts, live chat, conversations, assist) to a <see cref="UiOutcome"/>.</summary>
     public static UiOutcome Refused(Enum reason, IReadOnlyList<string> errors, long? currentRevision = null) => reason.ToString() switch

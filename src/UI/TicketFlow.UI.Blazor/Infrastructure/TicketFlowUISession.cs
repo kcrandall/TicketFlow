@@ -260,56 +260,61 @@ public sealed class TicketFlowUISession
         ITicketFlowPrincipalResolver? ticketFlowResolver,
         IAccessPrincipalResolver? accessResolver)
     {
-        if (accessResolver is not null && PreferAccessPrincipalResolver(http.User))
-            if (await accessResolver.ResolveAsync(http.User, scope, http.RequestAborted).ConfigureAwait(false) is { } direct)
-                return direct;
-
-        PrincipalRef? principal = null;
-        if (ticketFlowResolver is not null)
-            principal = await ticketFlowResolver.ResolveAsync(http, scope, http.RequestAborted).ConfigureAwait(false);
-
-        if (principal is null && accessResolver is not null)
+        if (accessResolver is not null && IsTicketFlowApiKey(http.User))
             return await accessResolver.ResolveAsync(http.User, scope, http.RequestAborted).ConfigureAwait(false);
 
-        if (principal is not null && principal.ExternalRoles.Count == 0 && accessResolver is not null && HasRoleClaims(http.User))
+        var hasConfiguredHostResolver = ticketFlowResolver is not null
+            && (ticketFlowResolver is not OptionsTicketFlowPrincipalResolver
+                || http.RequestServices.GetService<IOptions<TicketFlowEndpointOptions>>()?.Value.ResolvePrincipal is not null);
+
+        if (hasConfiguredHostResolver)
         {
-            var resolved = await accessResolver.ResolveAsync(http.User, scope, http.RequestAborted).ConfigureAwait(false);
-            if (resolved is not null && resolved.ExternalRoles.Count > 0)
-            {
-                if (principal is UserPrincipal user && resolved is UserPrincipal resolvedUser && user.UserId == resolvedUser.UserId)
-                    return new UserPrincipal(scope, user.UserId, user.Teams.Count > 0 ? user.Teams : resolvedUser.Teams, resolvedUser.ExternalRoles);
-                if (principal is ApiClientPrincipal client && resolved is ApiClientPrincipal resolvedClient && client.ClientId == resolvedClient.ClientId)
-                    return new ApiClientPrincipal(scope, client.ClientId, resolvedClient.ExternalRoles);
-            }
+            var principal = await ticketFlowResolver!.ResolveAsync(http, scope, http.RequestAborted).ConfigureAwait(false);
+            if (principal is null)
+                return null;
+
+            return EnrichExternalClaims(http, scope, principal, accessResolver);
         }
 
-        return principal;
+        if (accessResolver is not null)
+            return await accessResolver.ResolveAsync(http.User, scope, http.RequestAborted).ConfigureAwait(false);
+
+        return null;
     }
 
-    private static bool PreferAccessPrincipalResolver(ClaimsPrincipal user)
+    private static PrincipalRef EnrichExternalClaims(
+        HttpContext http,
+        TicketScope scope,
+        PrincipalRef principal,
+        IAccessPrincipalResolver? accessResolver)
     {
-        if (string.Equals(user.Identity?.AuthenticationType, "ApiKey", StringComparison.OrdinalIgnoreCase))
-            return true;
-        foreach (var claim in user.Claims)
+        if (principal is not (UserPrincipal or ApiClientPrincipal))
+            return principal;
+        if (principal.ExternalRoles.Count > 0 && principal.IdentityProvider is not null)
+            return principal;
+
+        var claimsResolver = accessResolver as ClaimsPrincipalResolver
+            ?? new ClaimsPrincipalResolver(http.RequestServices.GetService<IOptions<ClaimsPrincipalResolverOptions>>());
+        IReadOnlyCollection<string> externalRoles = principal.ExternalRoles.Count > 0
+            ? principal.ExternalRoles
+            : claimsResolver.ExtractExternalRoles(http.User);
+        var identityProvider = principal.IdentityProvider ?? claimsResolver.TryGetIdentityProvider(http.User);
+
+        if (externalRoles.Count == principal.ExternalRoles.Count && identityProvider == principal.IdentityProvider)
+            return principal;
+
+        return principal switch
         {
-            if (string.Equals(claim.Type, "amr", StringComparison.OrdinalIgnoreCase)
-                && (string.Equals(claim.Value, "api_key", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(claim.Value, "external", StringComparison.OrdinalIgnoreCase)))
-                return true;
-            if (string.Equals(claim.Type, "api_key_id", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(claim.Type, "principal_type", StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-        return false;
+            UserPrincipal user => new UserPrincipal(scope, user.UserId, user.Teams, externalRoles, identityProvider),
+            ApiClientPrincipal client => new ApiClientPrincipal(scope, client.ClientId, externalRoles, identityProvider),
+            _ => principal,
+        };
     }
 
-    private static bool HasRoleClaims(ClaimsPrincipal user)
-    {
-        foreach (var claim in user.Claims)
-            if (claim.Type is "role" or "roles" or ClaimTypes.Role && !string.IsNullOrWhiteSpace(claim.Value))
-                return true;
-        return false;
-    }
+    private static bool IsTicketFlowApiKey(ClaimsPrincipal user) =>
+        user.Identity is { IsAuthenticated: true } identity
+        && string.Equals(identity.AuthenticationType, "ApiKey", StringComparison.Ordinal)
+        && user.HasClaim(static c => string.Equals(c.Type, "api_key_id", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(c.Value));
 
     private static AccessPartition? PartitionFromClaims(ClaimsPrincipal user)
     {
@@ -506,16 +511,69 @@ public sealed class UiSensitivePermissionCache(TimeProvider time)
 
     public static string Key(PrincipalRef principal)
     {
-        var externalRoles = principal.ExternalRoles.Count == 0
-            ? string.Empty
-            : "|" + string.Join(',', principal.ExternalRoles.Order(StringComparer.OrdinalIgnoreCase));
-        return principal switch
+        ArgumentNullException.ThrowIfNull(principal);
+        var scope = principal.Scope;
+        var sb = new StringBuilder(128);
+        AppendPart(sb, scope.TenantId);
+        AppendPart(sb, scope.ProjectId);
+        AppendPart(sb, scope.EnvironmentId);
+        AppendPart(sb, scope.AppId);
+        AppendPart(sb, scope.WorkspaceId.Value);
+
+        switch (principal)
         {
-            UserPrincipal user => $"{principal.Scope}|u|{user.UserId.Value}|{string.Join(',', user.Teams.Select(team => team.Value).Order(StringComparer.Ordinal))}{externalRoles}",
-            ApiClientPrincipal client => $"{principal.Scope}|c|{client.ClientId.Value}{externalRoles}",
-            AutomationPrincipal automation => $"{principal.Scope}|a|{automation.AutomationId}",
-            SystemPrincipal system => $"{principal.Scope}|s|{system.Component}",
-        };
+            case UserPrincipal user:
+                sb.Append("u;");
+                AppendPart(sb, user.UserId.Value);
+                AppendProvider(sb, user.IdentityProvider);
+                AppendCount(sb, user.Teams.Count);
+                if (user.Teams.Count > 0)
+                    foreach (var team in user.Teams.Select(static t => t.Value).Order(StringComparer.Ordinal))
+                        AppendPart(sb, team);
+                break;
+            case ApiClientPrincipal client:
+                sb.Append("c;");
+                AppendPart(sb, client.ClientId.Value);
+                AppendProvider(sb, client.IdentityProvider);
+                AppendCount(sb, 0);
+                break;
+            case AutomationPrincipal automation:
+                sb.Append("a;");
+                AppendPart(sb, automation.AutomationId);
+                AppendProvider(sb, null);
+                AppendCount(sb, 0);
+                break;
+            case SystemPrincipal system:
+                sb.Append("s;");
+                AppendPart(sb, system.Component);
+                AppendProvider(sb, null);
+                AppendCount(sb, 0);
+                break;
+        }
+
+        AppendCount(sb, principal.ExternalRoles.Count);
+        if (principal.ExternalRoles.Count > 0)
+            foreach (var role in principal.ExternalRoles.Select(static r => r.ToLowerInvariant()).Order(StringComparer.Ordinal))
+                AppendPart(sb, role);
+
+        return sb.ToString();
+    }
+
+    private static void AppendPart(StringBuilder sb, string value) =>
+        sb.Append(value.Length).Append(':').Append(value).Append(';');
+
+    private static void AppendCount(StringBuilder sb, int count) =>
+        sb.Append('#').Append(count).Append(';');
+
+    private static void AppendProvider(StringBuilder sb, string? provider)
+    {
+        if (provider is null)
+            sb.Append("-;");
+        else
+        {
+            var normalized = provider.ToLowerInvariant();
+            sb.Append('+').Append(normalized.Length).Append(':').Append(normalized).Append(';');
+        }
     }
 
     public bool TryGet(string key, out IReadOnlySet<Permission> permissions)

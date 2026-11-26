@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using TicketFlow.Core;
+using TicketFlow.Hosting.AspNetCore;
 
 namespace TicketFlow.Access.AspNetCore;
 
@@ -159,9 +160,11 @@ public static class TicketFlowAccessAuthenticationExtensions
             pattern,
             async (
                 HttpContext httpContext,
-                IAccessPrincipalResolver principalResolver,
                 IRoleFederationService roleFederationService) =>
             {
+                httpContext.Response.Headers.CacheControl = "no-store";
+                httpContext.Response.Headers.Pragma = "no-cache";
+
                 if (httpContext.User.Identity?.IsAuthenticated != true)
                     return Results.Unauthorized();
 
@@ -171,10 +174,38 @@ public static class TicketFlowAccessAuthenticationExtensions
                 if (scope is null)
                     return Results.BadRequest(new { error = "TicketFlow scope could not be resolved." });
 
-                var principal = await principalResolver
-                    .ResolveAsync(httpContext.User, scope, httpContext.RequestAborted)
-                    .ConfigureAwait(false);
-                if (principal is null)
+                var services = httpContext.RequestServices;
+                var hostResolver = services.GetService<ITicketFlowPrincipalResolver>();
+                var accessResolver = services.GetService<IAccessPrincipalResolver>();
+                var hasHostResolver = hostResolver is not null
+                    && (hostResolver is not OptionsTicketFlowPrincipalResolver
+                        || services.GetService<IOptions<TicketFlowEndpointOptions>>()?.Value.ResolvePrincipal is not null);
+
+                PrincipalRef? principal;
+                if (hasHostResolver)
+                {
+                    principal = await hostResolver!.ResolveAsync(httpContext, scope, httpContext.RequestAborted).ConfigureAwait(false);
+                    if (principal is not null
+                        && (principal.ExternalRoles.Count == 0 || principal.IdentityProvider is null)
+                        && accessResolver is ClaimsPrincipalResolver claimsResolver)
+                    {
+                        IReadOnlyCollection<string> externalRoles = principal.ExternalRoles.Count > 0 ? principal.ExternalRoles : claimsResolver.ExtractExternalRoles(httpContext.User);
+                        var identityProvider = principal.IdentityProvider ?? claimsResolver.TryGetIdentityProvider(httpContext.User);
+                        if (externalRoles.Count > 0 || identityProvider is not null)
+                            principal = principal switch
+                            {
+                                UserPrincipal user => new UserPrincipal(scope, user.UserId, user.Teams, externalRoles, identityProvider),
+                                ApiClientPrincipal client => new ApiClientPrincipal(scope, client.ClientId, externalRoles, identityProvider),
+                                _ => principal,
+                            };
+                    }
+                }
+                else if (accessResolver is not null)
+                    principal = await accessResolver.ResolveAsync(httpContext.User, scope, httpContext.RequestAborted).ConfigureAwait(false);
+                else
+                    principal = null;
+
+                if (principal is null || principal.Scope != scope)
                     return Results.Unauthorized();
 
                 var result = await roleFederationService

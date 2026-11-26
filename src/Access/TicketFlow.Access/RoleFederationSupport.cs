@@ -22,6 +22,17 @@ internal static class RoleFederationSupport
         return candidates;
     }
 
+    private static bool MatchesMappingProvider(string mappingProvider, string? principalProvider, bool matchedByTeamOnly)
+    {
+        if (string.Equals(mappingProvider, "*", StringComparison.Ordinal))
+            return true;
+
+        if (principalProvider is not null && string.Equals(mappingProvider, principalProvider, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return matchedByTeamOnly && string.Equals(mappingProvider, "local", StringComparison.OrdinalIgnoreCase);
+    }
+
     public static async Task<IReadOnlyList<ResolvedGrant>> ResolveFederatedGrantsAsync(
         PrincipalRef principal,
         TicketScope scope,
@@ -47,6 +58,14 @@ internal static class RoleFederationSupport
         };
         if (subject is null)
             return [];
+
+        HashSet<string>? teamTokens = null;
+        if (options.MapTeamsAsExternalRoles && principal is UserPrincipal userPrincipal && userPrincipal.Teams.Count > 0)
+        {
+            teamTokens = new HashSet<string>(userPrincipal.Teams.Count, StringComparer.OrdinalIgnoreCase);
+            foreach (var team in userPrincipal.Teams)
+                teamTokens.Add(team.Value);
+        }
 
         var candidateRoles = CollectCandidateExternalRoles(principal, options);
         if (candidateRoles.Count == 0)
@@ -74,11 +93,23 @@ internal static class RoleFederationSupport
                 .ListForPartitionAsync(partition, includeDisabled: false, cancellationToken)
                 .ConfigureAwait(false);
             foreach (var stored in storedMappings)
-                if (stored.IsEnabled
-                    && stored.Mapping.Partition == partition
-                    && (stored.Mapping.Workspace is not { } mappingWorkspace || mappingWorkspace == scope.WorkspaceId)
-                    && candidateRoles.Contains(stored.Mapping.ExternalRole))
-                    AddMatch(stored.Mapping.RoleId, stored.Mapping.Scope);
+            {
+                if (!stored.IsEnabled
+                    || stored.Mapping.Partition != partition
+                    || (stored.Mapping.Workspace is { } mappingWorkspace && mappingWorkspace != scope.WorkspaceId))
+                    continue;
+
+                var externalRole = stored.Mapping.ExternalRole;
+                var inExternalRoles = principal.ExternalRoles.Contains(externalRole);
+                var inTeamTokens = !inExternalRoles && teamTokens is not null && teamTokens.Contains(externalRole);
+                if (!inExternalRoles && !inTeamTokens)
+                    continue;
+
+                if (!MatchesMappingProvider(stored.Mapping.Provider, principal.IdentityProvider, matchedByTeamOnly: inTeamTokens))
+                    continue;
+
+                AddMatch(stored.Mapping.RoleId, stored.Mapping.Scope);
+            }
         }
 
         if (options.AllowDirectRoleIdMatching)
@@ -121,7 +152,10 @@ internal static class RoleFederationSupport
             if (role is null)
                 continue;
 
-            var grantScope = explicitScope ?? DeriveGrantScope(defaultWorkspaceScope, role, options.AllowAdministrativeRoles && forAdministration);
+            if (explicitScope is TenantGrantScope && !role.IsBuiltIn)
+                continue;
+
+            var grantScope = DeriveGrantScope(defaultWorkspaceScope, role, explicitScope);
             var resolved = CreateVirtualGrant(partition, subject.Value, role, grantScope, i, options.AllowAdministrativeRoles, catalog);
             if (resolved is not null)
                 synthesized.Add(resolved);
@@ -130,10 +164,10 @@ internal static class RoleFederationSupport
         return synthesized;
     }
 
-    private static GrantScope DeriveGrantScope(WorkspaceGrantScope defaultWorkspaceScope, AccessRole role, bool forAllowedAdmin) =>
-        forAllowedAdmin && role.Includes(AccessPermissions.AccessManageTenant)
+    private static GrantScope DeriveGrantScope(WorkspaceGrantScope defaultWorkspaceScope, AccessRole role, GrantScope? explicitScope) =>
+        explicitScope is TenantGrantScope && role.IsBuiltIn
             ? TenantGrantScope.Instance
-            : defaultWorkspaceScope;
+            : explicitScope ?? defaultWorkspaceScope;
 
     private static ResolvedGrant? CreateVirtualGrant(
         AccessPartition partition,

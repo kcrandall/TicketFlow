@@ -125,4 +125,78 @@ public sealed class ClaimsPrincipalResolverTests
         Assert.AreEqual(c1.GetHashCode(), c2.GetHashCode());
         Assert.AreEqual("ApiClientPrincipal { <redacted> }", c1.ToString());
     }
+
+    [TestMethod]
+    public async Task HardensReservedWorkersConflictingClaimsScopeVerificationProviderAndNativeIdentityFlowApiKeys()
+    {
+        var resolver = new ClaimsPrincipalResolver();
+
+        // Reserved worker IDs rejected
+        foreach (var reserved in new[] { "automation-worker", "sla-worker", "channels", "ticketflow-routing" })
+        {
+            var spoof = new ClaimsPrincipal(new ClaimsIdentity(
+            [
+                new Claim("client_id", reserved),
+                new Claim("principal_type", "service_account"),
+            ], authenticationType: "ExternalIdentity"));
+            Assert.IsNull(await resolver.ResolveAsync(spoof, Scope), $"Reserved worker '{reserved}' must be rejected.");
+        }
+
+        // Conflicting multi-valued sub rejected
+        var conflictingSub = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim("sub", "alice"),
+            new Claim("sub", "bob"),
+        ], authenticationType: "Bearer"));
+        Assert.IsNull(await resolver.ResolveAsync(conflictingSub, Scope));
+
+        // Conflicting multi-valued client_id rejected
+        var conflictingClient = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim("client_id", "bot-1"),
+            new Claim("client_id", "bot-2"),
+        ], authenticationType: "Bearer"));
+        Assert.IsNull(await resolver.ResolveAsync(conflictingClient, Scope));
+
+        // Scope claim mismatch fails closed
+        var wrongTenant = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim("sub", "alice"),
+            new Claim("tenant_id", "other-tenant"),
+        ], authenticationType: "Bearer"));
+        Assert.IsNull(await resolver.ResolveAsync(wrongTenant, Scope));
+
+        var wrongWorkspace = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim("sub", "alice"),
+            new Claim("workspace_id", "other-workspace"),
+        ], authenticationType: "Bearer"));
+        Assert.IsNull(await resolver.ResolveAsync(wrongWorkspace, Scope));
+
+        // Matching scope claims + IdentityProvider succeed
+        var matching = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim("sub", "alice"),
+            new Claim("idp", "okta"),
+            new Claim("tenant_id", Scope.TenantId),
+            new Claim("project_id", Scope.ProjectId),
+            new Claim("environment_id", Scope.EnvironmentId),
+            new Claim("app_id", Scope.AppId),
+            new Claim("workspace_id", Scope.WorkspaceId.Value),
+        ], authenticationType: "Bearer"));
+        var resolvedUser = Assert.IsInstanceOfType<UserPrincipal>(await resolver.ResolveAsync(matching, Scope));
+        Assert.AreEqual("okta", resolvedUser.IdentityProvider);
+        Assert.AreNotEqual(resolvedUser, new UserPrincipal(Scope, new UserId("alice"), identityProvider: "identityflow"));
+
+        // Native IdentityFlow API key falls back to SubjectClaimTypes when ClientIdClaimTypes absent
+        var nativeIdfKey = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim(ClaimTypes.NameIdentifier, "idf-key-subject"),
+            new Claim("identityflow_auth_method", "ApiKey"),
+            new Claim("iss", "https://id.example.test"),
+        ], authenticationType: "IdentityFlow"));
+        var resolvedKey = Assert.IsInstanceOfType<ApiClientPrincipal>(await resolver.ResolveAsync(nativeIdfKey, Scope));
+        Assert.AreEqual(new ApiClientId("idf-key-subject"), resolvedKey.ClientId);
+        Assert.AreEqual("https://id.example.test", resolvedKey.IdentityProvider);
+    }
 }

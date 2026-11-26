@@ -42,6 +42,14 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
             StringAssert.Contains(await demoResp.Content.ReadAsStringAsync(), "Reporting Exporter");
         }
 
+        // Seeded tf_sa_* API key also works seamlessly on REST API endpoints (/ticketflow/api/...)
+        using (var restReq = new HttpRequestMessage(HttpMethod.Get, "/ticketflow/api/workspaces/acme/conversations"))
+        {
+            restReq.Headers.Add("X-Api-Key", SampleSeeder.DemoReportingExportApiKey);
+            using var restResp = await rawClient.SendAsync(restReq);
+            Assert.AreEqual(HttpStatusCode.OK, restResp.StatusCode);
+        }
+
         // 2. Create service account with initial role (Viewer)
         var (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/service-accounts");
         using (var createResp = await PostAsync(admin, "/support/access/service-accounts", cookie, new Dictionary<string, string>
@@ -570,6 +578,133 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
         }
 
         await app.StopAsync();
+    }
+
+    [TestMethod]
+    public async Task UiSessionRespectsHostPrincipalResolverEnrichesMappedStaffAndRefreshesTenantAdminCheck()
+    {
+        var partition = new AccessPartition("t1", "p1", "prod", "app1");
+        var workspace = new WorkspaceId("ws1");
+        var scope = partition.InWorkspace(workspace);
+
+        // 1. Host ITicketFlowPrincipalResolver returning null MUST NOT fall back to IAccessPrincipalResolver,
+        //    and spoofed amr=external / principal_type MUST NOT trigger the API key shortcut.
+        var services = new ServiceCollection();
+        services.AddTicketFlow()
+            .AddAccessControl()
+            .AddInMemoryAccessStores()
+            .AddTicketFlowEndpoints(o => o.Partition = partition)
+            .AddTicketFlowBlazorUI(o => o.Workspace = workspace);
+        services.AddScoped<ITicketFlowPrincipalResolver, NullReturningResolver>();
+
+        await using (var provider = services.BuildServiceProvider())
+        using (var serviceScope = provider.CreateScope())
+        {
+            var http = new Microsoft.AspNetCore.Http.DefaultHttpContext
+            {
+                RequestServices = serviceScope.ServiceProvider,
+                User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+                [
+                    new System.Security.Claims.Claim("sub", "spoofed-admin"),
+                    new System.Security.Claims.Claim("amr", "external"),
+                    new System.Security.Claims.Claim("principal_type", "user"),
+                ], "ExternalIdentity")),
+            };
+            var session = await TicketFlow.UI.Blazor.Infrastructure.TicketFlowUISession.ResolvePrincipalAsync(http);
+            Assert.AreEqual(TicketFlow.UI.Blazor.Infrastructure.UiSessionState.NoPrincipal, session.State);
+        }
+
+        // 2. Staff-mapped user (sub != UserId) still gets ExternalRoles and IdentityProvider enriched cleanly!
+        var mappedServices = new ServiceCollection();
+        mappedServices.AddTicketFlow()
+            .AddAccessControl()
+            .AddInMemoryAccessStores()
+            .AddTicketFlowEndpoints(o => o.Partition = partition)
+            .AddTicketFlowBlazorUI(o => o.Workspace = workspace);
+        mappedServices.AddScoped<ITicketFlowPrincipalResolver, StaffMappedResolver>();
+
+        await using (var provider = mappedServices.BuildServiceProvider())
+        using (var serviceScope = provider.CreateScope())
+        {
+            var http = new Microsoft.AspNetCore.Http.DefaultHttpContext
+            {
+                RequestServices = serviceScope.ServiceProvider,
+                User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+                [
+                    new System.Security.Claims.Claim("sub", "6f9619ff-8b86-d011-b42d-00cf4fc964ff"),
+                    new System.Security.Claims.Claim("role", "idf:support-agents"),
+                    new System.Security.Claims.Claim("idp", "identityflow"),
+                ], "IdentityFlow.Cookie")),
+            };
+            var session = await TicketFlow.UI.Blazor.Infrastructure.TicketFlowUISession.ResolvePrincipalAsync(http);
+            Assert.AreEqual(TicketFlow.UI.Blazor.Infrastructure.UiSessionState.Ready, session.State);
+            var user = Assert.IsInstanceOfType<UserPrincipal>(session.Principal);
+            Assert.AreEqual(new UserId("staff-ada"), user.UserId);
+            Assert.IsTrue(user.ExternalRoles.Contains("idf:support-agents"));
+            Assert.AreEqual("identityflow", user.IdentityProvider);
+        }
+
+        // 3. Revoked tenant-admin immediately stops ServiceAccountsPage from reading tenant grants despite stale cache
+        await using (var app = await StartSampleHostAsync())
+        {
+            var settings = app.Services.GetRequiredService<SampleSettings>();
+            var grants = app.Services.GetRequiredService<IAccessGrantStore>();
+            var saStore = app.Services.GetRequiredService<IServiceAccountStore>();
+            var cache = app.Services.GetRequiredService<TicketFlow.UI.Blazor.Infrastructure.UiSensitivePermissionCache>();
+
+            // Seed a tenant-admin user + a tenant grant on a SA
+            var tempAdminId = new UserId("temp-tenant-admin");
+            var tenantAdminGrant = new AccessGrant(new GrantId("g-temp-tenant-admin"), settings.Partition, tempAdminId, BuiltInRoles.Owner.Id, TenantGrantScope.Instance);
+            await grants.CreateAsync(tenantAdminGrant);
+            var wsAdminGrant = new AccessGrant(new GrantId("g-temp-ws-admin"), settings.Partition, tempAdminId, BuiltInRoles.Admin.Id, new WorkspaceGrantScope(settings.Workspace));
+            await grants.CreateAsync(wsAdminGrant);
+
+            var secretTenantSa = new ApiClientId("sa-tenant-secret");
+            await saStore.CreateAsync(new ServiceAccount(secretTenantSa, settings.Partition, TenantGrantScope.Instance, "Secret Tenant SA"), "system:test");
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-secret-tenant-sa"), settings.Partition, secretTenantSa, BuiltInRoles.Owner.Id, TenantGrantScope.Instance, justification: "TOP-SECRET-TENANT-GRANT"));
+
+            using var tempClient = CreateDevClient(app, "temp-tenant-admin");
+            // Warm up UiSensitivePermissionCache while user holds AccessManageTenant
+            var beforeRevokeHtml = await GetStringAsync(tempClient, "/support/access/service-accounts");
+            StringAssert.Contains(beforeRevokeHtml, "TOP-SECRET-TENANT-GRANT");
+
+            // Now revoke the tenant-admin grant (UiSensitivePermissionCache STILL has stale AccessManageTenant!)
+            await grants.DeleteAsync(settings.Partition, tenantAdminGrant.Id, expectedRevision: 1);
+
+            var afterRevokeHtml = await GetStringAsync(tempClient, "/support/access/service-accounts");
+            Assert.IsFalse(afterRevokeHtml.Contains("TOP-SECRET-TENANT-GRANT", StringComparison.Ordinal),
+                "Revoked tenant-admin must immediately stop seeing tenant grants despite cached sensitive permissions.");
+        }
+
+        // 4. SampleSeeder does NOT seed hardcoded demo API keys outside Development
+        await using (var prodApp = SampleHostApp.Build(["--environment", "Production"], builder =>
+        {
+            builder.WebHost.UseTestServer();
+            builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["TicketFlow:Storage"] = "InMemory",
+                ["TicketFlow:DevelopmentAuthentication"] = "false",
+            });
+        }))
+        {
+            await SampleHostApp.InitializeAsync(prodApp, seed: true);
+            var settings = prodApp.Services.GetRequiredService<SampleSettings>();
+            var apiKeys = prodApp.Services.GetRequiredService<IApiKeyStore>();
+            Assert.IsEmpty(await apiKeys.ListForPartitionAsync(settings.Partition, includeInactive: true),
+                "Hardcoded demo API keys must never be seeded outside Development.");
+        }
+    }
+
+    private sealed class NullReturningResolver : ITicketFlowPrincipalResolver
+    {
+        public ValueTask<PrincipalRef?> ResolveAsync(Microsoft.AspNetCore.Http.HttpContext httpContext, TicketScope scope, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<PrincipalRef?>(null);
+    }
+
+    private sealed class StaffMappedResolver : ITicketFlowPrincipalResolver
+    {
+        public ValueTask<PrincipalRef?> ResolveAsync(Microsoft.AspNetCore.Http.HttpContext httpContext, TicketScope scope, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<PrincipalRef?>(new UserPrincipal(scope, new UserId("staff-ada"), [new TeamId("tier1")]));
     }
 
     private static async Task<WebApplication> StartSampleHostAsync()

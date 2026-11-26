@@ -12,7 +12,7 @@ public sealed record UserPrincipal : PrincipalRef
     /// <summary>Maximum number of team memberships carried in one snapshot.</summary>
     public const int MaximumTeamMemberships = 256;
 
-    public UserPrincipal(TicketScope scope, UserId userId, IEnumerable<TeamId>? teams = null, IEnumerable<string>? externalRoles = null)
+    public UserPrincipal(TicketScope scope, UserId userId, IEnumerable<TeamId>? teams = null, IEnumerable<string>? externalRoles = null, string? identityProvider = null)
         : base(scope)
     {
         if (userId == default)
@@ -20,6 +20,7 @@ public sealed record UserPrincipal : PrincipalRef
         UserId = userId;
         Teams = SnapshotTeams(teams);
         ExternalRoles = SnapshotExternalRoles(externalRoles);
+        IdentityProvider = NormalizeIdentityProvider(identityProvider);
     }
 
     public UserId UserId { get; }
@@ -29,16 +30,19 @@ public sealed record UserPrincipal : PrincipalRef
 
     public override IReadOnlySet<string> ExternalRoles { get; }
 
+    public override string? IdentityProvider { get; }
+
     public bool Equals(UserPrincipal? other) =>
         other is not null && Scope == other.Scope && UserId == other.UserId && Teams.SetEquals(other.Teams)
-        && ExternalRoles.Count == other.ExternalRoles.Count && ExternalRoles.SetEquals(other.ExternalRoles);
+        && ExternalRoles.Count == other.ExternalRoles.Count && ExternalRoles.SetEquals(other.ExternalRoles)
+        && IdentityProvidersEqual(IdentityProvider, other.IdentityProvider);
 
     public override int GetHashCode()
     {
         var teams = 0;
         foreach (var team in Teams)
             teams ^= team.GetHashCode();
-        return HashCode.Combine(Scope, UserId, Teams.Count, teams, ComputeExternalRolesHash(ExternalRoles));
+        return HashCode.Combine(Scope, UserId, Teams.Count, teams, ComputeExternalRolesHash(ExternalRoles), ComputeIdentityProviderHash(IdentityProvider));
     }
 
     public override string ToString() => "UserPrincipal { <redacted> }";

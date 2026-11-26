@@ -50,9 +50,40 @@ public sealed class IdentityFlowPrincipalResolver(ITeamMembershipResolver teams,
                 }
                 return await teams.ResolveUserPrincipalAsync(scope, userId, cancellationToken).ConfigureAwait(false);
             case { Kind: IdentityFlowPrincipalKind.ApiClient } identity:
+                if (IsTicketFlowApiKey(user) && !VerifyScopeClaims(user, scope))
+                    return null;
                 return new ApiClientPrincipal(scope, new ApiClientId(identity.Id));
             default:
                 return null;
         }
+    }
+
+    private static bool IsTicketFlowApiKey(ClaimsPrincipal? user) =>
+        user?.Identity is { IsAuthenticated: true } identity
+        && string.Equals(identity.AuthenticationType, IdentityFlowClaimsMapper.TicketFlowApiKeyScheme, StringComparison.Ordinal)
+        && user.HasClaim(static c => string.Equals(c.Type, IdentityFlowClaimsMapper.TicketFlowApiKeyIdClaim, StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(c.Value));
+
+    private static bool VerifyScopeClaims(ClaimsPrincipal? user, TicketScope scope)
+    {
+        if (user is null)
+            return false;
+        foreach (var claim in user.Claims)
+        {
+            var expected = claim.Type switch
+            {
+                "tenant_id" => scope.TenantId,
+                "project_id" => scope.ProjectId,
+                "environment_id" or "environment" => scope.EnvironmentId,
+                "app_id" or "app_name" => scope.AppId,
+                "workspace_id" or "workspace" => scope.WorkspaceId.Value,
+                _ => null,
+            };
+            if (expected is null)
+                continue;
+            var trimmed = claim.Value?.Trim();
+            if (string.IsNullOrEmpty(trimmed) || !string.Equals(trimmed, expected, StringComparison.Ordinal))
+                return false;
+        }
+        return true;
     }
 }

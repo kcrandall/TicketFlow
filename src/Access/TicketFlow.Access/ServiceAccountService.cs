@@ -18,6 +18,7 @@ public sealed class ServiceAccountService : IServiceAccountService
     private readonly IServiceAccountStore serviceAccountStore;
     private readonly IApiKeyStore apiKeyStore;
     private readonly IAccessGrantStore grantStore;
+    private readonly IAccessRoleStore roleStore;
     private readonly IAccessAuditSink auditSink;
     private readonly AccessEngine engine;
 
@@ -45,6 +46,7 @@ public sealed class ServiceAccountService : IServiceAccountService
         this.serviceAccountStore = serviceAccountStore;
         this.apiKeyStore = apiKeyStore;
         this.grantStore = grantStore;
+        this.roleStore = roleStore;
         this.auditSink = auditSink;
         engine = new(catalog, grantStore, roleStore, timeProvider ?? TimeProvider.System, resolvedOptions, serviceAccountStore, roleFederationMappings);
     }
@@ -104,9 +106,18 @@ public sealed class ServiceAccountService : IServiceAccountService
         var requiredPermission = GetRequiredAdminPermission(account.Scope);
         var targetResource = TargetForAudit(actor.Scope, account.Scope, account.ClientId.Value);
 
-        var (authFailure, _) = await AuthorizeScopeManagementAsync(actor, account.Partition, account.Scope, requiredPermission, context: null, cancellationToken).ConfigureAwait(false);
+        var (authFailure, context) = await AuthorizeScopeManagementAsync(actor, account.Partition, account.Scope, requiredPermission, context: null, cancellationToken).ConfigureAwait(false);
         if (authFailure is not null)
             return await RefuseAsync<StoredServiceAccount>(actor, AccessAuditKind.ServiceAccountCreated, requiredPermission, targetResource, authFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        if (engine.Options.ReservedServiceAccountClientIds.Contains(account.ClientId.Value))
+            return await RefuseAsync<StoredServiceAccount>(actor, AccessAuditKind.ServiceAccountCreated, requiredPermission, targetResource,
+                new TicketFailure(TicketFailureKind.Rejected, [$"Service account client identifier '{account.ClientId.Value}' is reserved for internal TicketFlow workers."], Code: "reserved-client-id"),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        var existingGrantsFailure = await ValidateExistingGrantsForCreateAsync(context!, actor.Scope, account, cancellationToken).ConfigureAwait(false);
+        if (existingGrantsFailure is not null)
+            return await RefuseAsync<StoredServiceAccount>(actor, AccessAuditKind.ServiceAccountCreated, requiredPermission, targetResource, existingGrantsFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var createResult = await serviceAccountStore.CreateAsync(account, FormatActorId(actor), cancellationToken).ConfigureAwait(false);
         if (createResult.TryGetValue(out TicketFailure failure))
@@ -187,9 +198,16 @@ public sealed class ServiceAccountService : IServiceAccountService
 
         var requiredPermission = GetRequiredAdminPermission(existing.Account.Scope);
         var targetResource = TargetForAudit(actor.Scope, existing.Account.Scope, clientId.Value);
-        var (scopeFailure, _) = await AuthorizeScopeManagementAsync(actor, existing.Account.Partition, existing.Account.Scope, requiredPermission, context, cancellationToken).ConfigureAwait(false);
+        var (scopeFailure, scopeContext) = await AuthorizeScopeManagementAsync(actor, existing.Account.Partition, existing.Account.Scope, requiredPermission, context, cancellationToken).ConfigureAwait(false);
         if (scopeFailure is not null)
             return await RefuseAsync<StoredServiceAccount>(actor, auditKind, requiredPermission, targetResource, scopeFailure, safeReason, cancellationToken).ConfigureAwait(false);
+
+        if (isEnabled)
+        {
+            var escalationFailure = await CheckActorCanConferClientGrantsAsync(scopeContext!, actor.Scope, partition, clientId, cancellationToken).ConfigureAwait(false);
+            if (escalationFailure is not null)
+                return await RefuseAsync<StoredServiceAccount>(actor, auditKind, requiredPermission, targetResource, escalationFailure, safeReason, cancellationToken).ConfigureAwait(false);
+        }
 
         var setResult = await serviceAccountStore.SetEnabledAsync(partition, clientId, isEnabled, FormatActorId(actor), safeReason, expectedVersion ?? existing.Version, cancellationToken).ConfigureAwait(false);
         if (setResult.TryGetValue(out TicketFailure failure))
@@ -222,9 +240,14 @@ public sealed class ServiceAccountService : IServiceAccountService
 
         var requiredPermission = GetRequiredAdminPermission(existing.Account.Scope);
         var targetResource = TargetForAudit(actor.Scope, existing.Account.Scope, clientId.Value);
-        var (scopeFailure, _) = await AuthorizeScopeManagementAsync(actor, existing.Account.Partition, existing.Account.Scope, requiredPermission, context, cancellationToken).ConfigureAwait(false);
+        var (scopeFailure, scopeContext) = await AuthorizeScopeManagementAsync(actor, existing.Account.Partition, existing.Account.Scope, requiredPermission, context, cancellationToken).ConfigureAwait(false);
         if (scopeFailure is not null)
             return await RefuseAsync<ApiClientId>(actor, AccessAuditKind.ServiceAccountDeleted, requiredPermission, targetResource, scopeFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        var subjectGrants = await grantStore.ListAllForSubjectAsync(partition, clientId, actor.Scope.WorkspaceId, cancellationToken).ConfigureAwait(false);
+        var (deletableGrants, grantDeleteFailure) = await ValidateGrantsForDeleteAsync(scopeContext!, actor.Scope, existing, subjectGrants, cancellationToken).ConfigureAwait(false);
+        if (grantDeleteFailure is not null)
+            return await RefuseAsync<ApiClientId>(actor, AccessAuditKind.ServiceAccountDeleted, requiredPermission, targetResource, grantDeleteFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var deleteResult = await serviceAccountStore.DeleteAsync(partition, clientId, expectedVersion ?? existing.Version, cancellationToken).ConfigureAwait(false);
         if (deleteResult.TryGetValue(out TicketFailure failure))
@@ -233,13 +256,30 @@ public sealed class ServiceAccountService : IServiceAccountService
         var actorId = FormatActorId(actor);
         await apiKeyStore.RevokeAllForClientAsync(partition, clientId, actorId, "Service account deleted.", cancellationToken).ConfigureAwait(false);
 
-        var subjectGrants = await grantStore.ListAllForSubjectAsync(partition, clientId, actor.Scope.WorkspaceId, cancellationToken).ConfigureAwait(false);
-        if (subjectGrants.Count > 0)
+        if (deletableGrants is { Count: > 0 })
         {
-            var batch = new (GrantId Id, long ExpectedRevision)[subjectGrants.Count];
-            for (var i = 0; i < subjectGrants.Count; i++)
-                batch[i] = (subjectGrants[i].Grant.Id, subjectGrants[i].Revision);
-            await grantStore.DeleteManyAsync(partition, batch, cancellationToken).ConfigureAwait(false);
+            var batch = new (GrantId Id, long ExpectedRevision)[deletableGrants.Count];
+            for (var i = 0; i < deletableGrants.Count; i++)
+                batch[i] = (deletableGrants[i].Grant.Id, deletableGrants[i].Revision);
+            var removed = await grantStore.DeleteManyAsync(partition, batch, cancellationToken).ConfigureAwait(false);
+            for (var i = 0; i < removed.Count; i++)
+            {
+                var grant = removed[i].Grant;
+                var grantAuditResource = grant.Workspace == actor.Scope.WorkspaceId
+                    ? AccessEngine.Target(actor.Scope, grant.Scope)
+                    : null;
+                var grantAuditEvent = AccessEngine.AuditEvent(
+                    engine.Now,
+                    actor,
+                    AccessAuditKind.GrantRevoked,
+                    AccessAuditOutcome.Allowed,
+                    GetRequiredAdminPermission(grant.Scope),
+                    grantAuditResource,
+                    grant: grant.Id,
+                    role: grant.Role,
+                    justification: "Service account deleted.");
+                await auditSink.RecordAsync(grantAuditEvent, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         var auditEvent = await RecordAuditAsync(actor, AccessAuditKind.ServiceAccountDeleted, AccessAuditOutcome.Allowed, requiredPermission, targetResource, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -297,7 +337,7 @@ public sealed class ServiceAccountService : IServiceAccountService
 
         var requiredPermission = GetRequiredAdminPermission(existing.Account.Scope);
         var targetResource = TargetForAudit(actor.Scope, existing.Account.Scope, request.ClientId.Value);
-        var (scopeFailure, _) = await AuthorizeScopeManagementAsync(actor, existing.Account.Partition, existing.Account.Scope, requiredPermission, context, cancellationToken).ConfigureAwait(false);
+        var (scopeFailure, scopeContext) = await AuthorizeScopeManagementAsync(actor, existing.Account.Partition, existing.Account.Scope, requiredPermission, context, cancellationToken).ConfigureAwait(false);
         if (scopeFailure is not null)
             return await RefuseAsync<IssuedApiKey>(actor, AccessAuditKind.ApiKeyCreated, requiredPermission, targetResource, scopeFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -306,8 +346,13 @@ public sealed class ServiceAccountService : IServiceAccountService
                 TicketFailure.Conflict(existing.Version, ["Cannot issue an API key for a disabled service account."], code: "service-account-disabled"),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
 
+        var escalationFailure = await CheckActorCanConferClientGrantsAsync(scopeContext!, actor.Scope, partition, existing.Account.ClientId, cancellationToken).ConfigureAwait(false);
+        if (escalationFailure is not null)
+            return await RefuseAsync<IssuedApiKey>(actor, AccessAuditKind.ApiKeyCreated, requiredPermission, targetResource, escalationFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
+
         var (keyPrefix, plaintextKey, keyHashHex) = GenerateApiKey();
         var keyId = ApiKeyId.NewId();
+        var actorId = FormatActorId(actor);
         var createResult = await apiKeyStore.CreateAsync(
             keyId,
             partition,
@@ -315,13 +360,30 @@ public sealed class ServiceAccountService : IServiceAccountService
             request.Name,
             keyPrefix,
             keyHashHex,
-            FormatActorId(actor),
+            actorId,
             request.ExpiresAtUtc,
             cancellationToken).ConfigureAwait(false);
         if (createResult.TryGetValue(out TicketFailure failure))
             return await RefuseAsync<IssuedApiKey>(actor, AccessAuditKind.ApiKeyCreated, requiredPermission, targetResource, failure, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         createResult.TryGetValue(out TicketValue<StoredApiKey> ok);
+
+        // TOCTOU guard: verify the service account was not deleted, recreated, disabled, or re-scoped concurrently.
+        var currentAccount = await serviceAccountStore.FindAsync(partition, existing.Account.ClientId, cancellationToken).ConfigureAwait(false);
+        if (currentAccount is null
+            || !currentAccount.IsEnabled
+            || currentAccount.CreatedAtUtc != existing.CreatedAtUtc
+            || !currentAccount.Account.Scope.Equals(existing.Account.Scope))
+        {
+            await apiKeyStore.RevokeAsync(partition, ok.Value.Id, actorId, "Service account changed concurrently during API key issuance.", expectedVersion: ok.Value.Version, cancellationToken).ConfigureAwait(false);
+            var toctouFailure = currentAccount is null
+                ? TicketFailure.NotFound
+                : !currentAccount.IsEnabled
+                    ? TicketFailure.Conflict(currentAccount.Version, ["Cannot issue an API key because the service account was disabled concurrently."], code: "service-account-disabled")
+                    : TicketFailure.Conflict(currentAccount.Version, ["Service account changed concurrently during API key issuance."], code: "concurrency-conflict");
+            return await RefuseAsync<IssuedApiKey>(actor, AccessAuditKind.ApiKeyCreated, requiredPermission, targetResource, toctouFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+
         var keyResource = TargetForAudit(actor.Scope, existing.Account.Scope, ok.Value.Id.Value);
         // Never log plaintext key or hash; audit carries only the opaque key ID and non-secret prefix.
         var auditEvent = await RecordAuditAsync(actor, AccessAuditKind.ApiKeyCreated, AccessAuditOutcome.Allowed, requiredPermission, keyResource,
@@ -459,10 +521,17 @@ public sealed class ServiceAccountService : IServiceAccountService
         var context = await engine.LoadAsync(actor, actor.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
         var workspaceTarget = new AccessResource(actor.Scope);
 
-        var hasManage = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, workspaceTarget, includeBreakGlass: false).Allowed;
-        var hasManageTenant = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: false, tenantAllowsOnly: true).Allowed;
-        if (hasManage || hasManageTenant)
+        var manage = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, workspaceTarget, includeBreakGlass: false);
+        if (manage.Allowed)
             return (null, context);
+        if (manage.Denial == AccessDenialReason.ExplicitDeny)
+            return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is explicitly denied administrative permission."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
+
+        var manageTenant = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: false, tenantAllowsOnly: true);
+        if (manageTenant.Allowed)
+            return (null, context);
+        if (manageTenant.Denial == AccessDenialReason.ExplicitDeny)
+            return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is explicitly denied administrative permission."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
 
         var viaBreakGlass = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, workspaceTarget, includeBreakGlass: true).Allowed
             || AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: true, tenantAllowsOnly: true).Allowed;
@@ -490,22 +559,26 @@ public sealed class ServiceAccountService : IServiceAccountService
         if (engine.Precheck(actor, requiredPermission, actor.Scope) is { } precheck)
             return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is not authorized."], Code: precheck.ToString()), context);
 
-        var targetResource = AccessEngine.Target(actor.Scope, targetGrantScope);
-        var (saDenial, _) = await engine.CheckServiceAccountAsync(actor, actor.Scope, targetResource, cancellationToken).ConfigureAwait(false);
+        var (saDenial, _) = await engine.CheckServiceAccountForGrantScopeAsync(actor, actor.Scope, targetGrantScope, cancellationToken).ConfigureAwait(false);
         if (saDenial is { } saReason)
             return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is not authorized."], Code: saReason.ToString()), context);
 
+        var targetResource = AccessEngine.Target(actor.Scope, targetGrantScope);
         context ??= await engine.LoadAsync(actor, actor.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
         var tenantOnly = targetGrantScope is TenantGrantScope;
         var standard = AccessEngine.EvaluateSimple(context, requiredPermission, targetResource, includeBreakGlass: false, tenantAllowsOnly: tenantOnly);
         if (standard.Allowed)
             return (null, context);
+        if (standard.Denial == AccessDenialReason.ExplicitDeny)
+            return (new TicketFailure(TicketFailureKind.Forbidden, [$"The actor is explicitly denied '{requiredPermission}' on the target scope."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
 
-        if (!tenantOnly)
+        if (!tenantOnly && standard.Denial == AccessDenialReason.NoMatchingGrant)
         {
-            var tenantAdmin = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, new AccessResource(actor.Scope), includeBreakGlass: false, tenantAllowsOnly: true);
+            var tenantAdmin = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, targetResource, includeBreakGlass: false, tenantAllowsOnly: true);
             if (tenantAdmin.Allowed)
                 return (null, context);
+            if (tenantAdmin.Denial == AccessDenialReason.ExplicitDeny)
+                return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is explicitly denied tenant administrative permission on the target scope."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
         }
 
         var withBreakGlass = AccessEngine.EvaluateSimple(context, requiredPermission, targetResource, includeBreakGlass: true, tenantAllowsOnly: tenantOnly);
@@ -513,6 +586,228 @@ public sealed class ServiceAccountService : IServiceAccountService
             return (new TicketFailure(TicketFailureKind.Forbidden, ["Break-glass elevation cannot be used for service account administration."], Code: "break-glass-not-allowed"), context);
 
         return (new TicketFailure(TicketFailureKind.Forbidden, [$"The actor lacks standard permission '{requiredPermission}' on the target scope."], Code: "forbidden"), context);
+    }
+
+    private async Task<TicketFailure?> ValidateExistingGrantsForCreateAsync(
+        AccessContext context,
+        TicketScope actorScope,
+        ServiceAccount account,
+        CancellationToken cancellationToken)
+    {
+        var existingGrants = await grantStore.ListAllForSubjectAsync(account.Partition, account.ClientId, actorScope.WorkspaceId, cancellationToken).ConfigureAwait(false);
+        if (existingGrants.Count == 0)
+            return null;
+
+        var now = engine.Now;
+        Dictionary<WorkspaceId, Dictionary<RoleId, AccessRole>>? customRolesByWorkspace = null;
+        for (var i = 0; i < existingGrants.Count; i++)
+        {
+            var grant = existingGrants[i].Grant;
+            if (grant.ValidUntil is { } until && until <= now)
+                continue;
+
+            if (grant.Partition != account.Partition || !AccessEngine.ScopeContains(account.Scope, grant.Scope))
+                return TicketFailure.Conflict(null,
+                    [$"Cannot create service account '{account.ClientId.Value}' because active grants exist outside the service account's scope."],
+                    code: "existing-grants-conflict");
+
+            if (grant.Effect == GrantEffect.Deny)
+                return TicketFailure.Conflict(null,
+                    [$"Cannot create service account '{account.ClientId.Value}' because active deny grants already exist for this client."],
+                    code: "existing-grants-conflict");
+
+            var role = await ResolveGrantRoleAsync(account.Partition, grant, customRolesByWorkspace ??= [], cancellationToken).ConfigureAwait(false);
+            if (role is null)
+                return TicketFailure.Conflict(null,
+                    [$"Cannot create service account '{account.ClientId.Value}' because an active grant references an unresolvable role '{grant.Role.Value}'."],
+                    code: "existing-grants-conflict");
+
+            var tenantOnly = grant.Scope is TenantGrantScope || (grant.Workspace is { } ws && ws != actorScope.WorkspaceId);
+            var target = grant.Workspace == actorScope.WorkspaceId
+                ? AccessEngine.Target(actorScope, grant.Scope)
+                : new AccessResource(actorScope);
+            if (!ActorHoldsRolePermissions(context, role, target, tenantOnly, missing: null))
+                return TicketFailure.Conflict(null,
+                    [$"Cannot create service account '{account.ClientId.Value}' because existing grants confer permissions the actor does not hold."],
+                    code: "existing-grants-conflict");
+        }
+
+        return null;
+    }
+
+    private async Task<TicketFailure?> CheckActorCanConferClientGrantsAsync(
+        AccessContext context,
+        TicketScope actorScope,
+        AccessPartition partition,
+        ApiClientId clientId,
+        CancellationToken cancellationToken)
+    {
+        var subjectGrants = await grantStore.ListAllForSubjectAsync(partition, clientId, actorScope.WorkspaceId, cancellationToken).ConfigureAwait(false);
+        if (subjectGrants.Count == 0)
+            return null;
+
+        var now = engine.Now;
+        Dictionary<WorkspaceId, Dictionary<RoleId, AccessRole>>? customRolesByWorkspace = null;
+        SortedSet<string>? missing = null;
+        for (var i = 0; i < subjectGrants.Count; i++)
+        {
+            var grant = subjectGrants[i].Grant;
+            if (grant.Effect != GrantEffect.Allow || (grant.ValidUntil is { } until && until <= now))
+                continue;
+
+            var role = await ResolveGrantRoleAsync(partition, grant, customRolesByWorkspace ??= [], cancellationToken).ConfigureAwait(false);
+            if (role is null)
+                continue;
+
+            var tenantOnly = grant.Scope is TenantGrantScope || (grant.Workspace is { } ws && ws != actorScope.WorkspaceId);
+            var target = grant.Workspace == actorScope.WorkspaceId
+                ? AccessEngine.Target(actorScope, grant.Scope)
+                : new AccessResource(actorScope);
+            ActorHoldsRolePermissions(context, role, target, tenantOnly, missing ??= new SortedSet<string>(StringComparer.Ordinal));
+        }
+
+        if (missing is null || missing.Count == 0)
+            return null;
+
+        return new TicketFailure(
+            TicketFailureKind.Forbidden,
+            [.. missing.Select(permission => $"The actor does not hold '{permission}' on the service account's grant target.")],
+            Code: "privilege-escalation");
+    }
+
+    private async Task<(List<StoredAccessGrant>? Deletable, TicketFailure? Failure)> ValidateGrantsForDeleteAsync(
+        AccessContext context,
+        TicketScope actorScope,
+        StoredServiceAccount existing,
+        IReadOnlyList<StoredAccessGrant> subjectGrants,
+        CancellationToken cancellationToken)
+    {
+        if (subjectGrants.Count == 0)
+            return ([], null);
+
+        var now = engine.Now;
+        var deletable = new List<StoredAccessGrant>(subjectGrants.Count);
+        Dictionary<WorkspaceId, Dictionary<RoleId, AccessRole>>? customRolesByWorkspace = null;
+
+        for (var i = 0; i < subjectGrants.Count; i++)
+        {
+            var stored = subjectGrants[i];
+            var grant = stored.Grant;
+            var isActive = grant.ValidUntil is not { } until || until > now;
+            var withinAccountScope = grant.Partition == existing.Account.Partition
+                && AccessEngine.ScopeContains(existing.Account.Scope, grant.Scope);
+
+            if (!withinAccountScope)
+            {
+                if (isActive)
+                    return (null, new TicketFailure(TicketFailureKind.Forbidden, ["Cannot delete service account while active grants exist outside the service account's scope."], Code: "out-of-scope"));
+                continue;
+            }
+
+            var grantTenantOnly = grant.Scope is TenantGrantScope || (grant.Workspace is { } ws && ws != actorScope.WorkspaceId);
+            var grantTarget = grant.Workspace == actorScope.WorkspaceId
+                ? AccessEngine.Target(actorScope, grant.Scope)
+                : new AccessResource(actorScope);
+
+            if (!CanManageGrantTarget(context, grantTarget, grantTenantOnly))
+            {
+                if (isActive)
+                    return (null, new TicketFailure(TicketFailureKind.Forbidden, ["Cannot delete service account because the actor lacks revocation authority for one or more active grants."], Code: "forbidden"));
+                continue;
+            }
+
+            if (isActive && grant.Effect == GrantEffect.Deny)
+            {
+                var role = await ResolveGrantRoleAsync(existing.Account.Partition, grant, customRolesByWorkspace ??= [], cancellationToken).ConfigureAwait(false);
+                var holdsAllDeniedPermissions = role is not null
+                    ? ActorHoldsRolePermissions(context, role, grantTarget, grantTenantOnly, missing: null)
+                    : ActorHoldsAllCatalogPermissions(context, grantTarget, grantTenantOnly);
+                if (!holdsAllDeniedPermissions)
+                    return (null, new TicketFailure(TicketFailureKind.Forbidden, ["Cannot delete service account because the actor lacks authority to revoke an active deny grant."], Code: "privilege-escalation"));
+            }
+
+            deletable.Add(stored);
+        }
+
+        return (deletable, null);
+    }
+
+    private static bool CanManageGrantTarget(AccessContext context, AccessResource target, bool tenantOnly)
+    {
+        if (tenantOnly)
+            return AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, target, includeBreakGlass: false, tenantAllowsOnly: true).Allowed;
+
+        var manage = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, target, includeBreakGlass: false, tenantAllowsOnly: false);
+        if (manage.Allowed)
+            return true;
+        if (manage.Denial == AccessDenialReason.ExplicitDeny)
+            return false;
+
+        return AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, target, includeBreakGlass: false, tenantAllowsOnly: true).Allowed;
+    }
+
+    private async Task<AccessRole?> ResolveGrantRoleAsync(
+        AccessPartition partition,
+        AccessGrant grant,
+        Dictionary<WorkspaceId, Dictionary<RoleId, AccessRole>> cache,
+        CancellationToken cancellationToken)
+    {
+        if (BuiltInRoles.Find(grant.Role) is { } builtIn)
+            return builtIn;
+        if (grant.Scope is TenantGrantScope || grant.Workspace is not { } workspaceId)
+            return null;
+
+        if (!cache.TryGetValue(workspaceId, out var workspaceRoles))
+        {
+            var listed = await roleStore.ListAsync(partition.InWorkspace(workspaceId), cancellationToken).ConfigureAwait(false);
+            workspaceRoles = new Dictionary<RoleId, AccessRole>(listed.Count);
+            for (var i = 0; i < listed.Count; i++)
+                workspaceRoles[listed[i].Role.Id] = listed[i].Role;
+            cache[workspaceId] = workspaceRoles;
+        }
+
+        return workspaceRoles.GetValueOrDefault(grant.Role);
+    }
+
+    private bool ActorHoldsRolePermissions(AccessContext context, AccessRole role, AccessResource target, bool tenantOnly, SortedSet<string>? missing)
+    {
+        var allHeld = true;
+        if (role.IncludesAllPermissions)
+        {
+            var defs = engine.Catalog.Definitions;
+            for (var i = 0; i < defs.Count; i++)
+            {
+                var permission = defs[i].Permission;
+                if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly).Allowed)
+                {
+                    allHeld = false;
+                    if (missing is null)
+                        return false;
+                    missing.Add(permission.Value);
+                }
+            }
+            return allHeld;
+        }
+
+        foreach (var permission in role.Permissions)
+            if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly).Allowed)
+            {
+                allHeld = false;
+                if (missing is null)
+                    return false;
+                missing.Add(permission.Value);
+            }
+
+        return allHeld;
+    }
+
+    private bool ActorHoldsAllCatalogPermissions(AccessContext context, AccessResource target, bool tenantOnly)
+    {
+        var defs = engine.Catalog.Definitions;
+        for (var i = 0; i < defs.Count; i++)
+            if (!AccessEngine.EvaluateSimple(context, defs[i].Permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly).Allowed)
+                return false;
+        return true;
     }
 
     private async Task<TicketResult<AccessChangeApplied<T>>> RefuseAsync<T>(
@@ -526,7 +821,11 @@ public sealed class ServiceAccountService : IServiceAccountService
     {
         var denialReason = failure.Code switch
         {
-            "out-of-scope" => AccessDenialReason.ScopeMismatch,
+            "out-of-scope" or nameof(AccessDenialReason.ScopeMismatch) => AccessDenialReason.ScopeMismatch,
+            nameof(AccessDenialReason.ExplicitDeny) => AccessDenialReason.ExplicitDeny,
+            nameof(AccessDenialReason.ServiceAccountDisabled) => AccessDenialReason.ServiceAccountDisabled,
+            nameof(AccessDenialReason.UnsupportedPrincipal) => AccessDenialReason.UnsupportedPrincipal,
+            nameof(AccessDenialReason.UnknownPermission) => AccessDenialReason.UnknownPermission,
             _ when failure.Kind == TicketFailureKind.Forbidden => AccessDenialReason.NoMatchingGrant,
             _ => (AccessDenialReason?)null,
         };

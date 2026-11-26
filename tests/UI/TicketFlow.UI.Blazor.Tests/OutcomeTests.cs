@@ -45,6 +45,17 @@ public sealed class OutcomeTests
         var forbidden = UiOutcomes.From<StoredAccessRole>(new TicketFailure(TicketFailureKind.Forbidden, []), _ => UiOutcome.Success("ok"));
         Assert.AreEqual(UiOutcomeKind.Forbidden, forbidden.Kind);
         Assert.IsNotEmpty(forbidden.Messages);
+
+        // Non-concurrency conflict codes preserve actual error message instead of concurrency-conflict banner
+        var alreadyExists = UiOutcome.FromFailure(TicketFailure.Conflict(1, ["Service account 'bot' already exists."], code: "already-exists"));
+        Assert.AreEqual(UiOutcomeKind.Conflict, alreadyExists.Kind);
+        Assert.AreNotEqual("Someone else changed this record", alreadyExists.Title);
+        CollectionAssert.Contains(alreadyExists.Messages.ToArray(), "Service account 'bot' already exists.");
+
+        var disabled = UiOutcome.FromFailure(TicketFailure.Conflict(2, ["Cannot issue an API key for a disabled service account."], code: "service-account-disabled"));
+        Assert.AreEqual(UiOutcomeKind.Conflict, disabled.Kind);
+        StringAssert.Contains(disabled.Title, "disabled");
+        CollectionAssert.Contains(disabled.Messages.ToArray(), "Cannot issue an API key for a disabled service account.");
     }
 
     [TestMethod]

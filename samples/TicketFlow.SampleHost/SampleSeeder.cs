@@ -126,6 +126,8 @@ public static class SampleSeeder
                     new ApiKeyId("seed-key-reporting-export"), "demo-export-key", DemoReportingExportApiKey),
             };
 
+            var seedDemoKeys = services.GetService<IHostEnvironment>()?.IsDevelopment() == true;
+
             foreach (var demo in demoAccounts)
             {
                 if (await serviceAccounts.FindAsync(partition, demo.ClientId, cancellationToken) is null)
@@ -133,7 +135,7 @@ public static class SampleSeeder
 
                 await grantAsync(demo.GrantKey, demo.ClientId, demo.Role);
 
-                if (await apiKeys.FindByIdAsync(partition, demo.KeyId, cancellationToken) is null)
+                if (seedDemoKeys && await apiKeys.FindByIdAsync(partition, demo.KeyId, cancellationToken) is null)
                 {
                     var prefix = demo.PlaintextKey[..demo.PlaintextKey.IndexOf('.')];
                     var hashHex = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(demo.PlaintextKey)));

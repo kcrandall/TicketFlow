@@ -30,4 +30,30 @@ public sealed class PermissionCacheTests
         cache.Set(plain, new HashSet<Permission>(), TimeSpan.Zero);
         Assert.IsFalse(cache.TryGet(plain, out _), "A zero duration disables caching.");
     }
+
+    [TestMethod]
+    public void CacheKeysIsolateTenantsWorkspacesIdentityProvidersAndDelimiters()
+    {
+        var scopeA = new TicketScope("tenant-a", "proj", "prod", "app", new WorkspaceId("ws-1"));
+        var scopeB = new TicketScope("tenant-b", "proj", "prod", "app", new WorkspaceId("ws-1"));
+        var scopeWs2 = new TicketScope("tenant-a", "proj", "prod", "app", new WorkspaceId("ws-2"));
+
+        var tenantAKey = UiSensitivePermissionCache.Key(new UserPrincipal(scopeA, new UserId("alice")));
+        var tenantBKey = UiSensitivePermissionCache.Key(new UserPrincipal(scopeB, new UserId("alice")));
+        var ws2Key = UiSensitivePermissionCache.Key(new UserPrincipal(scopeWs2, new UserId("alice")));
+        Assert.AreNotEqual(tenantAKey, tenantBKey, "Different tenants must never share cache keys.");
+        Assert.AreNotEqual(tenantAKey, ws2Key, "Different workspaces must never share cache keys.");
+
+        var idpA = UiSensitivePermissionCache.Key(new UserPrincipal(scopeA, new UserId("alice"), identityProvider: "identityflow"));
+        var idpB = UiSensitivePermissionCache.Key(new UserPrincipal(scopeA, new UserId("alice"), identityProvider: "okta"));
+        var idpUpper = UiSensitivePermissionCache.Key(new UserPrincipal(scopeA, new UserId("alice"), identityProvider: "IDENTITYFLOW"));
+        Assert.AreNotEqual(tenantAKey, idpA);
+        Assert.AreNotEqual(idpA, idpB);
+        Assert.AreEqual(idpA, idpUpper);
+
+        // Delimiter injection in userId / team must never collide
+        var injected = UiSensitivePermissionCache.Key(new UserPrincipal(scopeA, new UserId("alice|tier1")));
+        var split = UiSensitivePermissionCache.Key(new UserPrincipal(scopeA, new UserId("alice"), [new TeamId("tier1")]));
+        Assert.AreNotEqual(injected, split);
+    }
 }

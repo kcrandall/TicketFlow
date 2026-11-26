@@ -35,43 +35,55 @@ public sealed class ClaimsPrincipalResolver : IAccessPrincipalResolver
         if (claimsPrincipal.Identity?.IsAuthenticated != true)
             return ValueTask.FromResult<PrincipalRef?>(null);
 
+        if (!VerifyScopeClaims(claimsPrincipal, scope))
+            return ValueTask.FromResult<PrincipalRef?>(null);
+
+        if (!TryResolveSingleIdentifier(claimsPrincipal, options.SubjectClaimTypes, out var subject))
+            return ValueTask.FromResult<PrincipalRef?>(null);
+
+        if (!TryResolveSingleIdentifier(claimsPrincipal, options.ClientIdClaimTypes, out var clientId))
+            return ValueTask.FromResult<PrincipalRef?>(null);
+
         var externalRoles = ExtractExternalRoles(claimsPrincipal);
+        var identityProvider = TryGetIdentityProvider(claimsPrincipal);
 
         if (IsApiKeyAuthentication(claimsPrincipal))
         {
-            var apiKeyClientId = FindFirstValidIdentifier(claimsPrincipal, options.ClientIdClaimTypes);
-            if (apiKeyClientId is null)
+            var apiKeyClientId = clientId ?? (HasIdentityFlowApiKeyMethod(claimsPrincipal) ? subject : null);
+            if (apiKeyClientId is null || options.ReservedApiClientIds.Contains(apiKeyClientId))
                 return ValueTask.FromResult<PrincipalRef?>(null);
 
             return ValueTask.FromResult<PrincipalRef?>(
-                new ApiClientPrincipal(scope, new ApiClientId(apiKeyClientId), externalRoles));
+                new ApiClientPrincipal(scope, new ApiClientId(apiKeyClientId), externalRoles, identityProvider));
         }
-
-        var clientId = FindFirstValidIdentifier(claimsPrincipal, options.ClientIdClaimTypes);
-        var subject = FindFirstValidIdentifier(claimsPrincipal, options.SubjectClaimTypes);
 
         if (HasClientPrincipalTypeClaim(claimsPrincipal))
         {
-            if (clientId is null)
+            if (clientId is null || options.ReservedApiClientIds.Contains(clientId))
                 return ValueTask.FromResult<PrincipalRef?>(null);
 
             return ValueTask.FromResult<PrincipalRef?>(
-                new ApiClientPrincipal(scope, new ApiClientId(clientId), externalRoles));
+                new ApiClientPrincipal(scope, new ApiClientId(clientId), externalRoles, identityProvider));
         }
 
         if (clientId is not null
             && (subject is null
                 || string.Equals(subject, clientId, StringComparison.Ordinal)
                 || string.Equals(subject, $"{clientId}@clients", StringComparison.OrdinalIgnoreCase)))
+        {
+            if (options.ReservedApiClientIds.Contains(clientId))
+                return ValueTask.FromResult<PrincipalRef?>(null);
+
             return ValueTask.FromResult<PrincipalRef?>(
-                new ApiClientPrincipal(scope, new ApiClientId(clientId), externalRoles));
+                new ApiClientPrincipal(scope, new ApiClientId(clientId), externalRoles, identityProvider));
+        }
 
         if (subject is null)
             return ValueTask.FromResult<PrincipalRef?>(null);
 
         var teams = ExtractTeams(claimsPrincipal);
         return ValueTask.FromResult<PrincipalRef?>(
-            new UserPrincipal(scope, new UserId(subject), teams, externalRoles));
+            new UserPrincipal(scope, new UserId(subject), teams, externalRoles, identityProvider));
     }
 
     /// <summary>Extracts a validated display name from the configured <see cref="ClaimsPrincipalResolverOptions.DisplayNameClaimTypes"/>.</summary>
@@ -79,6 +91,67 @@ public sealed class ClaimsPrincipalResolver : IAccessPrincipalResolver
     {
         ArgumentNullException.ThrowIfNull(claimsPrincipal);
         return FindFirstValidIdentifier(claimsPrincipal, options.DisplayNameClaimTypes);
+    }
+
+    /// <summary>Extracts a validated identity provider identifier from the configured <see cref="ClaimsPrincipalResolverOptions.ProviderClaimTypes"/>.</summary>
+    public string? TryGetIdentityProvider(ClaimsPrincipal claimsPrincipal)
+    {
+        ArgumentNullException.ThrowIfNull(claimsPrincipal);
+        for (var i = 0; i < options.ProviderClaimTypes.Count; i++)
+        {
+            var claimType = options.ProviderClaimTypes[i];
+            string? resolved = null;
+            var foundAny = false;
+            foreach (var claim in claimsPrincipal.Claims)
+            {
+                if (!string.Equals(claim.Type, claimType, StringComparison.Ordinal))
+                    continue;
+                foundAny = true;
+                var trimmed = claim.Value?.Trim();
+                if (string.IsNullOrEmpty(trimmed) || !AccessText.IsValidText(trimmed, TicketScope.MaximumIdentifierLength))
+                    return null;
+                if (resolved is null)
+                    resolved = trimmed;
+                else if (!string.Equals(resolved, trimmed, StringComparison.OrdinalIgnoreCase))
+                    return null;
+            }
+            if (foundAny)
+                return resolved;
+        }
+
+        return null;
+    }
+
+    /// <summary>Extracts validated external role tokens from the configured <see cref="ClaimsPrincipalResolverOptions.RoleClaimTypes"/>.</summary>
+    public IReadOnlyList<string> ExtractExternalRoles(ClaimsPrincipal principal)
+    {
+        ArgumentNullException.ThrowIfNull(principal);
+        var roles = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var claim in principal.Claims)
+        {
+            if (!ContainsClaimType(options.RoleClaimTypes, claim.Type, ignoreCase: false))
+                continue;
+
+            if (string.IsNullOrWhiteSpace(claim.Value))
+                continue;
+
+            var parts = claim.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            foreach (var part in parts)
+            {
+                if (roles.Count >= PrincipalRef.MaximumExternalRoles)
+                    return roles;
+
+                if (!AccessText.IsValidText(part, TicketScope.MaximumIdentifierLength))
+                    continue;
+
+                if (seen.Add(part))
+                    roles.Add(part);
+            }
+        }
+
+        return roles;
     }
 
     private bool IsApiKeyAuthentication(ClaimsPrincipal principal)
@@ -91,6 +164,72 @@ public sealed class ClaimsPrincipalResolver : IAccessPrincipalResolver
                 return true;
 
         return false;
+    }
+
+    private static bool HasIdentityFlowApiKeyMethod(ClaimsPrincipal principal)
+    {
+        foreach (var claim in principal.Claims)
+            if ((string.Equals(claim.Type, "identityflow_auth_method", StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(claim.Type, "identityflow:primary_method", StringComparison.OrdinalIgnoreCase))
+                && IsApiKeyMethod(claim.Value))
+                return true;
+
+        return false;
+    }
+
+    private static bool VerifyScopeClaims(ClaimsPrincipal principal, TicketScope scope)
+    {
+        foreach (var claim in principal.Claims)
+        {
+            var expected = claim.Type switch
+            {
+                "tenant_id" => scope.TenantId,
+                "project_id" => scope.ProjectId,
+                "environment_id" or "environment" => scope.EnvironmentId,
+                "app_id" or "app_name" => scope.AppId,
+                "workspace_id" or "workspace" => scope.WorkspaceId.Value,
+                _ => null,
+            };
+            if (expected is null)
+                continue;
+
+            var trimmed = claim.Value?.Trim();
+            if (string.IsNullOrEmpty(trimmed) || !string.Equals(trimmed, expected, StringComparison.Ordinal))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryResolveSingleIdentifier(ClaimsPrincipal principal, IList<string> claimTypes, out string? value)
+    {
+        value = null;
+        for (var i = 0; i < claimTypes.Count; i++)
+        {
+            var claimType = claimTypes[i];
+            foreach (var claim in principal.Claims)
+            {
+                if (!string.Equals(claim.Type, claimType, StringComparison.Ordinal))
+                    continue;
+
+                var trimmed = claim.Value?.Trim();
+                if (string.IsNullOrEmpty(trimmed) || !AccessText.IsValidText(trimmed, TicketScope.MaximumIdentifierLength))
+                {
+                    value = null;
+                    return false;
+                }
+
+                if (value is null)
+                    value = trimmed;
+                else if (!string.Equals(value, trimmed, StringComparison.Ordinal))
+                {
+                    value = null;
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     private bool HasClientPrincipalTypeClaim(ClaimsPrincipal principal)
@@ -176,35 +315,5 @@ public sealed class ClaimsPrincipalResolver : IAccessPrincipalResolver
         }
 
         return teams;
-    }
-
-    private List<string> ExtractExternalRoles(ClaimsPrincipal principal)
-    {
-        var roles = new List<string>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var claim in principal.Claims)
-        {
-            if (!ContainsClaimType(options.RoleClaimTypes, claim.Type, ignoreCase: false))
-                continue;
-
-            if (string.IsNullOrWhiteSpace(claim.Value))
-                continue;
-
-            var parts = claim.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            foreach (var part in parts)
-            {
-                if (roles.Count >= PrincipalRef.MaximumExternalRoles)
-                    return roles;
-
-                if (!AccessText.IsValidText(part, TicketScope.MaximumIdentifierLength))
-                    continue;
-
-                if (seen.Add(part))
-                    roles.Add(part);
-            }
-        }
-
-        return roles;
     }
 }

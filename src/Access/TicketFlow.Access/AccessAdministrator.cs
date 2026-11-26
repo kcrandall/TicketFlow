@@ -16,6 +16,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
     private readonly IAccessRoleStore roles;
     private readonly IAccessFieldPolicyStore policies;
     private readonly IAccessAuditSink audit;
+    private readonly IRoleFederationMappingStore? roleFederationMappings;
     private readonly AccessControlOptions options;
 
     public AccessAdministrator(
@@ -35,6 +36,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         this.roles = roles ?? throw new ArgumentNullException(nameof(roles));
         this.policies = policies ?? throw new ArgumentNullException(nameof(policies));
         this.audit = audit ?? throw new ArgumentNullException(nameof(audit));
+        this.roleFederationMappings = roleFederationMappings;
         ArgumentNullException.ThrowIfNull(options);
         this.options = options.Value;
         this.options.Validate();
@@ -92,6 +94,21 @@ public sealed class AccessAdministrator : IAccessAdministrator
             var existing = await roles.GetAsync(actor.Scope, role, cancellationToken).ConfigureAwait(false);
             refusal = Fence(existing?.Revision, expectedRevision)
                 ?? RequireHeld(context!, existing!.Role.Permissions, workspace, tenantAllowsOnly: false);
+        }
+        if (refusal is null && roleFederationMappings is not null)
+        {
+            var mappings = await roleFederationMappings.ListForPartitionAsync(AccessPartition.From(actor.Scope), includeDisabled: true, cancellationToken).ConfigureAwait(false);
+            for (var i = 0; i < mappings.Count; i++)
+            {
+                var mapping = mappings[i].Mapping;
+                if (mapping.RoleId == role && (mapping.Workspace is null || mapping.Workspace == actor.Scope.WorkspaceId))
+                {
+                    refusal = new Refusal(TicketFailureKind.Conflict,
+                        [$"Role '{role.Value}' cannot be deleted while referenced by role federation mapping '{mappings[i].Id.Value}'."],
+                        Code: "role-in-use");
+                    break;
+                }
+            }
         }
         if (refusal is not null)
             return await RefuseAsync<StoredAccessRole>(change, refusal, cancellationToken).ConfigureAwait(false);
@@ -289,6 +306,12 @@ public sealed class AccessAdministrator : IAccessAdministrator
             errors.Add("Break-glass roles cannot include access-management or break-glass permissions.");
 
         var refusal = errors.Count > 0 ? new Refusal(TicketFailureKind.Invalid, errors) : null;
+        if (refusal is null)
+        {
+            var (saDenial, _) = await engine.CheckServiceAccountForGrantScopeAsync(actor, actor.Scope, request.Scope, cancellationToken).ConfigureAwait(false);
+            if (saDenial is { } saReason)
+                refusal = new Refusal(TicketFailureKind.Forbidden, ["The actor is not authorized."], saReason);
+        }
         refusal ??= await AuthorizeAsync(actor, AccessPermissions.AccessBreakGlass, target!, cancellationToken).ConfigureAwait(false);
         if (refusal is not null)
             return await RefuseAsync<StoredAccessGrant>(change, refusal, cancellationToken).ConfigureAwait(false);
@@ -307,7 +330,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         var items = Bounded(conferrals, nameof(conferrals));
         if (engine.Precheck(actor, AccessPermissions.AccessManage, actor.Scope) is { } reason)
             return Refused(["The actor is not authorized."], reason);
-        var (serviceAccountDenial, _) = await engine.CheckServiceAccountAsync(actor, actor.Scope, resource: null, cancellationToken).ConfigureAwait(false);
+        var (serviceAccountDenial, serviceAccount) = await engine.CheckServiceAccountAsync(actor, actor.Scope, resource: null, cancellationToken).ConfigureAwait(false);
         if (serviceAccountDenial is { } saReason)
             return Refused(["The actor is not authorized."], saReason);
         var now = engine.Now;
@@ -323,6 +346,9 @@ public sealed class AccessAdministrator : IAccessAdministrator
             var target = conferral.Target ?? AccessEngine.Target(actor.Scope, grant.Scope);
             if (!InActorScope(actor, grant) || target.Scope != actor.Scope)
                 return Refused(["The grant is outside the actor's scope."], AccessDenialReason.ScopeMismatch);
+            if (serviceAccount is not null
+                && (!AccessEngine.ScopeContains(serviceAccount.Account.Scope, grant.Scope) || !serviceAccount.Account.AppliesTo(target)))
+                return Refused(["The grant is outside the service account's scope."], AccessDenialReason.ScopeMismatch);
             AccessRole? role = BuiltInRoles.Find(grant.Role);
             if (role is null && grant.Scope is not TenantGrantScope)
             {
@@ -382,7 +408,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
             return AccessCheckPassed.Instance;
         if (engine.Precheck(actor, AccessPermissions.AccessManage, actor.Scope) is { } reason)
             return Refused(["The actor is not authorized."], reason);
-        var (serviceAccountDenial, _) = await engine.CheckServiceAccountAsync(actor, actor.Scope, resource: null, cancellationToken).ConfigureAwait(false);
+        var (serviceAccountDenial, serviceAccount) = await engine.CheckServiceAccountAsync(actor, actor.Scope, resource: null, cancellationToken).ConfigureAwait(false);
         if (serviceAccountDenial is { } saReason)
             return Refused(["The actor is not authorized."], saReason);
         var context = await engine.LoadAsync(actor, actor.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
@@ -391,6 +417,8 @@ public sealed class AccessAdministrator : IAccessAdministrator
             var grant = items[i];
             if (!InActorScope(actor, grant))
                 return Refused(["The grant is outside the actor's scope."], AccessDenialReason.ScopeMismatch);
+            if (serviceAccount is not null && !AccessEngine.ScopeContains(serviceAccount.Account.Scope, grant.Scope))
+                return Refused(["The grant is outside the service account's scope."], AccessDenialReason.ScopeMismatch);
             var tenant = grant.Scope is TenantGrantScope;
             var permission = tenant ? AccessPermissions.AccessManageTenant : AccessPermissions.AccessManage;
             var result = AccessEngine.EvaluateSimple(context, permission, AccessEngine.Target(actor.Scope, grant.Scope), includeBreakGlass: false, tenantAllowsOnly: tenant);
@@ -440,6 +468,9 @@ public sealed class AccessAdministrator : IAccessAdministrator
             || target is TeamGrantScope team && team.Workspace != actor.Scope.WorkspaceId
             || target is InboxGrantScope inbox && inbox.Workspace != actor.Scope.WorkspaceId)
             return new TicketFailure(TicketFailureKind.Forbidden, ["The actor is not authorized."]);
+        var (saDenial, _) = await engine.CheckServiceAccountForGrantScopeAsync(actor, actor.Scope, target, cancellationToken).ConfigureAwait(false);
+        if (saDenial is not null)
+            return new TicketFailure(TicketFailureKind.Forbidden, ["The actor is not authorized."]);
         if (await AuthorizeAsync(actor, AccessPermissions.AccessManage, AccessEngine.Target(actor.Scope, target), cancellationToken).ConfigureAwait(false) is { } refusal)
             return new TicketFailure(refusal.Reason, refusal.Errors);
         return new TicketValue<IReadOnlyList<StoredAccessGrant>>(await grants.ListForTargetAsync(AccessPartition.From(actor.Scope), target, limit, after, cancellationToken).ConfigureAwait(false));
@@ -459,7 +490,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
     private static readonly Permission[] ManagementPermissions =
         [AccessPermissions.AccessManage, AccessPermissions.AccessManageTenant, AccessPermissions.AccessBreakGlass];
 
-    private sealed record Refusal(TicketFailureKind Reason, IReadOnlyList<string> Errors, AccessDenialReason? Denial = null, long? CurrentRevision = null);
+    private sealed record Refusal(TicketFailureKind Reason, IReadOnlyList<string> Errors, AccessDenialReason? Denial = null, long? CurrentRevision = null, string? Code = null);
 
     /// <summary>Refuses before any authorization decision is based on a record that is missing or at another revision.</summary>
     private static Refusal? Fence(long? currentRevision, long expectedRevision) => currentRevision switch
@@ -552,13 +583,16 @@ public sealed class AccessAdministrator : IAccessAdministrator
     /// Authorizes management of a grant's target. Tenant grants need <c>access:manage-tenant</c> from a tenant-scoped grant; a
     /// workspace-scoped Owner cannot manage tenant grants.
     /// </summary>
-    private Task<(Refusal? Refusal, AccessContext? Context)> AuthorizeTargetWithContextAsync(PrincipalRef actor, AccessGrant grant, AccessContext? context, CancellationToken cancellationToken)
+    private async Task<(Refusal? Refusal, AccessContext? Context)> AuthorizeTargetWithContextAsync(PrincipalRef actor, AccessGrant grant, AccessContext? context, CancellationToken cancellationToken)
     {
         if (grant.Partition != AccessPartition.From(actor.Scope) || (grant.Workspace is { } workspace && workspace != actor.Scope.WorkspaceId))
-            return Task.FromResult<(Refusal?, AccessContext?)>((new(TicketFailureKind.Forbidden, ["The grant is outside the actor's scope."], AccessDenialReason.ScopeMismatch), context));
+            return (new(TicketFailureKind.Forbidden, ["The grant is outside the actor's scope."], AccessDenialReason.ScopeMismatch), context);
+        var (saDenial, _) = await engine.CheckServiceAccountForGrantScopeAsync(actor, actor.Scope, grant.Scope, cancellationToken).ConfigureAwait(false);
+        if (saDenial is { } saReason)
+            return (new(TicketFailureKind.Forbidden, ["The actor is not authorized."], saReason), context);
         var tenant = grant.Scope is TenantGrantScope;
         var permission = tenant ? AccessPermissions.AccessManageTenant : AccessPermissions.AccessManage;
-        return AuthorizeWithContextAsync(actor, permission, AccessEngine.Target(actor.Scope, grant.Scope), cancellationToken, tenantAllowsOnly: tenant, context: context);
+        return await AuthorizeWithContextAsync(actor, permission, AccessEngine.Target(actor.Scope, grant.Scope), cancellationToken, tenantAllowsOnly: tenant, context: context).ConfigureAwait(false);
     }
 
     private async Task<Refusal?> AuthorizeGrantAsync(PrincipalRef actor, AccessGrant grant, AccessContext? context, CancellationToken cancellationToken)
@@ -581,7 +615,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
     private async Task<TicketResult<AccessChangeApplied<T>>> RefuseAsync<T>(Change change, Refusal refusal, CancellationToken cancellationToken, long? currentRevision = null)
     {
         await RecordAsync(change, AccessAuditOutcome.Denied, refusal.Denial, cancellationToken).ConfigureAwait(false);
-        return new TicketFailure(refusal.Reason, refusal.Errors, refusal.CurrentRevision ?? currentRevision);
+        return new TicketFailure(refusal.Reason, refusal.Errors, refusal.CurrentRevision ?? currentRevision, refusal.Code);
     }
 
     private Task<TicketResult<AccessChangeApplied<T>>> CompleteAsync<T>(Change change, StoreWriteResult<T, AccessWriteRejection> result, CancellationToken cancellationToken) => result switch

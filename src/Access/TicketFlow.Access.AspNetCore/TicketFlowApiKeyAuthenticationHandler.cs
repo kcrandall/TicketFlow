@@ -106,33 +106,39 @@ public sealed class TicketFlowApiKeyAuthenticationHandler(
     private async ValueTask<TicketScope?> ResolveTargetScopeAsync()
     {
         if (Options.ResolveScope is not null)
-        {
-            var resolved = await Options.ResolveScope(Context).ConfigureAwait(false);
-            if (resolved is not null)
-                return resolved;
-        }
+            return await Options.ResolveScope(Context).ConfigureAwait(false);
 
         var baseScope = Options.DefaultScope;
         if (baseScope is null)
             return null;
 
         if (!string.IsNullOrWhiteSpace(Options.WorkspaceRouteParameter)
-            && Context.GetRouteValue(Options.WorkspaceRouteParameter) is string routeWorkspace
-            && TryCreateWorkspaceId(routeWorkspace, out var routeWsId))
+            && Context.Request.RouteValues.TryGetValue(Options.WorkspaceRouteParameter, out var rawRouteWorkspace)
+            && rawRouteWorkspace is not null)
+        {
+            if (rawRouteWorkspace is not string routeWorkspace || !TryCreateWorkspaceId(routeWorkspace, out var routeWsId))
+                return null;
             return AccessPartition.From(baseScope).InWorkspace(routeWsId);
+        }
 
         if (!string.IsNullOrWhiteSpace(Options.WorkspaceQueryParameter)
-            && Request.Query.TryGetValue(Options.WorkspaceQueryParameter, out var queryValues))
+            && Request.Query.TryGetValue(Options.WorkspaceQueryParameter, out var queryValues)
+            && queryValues.Count > 0)
         {
             var resolution = ResolveSingleValue(queryValues, splitCommas: false);
-            if (!resolution.IsAmbiguous && resolution.Value is not null && TryCreateWorkspaceId(resolution.Value, out var queryWsId))
-                return AccessPartition.From(baseScope).InWorkspace(queryWsId);
+            if (resolution.IsAmbiguous || resolution.Value is null || !TryCreateWorkspaceId(resolution.Value, out var queryWsId))
+                return null;
+            return AccessPartition.From(baseScope).InWorkspace(queryWsId);
         }
 
         if (!string.IsNullOrWhiteSpace(Options.WorkspaceCookieName)
             && Request.Cookies.TryGetValue(Options.WorkspaceCookieName, out var cookieWorkspace)
-            && TryCreateWorkspaceId(cookieWorkspace, out var cookieWsId))
+            && !string.IsNullOrEmpty(cookieWorkspace))
+        {
+            if (!TryCreateWorkspaceId(cookieWorkspace, out var cookieWsId))
+                return null;
             return AccessPartition.From(baseScope).InWorkspace(cookieWsId);
+        }
 
         return baseScope;
     }

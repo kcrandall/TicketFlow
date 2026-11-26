@@ -115,6 +115,8 @@ public static class IdentityFlowClaimsMapper
     public const string ApiKeyMethod = "ApiKey";
     public const string PersonalAccessTokenMethod = "PersonalAccessToken";
     public const string ScopeClaim = "scope";
+    public const string TicketFlowApiKeyScheme = "ApiKey";
+    public const string TicketFlowApiKeyIdClaim = "api_key_id";
 
     public static IdentityFlowIdentity? Map(ClaimsPrincipal? user, IdentityFlowPrincipalOptions options)
     {
@@ -137,6 +139,8 @@ public static class IdentityFlowClaimsMapper
         var nameIdAmbiguous = false;
         string? methodId = null;
         var methodIdAmbiguous = false;
+        string? apiKeyId = null;
+        var apiKeyIdAmbiguous = false;
         var checkScopes = options.RequiredScopes.Count > 0;
         var hasRequiredScope = false;
 
@@ -158,17 +162,33 @@ public static class IdentityFlowClaimsMapper
                 Accumulate(ref nameId, ref nameIdAmbiguous, value);
             else if (string.Equals(type, MethodIdClaim, StringComparison.OrdinalIgnoreCase))
                 Accumulate(ref methodId, ref methodIdAmbiguous, value);
+            else if (string.Equals(type, TicketFlowApiKeyIdClaim, StringComparison.Ordinal))
+                Accumulate(ref apiKeyId, ref apiKeyIdAmbiguous, value);
             else if (checkScopes && !hasRequiredScope && string.Equals(type, ScopeClaim, StringComparison.OrdinalIgnoreCase))
                 hasRequiredScope = HasScope(value, options.RequiredScopes);
         }
 
         var methodVal = Resolve(method, methodAmbiguous);
-        var client = Resolve(idfClient, idfClientAmbiguous) ?? Resolve(rawClient, rawClientAmbiguous);
+        var subject = Resolve(idfSub, idfSubAmbiguous) ?? Resolve(nameId, nameIdAmbiguous);
+        var resolvedRawClient = Resolve(rawClient, rawClientAmbiguous);
+        var resolvedIdfClient = Resolve(idfClient, idfClientAmbiguous);
+
+        // TicketFlow's own service-account API keys (TicketFlowApiKeyAuthenticationHandler) carry AuthenticationType == "ApiKey"
+        // and an api_key_id claim; they map to their unprefixed ApiClientId so IServiceAccountStore and ACL grants match across
+        // UI, REST API, and MCP endpoints.
+        if (string.Equals(identity.AuthenticationType, TicketFlowApiKeyScheme, StringComparison.Ordinal)
+            && Resolve(apiKeyId, apiKeyIdAmbiguous) is not null)
+        {
+            if (subject is not null || resolvedRawClient is null)
+                return null;
+            return Identity(IdentityFlowPrincipalKind.ApiClient, string.Empty, resolvedRawClient, options);
+        }
+
+        var client = resolvedIdfClient ?? resolvedRawClient;
         var session = identity.AuthenticationType is { } authType && options.BrowserSessionAuthenticationTypes.Contains(authType)
             || Resolve(sessionId, sessionIdAmbiguous) is not null && client is null && methodVal is null;
         if (!session && checkScopes && !hasRequiredScope)
             return null;
-        var subject = Resolve(idfSub, idfSubAmbiguous) ?? Resolve(nameId, nameIdAmbiguous);
         if (methodVal == ApiKeyMethod)
         {
             if (subject is null)

@@ -220,4 +220,209 @@ public sealed partial class ServiceAccountTests
         var disabledBatch = await fixture.Evaluator.LoadDecisionContextAsync(bot, fixture.Scope, [AccessPermissions.ConversationRead]);
         Assert.AreEqual("denied:ServiceAccountDisabled", AccessFixture.Describe(await disabledBatch.DecideAsync(AccessPermissions.ConversationRead, fixture.Resource(team: "team-a"))));
     }
+
+    [TestMethod]
+    public async Task CreateServiceAccountRejectsReservedWorkerIdsAndConflictingPreexistingGrants()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<IServiceAccountService>();
+
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        foreach (var reserved in new[] { "automation-worker", "sla-worker", "channels", "ticketflow-routing" })
+        {
+            var res = await service.CreateServiceAccountAsync(owner, new ServiceAccount(new ApiClientId(reserved), fixture.Partition, fixture.Workspace, "Reserved"));
+            Assert.IsTrue(res.TryGetValue(out TicketFailure failure));
+            Assert.AreEqual(TicketFailureKind.Rejected, failure.Kind);
+            Assert.AreEqual("reserved-client-id", failure.Code);
+        }
+
+        // Pre-existing grant outside requested SA scope -> Conflict
+        var outOfScopeClient = new ApiClientId("pre-tenant-bot");
+        await fixture.GrantAsync(outOfScopeClient, BuiltInRoles.Viewer, TenantGrantScope.Instance);
+        var outOfScopeCreate = await service.CreateServiceAccountAsync(owner, new ServiceAccount(outOfScopeClient, fixture.Partition, fixture.Workspace, "Bot"));
+        Assert.IsTrue(outOfScopeCreate.TryGetValue(out TicketFailure outOfScopeFailure));
+        Assert.AreEqual(TicketFailureKind.Conflict, outOfScopeFailure.Kind);
+        Assert.AreEqual("existing-grants-conflict", outOfScopeFailure.Code);
+
+        // Pre-existing Deny grant -> Conflict
+        var deniedClient = new ApiClientId("pre-denied-bot");
+        await fixture.GrantAsync(deniedClient, BuiltInRoles.Viewer, fixture.Workspace, GrantEffect.Deny);
+        var deniedCreate = await service.CreateServiceAccountAsync(owner, new ServiceAccount(deniedClient, fixture.Partition, fixture.Workspace, "Denied Bot"));
+        Assert.IsTrue(deniedCreate.TryGetValue(out TicketFailure denyFailure));
+        Assert.AreEqual(TicketFailureKind.Conflict, denyFailure.Kind);
+        Assert.AreEqual("existing-grants-conflict", denyFailure.Code);
+
+        // Pre-existing Allow grant conferring permissions actor lacks -> Conflict
+        var wsAdmin = fixture.User("ws-admin");
+        await fixture.GrantAsync(wsAdmin.UserId, BuiltInRoles.Admin, fixture.Workspace);
+        var highPrivClient = new ApiClientId("pre-owner-bot");
+        await fixture.GrantAsync(highPrivClient, BuiltInRoles.Owner, fixture.Workspace);
+        var escCreate = await service.CreateServiceAccountAsync(wsAdmin, new ServiceAccount(highPrivClient, fixture.Partition, fixture.Workspace, "High Priv Bot"));
+        Assert.IsTrue(escCreate.TryGetValue(out TicketFailure escFailure));
+        Assert.AreEqual(TicketFailureKind.Conflict, escFailure.Kind);
+        Assert.AreEqual("existing-grants-conflict", escFailure.Code);
+    }
+
+    [TestMethod]
+    public async Task IssueApiKeyAndEnableEnforceAntiEscalationAndDeleteProtectsOutOfScopeAndDenyGrants()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<IServiceAccountService>();
+
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        var wsAdmin = fixture.User("ws-admin");
+        await fixture.GrantAsync(wsAdmin.UserId, BuiltInRoles.Admin, fixture.Workspace);
+
+        // Workspace-scoped SA that holds Owner grant (more than wsAdmin holds!)
+        var botId = new ApiClientId("high-priv-sa");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(botId, fixture.Partition, fixture.Workspace, "High Priv SA"))).IsSuccess);
+        await fixture.GrantAsync(botId, BuiltInRoles.Owner, fixture.Workspace);
+
+        // wsAdmin cannot issue an API key for a SA holding permissions wsAdmin lacks
+        var issueEsc = await service.IssueApiKeyAsync(wsAdmin, new ApiKeyCreateRequest(botId, "hijack"));
+        Assert.IsTrue(issueEsc.TryGetValue(out TicketFailure issueFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, issueFailure.Kind);
+        Assert.AreEqual("privilege-escalation", issueFailure.Code);
+
+        // wsAdmin CAN disable a compromised SA, but CANNOT re-enable it (anti-escalation)
+        Assert.IsTrue((await service.SetServiceAccountEnabledAsync(wsAdmin, botId, isEnabled: false, reason: "incident")).IsSuccess);
+        var enableEsc = await service.SetServiceAccountEnabledAsync(wsAdmin, botId, isEnabled: true);
+        Assert.IsTrue(enableEsc.TryGetValue(out TicketFailure enableFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, enableFailure.Kind);
+        Assert.AreEqual("privilege-escalation", enableFailure.Code);
+
+        // Delete refuses when SA has an active grant outside SA scope
+        var crossScopeBot = new ApiClientId("cross-scope-sa");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(crossScopeBot, fixture.Partition, fixture.Workspace, "Cross Scope SA"))).IsSuccess);
+        await fixture.GrantAsync(crossScopeBot, BuiltInRoles.Viewer, TenantGrantScope.Instance);
+        var deleteCross = await service.DeleteServiceAccountAsync(wsAdmin, crossScopeBot);
+        Assert.IsTrue(deleteCross.TryGetValue(out TicketFailure crossFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, crossFailure.Kind);
+        Assert.AreEqual("out-of-scope", crossFailure.Code);
+        Assert.IsNotEmpty(await fixture.Grants.ListAllForSubjectAsync(fixture.Partition, crossScopeBot, fixture.Scope.WorkspaceId));
+
+        // Delete refuses when SA has an active Deny grant whose permissions actor cannot confer/revoke
+        var denyBot = new ApiClientId("deny-protected-sa");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(denyBot, fixture.Partition, fixture.Workspace, "Deny Protected SA"))).IsSuccess);
+        await fixture.GrantAsync(denyBot, BuiltInRoles.Owner, fixture.Workspace, GrantEffect.Deny);
+        var deleteDeny = await service.DeleteServiceAccountAsync(wsAdmin, denyBot);
+        Assert.IsTrue(deleteDeny.TryGetValue(out TicketFailure denyDelFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, denyDelFailure.Kind);
+        Assert.AreEqual("privilege-escalation", denyDelFailure.Code);
+
+        // Owner CAN delete and grant revocations are audited
+        var auditBefore = fixture.Audit.Snapshot().Count;
+        Assert.IsTrue((await service.DeleteServiceAccountAsync(owner, denyBot)).IsSuccess);
+        var auditAfter = fixture.Audit.Snapshot().Skip(auditBefore).ToArray();
+        Assert.IsTrue(auditAfter.Any(e => e.Kind == AccessAuditKind.GrantRevoked && e.Outcome == AccessAuditOutcome.Allowed));
+        Assert.IsTrue(auditAfter.Any(e => e.Kind == AccessAuditKind.ServiceAccountDeleted && e.Outcome == AccessAuditOutcome.Allowed));
+    }
+
+    [TestMethod]
+    public async Task IssueApiKeyToctouImmediatelyRevokesKeyWhenAccountDisabledConcurrently()
+    {
+        using var fixture = AccessFixture.Create();
+        var saStore = fixture.Provider.GetRequiredService<IServiceAccountStore>();
+        var innerKeyStore = fixture.Provider.GetRequiredService<IApiKeyStore>();
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        var clientId = new ApiClientId("race-bot");
+        Assert.IsTrue((await saStore.CreateAsync(new ServiceAccount(clientId, fixture.Partition, fixture.Workspace, "Race Bot"), "user:owner")).IsSuccess);
+
+        var racingKeyStore = new RacingApiKeyStore(innerKeyStore, async () =>
+        {
+            // Simulate concurrent disable between FindAsync and post-CreateAsync verification
+            await saStore.SetEnabledAsync(fixture.Partition, clientId, isEnabled: false, "user:other", "disabled mid-flight");
+        });
+
+        var service = new ServiceAccountService(
+            saStore,
+            racingKeyStore,
+            fixture.Grants,
+            fixture.Roles,
+            fixture.Catalog,
+            fixture.Audit,
+            fixture.Clock);
+
+        var result = await service.IssueApiKeyAsync(owner, new ApiKeyCreateRequest(clientId, "raced-key"));
+        Assert.IsTrue(result.TryGetValue(out TicketFailure failure));
+        Assert.AreEqual(TicketFailureKind.Conflict, failure.Kind);
+        Assert.AreEqual("service-account-disabled", failure.Code);
+
+        // Verify the just-created key was immediately revoked in the store
+        var storedKeys = await innerKeyStore.ListForClientAsync(fixture.Partition, clientId, includeInactive: true);
+        Assert.HasCount(1, storedKeys);
+        Assert.IsTrue(storedKeys[0].IsRevoked, "Key created during concurrent disable must be immediately revoked.");
+    }
+
+    [TestMethod]
+    public async Task ExplicitDenyBlocksServiceAccountAdministrationAndOutOfScopeServiceAccountBlockedFromAdmin()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<IServiceAccountService>();
+
+        var deniedAdmin = fixture.User("denied-tenant-admin");
+        await fixture.GrantAsync(deniedAdmin.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        var denyRole = await fixture.CustomRoleAsync("deny-access-manage", AccessPermissions.AccessManage);
+        await fixture.GrantAsync(deniedAdmin.UserId, denyRole, fixture.Workspace, GrantEffect.Deny);
+
+        // Explicit deny on AccessManage at workspace scope MUST NOT fall through to AccessManageTenant
+        var createRes = await service.CreateServiceAccountAsync(deniedAdmin, new ServiceAccount(new ApiClientId("blocked-sa"), fixture.Partition, fixture.Workspace, "Blocked"));
+        Assert.IsTrue(createRes.TryGetValue(out TicketFailure denyFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, denyFailure.Kind);
+        Assert.AreEqual(nameof(AccessDenialReason.ExplicitDeny), denyFailure.Code);
+
+        // Workspace-scoped service account holding tenant Owner grant still cannot create tenant-scoped grant or SA
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        var wsSaId = new ApiClientId("ws-scoped-admin-sa");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(wsSaId, fixture.Partition, fixture.Workspace, "WS SA"))).IsSuccess);
+        await fixture.GrantAsync(wsSaId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        var wsSaPrincipal = fixture.Client(wsSaId.Value);
+        var tenantGrant = new AccessGrant(new GrantId("sa-tenant-grant"), fixture.Partition, new UserId("u1"), BuiltInRoles.Viewer.Id, TenantGrantScope.Instance);
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(wsSaPrincipal, tenantGrant)));
+
+        var tenantSaAttempt = await service.CreateServiceAccountAsync(wsSaPrincipal, new ServiceAccount(new ApiClientId("escalated-tenant-sa"), fixture.Partition, TenantGrantScope.Instance, "Esc"));
+        Assert.IsTrue(tenantSaAttempt.TryGetValue(out TicketFailure saScopeFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, saScopeFailure.Kind);
+    }
+
+    private sealed class RacingApiKeyStore(IApiKeyStore inner, Func<Task> onAfterCreate) : IApiKeyStore
+    {
+        public ValueTask<StoredApiKey?> FindByIdAsync(AccessPartition partition, ApiKeyId keyId, CancellationToken cancellationToken = default) =>
+            inner.FindByIdAsync(partition, keyId, cancellationToken);
+
+        public ValueTask<IReadOnlyList<StoredApiKeySecret>> FindByPrefixAsync(string keyPrefix, CancellationToken cancellationToken = default) =>
+            inner.FindByPrefixAsync(keyPrefix, cancellationToken);
+
+        public ValueTask<IReadOnlyList<StoredApiKey>> ListForClientAsync(AccessPartition partition, ApiClientId clientId, bool includeInactive = false, CancellationToken cancellationToken = default) =>
+            inner.ListForClientAsync(partition, clientId, includeInactive, cancellationToken);
+
+        public ValueTask<IReadOnlyList<StoredApiKey>> ListForPartitionAsync(AccessPartition partition, bool includeInactive = false, CancellationToken cancellationToken = default) =>
+            inner.ListForPartitionAsync(partition, includeInactive, cancellationToken);
+
+        public async ValueTask<TicketResult<StoredApiKey>> CreateAsync(ApiKeyId keyId, AccessPartition partition, ApiClientId clientId, string name, string keyPrefix, string keyHashHex, string actorPrincipalId, DateTimeOffset? expiresAtUtc = null, CancellationToken cancellationToken = default)
+        {
+            var created = await inner.CreateAsync(keyId, partition, clientId, name, keyPrefix, keyHashHex, actorPrincipalId, expiresAtUtc, cancellationToken);
+            await onAfterCreate();
+            return created;
+        }
+
+        public ValueTask<TicketResult<StoredApiKey>> RevokeAsync(AccessPartition partition, ApiKeyId keyId, string actorPrincipalId, string? reason = null, long? expectedVersion = null, CancellationToken cancellationToken = default) =>
+            inner.RevokeAsync(partition, keyId, actorPrincipalId, reason, expectedVersion, cancellationToken);
+
+        public ValueTask<int> RevokeAllForClientAsync(AccessPartition partition, ApiClientId clientId, string actorPrincipalId, string? reason = null, CancellationToken cancellationToken = default) =>
+            inner.RevokeAllForClientAsync(partition, clientId, actorPrincipalId, reason, cancellationToken);
+
+        public ValueTask RecordUsageAsync(AccessPartition partition, ApiKeyId keyId, DateTimeOffset usedAtUtc, CancellationToken cancellationToken = default) =>
+            inner.RecordUsageAsync(partition, keyId, usedAtUtc, cancellationToken);
+    }
 }

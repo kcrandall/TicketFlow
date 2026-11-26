@@ -8,5 +8,6 @@
   <ItemGroup>
     <ProjectReference Include="../TicketFlow.Access.Abstractions/TicketFlow.Access.Abstractions.csproj" />
     <ProjectReference Include="../TicketFlow.Access/TicketFlow.Access.csproj" />
+    <ProjectReference Include="../../Hosting/TicketFlow.Hosting.AspNetCore/TicketFlow.Hosting.AspNetCore.csproj" />
   </ItemGroup>
 </Project>

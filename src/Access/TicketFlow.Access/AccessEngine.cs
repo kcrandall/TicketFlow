@@ -69,6 +69,8 @@ internal sealed class AccessEngine(
 
     public IPermissionCatalog Catalog { get; } = catalog;
 
+    public AccessControlOptions Options => options;
+
     public DateTimeOffset Now => time.GetUtcNow();
 
     public async ValueTask<(AccessDenialReason? Denial, StoredServiceAccount? ServiceAccount)> CheckServiceAccountAsync(
@@ -92,6 +94,43 @@ internal sealed class AccessEngine(
             : stored.Account.AppliesTo(scope);
         return withinScope ? (null, stored) : (AccessDenialReason.ScopeMismatch, stored);
     }
+
+    public async ValueTask<(AccessDenialReason? Denial, StoredServiceAccount? ServiceAccount)> CheckServiceAccountForGrantScopeAsync(
+        PrincipalRef principal,
+        TicketScope scope,
+        GrantScope targetGrantScope,
+        CancellationToken cancellationToken)
+    {
+        if (principal is not ApiClientPrincipal client || serviceAccounts is null)
+            return (null, null);
+
+        var partition = AccessPartition.From(scope);
+        var stored = await serviceAccounts.FindAsync(partition, client.ClientId, cancellationToken).ConfigureAwait(false);
+        if (stored is null)
+            return (null, null);
+
+        if (!stored.IsEnabled)
+            return (AccessDenialReason.ServiceAccountDisabled, stored);
+
+        if (stored.Account.Partition != partition || !ScopeContains(stored.Account.Scope, targetGrantScope))
+            return (AccessDenialReason.ScopeMismatch, stored);
+
+        return (null, stored);
+    }
+
+    public static bool ScopeContains(GrantScope container, GrantScope candidate) => container switch
+    {
+        TenantGrantScope => true,
+        WorkspaceGrantScope ws => candidate switch
+        {
+            WorkspaceGrantScope c => c.Workspace == ws.Workspace,
+            TeamGrantScope c => c.Workspace == ws.Workspace,
+            InboxGrantScope c => c.Workspace == ws.Workspace,
+            TenantGrantScope => false,
+        },
+        TeamGrantScope team => candidate is TeamGrantScope c && c.Workspace == team.Workspace && c.Team == team.Team,
+        InboxGrantScope inbox => candidate is InboxGrantScope c && c.Workspace == inbox.Workspace && c.Inbox == inbox.Inbox,
+    };
 
     public AccessDenialReason? Precheck(PrincipalRef principal, Permission permission, TicketScope scope) =>
         Precheck(principal, Catalog.Contains(permission), scope);
@@ -149,6 +188,7 @@ internal sealed class AccessEngine(
         var stored = await grants.ListForSubjectsAsync(partition, scope.WorkspaceId, subjects, cancellationToken).ConfigureAwait(false);
         var ignoreLocalAllows = options.RoleFederation.Mode == RoleFederationMode.FederatedOnly
             && (!forAdministration || options.RoleFederation.AllowAdministrativeRoles);
+        var preserveLocalAdminOnly = ignoreLocalAllows && !options.RoleFederation.AllowAdministrativeRoles;
         var valid = new List<AccessGrant>(stored.Count);
         RoleId? singleCustomRole = null;
         var multipleCustomRoles = false;
@@ -160,7 +200,7 @@ internal sealed class AccessEngine(
                 throw new InvalidOperationException("The grant store returned a grant outside the requested scope or subjects.");
             if (!grant.IsValidAt(now))
                 continue;
-            if (ignoreLocalAllows && grant.Effect == GrantEffect.Allow)
+            if (ignoreLocalAllows && grant.Effect == GrantEffect.Allow && grant.Kind != GrantKind.BreakGlass && !preserveLocalAdminOnly)
                 continue;
             valid.Add(grant);
             if (!multipleCustomRoles && grant.Scope is not TenantGrantScope && !BuiltInRoles.IsBuiltIn(grant.Role))
@@ -195,6 +235,22 @@ internal sealed class AccessEngine(
                     : custom is not null
                         ? custom.GetValueOrDefault(grant.Role)
                         : resolvedSingleCustom is not null && resolvedSingleCustom.Id == grant.Role ? resolvedSingleCustom : null);
+            if (preserveLocalAdminOnly && grant.Effect == GrantEffect.Allow && grant.Kind != GrantKind.BreakGlass)
+            {
+                if (role is null)
+                    continue;
+                HashSet<Permission>? adminPermissions = null;
+                if (role.Includes(AccessPermissions.AccessManage) && Catalog.Contains(AccessPermissions.AccessManage))
+                    (adminPermissions ??= []).Add(AccessPermissions.AccessManage);
+                if (role.Includes(AccessPermissions.AccessManageTenant) && Catalog.Contains(AccessPermissions.AccessManageTenant))
+                    (adminPermissions ??= []).Add(AccessPermissions.AccessManageTenant);
+                if (role.Includes(AccessPermissions.AccessBreakGlass) && Catalog.Contains(AccessPermissions.AccessBreakGlass))
+                    (adminPermissions ??= []).Add(AccessPermissions.AccessBreakGlass);
+                if (adminPermissions is null)
+                    continue;
+                resolved.Add(new(grant, role, adminPermissions, IsRoleStripped: true));
+                continue;
+            }
             resolved.Add(new(grant, role));
         }
 

@@ -19,6 +19,9 @@ public closed record PrincipalRef
     /// <summary>External identity provider role names carried at resolution time for optional role federation.</summary>
     public virtual IReadOnlySet<string> ExternalRoles => FrozenSet<string>.Empty;
 
+    /// <summary>External identity provider identifier carried at resolution time for provider-scoped role federation.</summary>
+    public virtual string? IdentityProvider => null;
+
     protected static IReadOnlySet<string> SnapshotExternalRoles(IEnumerable<string>? externalRoles)
     {
         if (externalRoles is null)
@@ -39,6 +42,17 @@ public closed record PrincipalRef
             ? FrozenSet<string>.Empty
             : snapshot.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
     }
+
+    protected static string? NormalizeIdentityProvider(string? identityProvider) =>
+        string.IsNullOrWhiteSpace(identityProvider)
+            ? null
+            : TicketScope.RequireIdentifier(identityProvider.Trim(), nameof(identityProvider));
+
+    protected static bool IdentityProvidersEqual(string? left, string? right) =>
+        string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+
+    protected static int ComputeIdentityProviderHash(string? identityProvider) =>
+        identityProvider is null ? 0 : StringComparer.OrdinalIgnoreCase.GetHashCode(identityProvider);
 
     protected static int ComputeExternalRolesHash(IReadOnlySet<string> externalRoles)
     {

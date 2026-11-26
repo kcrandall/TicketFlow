@@ -30,7 +30,7 @@ public sealed class ExternalIdentityAuthenticationHandler(
         if (!TryReadSingleHeader(Request, Options.SubjectHeader, 256, out var subject, out var error)
             || !TryReadSingleHeader(Request, Options.ClientIdHeader, 256, out var clientId, out error)
             || !TryReadSingleHeader(Request, Options.PrincipalTypeHeader, 64, out var principalType, out error)
-            || !TryReadSingleHeader(Request, Options.DisplayNameHeader, 256, out var displayName, out error)
+            || !TryReadSingleHeader(Request, Options.DisplayNameHeader, 256, out var displayName, out error, allowCommas: true)
             || !TryReadSingleHeader(Request, Options.EmailHeader, 320, out var email, out error)
             || !TryReadSingleHeader(Request, Options.TenantHeader, 256, out var tenant, out error)
             || !TryReadSingleHeader(Request, Options.ProjectHeader, 256, out var project, out error)
@@ -194,7 +194,8 @@ public sealed class ExternalIdentityAuthenticationHandler(
         string? headerName,
         int maxLength,
         out string? value,
-        out string? error)
+        out string? error,
+        bool allowCommas = false)
     {
         value = null;
         error = null;
@@ -205,7 +206,7 @@ public sealed class ExternalIdentityAuthenticationHandler(
         if (!request.Headers.TryGetValue(headerName, out var values) || values.Count == 0)
             return true;
 
-        var resolution = ResolveSingleValue(values);
+        var resolution = ResolveSingleValue(values, allowCommas);
         if (resolution.IsAmbiguous)
         {
             error = $"Multiple distinct '{headerName}' headers are not permitted.";
@@ -271,7 +272,7 @@ public sealed class ExternalIdentityAuthenticationHandler(
         return true;
     }
 
-    private static (string? Value, bool IsAmbiguous) ResolveSingleValue(StringValues values)
+    private static (string? Value, bool IsAmbiguous) ResolveSingleValue(StringValues values, bool allowCommas = false)
     {
         string? resolved = null;
 
@@ -280,6 +281,17 @@ public sealed class ExternalIdentityAuthenticationHandler(
             var raw = values[i];
             if (string.IsNullOrWhiteSpace(raw))
                 continue;
+
+            if (!allowCommas && raw.Contains(',', StringComparison.Ordinal))
+            {
+                var parts = raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                foreach (var part in parts)
+                    if (resolved is null)
+                        resolved = part;
+                    else if (!string.Equals(resolved, part, StringComparison.Ordinal))
+                        return (null, true);
+                continue;
+            }
 
             var trimmed = raw.Trim();
             if (resolved is null)

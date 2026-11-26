@@ -150,6 +150,45 @@ public sealed class PrincipalMappingTests
         Assert.AreEqual(typeof(CustomResolver), custom.Single(descriptor => descriptor.ServiceType == typeof(ITicketFlowPrincipalResolver)).ImplementationType, "Application resolvers win.");
     }
 
+    [TestMethod]
+    public async Task TicketFlowServiceAccountApiKeysMapUnprefixedAndVerifyScopeClaims()
+    {
+        var scope = TestScopes.Create();
+        var options = new IdentityFlowPrincipalOptions();
+        options.RequiredScopes.Add("ticketflow"); // TicketFlow API keys do not carry OAuth scopes
+
+        var validApiKey = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim("client_id", "sa-reporting-export"),
+            new Claim("api_key_id", "key-123"),
+            new Claim("amr", "api_key"),
+            new Claim("tenant_id", scope.TenantId),
+            new Claim("project_id", scope.ProjectId),
+            new Claim("environment_id", scope.EnvironmentId),
+            new Claim("app_id", scope.AppId),
+            new Claim("workspace_id", scope.WorkspaceId.Value),
+        ], authenticationType: "ApiKey"));
+
+        var mapped = IdentityFlowClaimsMapper.Map(validApiKey, options);
+        Assert.AreEqual(new IdentityFlowIdentity(IdentityFlowPrincipalKind.ApiClient, "sa-reporting-export", "sa-reporting-export"), mapped);
+
+        var resolver = new IdentityFlowPrincipalResolver(new FakeTeams(), Options.Create(options));
+        var resolved = Assert.IsInstanceOfType<ApiClientPrincipal>(await resolver.ResolveAsync(validApiKey, scope));
+        Assert.AreEqual(new ApiClientId("sa-reporting-export"), resolved.ClientId);
+
+        // Wrong workspace claim fails closed
+        var wrongWorkspace = TestScopes.Create(workspaceId: "other-ws");
+        Assert.IsNull(await resolver.ResolveAsync(validApiKey, wrongWorkspace));
+
+        // Reserved worker ID is still rejected even on ApiKey scheme
+        var reservedKey = new ClaimsPrincipal(new ClaimsIdentity(
+        [
+            new Claim("client_id", "sla-worker"),
+            new Claim("api_key_id", "key-456"),
+        ], authenticationType: "ApiKey"));
+        Assert.IsNull(IdentityFlowClaimsMapper.Map(reservedKey, options));
+    }
+
     private static ClaimsPrincipal Authenticated(params (string Type, string Value)[] claims) =>
         new(new ClaimsIdentity(claims.Select(claim => new Claim(claim.Type, claim.Value)), "IdentityFlow"));
 

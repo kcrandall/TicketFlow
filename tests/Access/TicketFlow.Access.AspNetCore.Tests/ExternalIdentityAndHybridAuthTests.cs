@@ -482,7 +482,167 @@ public sealed class ExternalIdentityAndHybridAuthTests
                 }
 
             Assert.IsTrue(foundCustom);
+            Assert.IsTrue(resp.Headers.CacheControl?.NoStore, "/.well-known/ticketflow-roles must return Cache-Control: no-store.");
+            Assert.IsTrue(resp.Headers.Pragma.Any(p => string.Equals(p.Name, "no-cache", StringComparison.OrdinalIgnoreCase)),
+                "/.well-known/ticketflow-roles must return Pragma: no-cache.");
         }
+    }
+
+    [TestMethod]
+    public async Task OAuth2ProxyIgnoresSpoofedAuthHeadersAndRejectsCommaCoalescedSingleHeaders()
+    {
+        const string secret = "oauth2-hardened-secret";
+        await using var app = await CreateTestAppAsync(
+            services =>
+            {
+                services.AddTicketFlowExternalIdentityAuthentication(options =>
+                {
+                    options.UseOAuth2ProxyDefaults(sharedSecret: secret, acceptFederatedRoles: true);
+                });
+            });
+
+        using var client = app.GetTestClient();
+
+        // Spoofed X-Auth-Client-Id, X-Auth-Principal-Type, X-Auth-Tenant, X-Auth-Workspace, X-Auth-Roles are ignored;
+        // X-Forwarded-Groups is mapped to roles when acceptFederatedRoles: true, and comma is allowed in DisplayNameHeader
+        using (var req = new HttpRequestMessage(HttpMethod.Get, "/whoami"))
+        {
+            req.Headers.Add("X-OAuth2-Proxy-Secret", secret);
+            req.Headers.Add("X-Forwarded-User", "oauth-alice");
+            req.Headers.Add("X-Forwarded-Preferred-Username", "Lovelace, Ada");
+            req.Headers.Add("X-Forwarded-Groups", "support-agents");
+            req.Headers.Add("X-Auth-Client-Id", "spoofed-bot");
+            req.Headers.Add("X-Auth-Principal-Type", "service_account");
+            req.Headers.Add("X-Auth-Tenant", "evil-tenant");
+            req.Headers.Add("X-Auth-Workspace", "evil-ws");
+            req.Headers.Add("X-Auth-Roles", "spoofed-owner");
+
+            using var resp = await client.SendAsync(req);
+            Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+            var payload = await resp.Content.ReadFromJsonAsync<WhoAmIResponse>();
+            Assert.IsNotNull(payload);
+            Assert.AreEqual("user:oauth-alice", payload.PrincipalId);
+            Assert.AreEqual("tenant-a/proj-a/prod/support/ws-main", payload.Scope);
+            CollectionAssert.Contains(payload.ExternalRoles, "support-agents");
+            CollectionAssert.DoesNotContain(payload.ExternalRoles, "spoofed-owner");
+        }
+
+        // Comma-coalesced multiple distinct values on X-Forwarded-User -> 401
+        using (var coalescedSub = new HttpRequestMessage(HttpMethod.Get, "/whoami"))
+        {
+            coalescedSub.Headers.Add("X-OAuth2-Proxy-Secret", secret);
+            coalescedSub.Headers.Add("X-Forwarded-User", "alice, bob");
+            using var resp = await client.SendAsync(coalescedSub);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+        }
+
+        // Comma-coalesced multiple distinct values on shared secret -> 401
+        using (var coalescedSecret = new HttpRequestMessage(HttpMethod.Get, "/whoami"))
+        {
+            coalescedSecret.Headers.Add("X-OAuth2-Proxy-Secret", $"{secret}, other");
+            coalescedSecret.Headers.Add("X-Forwarded-User", "oauth-alice");
+            using var resp = await client.SendAsync(coalescedSecret);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+        }
+    }
+
+    [TestMethod]
+    public async Task ApiKeyScopeResolutionFailsClosedOnAmbiguousQueryOrNullResolveScopeAndRoleCatalogRespectsHostResolver()
+    {
+        // Part 1: Ambiguous ?workspace=a&workspace=b fails closed instead of falling back to DefaultScope
+        await using (var app = await CreateTestAppAsync(services =>
+        {
+            services.AddTicketFlowApiKeyAuthentication(apiKey => apiKey.DefaultScope = DefaultScope, setAsDefault: true);
+        }))
+        {
+            var partition = AccessPartition.From(DefaultScope);
+            var owner = new UserPrincipal(DefaultScope, new UserId("owner"));
+            await app.Services.GetRequiredService<IAccessGrantStore>().CreateAsync(
+                new AccessGrant(new GrantId("g-o"), partition, owner.UserId, BuiltInRoles.Owner.Id, TenantGrantScope.Instance));
+
+            string plaintextKey;
+            using (var scope = app.Services.CreateScope())
+            {
+                var sa = scope.ServiceProvider.GetRequiredService<IServiceAccountService>();
+                var clientId = new ApiClientId("scope-bot");
+                Assert.IsTrue((await sa.CreateServiceAccountAsync(owner, new ServiceAccount(clientId, partition, TenantGrantScope.Instance, "Scope Bot"))).IsSuccess);
+                var issued = await sa.IssueApiKeyAsync(owner, new ApiKeyCreateRequest(clientId, "k1"));
+                Assert.IsTrue(issued.TryGetValue(out TicketValue<AccessChangeApplied<IssuedApiKey>> ok));
+                plaintextKey = ok.Value.Value.PlaintextKey;
+            }
+
+            using var client = app.GetTestClient();
+            using (var ambiguous = new HttpRequestMessage(HttpMethod.Get, "/whoami?workspace=ws-main&workspace=ws-other"))
+            {
+                ambiguous.Headers.Add("X-Api-Key", plaintextKey);
+                using var resp = await client.SendAsync(ambiguous);
+                Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+            }
+        }
+
+        // Part 2: Configured ResolveScope returning null fails closed even when DefaultScope is set
+        await using (var app = await CreateTestAppAsync(services =>
+        {
+            services.AddTicketFlowApiKeyAuthentication(apiKey =>
+            {
+                apiKey.DefaultScope = DefaultScope;
+                apiKey.ResolveScope = _ => ValueTask.FromResult<TicketScope?>(null);
+            }, setAsDefault: true);
+        }))
+        {
+            var partition = AccessPartition.From(DefaultScope);
+            var owner = new UserPrincipal(DefaultScope, new UserId("owner"));
+            await app.Services.GetRequiredService<IAccessGrantStore>().CreateAsync(
+                new AccessGrant(new GrantId("g-o2"), partition, owner.UserId, BuiltInRoles.Owner.Id, TenantGrantScope.Instance));
+
+            string plaintextKey;
+            using (var scope = app.Services.CreateScope())
+            {
+                var sa = scope.ServiceProvider.GetRequiredService<IServiceAccountService>();
+                var clientId = new ApiClientId("null-scope-bot");
+                Assert.IsTrue((await sa.CreateServiceAccountAsync(owner, new ServiceAccount(clientId, partition, TenantGrantScope.Instance, "Null Scope Bot"))).IsSuccess);
+                var issued = await sa.IssueApiKeyAsync(owner, new ApiKeyCreateRequest(clientId, "k1"));
+                Assert.IsTrue(issued.TryGetValue(out TicketValue<AccessChangeApplied<IssuedApiKey>> ok));
+                plaintextKey = ok.Value.Value.PlaintextKey;
+            }
+
+            using var client = app.GetTestClient();
+            using var req = new HttpRequestMessage(HttpMethod.Get, "/whoami");
+            req.Headers.Add("X-Api-Key", plaintextKey);
+            using var resp = await client.SendAsync(req);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+        }
+
+        // Part 3: /.well-known/ticketflow-roles respects host ITicketFlowPrincipalResolver returning null (no fallback to IAccessPrincipalResolver)
+        const string proxySecret = "host-resolver-secret";
+        await using (var app = await CreateTestAppAsync(
+            services =>
+            {
+                services.AddScoped<TicketFlow.Hosting.AspNetCore.ITicketFlowPrincipalResolver, RefusingHostPrincipalResolver>();
+                services.AddTicketFlowExternalIdentityAuthentication(options =>
+                {
+                    options.UseIdentityFlowDefaults(sharedSecret: proxySecret);
+                });
+            },
+            mapRoleCatalog: true))
+        {
+            await app.Services.GetRequiredService<IAccessGrantStore>().CreateAsync(
+                new AccessGrant(new GrantId("g-adm"), AccessPartition.From(DefaultScope), new UserId("admin-user"), BuiltInRoles.Owner.Id, TenantGrantScope.Instance));
+
+            using var client = app.GetTestClient();
+            using var req = new HttpRequestMessage(HttpMethod.Get, "/.well-known/ticketflow-roles");
+            req.Headers.Add("X-IdentityFlow-Proxy-Secret", proxySecret);
+            req.Headers.Add("X-Auth-Subject", "admin-user");
+            using var resp = await client.SendAsync(req);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+            Assert.IsTrue(resp.Headers.CacheControl?.NoStore);
+        }
+    }
+
+    private sealed class RefusingHostPrincipalResolver : TicketFlow.Hosting.AspNetCore.ITicketFlowPrincipalResolver
+    {
+        public ValueTask<PrincipalRef?> ResolveAsync(HttpContext httpContext, TicketScope scope, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<PrincipalRef?>(null);
     }
 
     private static async Task<WebApplication> CreateTestAppAsync(

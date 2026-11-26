@@ -99,9 +99,13 @@ public static class SampleHostApp
             .AddTicketFlowEndpoints(options => options.Partition = settings.Partition)
             .AddTicketFlowOpenApi()
             .AddIdentityFlowRealtimePrincipals();
-        // Callers mapped from IdentityFlow can never become one of TicketFlow's own worker clients.
+        // Callers mapped from IdentityFlow, external claims, or managed service accounts can never become one of TicketFlow's own worker clients.
         services.AddOptions<IdentityFlowPrincipalOptions>().PostConfigure<IServiceProvider>((options, provider) =>
             options.ReservedApiClientIds.UnionWith(TicketFlowServiceIdentities.Collect(provider).Select(id => id.Value)));
+        services.AddOptions<ClaimsPrincipalResolverOptions>().PostConfigure<IServiceProvider>((options, provider) =>
+            options.ReservedApiClientIds.UnionWith(TicketFlowServiceIdentities.Collect(provider).Select(id => id.Value)));
+        services.AddOptions<AccessControlOptions>().PostConfigure<IServiceProvider>((options, provider) =>
+            options.ReservedServiceAccountClientIds.UnionWith(TicketFlowServiceIdentities.Collect(provider).Select(id => id.Value)));
         if (settings.UsePostgres)
         {
             var connection = configuration.GetConnectionString("TicketFlow") ?? throw new InvalidOperationException("ConnectionStrings:TicketFlow is required for Postgres storage.");

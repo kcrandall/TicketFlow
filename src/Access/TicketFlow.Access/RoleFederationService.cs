@@ -302,10 +302,17 @@ public sealed class RoleFederationService : IRoleFederationService
         var context = await engine.LoadAsync(actor, actor.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
         var workspaceTarget = new AccessResource(actor.Scope);
 
-        var hasManage = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, workspaceTarget, includeBreakGlass: false).Allowed;
-        var hasManageTenant = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: false, tenantAllowsOnly: true).Allowed;
-        if (hasManage || hasManageTenant)
+        var manage = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, workspaceTarget, includeBreakGlass: false);
+        if (manage.Allowed)
             return (null, context);
+        if (manage.Denial == AccessDenialReason.ExplicitDeny)
+            return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is explicitly denied administrative permission."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
+
+        var manageTenant = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: false, tenantAllowsOnly: true);
+        if (manageTenant.Allowed)
+            return (null, context);
+        if (manageTenant.Denial == AccessDenialReason.ExplicitDeny)
+            return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is explicitly denied administrative permission."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
 
         var viaBreakGlass = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, workspaceTarget, includeBreakGlass: true).Allowed
             || AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: true, tenantAllowsOnly: true).Allowed;
@@ -333,22 +340,26 @@ public sealed class RoleFederationService : IRoleFederationService
         if (engine.Precheck(actor, requiredPermission, actor.Scope) is { } precheck)
             return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is not authorized."], Code: precheck.ToString()), context);
 
-        var targetResource = AccessEngine.Target(actor.Scope, targetGrantScope);
-        var (saDenial, _) = await engine.CheckServiceAccountAsync(actor, actor.Scope, targetResource, cancellationToken).ConfigureAwait(false);
+        var (saDenial, _) = await engine.CheckServiceAccountForGrantScopeAsync(actor, actor.Scope, targetGrantScope, cancellationToken).ConfigureAwait(false);
         if (saDenial is { } saReason)
             return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is not authorized."], Code: saReason.ToString()), context);
 
+        var targetResource = AccessEngine.Target(actor.Scope, targetGrantScope);
         context ??= await engine.LoadAsync(actor, actor.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
         var tenantOnly = targetGrantScope is TenantGrantScope;
         var standard = AccessEngine.EvaluateSimple(context, requiredPermission, targetResource, includeBreakGlass: false, tenantAllowsOnly: tenantOnly);
         if (standard.Allowed)
             return (null, context);
+        if (standard.Denial == AccessDenialReason.ExplicitDeny)
+            return (new TicketFailure(TicketFailureKind.Forbidden, [$"The actor is explicitly denied '{requiredPermission}' on the target scope."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
 
-        if (!tenantOnly)
+        if (!tenantOnly && standard.Denial == AccessDenialReason.NoMatchingGrant)
         {
-            var tenantAdmin = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, new AccessResource(actor.Scope), includeBreakGlass: false, tenantAllowsOnly: true);
+            var tenantAdmin = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, targetResource, includeBreakGlass: false, tenantAllowsOnly: true);
             if (tenantAdmin.Allowed)
                 return (null, context);
+            if (tenantAdmin.Denial == AccessDenialReason.ExplicitDeny)
+                return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is explicitly denied tenant administrative permission on the target scope."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
         }
 
         var withBreakGlass = AccessEngine.EvaluateSimple(context, requiredPermission, targetResource, includeBreakGlass: true, tenantAllowsOnly: tenantOnly);
@@ -369,7 +380,11 @@ public sealed class RoleFederationService : IRoleFederationService
     {
         var denialReason = failure.Code switch
         {
-            "out-of-scope" => AccessDenialReason.ScopeMismatch,
+            "out-of-scope" or nameof(AccessDenialReason.ScopeMismatch) => AccessDenialReason.ScopeMismatch,
+            nameof(AccessDenialReason.ExplicitDeny) => AccessDenialReason.ExplicitDeny,
+            nameof(AccessDenialReason.ServiceAccountDisabled) => AccessDenialReason.ServiceAccountDisabled,
+            nameof(AccessDenialReason.UnsupportedPrincipal) => AccessDenialReason.UnsupportedPrincipal,
+            nameof(AccessDenialReason.UnknownPermission) => AccessDenialReason.UnknownPermission,
             _ when failure.Kind == TicketFailureKind.Forbidden => AccessDenialReason.NoMatchingGrant,
             _ => (AccessDenialReason?)null,
         };

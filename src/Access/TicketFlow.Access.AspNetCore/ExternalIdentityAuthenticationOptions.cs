@@ -24,29 +24,29 @@ public sealed class ExternalIdentityAuthenticationOptions : AuthenticationScheme
 
     public string SubjectHeader { get; set; } = "X-Auth-Subject";
 
-    public string ClientIdHeader { get; set; } = "X-Auth-Client-Id";
+    public string? ClientIdHeader { get; set; } = "X-Auth-Client-Id";
 
-    public string PrincipalTypeHeader { get; set; } = "X-Auth-Principal-Type";
+    public string? PrincipalTypeHeader { get; set; } = "X-Auth-Principal-Type";
 
-    public string DisplayNameHeader { get; set; } = "X-Auth-Name";
+    public string? DisplayNameHeader { get; set; } = "X-Auth-Name";
 
-    public string EmailHeader { get; set; } = "X-Auth-Email";
+    public string? EmailHeader { get; set; } = "X-Auth-Email";
 
-    public string TeamsHeader { get; set; } = "X-Auth-Groups";
+    public string? TeamsHeader { get; set; } = "X-Auth-Groups";
 
-    public string RolesHeader { get; set; } = "X-Auth-Roles";
+    public string? RolesHeader { get; set; } = "X-Auth-Roles";
 
     public bool AcceptRoleHeaders { get; set; }
 
-    public string TenantHeader { get; set; } = "X-Auth-Tenant";
+    public string? TenantHeader { get; set; } = "X-Auth-Tenant";
 
-    public string ProjectHeader { get; set; } = "X-Auth-Project";
+    public string? ProjectHeader { get; set; } = "X-Auth-Project";
 
-    public string EnvironmentHeader { get; set; } = "X-Auth-Environment";
+    public string? EnvironmentHeader { get; set; } = "X-Auth-Environment";
 
-    public string AppHeader { get; set; } = "X-Auth-App";
+    public string? AppHeader { get; set; } = "X-Auth-App";
 
-    public string WorkspaceHeader { get; set; } = "X-Auth-Workspace";
+    public string? WorkspaceHeader { get; set; } = "X-Auth-Workspace";
 
     public string ProviderName { get; set; } = "external";
 
@@ -85,10 +85,18 @@ public sealed class ExternalIdentityAuthenticationOptions : AuthenticationScheme
     {
         ProviderName = "oauth2-proxy";
         SubjectHeader = "X-Forwarded-User";
+        ClientIdHeader = null;
+        PrincipalTypeHeader = null;
         EmailHeader = "X-Forwarded-Email";
         DisplayNameHeader = "X-Forwarded-Preferred-Username";
         TeamsHeader = "X-Forwarded-Groups";
+        RolesHeader = acceptFederatedRoles ? "X-Forwarded-Groups" : null;
         AcceptRoleHeaders = acceptFederatedRoles;
+        TenantHeader = null;
+        ProjectHeader = null;
+        EnvironmentHeader = null;
+        AppHeader = null;
+        WorkspaceHeader = null;
         if (!string.IsNullOrWhiteSpace(sharedSecret))
         {
             if (string.IsNullOrWhiteSpace(SharedSecretHeader))

@@ -19,4 +19,18 @@ public sealed class ClaimsPrincipalResolverOptions
     public IList<string> PrincipalTypeClaimTypes { get; } = ["principal_type", "actor_type", "gty", "grant_type"];
 
     public IList<string> DisplayNameClaimTypes { get; } = ["display_name", "name", ClaimTypes.Name];
+
+    public IList<string> ProviderClaimTypes { get; } = ["idp", "identityflow:provider", "iss"];
+
+    /// <summary>
+    /// Internal TicketFlow worker API client identifiers that externally resolved claims can never impersonate.
+    /// Hosts can add configured worker identities (for example from <c>TicketFlowServiceIdentities.Collect</c>).
+    /// </summary>
+    public ISet<string> ReservedApiClientIds { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "automation-worker",
+        "sla-worker",
+        "channels",
+        "ticketflow-routing",
+    };
 }

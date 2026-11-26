@@ -15,6 +15,18 @@ public sealed class AccessControlOptions
     /// <summary>External identity role federation settings. Disabled by default.</summary>
     public RoleFederationOptions RoleFederation { get; } = new();
 
+    /// <summary>
+    /// Internal TicketFlow worker API client identifiers that cannot be claimed as managed service accounts.
+    /// Hosts can add custom worker identities (for example from <c>TicketFlowServiceIdentities.Collect</c>).
+    /// </summary>
+    public ISet<string> ReservedServiceAccountClientIds { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "automation-worker",
+        "sla-worker",
+        "channels",
+        "ticketflow-routing",
+    };
+
     /// <exception cref="ArgumentOutOfRangeException">An option is out of range.</exception>
     public void Validate()
     {

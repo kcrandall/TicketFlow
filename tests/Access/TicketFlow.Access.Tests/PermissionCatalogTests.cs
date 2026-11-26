@@ -75,7 +75,7 @@ public sealed class PermissionCatalogTests
         };
         var first = Assert.ThrowsExactly<ArgumentException>(() => PermissionCatalog.Create(conflicts));
         var second = Assert.ThrowsExactly<ArgumentException>(() => PermissionCatalog.Create(conflicts.Reverse()));
-        StringAssert.Contains(first.Message, "'alpha:run'");
+        StringAssert.Contains(first.Message, "'alpha:run'", StringComparison.Ordinal);
         Assert.AreEqual(first.Message, second.Message);
         Assert.ThrowsExactly<ArgumentException>(() => PermissionCatalog.Create([new PermissionDefinition(AccessPermissions.ContactExport, isSensitive: false)]));
     }

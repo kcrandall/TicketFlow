@@ -25,7 +25,7 @@ public static class ContactMerger
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(actor);
         if (target.MergedInto is not null || source.MergedInto is not null || target.Id == source.Id)
-            throw new ArgumentException("Only two distinct live contacts can be merged.");
+            throw new ArgumentException("Only two distinct live contacts can be merged.", target.MergedInto is not null ? nameof(target) : nameof(source));
 
         var identities = target.Identities.ToDictionary(identity => identity.Address);
         var moved = new List<ContactIdentityAddress>();
@@ -54,7 +54,7 @@ public static class ContactMerger
                 attributes[key] = incoming;
                 attributeChanges.Add(new(key, null, incoming));
             }
-            else if (conflict == ContactAttributeConflict.PreferSource && !existing.Equals(incoming))
+            else if (conflict == ContactAttributeConflict.PreferSource && !Equals(existing.Value, incoming.Value))
             {
                 attributes[key] = incoming;
                 attributeChanges.Add(new(key, existing, incoming));
@@ -105,7 +105,7 @@ public static class ContactMerger
         var attributes = new Dictionary<string, ContactAttributeValue>(target.Attributes, StringComparer.Ordinal);
         foreach (var change in record.AttributeChanges)
         {
-            if (!attributes.TryGetValue(change.Key, out var current) || !current.Equals(change.Merged))
+            if (!attributes.TryGetValue(change.Key, out var current) || !Equals(current.Value, change.Merged.Value))
                 continue;
             if (change.Previous is { } previous)
                 attributes[change.Key] = previous;
@@ -148,7 +148,7 @@ public static class ContactMerger
     }
 
     private static string? Unfill(string? current, string? contributed, ContactProfileField field, ContactMergeRecord record) =>
-        record.FilledProfileFields.Contains(field) && current == contributed ? null : current;
+        record.FilledProfileFields.Contains(field) && string.Equals(current, contributed, StringComparison.Ordinal) ? null : current;
 
     private static DateTimeOffset Later(DateTimeOffset left, DateTimeOffset right) => left >= right ? left : right;
 }

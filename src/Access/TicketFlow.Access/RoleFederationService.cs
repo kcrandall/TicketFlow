@@ -272,14 +272,14 @@ public sealed class RoleFederationService : IRoleFederationService
             return ([], TicketFailure.NotFound);
 
         var expanded = ExpandRolePermissions(role);
-        for (var i = 0; i < expanded.Count; i++)
+        for (var i = 0; i < expanded.Length; i++)
             if (!catalog.Contains(expanded[i]))
                 return ([], TicketFailure.Invalid($"Role '{roleId.Value}' references unknown permission '{expanded[i].Value}'."));
 
         return (expanded, null);
     }
 
-    private IReadOnlyList<Permission> ExpandRolePermissions(AccessRole role)
+    private Permission[] ExpandRolePermissions(AccessRole role)
     {
         if (role.IncludesAllPermissions)
         {

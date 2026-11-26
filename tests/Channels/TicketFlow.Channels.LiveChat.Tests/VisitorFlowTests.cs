@@ -19,7 +19,7 @@ public sealed class VisitorFlowTests
         var grant = await host.StartAsync();
         Assert.AreEqual("Hi! How can we help?", grant.Widget.GreetingMessage);
         Assert.IsTrue(grant.Widget.Online);
-        var visitor = host.ConnectVisitor(grant.Context, "visitor-1");
+        var visitor = await host.ConnectVisitorAsync(grant.Context, "visitor-1");
 
         var accepted = Value(await host.Visitors.SendMessageAsync(grant.Context, new VisitorMessageDraft("c1", "My order is late")));
         Assert.IsTrue(accepted.StartedConversation);
@@ -86,7 +86,7 @@ public sealed class VisitorFlowTests
         await using var host = await CreateAsync();
         var a = await host.StartAsync();
         var b = await host.StartAsync();
-        var visitorB = host.ConnectVisitor(b.Context, "visitor-b");
+        var visitorB = await host.ConnectVisitorAsync(b.Context, "visitor-b");
         var accepted = Value(await host.Visitors.SendMessageAsync(a.Context, new VisitorMessageDraft("c1", "secret order details")));
 
         Assert.AreEqual(LiveChatRefusal.NotFound, Refusal(await host.Visitors.ReadMessagesAsync(b.Context, accepted.Conversation)));
@@ -213,7 +213,7 @@ public sealed class VisitorFlowTests
     {
         await using var host = await CreateAsync();
         var grant = await host.StartAsync();
-        var visitor = host.ConnectVisitor(grant.Context, "visitor-1");
+        var visitor = await host.ConnectVisitorAsync(grant.Context, "visitor-1");
         var accepted = Value(await host.Visitors.SendMessageAsync(grant.Context, new VisitorMessageDraft("c1", "Hi")));
         await host.Host.DispatchAsync();
         visitor.Clear();
@@ -236,10 +236,10 @@ public sealed class VisitorFlowTests
     {
         await using var host = await CreateAsync();
         var grant = await host.StartAsync();
-        var tabA = host.ConnectVisitor(grant.Context, "tab-a");
-        var tabB = host.ConnectVisitor(grant.Context, "tab-b");
+        var tabA = await host.ConnectVisitorAsync(grant.Context, "tab-a");
+        var tabB = await host.ConnectVisitorAsync(grant.Context, "tab-b");
         var other = await host.StartAsync();
-        var otherTab = host.ConnectVisitor(other.Context, "other");
+        var otherTab = await host.ConnectVisitorAsync(other.Context, "other");
 
         Assert.IsTrue(Value(await host.Visitors.EndSessionAsync(grant.Context)));
         Assert.IsNotNull(tabA.Events<VisitorSessionEndedEvent>().SingleOrDefault());

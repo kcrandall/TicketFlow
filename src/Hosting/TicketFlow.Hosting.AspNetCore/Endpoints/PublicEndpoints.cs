@@ -59,7 +59,7 @@ internal static class PublicEndpoints
         group.MapPost("/portals/{portal}/articles/{articleId}/feedback", async (TicketFlowPublicScope scope, string portal, string articleId, ArticleVisitRequest request,
             IHelpCenterPublicReader reader, HttpContext http) =>
             Feedback(await reader.RecordFeedbackAsync(scope.Scope, new HelpCenterSlug(portal), new ArticleId(articleId), request.VisitorKey,
-                request.Helpful ?? throw new ArgumentException("'helpful' is required.", nameof(request.Helpful)), http.RequestAborted)))
+                request.Helpful ?? throw new ArgumentException("'helpful' is required.", nameof(request)), http.RequestAborted)))
             .WithName("RecordArticleFeedback").Produces(StatusCodes.Status204NoContent);
         return group;
     }

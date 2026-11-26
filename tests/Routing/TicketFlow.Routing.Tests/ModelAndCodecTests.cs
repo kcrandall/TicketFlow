@@ -25,7 +25,7 @@ public sealed class ModelAndCodecTests
     public void PoliciesRoundTrip(RoutingPolicy policy)
     {
         var json = RoutingPolicyCodec.Serialize(policy);
-        StringAssert.StartsWith(json, "{\"v\":1,");
+        StringAssert.StartsWith(json, "{\"v\":1,", StringComparison.Ordinal);
         Assert.AreEqual(policy, RoutingPolicyCodec.Deserialize(Id, json));
     }
 

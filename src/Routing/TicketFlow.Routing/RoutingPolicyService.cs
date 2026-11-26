@@ -94,10 +94,10 @@ public sealed class RoutingPolicyService(IAccessEvaluator access, IRoutingPolicy
         else if (inboxTasks.Length > 0)
             await Task.WhenAll(inboxTasks).ConfigureAwait(false);
         for (var i = 0; i < teamTasks.Length; i++)
-            if (teamTasks[i].Result is null)
+            if (await teamTasks[i].ConfigureAwait(false) is null)
                 return TicketFailure.Invalid("A referenced team does not exist.");
         for (var i = 0; i < inboxTasks.Length; i++)
-            if (inboxTasks[i].Result is null)
+            if (await inboxTasks[i].ConfigureAwait(false) is null)
                 return TicketFailure.Invalid("A referenced inbox does not exist.");
         return null;
     }

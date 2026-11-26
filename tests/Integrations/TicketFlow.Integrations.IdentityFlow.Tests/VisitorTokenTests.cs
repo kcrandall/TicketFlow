@@ -60,7 +60,7 @@ public sealed class VisitorTokenTests
     public async Task PerWidgetAudiencesWinOverDefaults()
     {
         var options = Options("widget");
-        options.AudienceResolver = (_, configuration) => configuration == "cfg-shop" ? ["shop-widget"] : [];
+        options.AudienceResolver = (_, configuration) => string.Equals(configuration, "cfg-shop", StringComparison.Ordinal) ? ["shop-widget"] : [];
         using var validator = new IdentityFlowVisitorTokenValidator(Microsoft.Extensions.Options.Options.Create(options));
         Assert.IsInstanceOfType<VisitorTokenAccepted>((await validator.ValidateAsync(TestScopes.Create(), "cfg-shop", Issue("u1", audience: "shop-widget"))).Value);
         await Rejected(validator.ValidateAsync(TestScopes.Create(), "cfg-shop", Issue("u1")));
@@ -139,6 +139,8 @@ public sealed class VisitorTokenTests
 
     private sealed class DiscoveryHandler : HttpMessageHandler
     {
+        private static readonly JsonSerializerOptions JwksJsonOptions = new() { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull };
+
         public List<string> Requests { get; } = [];
 
         public RsaSecurityKey Key { get; set; } = VisitorTokenTests.Key;
@@ -150,7 +152,7 @@ public sealed class VisitorTokenTests
             {
                 "/.well-known/openid-configuration" => JsonSerializer.Serialize(new { issuer = Issuer, jwks_uri = "https://id.example.test/.well-known/jwks" }),
                 "/.well-known/jwks" => JsonSerializer.Serialize(new { keys = new[] { JsonWebKeyConverter.ConvertFromRSASecurityKey(new RsaSecurityKey(Key.Rsa.ExportParameters(false)) { KeyId = Key.KeyId }) } },
-                    new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull }),
+                    JwksJsonOptions),
                 _ => null,
             };
             return Task.FromResult(body is null ? new HttpResponseMessage(HttpStatusCode.NotFound) : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") });

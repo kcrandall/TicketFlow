@@ -54,7 +54,7 @@ public static class ConversationJsonCodec
     public static IReadOnlyDictionary<string, ConversationAttributeValue> DeserializeAttributes(string json)
     {
         ArgumentNullException.ThrowIfNull(json);
-        if (json == EmptyAttributesJson)
+        if (string.Equals(json, EmptyAttributesJson, StringComparison.Ordinal))
             return EmptyAttributes;
         return Read(json, static root =>
         {
@@ -111,7 +111,7 @@ public static class ConversationJsonCodec
     public static IReadOnlyList<ContactRedirect> DeserializeRedirects(string json)
     {
         ArgumentNullException.ThrowIfNull(json);
-        if (json == EmptyRedirectsJson)
+        if (string.Equals(json, EmptyRedirectsJson, StringComparison.Ordinal))
             return [];
         return Read(json, static root =>
         {
@@ -527,7 +527,7 @@ public static class ConversationJsonCodec
         writer.WriteEndArray();
     }
 
-    private static IReadOnlyList<AttachmentRef> ReadAttachments(JsonElement element)
+    private static AttachmentRef[] ReadAttachments(JsonElement element)
     {
         var count = element.GetArrayLength();
         if (count == 0)
@@ -543,7 +543,7 @@ public static class ConversationJsonCodec
         return list;
     }
 
-    private static IReadOnlyList<LabelId> ReadLabelIds(JsonElement element)
+    private static LabelId[] ReadLabelIds(JsonElement element)
     {
         var count = element.GetArrayLength();
         if (count == 0)

@@ -124,8 +124,8 @@ public sealed class ModelTests
         Assert.AreNotEqual(first, InboxAgentGrants.For(scope.WorkspaceId, new InboxId("emai"), new UserId("lada"), Access.BuiltInRoles.Agent.Id));
         Assert.AreNotEqual(first, InboxAgentGrants.For(new WorkspaceId("other"), new InboxId("email"), new UserId("ada"), Access.BuiltInRoles.Agent.Id));
         Assert.AreNotEqual(first, InboxAgentGrants.For(scope.WorkspaceId, new InboxId("email"), new UserId("ada"), Access.BuiltInRoles.Viewer.Id));
-        Assert.StartsWith(InboxAgentGrants.Prefix, first.Value);
-        Assert.DoesNotContain("ada", first.Value);
+        Assert.StartsWith(InboxAgentGrants.Prefix, first.Value, StringComparison.Ordinal);
+        Assert.DoesNotContain("ada", first.Value, StringComparison.Ordinal);
         Assert.HasCount(InboxAgentGrants.Prefix.Length + 64, first.Value);
         var longId = InboxAgentGrants.For(new WorkspaceId(Testing.TestScopes.LongIdentifier(1)), new InboxId(Testing.TestScopes.LongIdentifier(2)), new UserId(Testing.TestScopes.LongIdentifier(3)), Access.BuiltInRoles.Agent.Id);
         Assert.HasCount(InboxAgentGrants.Prefix.Length + 64, longId.Value);

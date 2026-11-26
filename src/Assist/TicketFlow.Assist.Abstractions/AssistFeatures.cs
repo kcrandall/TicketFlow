@@ -33,7 +33,7 @@ public sealed record AssistGrounding
     public AssistGrounding(PortalId portal, HelpCenterLocale locale, string? query = null)
     {
         if (!portal.IsInitialized || !locale.IsInitialized)
-            throw new ArgumentException("Portal and locale are required.");
+            throw new ArgumentException("Portal and locale are required.", !portal.IsInitialized ? nameof(portal) : nameof(locale));
         Portal = portal;
         Locale = locale;
         Query = query is null ? null : HelpCenterText.RequireLine(query, HelpCenterSearchQuery.MaximumQueryLength, nameof(query));
@@ -126,9 +126,9 @@ public sealed record AssistTriageRequest
         Teams = [.. teams ?? []];
         if (Labels.Count > MaximumOptions || Teams.Count > MaximumOptions || Labels.Any(option => option is null) || Teams.Any(option => option is null)
             || Labels.Select(option => option.Label).Distinct().Count() != Labels.Count || Teams.Select(option => option.Team).Distinct().Count() != Teams.Count)
-            throw new ArgumentException($"At most {MaximumOptions} distinct label and team candidates are allowed.");
+            throw new ArgumentException($"At most {MaximumOptions} distinct label and team candidates are allowed.", nameof(labels));
         if (Labels.Count == 0 && Teams.Count == 0 && !suggestPriority)
-            throw new ArgumentException("Triage needs label or team candidates, or a priority suggestion.");
+            throw new ArgumentException("Triage needs label or team candidates, or a priority suggestion.", nameof(labels));
         SuggestPriority = suggestPriority;
     }
 
@@ -195,7 +195,7 @@ public sealed record AssistTranslateRequest
         if (!targetLocale.IsInitialized)
             throw new ArgumentException("A target locale is required.", nameof(targetLocale));
         if ((text is null) == (message is null))
-            throw new ArgumentException("Supply exactly one of text or message.");
+            throw new ArgumentException("Supply exactly one of text or message.", nameof(text));
         if (message == default(MessageId))
             throw new ArgumentException("Message identifiers must be initialized.", nameof(message));
         Conversation = conversation;

@@ -143,7 +143,7 @@ public sealed class HelpCenterPublicReader : IHelpCenterPublicReader, IHelpCente
     {
         ArgumentNullException.ThrowIfNull(scope);
         if (!slug.IsInitialized || locale is { IsInitialized: false })
-            throw new ArgumentException("Portal slug and locale must be initialized.");
+            throw new ArgumentException("Portal slug and locale must be initialized.", !slug.IsInitialized ? nameof(slug) : nameof(locale));
         var stored = await store.FindPortalBySlugAsync(scope, slug, cancellationToken).ConfigureAwait(false);
         if (stored is null || stored.Portal.Visibility != PortalVisibility.Public || (locale is { } wanted && !stored.Portal.Supports(wanted)))
             return null;

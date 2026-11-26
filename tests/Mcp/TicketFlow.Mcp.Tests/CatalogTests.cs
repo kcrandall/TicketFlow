@@ -97,11 +97,11 @@ public sealed partial class CatalogTests
         var registry = provider.GetRequiredService<TicketFlowMcpRegistry>();
         Assert.AreEqual(TicketFlowToolsets.Conversations | TicketFlowToolsets.Reports, registry.Registered);
         Assert.IsFalse(registry.ServicesAvailable(TicketFlowToolsets.Conversations), "No conversation services are registered in this container.");
-        var meta = provider.GetServices<McpServerTool>().Single(tool => tool.ProtocolTool.Name == "conversations_reply").ProtocolTool;
+        var meta = provider.GetServices<McpServerTool>().Single(tool => string.Equals(tool.ProtocolTool.Name, "conversations_reply", StringComparison.Ordinal)).ProtocolTool;
         Assert.AreEqual("conversations", meta.Meta!["ticketflow/toolset"]!.GetValue<string>());
         Assert.AreEqual("conversation:reply", meta.Meta["ticketflow/permissions"]![0]!.GetValue<string>());
         Assert.IsFalse(meta.Annotations!.ReadOnlyHint ?? false);
-        Assert.IsTrue(provider.GetServices<McpServerTool>().Single(tool => tool.ProtocolTool.Name == "conversations_list").ProtocolTool.Annotations!.ReadOnlyHint);
+        Assert.IsTrue(provider.GetServices<McpServerTool>().Single(tool => string.Equals(tool.ProtocolTool.Name, "conversations_list", StringComparison.Ordinal)).ProtocolTool.Annotations!.ReadOnlyHint);
         foreach (var tool in provider.GetServices<McpServerTool>().Select(tool => tool.ProtocolTool))
             Assert.IsTrue(tool.Annotations is { ReadOnlyHint: true } || tool.Annotations?.DestructiveHint is not null, $"{tool.Name} declares its destructive hint explicitly.");
     }
@@ -113,8 +113,8 @@ public sealed partial class CatalogTests
         var docs = File.ReadAllText(Path.Combine(RepositoryRoot(), "docs", "mcp.md"));
         foreach (var tool in TicketFlowToolCatalog.Tools)
         {
-            Assert.Contains($"`{tool.Name}`", guide);
-            Assert.Contains($"`{tool.Name}`", docs, $"docs/mcp.md must document {tool.Name}.");
+            Assert.Contains($"`{tool.Name}`", guide, StringComparison.Ordinal);
+            Assert.Contains($"`{tool.Name}`", docs, StringComparison.Ordinal, $"docs/mcp.md must document {tool.Name}.");
         }
     }
 
@@ -126,6 +126,6 @@ public sealed partial class CatalogTests
         return directory?.FullName ?? throw new InvalidOperationException("Repository root not found.");
     }
 
-    [GeneratedRegex("^[a-z][a-z0-9_]{2,63}$")]
+    [GeneratedRegex("^[a-z][a-z0-9_]{2,63}$", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 1000)]
     private static partial Regex ToolName();
 }

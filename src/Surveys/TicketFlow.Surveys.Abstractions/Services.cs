@@ -14,7 +14,7 @@ public sealed record ConversationResolvedNotification
     {
         ArgumentNullException.ThrowIfNull(scope);
         if (conversation == default || contact == default || inbox == default(InboxId) || team == default(TeamId) || agent == default(UserId) || locale is { IsInitialized: false })
-            throw new ArgumentException("Notification identifiers must be initialized.");
+            throw new ArgumentException("Notification identifiers must be initialized.", conversation == default ? nameof(conversation) : contact == default ? nameof(contact) : inbox == default(InboxId) ? nameof(inbox) : team == default(TeamId) ? nameof(team) : agent == default(UserId) ? nameof(agent) : nameof(locale));
         Scope = scope;
         Conversation = conversation;
         Contact = contact;

@@ -115,13 +115,20 @@ public sealed class AutomationReviewRegressionTests
         var lost = false;
         log.Override = (method, args) =>
         {
-            if (method != "UpdateAsync" || lost || ((AutomationExecution)args![1]!).Outcomes.Count == 0)
+            if (!string.Equals(method, "UpdateAsync", StringComparison.Ordinal) || lost || ((AutomationExecution)args![1]!).Outcomes.Count == 0)
                 return null;
             lost = true;
             var execution = (AutomationExecution)args[1]!;
-            var bumped = inner.UpdateAsync((TicketScope)args[0]!, execution.WithProgress([]), (long)args[2]!).GetAwaiter().GetResult();
-            Assert.IsInstanceOfType<StoreApplied<StoredAutomationExecution>>(bumped.Value);
-            return inner.UpdateAsync((TicketScope)args[0]!, execution, (long)args[2]!);
+            var scope = (TicketScope)args[0]!;
+            var expectedRevision = (long)args[2]!;
+            return RaceUpdateAsync();
+
+            async Task<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>> RaceUpdateAsync()
+            {
+                var bumped = await inner.UpdateAsync(scope, execution.WithProgress([]), expectedRevision);
+                Assert.IsInstanceOfType<StoreApplied<StoredAutomationExecution>>(bumped.Value);
+                return await inner.UpdateAsync(scope, execution, expectedRevision);
+            }
         };
         var occurrence = new AutomationOccurrence(fixture.Scope, C1, AutomationEvent.MessageReceived(1), AutomationTriggerKeys.TimelineEvent(1), false, null, null);
         var firstRun = await fixture.InScopeAsync(services => services.GetRequiredService<AutomationRunner>().RunAsync(occurrence, [rule]));
@@ -175,7 +182,7 @@ public sealed class AutomationReviewRegressionTests
         await fixture.CreateRuleAsync(new AutomationRule(new AutomationRuleId("daily"), "Daily", new ScheduledTrigger(new AutomationSchedule("0 9 * * *", "UTC"),
             [ConversationStatusKind.Open]), null, [new AddLabelsAction(new LabelId("checked"))]));
         Task<AutomationScheduleRunResult> RunAsync() => fixture.InScopeAsync(services => services.GetRequiredService<AutomationScheduler>().RunOnceAsync());
-        plannerLog.Override = (method, _) => method == "PlanAsync" ? Task.FromException<AccessFilter>(new InvalidOperationException("planner down")) : null;
+        plannerLog.Override = (method, _) => string.Equals(method, "PlanAsync", StringComparison.Ordinal) ? Task.FromException<AccessFilter>(new InvalidOperationException("planner down")) : null;
         fixture.Clock.Advance(TimeSpan.FromHours(1));
 
         var failed = await RunAsync();
@@ -184,7 +191,7 @@ public sealed class AutomationReviewRegressionTests
         Assert.AreEqual(new AutomationScheduleRunResult(0, 0, 0, 0), await RunAsync(), "Not retried before the retry delay.");
 
         fixture.Clock.Advance(TimeSpan.FromMinutes(1));
-        rulesLog.Override = (method, _) => method == "ReleaseScheduleAsync" ? Task.FromResult(false) : null;
+        rulesLog.Override = (method, _) => string.Equals(method, "ReleaseScheduleAsync", StringComparison.Ordinal) ? Task.FromResult(false) : null;
         Assert.AreEqual(new AutomationScheduleRunResult(0, 0, 0, 1), await RunAsync(), "A refused release (lease lost) is counted as lost.");
 
         plannerLog.Override = null;

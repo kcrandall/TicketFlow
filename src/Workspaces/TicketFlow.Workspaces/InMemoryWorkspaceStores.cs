@@ -343,7 +343,7 @@ internal sealed class InMemoryWorkspaceTable<TValue>
                 return StoreNotFound.Instance;
             if (existing.Revision != expectedRevision)
                 return new StoreConflict(existing.Revision);
-            if (validate?.Invoke(entries.Where(pair => pair.Key != key).Select(pair => pair.Value)) is { } rejection)
+            if (validate?.Invoke(entries.Where(pair => !string.Equals(pair.Key, key, StringComparison.Ordinal)).Select(pair => pair.Value)) is { } rejection)
                 return new StoreRejected<WorkspaceWriteRejection>(rejection);
             var updated = new Entry(value, checked(existing.Revision + 1));
             entries[key] = updated;

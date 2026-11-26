@@ -34,7 +34,7 @@ public static class ReportingStoreContract
     public static string W(ReportWriteResult result) => result switch
     {
         ReportWriteApplied applied => $"applied:{applied.Conversation.Revision}:{applied.InsertedFacts}",
-        ReportWriteConflict conflict => $"conflict:{conflict.CurrentRevision?.ToString() ?? "none"}",
+        ReportWriteConflict conflict => $"conflict:{conflict.CurrentRevision?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none"}",
         ReportWriteRejected rejected => $"rejected:{rejected.Reason}",
     };
 
@@ -49,7 +49,7 @@ public static class ReportingStoreContract
         new([from, to], metrics.Length == 0 ? ReportMetrics.All : metrics, filter, groupBy, histograms);
 
     public static long Total(ReportAggregateResult result, ReportMetric metric, string? group = null, bool anyGroup = true) =>
-        result.Rows.Where(row => row.Metric == metric && (anyGroup || row.Group == group)).Sum(row => row.Count);
+        result.Rows.Where(row => row.Metric == metric && (anyGroup || string.Equals(row.Group, group, StringComparison.Ordinal))).Sum(row => row.Count);
 
     public static async Task VerifyProjectionAsync(IReportingStore primary, IReportingStore competing)
     {
@@ -219,7 +219,7 @@ public static class ReportingStoreContract
         Assert.AreEqual("rebuilt:96", B(await store.RebuildRollupsAsync(scope, Day, Day.AddDays(2))));
         CollectionAssert.AreEqual(before.Rows.ToArray(), (await store.AggregateAsync(scope, plain, AllowAllFilter.Instance)).Rows.ToArray());
         CollectionAssert.AreEqual(beforeLabels.Rows.ToArray(), (await store.AggregateAsync(scope, query, AllowAllFilter.Instance)).Rows.ToArray());
-        Assert.ThrowsExactly<ArgumentException>(() => store.RebuildRollupsAsync(scope, Day, Day.AddDays(40)).GetAwaiter().GetResult());
+        await Assert.ThrowsExactlyAsync<ArgumentException>(() => store.RebuildRollupsAsync(scope, Day, Day.AddDays(40)));
 
         // Fact retention deletes facts only; rollup retention deletes cells only. Both are bounded and store-wide.
         var cutoff = Day.AddDays(1);
@@ -254,8 +254,8 @@ public static class ReportingStoreContract
             // Both clients race to create the same state: exactly one wins, the other conflicts and inserts nothing.
             return W(await store.ApplyAsync(scope, projection, null));
         }));
-        Assert.AreEqual(conversations, results.Count(result => result == "applied:1:2"));
-        Assert.AreEqual(conversations, results.Count(result => result == "conflict:1"));
+        Assert.AreEqual(conversations, results.Count(result => string.Equals(result, "applied:1:2", StringComparison.Ordinal)));
+        Assert.AreEqual(conversations, results.Count(result => string.Equals(result, "conflict:1", StringComparison.Ordinal)));
         var aggregate = await primary.AggregateAsync(scope, Whole(Day, Day.AddDays(1), histograms: true), AllowAllFilter.Instance);
         Assert.AreEqual(conversations, Total(aggregate, ReportMetric.ConversationCreated));
         Assert.AreEqual(conversations, Total(aggregate, ReportMetric.ResponseTime));
@@ -269,7 +269,7 @@ public static class ReportingStoreContract
             var store = index % 2 == 0 ? primary : competing;
             return W(await store.ApplyAsync(scope, new ReportProjection(State($"c{conversation}", sequence: 2), [created[conversation], replies[conversation]]), 1));
         }));
-        Assert.AreEqual(conversations, replays.Count(result => result == "applied:2:0"));
+        Assert.AreEqual(conversations, replays.Count(result => string.Equals(result, "applied:2:0", StringComparison.Ordinal)));
         Assert.AreEqual(conversations, Total(await primary.AggregateAsync(scope, Whole(Day, Day.AddDays(1)), AllowAllFilter.Instance), ReportMetric.ConversationCreated));
     }
 
@@ -324,7 +324,7 @@ public static class ReportingStoreContract
                 : Duration(ReportMetric.ResponseTime, at, TimeSpan.FromSeconds(random.Next(0, 20_000)), $"bulk{index / 100}", dimensions));
         }
         foreach (var chunk in facts.Chunk(100).Select((items, index) => (items, index)))
-            Assert.StartsWith("applied:1:", W(await store.ApplyAsync(scope, new ReportProjection(State($"bulk{chunk.index}"), chunk.items), null)));
+            Assert.StartsWith("applied:1:", W(await store.ApplyAsync(scope, new ReportProjection(State($"bulk{chunk.index}"), chunk.items), null)), StringComparison.Ordinal);
         var boundaries = new[] { Day, Day.AddDays(1), Day.AddDays(2), Day.AddDays(3) };
         AccessFilter[] filters = [AllowAllFilter.Instance, new TeamInFilter([new TeamId("t0")]), new OrFilter(new AssigneeIsFilter(new UserId("u1")), new HasLabelFilter(new LabelId("a")))];
         foreach (var filter in filters)

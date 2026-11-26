@@ -157,10 +157,10 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
             {
                 await using var reader = await create.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
                 await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-                insertedRevision = reader.IsDBNull(0) ? null : reader.GetInt64(0);
-                existingRevision = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+                insertedRevision = await reader.IsDBNullAsync(0, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt64(0);
+                existingRevision = await reader.IsDBNullAsync(1, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt64(1);
             }
-            catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == "tf_channel_endpoints_address")
+            catch (PostgresException error) when (string.Equals(error.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(error.ConstraintName, "tf_channel_endpoints_address", StringComparison.Ordinal))
             {
                 return new StoreRejected<ChannelWriteRejection>(ChannelWriteRejection.AddressTaken);
             }
@@ -194,7 +194,7 @@ public sealed class PostgresChannelStore : IChannelEndpointStore, IChannelConver
             if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
                 return new StoreApplied<StoredChannelEndpoint>(new StoredChannelEndpoint(scope, endpoint, revision));
         }
-        catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == "tf_channel_endpoints_address")
+        catch (PostgresException error) when (string.Equals(error.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(error.ConstraintName, "tf_channel_endpoints_address", StringComparison.Ordinal))
         {
             return new StoreRejected<ChannelWriteRejection>(ChannelWriteRejection.AddressTaken);
         }

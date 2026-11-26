@@ -61,7 +61,7 @@ public sealed partial class PostgresWorkspaceStore
             BindInboxKey(check, scope, inbox.Id);
             await using var reader = await check.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            if (!reader.IsDBNull(0))
+            if (!await reader.IsDBNullAsync(0, cancellationToken).ConfigureAwait(false))
                 return new StoreConflict(reader.GetInt64(0));
             if (reader.GetInt64(1) >= WorkspaceLimits.MaximumInboxesPerWorkspace)
                 return new StoreRejected<WorkspaceWriteRejection>(WorkspaceWriteRejection.CapacityExceeded);
@@ -77,7 +77,7 @@ public sealed partial class PostgresWorkspaceStore
             {
                 await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
-            catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == BindingIndex)
+            catch (PostgresException error) when (string.Equals(error.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(error.ConstraintName, BindingIndex, StringComparison.Ordinal))
             {
                 return new StoreRejected<WorkspaceWriteRejection>(WorkspaceWriteRejection.ChannelBindingInUse);
             }
@@ -105,7 +105,7 @@ public sealed partial class PostgresWorkspaceStore
                 if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
                     return new StoreApplied<StoredInbox>(new(scope, inbox, revision));
             }
-            catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == BindingIndex)
+            catch (PostgresException error) when (string.Equals(error.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(error.ConstraintName, BindingIndex, StringComparison.Ordinal))
             {
                 return new StoreRejected<WorkspaceWriteRejection>(WorkspaceWriteRejection.ChannelBindingInUse);
             }

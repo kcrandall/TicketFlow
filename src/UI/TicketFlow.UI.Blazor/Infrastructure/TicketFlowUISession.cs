@@ -221,7 +221,7 @@ public sealed class TicketFlowUISession
     internal static string RelativePath(HttpContext http, TicketFlowBlazorUIOptions options)
     {
         var path = http.Request.Path.Value ?? string.Empty;
-        if (options.BasePath != "/" && path.StartsWith(options.BasePath, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(options.BasePath, "/", StringComparison.Ordinal) && path.StartsWith(options.BasePath, StringComparison.OrdinalIgnoreCase))
             path = path[options.BasePath.Length..];
         return path.Trim('/');
     }
@@ -247,11 +247,11 @@ public sealed class TicketFlowUISession
             : PartitionFromClaims(http.User);
         if (partition is null)
             return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, null, null, none, theme);
-        var scope = partition.InWorkspace(id);
-        var principal = await ResolvePrincipalAsync(http, scope, ticketFlowResolver, accessResolver).ConfigureAwait(false);
-        if (principal is null || principal.Scope != scope)
-            return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, scope, null, none, theme);
-        return new TicketFlowUISession(http, options, UiSessionState.Ready, scope, principal, none, theme);
+        var resolvedScope = partition.InWorkspace(id);
+        var resolvedPrincipal = await ResolvePrincipalAsync(http, resolvedScope, ticketFlowResolver, accessResolver).ConfigureAwait(false);
+        if (resolvedPrincipal is null || resolvedPrincipal.Scope != resolvedScope)
+            return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, resolvedScope, null, none, theme);
+        return new TicketFlowUISession(http, options, UiSessionState.Ready, resolvedScope, resolvedPrincipal, none, theme);
     }
 
     private static async Task<PrincipalRef?> ResolvePrincipalAsync(
@@ -269,11 +269,11 @@ public sealed class TicketFlowUISession
 
         if (hasConfiguredHostResolver)
         {
-            var principal = await ticketFlowResolver!.ResolveAsync(http, scope, http.RequestAborted).ConfigureAwait(false);
-            if (principal is null || principal.Scope != scope)
+            var resolved = await ticketFlowResolver!.ResolveAsync(http, scope, http.RequestAborted).ConfigureAwait(false);
+            if (resolved is null || resolved.Scope != scope)
                 return null;
 
-            return EnrichExternalClaims(http, principal, accessResolver);
+            return EnrichExternalClaims(http, resolved, accessResolver);
         }
 
         if (accessResolver is not null)
@@ -299,7 +299,7 @@ public sealed class TicketFlowUISession
             : claimsResolver.ExtractExternalRoles(http.User);
         var identityProvider = principal.IdentityProvider ?? claimsResolver.TryGetIdentityProvider(http.User);
 
-        if (externalRoles.Count == principal.ExternalRoles.Count && identityProvider == principal.IdentityProvider)
+        if (externalRoles.Count == principal.ExternalRoles.Count && string.Equals(identityProvider, principal.IdentityProvider, StringComparison.Ordinal))
             return principal;
 
         return principal switch
@@ -341,8 +341,8 @@ public sealed class TicketFlowUISession
             return basic;
         var services = http.RequestServices;
         var options = basic.Options;
-        var scope = basic.Scope;
-        var principal = basic.Principal;
+        var sessionScope = basic.Scope;
+        var sessionPrincipal = basic.Principal;
 
         var held = basic.permissions;
         if (services.GetService<IPermissionCatalog>() is { } catalog)
@@ -351,7 +351,7 @@ public sealed class TicketFlowUISession
             var planner = services.GetService<IAccessQueryPlanner>();
             var evaluator = planner is null ? services.GetService<IAccessEvaluator>() : null;
             var cache = services.GetRequiredService<UiSensitivePermissionCache>();
-            var key = UiSensitivePermissionCache.Key(principal);
+            var key = UiSensitivePermissionCache.Key(sessionPrincipal);
             var needSensitive = !cache.TryGet(key, out var sensitive);
 
             var regularChunks = chunks.Regular;
@@ -360,10 +360,10 @@ public sealed class TicketFlowUISession
             if (total == 1)
             {
                 if (regularChunks.Length == 1)
-                    held.UnionWith(await HeldAsync(planner, evaluator, principal, scope, regularChunks[0], http.RequestAborted).ConfigureAwait(false));
+                    held.UnionWith(await HeldAsync(planner, evaluator, sessionPrincipal, sessionScope, regularChunks[0], http.RequestAborted).ConfigureAwait(false));
                 else
                 {
-                    var probed = new HashSet<Permission>(await HeldAsync(planner, evaluator, principal, scope, sensitiveChunks[0], http.RequestAborted).ConfigureAwait(false));
+                    var probed = new HashSet<Permission>(await HeldAsync(planner, evaluator, sessionPrincipal, sessionScope, sensitiveChunks[0], http.RequestAborted).ConfigureAwait(false));
                     sensitive = probed;
                     cache.Set(key, probed, options.SensitivePermissionCacheDuration);
                 }
@@ -372,9 +372,9 @@ public sealed class TicketFlowUISession
             {
                 var tasks = new Task<IReadOnlySet<Permission>>[total];
                 for (var i = 0; i < regularChunks.Length; i++)
-                    tasks[i] = HeldAsync(planner, evaluator, principal, scope, regularChunks[i], http.RequestAborted);
+                    tasks[i] = HeldAsync(planner, evaluator, sessionPrincipal, sessionScope, regularChunks[i], http.RequestAborted);
                 for (var i = 0; i < sensitiveChunks.Length; i++)
-                    tasks[regularChunks.Length + i] = HeldAsync(planner, evaluator, principal, scope, sensitiveChunks[i], http.RequestAborted);
+                    tasks[regularChunks.Length + i] = HeldAsync(planner, evaluator, sessionPrincipal, sessionScope, sensitiveChunks[i], http.RequestAborted);
                 var results = await Task.WhenAll(tasks).ConfigureAwait(false);
                 for (var i = 0; i < regularChunks.Length; i++)
                     held.UnionWith(results[i]);
@@ -457,7 +457,7 @@ internal static class UiUrls
 {
     public static string Combine(string basePath, string path, params (string Key, string? Value)[] query)
     {
-        var root = basePath == "/" ? string.Empty : basePath;
+        var root = string.Equals(basePath, "/", StringComparison.Ordinal) ? string.Empty : basePath;
         var relative = path.TrimStart('/');
         var url = relative.Length == 0 ? (root.Length == 0 ? "/" : root) : $"{root}/{relative}";
         if (query.Length == 0)
@@ -483,7 +483,7 @@ internal static class UiUrls
     /// <summary>A safe local return path inside the UI, or the dashboard.</summary>
     public static string SafeReturn(string basePath, string? candidate)
     {
-        var root = basePath == "/" ? "/" : basePath;
+        var root = string.Equals(basePath, "/", StringComparison.Ordinal) ? "/" : basePath;
         if (string.IsNullOrEmpty(candidate) || candidate[0] != '/' || candidate.StartsWith("//", StringComparison.Ordinal))
             return root;
         for (var i = 0; i < candidate.Length; i++)
@@ -492,7 +492,7 @@ internal static class UiUrls
             if (c < 0x20 || c == 0x7f || c == '\\')
                 return root;
         }
-        if (!(candidate == root || candidate.StartsWith(root == "/" ? "/" : root + "/", StringComparison.Ordinal) || candidate.StartsWith(root + "?", StringComparison.Ordinal)))
+        if (!(string.Equals(candidate, root, StringComparison.Ordinal) || candidate.StartsWith(string.Equals(root, "/", StringComparison.Ordinal) ? "/" : root + "/", StringComparison.Ordinal) || candidate.StartsWith(root + "?", StringComparison.Ordinal)))
             return root;
         return candidate;
     }

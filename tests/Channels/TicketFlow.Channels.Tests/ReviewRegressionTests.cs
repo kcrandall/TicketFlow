@@ -143,6 +143,7 @@ public sealed class ReviewRegressionTests
     }
 
     /// <summary>An <see cref="IConversationService"/> whose delivery updates return a fixed outcome.</summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1852:Seal internal types", Justification = "DispatchProxy requires a non-sealed proxy base type.")]
     internal class StubConversations : DispatchProxy
     {
         private ConversationCommandResult outcome;
@@ -154,7 +155,6 @@ public sealed class ReviewRegressionTests
             return proxy;
         }
 
-        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) =>
-            targetMethod?.Name == nameof(IConversationService.UpdateDeliveryStatusAsync) ? Task.FromResult(outcome) : throw new NotSupportedException();
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) => string.Equals(targetMethod?.Name, nameof(IConversationService.UpdateDeliveryStatusAsync), StringComparison.Ordinal) ? Task.FromResult(outcome) : throw new NotSupportedException();
     }
 }

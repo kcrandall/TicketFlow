@@ -31,6 +31,11 @@ public readonly record struct BusinessHours : IComparable<BusinessHours>
 
     public int CompareTo(BusinessHours other) => Start != other.Start ? Start.CompareTo(other.Start) : End.CompareTo(other.End);
 
+    public static bool operator <(BusinessHours left, BusinessHours right) => left.CompareTo(right) < 0;
+    public static bool operator <=(BusinessHours left, BusinessHours right) => left.CompareTo(right) <= 0;
+    public static bool operator >(BusinessHours left, BusinessHours right) => left.CompareTo(right) > 0;
+    public static bool operator >=(BusinessHours left, BusinessHours right) => left.CompareTo(right) >= 0;
+
     public override string ToString() => $"{(int)Start.TotalHours:D2}:{Start.Minutes:D2}-{(int)End.TotalHours:D2}:{End.Minutes:D2}";
 
     /// <summary>Sorts, rejects overlaps and merges touching spans, so equal schedules have one canonical form.</summary>
@@ -102,7 +107,7 @@ public sealed record CalendarDateOverride
     public bool IsClosed => Hours.Count == 0;
 
     public bool Equals(CalendarDateOverride? other) =>
-        other is not null && Date == other.Date && Name == other.Name && Hours.SequenceEqual(other.Hours);
+        other is not null && Date == other.Date && string.Equals(Name, other.Name, StringComparison.Ordinal) && Hours.SequenceEqual(other.Hours);
 
     public override int GetHashCode() => HashCode.Combine(Date, Name, Hours.Count);
 }
@@ -221,8 +226,8 @@ public sealed record BusinessCalendar
         overridesByDate.TryGetValue(date, out var entry) ? entry.Hours : weekly[(int)date.DayOfWeek];
 
     public bool Equals(BusinessCalendar? other) =>
-        other is not null && Id == other.Id && Name == other.Name && TimeZoneId == other.TimeZoneId
-        && WeeklyHours.SequenceEqual(other.WeeklyHours) && Overrides.SequenceEqual(other.Overrides);
+        other is not null && Id == other.Id && string.Equals(Name, other.Name, StringComparison.Ordinal) && string.Equals(TimeZoneId, other.TimeZoneId
+, StringComparison.Ordinal) && WeeklyHours.SequenceEqual(other.WeeklyHours) && Overrides.SequenceEqual(other.Overrides);
 
     public override int GetHashCode() => HashCode.Combine(Id, Name, TimeZoneId, WeeklyHours.Count, Overrides.Count);
 }

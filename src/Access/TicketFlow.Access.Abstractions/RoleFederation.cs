@@ -27,6 +27,11 @@ public readonly record struct RoleFederationMappingId : IComparable<RoleFederati
 
     public int CompareTo(RoleFederationMappingId other) => string.CompareOrdinal(value, other.value);
 
+    public static bool operator <(RoleFederationMappingId left, RoleFederationMappingId right) => left.CompareTo(right) < 0;
+    public static bool operator <=(RoleFederationMappingId left, RoleFederationMappingId right) => left.CompareTo(right) <= 0;
+    public static bool operator >(RoleFederationMappingId left, RoleFederationMappingId right) => left.CompareTo(right) > 0;
+    public static bool operator >=(RoleFederationMappingId left, RoleFederationMappingId right) => left.CompareTo(right) >= 0;
+
     public override string ToString() => value ?? string.Empty;
 }
 

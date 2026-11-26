@@ -74,7 +74,7 @@ public sealed class AutomationActionExecutor
             case SnoozeAction snooze:
                 return Map(await conversations.SnoozeAsync(actor, id, time.GetUtcNow() + snooze.Duration, cancellationToken: cancellationToken).ConfigureAwait(false));
             case SetAttributeAction attribute:
-                return Map(await conversations.UpdateAttributesAsync(actor, id, new Dictionary<string, ConversationAttributeValue?> { [attribute.Key] = attribute.Value },
+                return Map(await conversations.UpdateAttributesAsync(actor, id, new Dictionary<string, ConversationAttributeValue?>(StringComparer.Ordinal) { [attribute.Key] = attribute.Value },
                     cancellationToken: cancellationToken).ConfigureAwait(false));
             case SendReplyAction reply:
             {
@@ -83,7 +83,7 @@ public sealed class AutomationActionExecutor
                     return new AutomationActionApplied([existing]);
                 var (body, contentType, note) = await RenderReplyAsync(actor.Scope, reply, request.Context, request.AgentName, cancellationToken).ConfigureAwait(false);
                 if (body is null)
-                    return note == "template-output-too-large" ? new AutomationActionFailed(note) : new AutomationActionSkipped(note!);
+                    return string.Equals(note, "template-output-too-large", StringComparison.Ordinal) ? new AutomationActionFailed(note!) : new AutomationActionSkipped(note!);
                 return Map(await conversations.ReplyAsync(actor, id, new OutgoingMessageDraft(body, contentType, Id: messageId), cancellationToken: cancellationToken).ConfigureAwait(false));
             }
             case AddNoteAction noteAction:

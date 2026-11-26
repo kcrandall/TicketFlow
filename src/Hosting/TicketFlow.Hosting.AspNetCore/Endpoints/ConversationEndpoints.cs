@@ -80,7 +80,7 @@ internal static class ConversationEndpoints
         Command<LabelsRequest>(group, "/conversations/{conversationId}/labels", "UpdateLabels", (service, actor, id, body, revision, ct) =>
             service.UpdateLabelsAsync(actor.Principal, id, (body.Add ?? []).Select(label => new LabelId(label)), (body.Remove ?? []).Select(label => new LabelId(label)), revision, ct));
         Command<AttributesRequest>(group, "/conversations/{conversationId}/attributes", "UpdateAttributes", (service, actor, id, body, revision, ct) =>
-            service.UpdateAttributesAsync(actor.Principal, id, (body.Changes ?? throw new ArgumentException("Changes are required.", "changes"))
+            service.UpdateAttributesAsync(actor.Principal, id, (body.Changes ?? throw new ArgumentException("Changes are required.", nameof(body)))
                 .ToDictionary(pair => pair.Key, pair => pair.Value is null ? (ConversationAttributeValue?)null : Attributes.Conversation(pair.Value), StringComparer.Ordinal), revision, ct));
         Command<ParticipantsRequest>(group, "/conversations/{conversationId}/participants", "UpdateParticipants", (service, actor, id, body, revision, ct) =>
             service.UpdateParticipantsAsync(actor.Principal, id, (body.Add ?? []).Select(user => new UserId(user)), (body.Remove ?? []).Select(user => new UserId(user)), revision, ct));
@@ -102,7 +102,7 @@ internal static class ConversationEndpoints
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
                 return failure;
-            if (request.Key != key)
+            if (!string.Equals(request.Key, key, StringComparison.Ordinal))
                 throw new ArgumentException("The body key must match the route.", nameof(key));
             return Map(http, await service.UpdateAsync(actor.Principal, Definition(request), revision, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Definition(stored), stored.Revision));
         }).WithName("UpdateConversationAttribute").Produces<AttributeDefinitionResponse>();
@@ -122,7 +122,7 @@ internal static class ConversationEndpoints
     {
         var handle = async (TicketFlowActor actor, string conversationId, TBody body, [FromServices] IConversationService service, HttpContext http) =>
         {
-            ArgumentNullException.ThrowIfNull(body, "body");
+            ArgumentNullException.ThrowIfNull(body);
             if (!TicketFlowHttp.TryOptionalRevision(http, out var revision, out var failure))
                 return failure;
             return Map(http, await handler(service, actor, new ConversationId(conversationId), body, revision, http.RequestAborted), applied => TicketFlowHttp.Ok(http, Command(applied), applied.Revision));
@@ -155,7 +155,7 @@ internal static class ConversationEndpoints
     {
         ConversationStatusKind.Open => ConversationStatus.Open,
         ConversationStatusKind.Pending => ConversationStatus.Pending,
-        ConversationStatusKind.Snoozed => ConversationStatus.Snoozed(request.SnoozedUntil ?? throw new ArgumentException("Snoozing requires 'snoozedUntil'.", "snoozedUntil")),
+        ConversationStatusKind.Snoozed => ConversationStatus.Snoozed(request.SnoozedUntil ?? throw new ArgumentException("Snoozing requires 'snoozedUntil'.", nameof(request))),
         ConversationStatusKind.Resolved => ConversationStatus.Resolved,
         _ => ConversationStatus.Closed,
     };
@@ -164,7 +164,7 @@ internal static class ConversationEndpoints
 
     private static MessageId? MessageId(string? value) => value is null ? null : new MessageId(value);
 
-    private static IReadOnlyList<AttachmentRef>? Attachments(IReadOnlyList<AttachmentModel>? attachments) =>
+    private static List<AttachmentRef>? Attachments(IReadOnlyList<AttachmentModel>? attachments) =>
         attachments?.Select(attachment => new AttachmentRef(attachment.StorageRef, attachment.FileName, attachment.MediaType, attachment.SizeBytes)).ToList();
 
     internal static ConversationStatusResponse Status(ConversationStatus status) => new(TicketFlowHttp.Token(status.Kind), status.SnoozedUntil);

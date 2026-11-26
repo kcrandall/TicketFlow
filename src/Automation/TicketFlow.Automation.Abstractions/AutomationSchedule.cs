@@ -102,7 +102,7 @@ public sealed record AutomationSchedule
         return null;
     }
 
-    public bool Equals(AutomationSchedule? other) => other is not null && Expression == other.Expression && TimeZoneId == other.TimeZoneId;
+    public bool Equals(AutomationSchedule? other) => other is not null && string.Equals(Expression, other.Expression, StringComparison.Ordinal) && string.Equals(TimeZoneId, other.TimeZoneId, StringComparison.Ordinal);
 
     public override int GetHashCode() => HashCode.Combine(Expression, TimeZoneId);
 
@@ -148,7 +148,7 @@ public sealed record AutomationSchedule
     private static bool Parse(string field, int minimum, int maximum, out ulong mask, string parameterName)
     {
         mask = 0;
-        if (field == "*")
+        if (string.Equals(field, "*", StringComparison.Ordinal))
         {
             for (var value = minimum; value <= maximum; value++)
                 mask |= 1UL << value;

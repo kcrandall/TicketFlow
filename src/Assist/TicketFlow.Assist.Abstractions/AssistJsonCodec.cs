@@ -32,7 +32,7 @@ public static class AssistTimelineKinds
 public sealed record AssistTimelinePayload(AssistFeature Feature, string Model, Guid UsageId, AssistUsage Usage, IReadOnlyList<ArticleId> Citations)
 {
     public bool Equals(AssistTimelinePayload? other) =>
-        other is not null && Feature == other.Feature && Model == other.Model && UsageId == other.UsageId && Usage == other.Usage && Citations.SequenceEqual(other.Citations);
+        other is not null && Feature == other.Feature && string.Equals(Model, other.Model, StringComparison.Ordinal) && UsageId == other.UsageId && Usage == other.Usage && Citations.SequenceEqual(other.Citations);
 
     public override int GetHashCode() => HashCode.Combine(Feature, Model, UsageId);
 }

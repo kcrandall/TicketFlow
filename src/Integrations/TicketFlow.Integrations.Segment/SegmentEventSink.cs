@@ -38,7 +38,7 @@ public sealed record SegmentSource
         if (AllowedScopes.Count == 0 || AllowedScopes.Any(rule => rule is null))
             throw new ArgumentException("A Segment source needs at least one allowed scope rule.", nameof(allowedScopes));
         ArgumentNullException.ThrowIfNull(host);
-        if (!host.IsAbsoluteUri || host.Scheme != Uri.UriSchemeHttps || host.UserInfo.Length != 0 || host.Query.Length != 0 || host.Fragment.Length != 0)
+        if (!host.IsAbsoluteUri || !string.Equals(host.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal) || host.UserInfo.Length != 0 || host.Query.Length != 0 || host.Fragment.Length != 0)
             throw new ArgumentException("Segment hosts are absolute https URIs without credentials, query or fragment.", nameof(host));
         Host = host;
         WriteKey = string.IsNullOrWhiteSpace(writeKey) || writeKey.Length > 256 || writeKey.Any(character => character is < '!' or > '~')
@@ -221,7 +221,7 @@ public sealed class SegmentEventSink : IEventSink, IDisposable
             var holder = content.TryGetProperty("contact", out var related) ? related : content;
             if (holder.TryGetProperty("identities", out var identities))
                 foreach (var identity in identities.EnumerateArray())
-                    if (identity.GetProperty("kind").GetString() == "external-user")
+                    if (string.Equals(identity.GetProperty("kind").GetString(), "external-user", StringComparison.Ordinal))
                         return "external:" + (identity.TryGetProperty("namespace", out var issuer) ? issuer.GetString() : "") + ":" + identity.GetProperty("value").GetString();
         }
         var contact = rendered.Event.Event.Data.Value switch

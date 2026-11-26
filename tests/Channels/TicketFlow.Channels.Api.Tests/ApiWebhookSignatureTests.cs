@@ -63,8 +63,8 @@ public sealed class ApiWebhookSignatureTests
         Assert.AreEqual(ApiWebhookRejection.Malformed, Reason(ApiWebhookSignature.Verify(Key, "tf1-abc", "999999999999", signature, Body, Now)));
         Assert.AreEqual(ApiWebhookRejection.Malformed, Reason(ApiWebhookSignature.Verify(Key, "tf1-abc", timestamp, "v2=" + signature[3..], Body, Now)));
         Assert.AreEqual(ApiWebhookRejection.Malformed, Reason(ApiWebhookSignature.Verify(Key, "tf1-abc", timestamp, "v1=" + new string('z', 64), Body, Now)));
-        Assert.AreEqual(ApiWebhookRejection.Malformed, Reason(ApiWebhookSignature.Verify(Key[..16], "tf1-abc", timestamp, signature, Body, Now)));
-        Assert.ThrowsExactly<ArgumentException>(() => ApiWebhookSignature.Create(Key[..16], "id", 1, Body));
+        Assert.AreEqual(ApiWebhookRejection.Malformed, Reason(ApiWebhookSignature.Verify(Key.AsSpan()[..16], "tf1-abc", timestamp, signature, Body, Now)));
+        Assert.ThrowsExactly<ArgumentException>(() => ApiWebhookSignature.Create(Key.AsSpan()[..16], "id", 1, Body));
     }
 
     [TestMethod]

@@ -184,13 +184,13 @@ public static class EventStoreContract
     {
         var scope = NewScope();
         for (var index = 0; index < 20; index++)
-            Applied(await primary.CreateAsync(scope, Subscription("s" + index.ToString("D2")), 0, Now));
+            Applied(await primary.CreateAsync(scope, Subscription("s" + index.ToString("D2", System.Globalization.CultureInfo.InvariantCulture)), 0, Now));
         await log.AppendAsync(scope, [Draft()], Now);
         var claims = await Task.WhenAll(Enumerable.Range(0, 8).Select(index => (index % 2 == 0 ? primary : competing).ClaimAsync(Now, 5, TimeSpan.FromMinutes(1))));
         var mine = claims.SelectMany(batch => batch).Where(claim => claim.Subscription.Scope == scope).Select(claim => claim.Subscription.Subscription.Id.Value).ToList();
         Assert.AreEqual(mine.Count, mine.Distinct().Count(), "No subscription is leased twice.");
         var rest = (await primary.ClaimAsync(Now, 100, TimeSpan.FromMinutes(1))).Where(claim => claim.Subscription.Scope == scope).Select(claim => claim.Subscription.Subscription.Id.Value);
-        CollectionAssert.AreEquivalent(Enumerable.Range(0, 20).Select(index => "s" + index.ToString("D2")).ToArray(), mine.Concat(rest).ToArray());
+        CollectionAssert.AreEquivalent(Enumerable.Range(0, 20).Select(index => "s" + index.ToString("D2", System.Globalization.CultureInfo.InvariantCulture)).ToArray(), mine.Concat(rest).ToArray());
     }
 
     /// <summary>More busy subscriptions than the claim limit: completion moves a subscription behind the others (round-robin).</summary>

@@ -72,11 +72,11 @@ internal sealed class LiveChatHost : IAsyncDisposable
         return grant with { Context = context };
     }
 
-    public RecordingConnection ConnectVisitor(VisitorSessionContext context, string id)
+    public async Task<RecordingConnection> ConnectVisitorAsync(VisitorSessionContext context, string id)
     {
         var connection = new RecordingConnection(id, new VisitorSubscriber(context.Scope, context.Session.Session.Id), Idle);
         Assert.IsInstanceOfType<RealtimeConnected>(Registry.Connect(connection).Value);
-        Assert.IsInstanceOfType<RealtimeSubscribed>(Registry.SubscribeAsync(id, new VisitorSessionTopic(context.Scope, context.Session.Session.Id)).GetAwaiter().GetResult().Value);
+        Assert.IsInstanceOfType<RealtimeSubscribed>((await Registry.SubscribeAsync(id, new VisitorSessionTopic(context.Scope, context.Session.Session.Id))).Value);
         return connection;
     }
 
@@ -104,7 +104,7 @@ internal sealed class LiveChatHost : IAsyncDisposable
     internal sealed class FixedSecret : ILiveChatIdentitySecretResolver
     {
         public Task<ReadOnlyMemory<byte>?> ResolveAsync(TicketScope scope, string configurationId, CancellationToken cancellationToken = default) =>
-            Task.FromResult<ReadOnlyMemory<byte>?>(configurationId == "cfg-chat" ? Secret : null);
+            Task.FromResult<ReadOnlyMemory<byte>?>(string.Equals(configurationId, "cfg-chat", StringComparison.Ordinal) ? Secret : null);
     }
 
     internal sealed class FakeSearch : IHelpCenterSearch
@@ -125,6 +125,6 @@ internal sealed class LiveChatHost : IAsyncDisposable
     internal sealed class FakeTokenValidator : IVisitorTokenValidator
     {
         public Task<VisitorTokenValidation> ValidateAsync(TicketScope scope, string configurationId, string token, CancellationToken cancellationToken = default) =>
-            Task.FromResult<VisitorTokenValidation>(token == "good-token" ? new VisitorTokenAccepted("idf", "subject-7", "Grace") : VisitorTokenRejected.Instance);
+            Task.FromResult<VisitorTokenValidation>(string.Equals(token, "good-token", StringComparison.Ordinal) ? new VisitorTokenAccepted("idf", "subject-7", "Grace") : VisitorTokenRejected.Instance);
     }
 }

@@ -100,8 +100,36 @@ public sealed class AutomationRuleCache
         public long LastAccess = stamp;
     }
 
+    private sealed class InFlightLoad
+    {
+        private readonly TaskCompletionSource<CompiledRuleSet> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int started;
+
+        public async Task<CompiledRuleSet> RunAsync(Func<InFlightLoad, Task<CompiledRuleSet>> factory)
+        {
+            if (Interlocked.Exchange(ref started, 1) != 0)
+                return await completion.Task.ConfigureAwait(false);
+            try
+            {
+                var result = await factory(this).ConfigureAwait(false);
+                completion.TrySetResult(result);
+                return result;
+            }
+            catch (OperationCanceledException ex)
+            {
+                completion.TrySetCanceled(ex.CancellationToken);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                completion.TrySetException(ex);
+                throw;
+            }
+        }
+    }
+
     private readonly ConcurrentDictionary<TicketScope, CacheEntry> entries = new();
-    private readonly ConcurrentDictionary<(TicketScope Scope, long Version), Lazy<Task<CompiledRuleSet>>> inflight = new();
+    private readonly ConcurrentDictionary<(TicketScope Scope, long Version), InFlightLoad> inflight = new();
     private long accessCounter;
 
     public async Task<IReadOnlyList<AutomationRule>> GetAsync(IAutomationRuleStore store, TicketScope scope, CancellationToken cancellationToken = default) =>
@@ -120,16 +148,11 @@ public sealed class AutomationRuleCache
         // Coalesce concurrent reloads for the same (scope, version) to avoid thundering-herd DB queries.
         // Cleanup runs inside LoadAsync's finally so a cancelled waiter never evicts a still-running load.
         var key = (scope, version);
-        var lazy = inflight.GetOrAdd(key, static (k, state) =>
-        {
-            Lazy<Task<CompiledRuleSet>>? holder = null;
-            holder = new Lazy<Task<CompiledRuleSet>>(() => state.Self.LoadAsync(state.Store, k, holder!));
-            return holder;
-        }, (Self: this, Store: store));
-        return await lazy.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var holder = inflight.GetOrAdd(key, static _ => new InFlightLoad());
+        return await holder.RunAsync(h => LoadAsync(store, key, h)).WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<CompiledRuleSet> LoadAsync(IAutomationRuleStore store, (TicketScope Scope, long Version) key, Lazy<Task<CompiledRuleSet>> holder)
+    private async Task<CompiledRuleSet> LoadAsync(IAutomationRuleStore store, (TicketScope Scope, long Version) key, InFlightLoad holder)
     {
         try
         {
@@ -145,7 +168,7 @@ public sealed class AutomationRuleCache
         }
         finally
         {
-            inflight.TryRemove(new KeyValuePair<(TicketScope, long), Lazy<Task<CompiledRuleSet>>>(key, holder));
+            inflight.TryRemove(new KeyValuePair<(TicketScope, long), InFlightLoad>(key, holder));
         }
     }
 

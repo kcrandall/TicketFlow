@@ -203,7 +203,7 @@ public sealed record ContactMergeRequest
         ContactAttributeConflict attributeConflict = ContactAttributeConflict.PreferTarget, string? justification = null)
     {
         if (target == default || source == default)
-            throw new ArgumentException("Contact identifiers are required.");
+            throw new ArgumentException("Contact identifiers are required.", target == default ? nameof(target) : nameof(source));
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedTargetRevision, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedSourceRevision, 1);
         if (!Enum.IsDefined(attributeConflict))

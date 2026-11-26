@@ -135,7 +135,7 @@ internal static class AutomationEndpoints
 
     private static AutomationEvent Event(AutomationEventInput? dto)
     {
-        ArgumentNullException.ThrowIfNull(dto, "event");
+        ArgumentNullException.ThrowIfNull(dto);
         return TicketFlowHttp.Parse<AutomationEventKind>(dto.Kind, "event.kind") switch
         {
             AutomationEventKind.ConversationCreated => AutomationEvent.ConversationCreated(),

@@ -25,7 +25,7 @@ public sealed record ReportFilter
     public ReportFilter(InboxId? inbox = null, TeamId? team = null, UserId? agent = null, string? channel = null, ConversationPriority? priority = null, LabelId? label = null)
     {
         if (inbox == default(InboxId) || team == default(TeamId) || agent == default(UserId) || label == default(LabelId))
-            throw new ArgumentException("Filter identifiers must be initialized when supplied.");
+            throw new ArgumentException("Filter identifiers must be initialized when supplied.", inbox == default(InboxId) ? nameof(inbox) : team == default(TeamId) ? nameof(team) : agent == default(UserId) ? nameof(agent) : nameof(label));
         if (priority is { } value && !Enum.IsDefined(value))
             throw new ArgumentOutOfRangeException(nameof(priority));
         Inbox = inbox;
@@ -50,7 +50,7 @@ public sealed record ReportFilter
     {
         ArgumentNullException.ThrowIfNull(dimensions);
         return (Inbox is null || dimensions.Inbox == Inbox) && (Team is null || dimensions.Team == Team) && (Agent is null || dimensions.Agent == Agent)
-            && (Channel is null || dimensions.Channel == Channel) && (Priority is null || dimensions.Priority == Priority)
+            && (Channel is null || string.Equals(dimensions.Channel, Channel, StringComparison.Ordinal)) && (Priority is null || dimensions.Priority == Priority)
             && (Label is null || dimensions.Labels.Contains(Label.Value));
     }
 }

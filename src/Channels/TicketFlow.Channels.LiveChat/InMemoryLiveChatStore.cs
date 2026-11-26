@@ -115,7 +115,7 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
             if (existing.Revision != expectedRevision)
                 return Result<StoredVisitorSession>(new StoreConflict(existing.Revision));
             var current = existing.Session;
-            if (current.ConfigurationId != session.ConfigurationId || current.Inbox != session.Inbox || current.VisitorId != session.VisitorId || current.CreatedAt != session.CreatedAt)
+            if (!string.Equals(current.ConfigurationId, session.ConfigurationId, StringComparison.Ordinal) || current.Inbox != session.Inbox || !string.Equals(current.VisitorId, session.VisitorId, StringComparison.Ordinal) || current.CreatedAt != session.CreatedAt)
                 throw new ArgumentException("Session identity fields are immutable.", nameof(session));
             var stored = new StoredVisitorSession(scope, session, existing.Revision + 1);
             sessions[key] = stored;
@@ -304,7 +304,7 @@ public sealed class InMemoryLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
     private static void RequireIds(VisitorSessionId session, ConversationId conversation)
     {
         if (!session.IsInitialized || conversation == default)
-            throw new ArgumentException("Session and conversation identifiers are required.");
+            throw new ArgumentException("Session and conversation identifiers are required.", !session.IsInitialized ? nameof(session) : nameof(conversation));
     }
 
     private static Task<StoreWriteResult<T, LiveChatWriteRejection>> Result<T>(StoreWriteResult<T, LiveChatWriteRejection> result) => Task.FromResult(result);

@@ -10,7 +10,7 @@ namespace TicketFlow.Events.Tests;
 [TestClass]
 public sealed class DeliveryTests
 {
-    private static JsonElement Data(RenderedEvent rendered) => JsonDocument.Parse(rendered.Json).RootElement.GetProperty("data");
+    private static JsonElement Data(RenderedEvent rendered) => JsonElement.Parse(rendered.Json).GetProperty("data");
 
     private static async Task<EventsFixture> WithConversationAsync(string? externalId = null)
     {
@@ -58,21 +58,21 @@ public sealed class DeliveryTests
         EventsFixture.Value(await fixture.SubscribeAsync("content", principal: "content-hooks", privacy: EventPrivacy.Content));
         await fixture.DeliverAllAsync();
         var events = fixture.Subscriber.Events.ToList();
-        var received = events.Single(item => item.Event.Event.Type == IntegrationEventTypes.ConversationMessageReceived);
+        var received = events.Single(item => string.Equals(item.Event.Event.Type, IntegrationEventTypes.ConversationMessageReceived, StringComparison.Ordinal));
         var content = Data(received).GetProperty("content");
         Assert.AreEqual("message", content.GetProperty("kind").GetString());
-        StringAssert.Contains(content.GetProperty("body").GetString(), "Help please");
+        StringAssert.Contains(content.GetProperty("body").GetString(), "Help please", StringComparison.Ordinal);
         Assert.IsFalse(content.TryGetProperty("externalId", out _), "The masked channel identifier is removed.");
         var maskedFields = content.GetProperty("maskedFields").EnumerateArray().Select(field => field.GetString()).ToList();
         CollectionAssert.Contains(maskedFields, "conversation.channel");
         CollectionAssert.Contains(maskedFields, "contact.email", "The conversation's contact is attached masked.");
         Assert.AreEqual("ada", content.GetProperty("contact").GetProperty("displayName").GetString());
         Assert.AreEqual(0, content.GetProperty("contact").GetProperty("identities").GetArrayLength());
-        var sent = events.Single(item => item.Event.Event.Type == IntegrationEventTypes.ConversationMessageSent);
+        var sent = events.Single(item => string.Equals(item.Event.Event.Type, IntegrationEventTypes.ConversationMessageSent, StringComparison.Ordinal));
         Assert.AreEqual("Refund issued", Data(sent).GetProperty("content").GetProperty("body").GetString());
-        var note = events.Single(item => item.Event.Event.Type == IntegrationEventTypes.ConversationNoteAdded);
+        var note = events.Single(item => string.Equals(item.Event.Event.Type, IntegrationEventTypes.ConversationNoteAdded, StringComparison.Ordinal));
         Assert.IsFalse(note.Json.Contains("VIP", StringComparison.Ordinal), "Notes never carry bodies.");
-        var contact = events.Single(item => item.Event.Event.Type == IntegrationEventTypes.ContactCreated);
+        var contact = events.Single(item => string.Equals(item.Event.Event.Type, IntegrationEventTypes.ContactCreated, StringComparison.Ordinal));
         var contactContent = Data(contact).GetProperty("content");
         Assert.AreEqual("ada", contactContent.GetProperty("displayName").GetString());
         Assert.AreEqual(0, contactContent.GetProperty("identities").GetArrayLength(), "The masked email is removed.");
@@ -178,7 +178,7 @@ public sealed class DeliveryTests
 
         var letters = EventsFixture.Value(await fixture.InScopeAsync(provider => provider.GetRequiredService<IEventSubscriptionService>().ListDeadLettersAsync(fixture.Owner, id)));
         CollectionAssert.AreEqual(new long[] { 1, 2, 3, 4 }, letters.Select(letter => letter.Sequence).ToArray());
-        Assert.IsTrue(letters.All(letter => letter.Error == "subscriber-error" && letter.Attempts == 3));
+        Assert.IsTrue(letters.All(letter => string.Equals(letter.Error, "subscriber-error", StringComparison.Ordinal) && letter.Attempts == 3));
 
         fixture.Subscriber.Fail = false;
         var refused = await fixture.InScopeAsync(provider => provider.GetRequiredService<IEventSubscriptionService>().ReplayAsync(fixture.Agent, id, 0));

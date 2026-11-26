@@ -31,8 +31,8 @@ public sealed class ResourceAndPromptTests
         using (var doc = JsonDocument.Parse(Assert.IsInstanceOfType<TextResourceContents>(Assert.ContainsSingle(ownerTimeline.Contents)).Text))
         {
             Assert.IsTrue(doc.RootElement.GetProperty("notesIncluded").GetBoolean());
-            StringAssert.Contains(doc.RootElement.GetRawText(), "Secret internal note");
-            StringAssert.Contains(doc.RootElement.GetRawText(), "\"untrusted\"");
+            StringAssert.Contains(doc.RootElement.GetRawText(), "Secret internal note", StringComparison.Ordinal);
+            StringAssert.Contains(doc.RootElement.GetRawText(), "\"untrusted\"", StringComparison.Ordinal);
         }
 
         // Caller with conversation:read but without note:read -> timeline omits private note.
@@ -58,18 +58,18 @@ public sealed class ResourceAndPromptTests
         // Principal with no permissions is forbidden.
         host.Caller.User = "nobody";
         var forbidden = await Assert.ThrowsExactlyAsync<McpProtocolException>(() => host.Client.ReadResourceAsync($"ticketflow://conversations/{host.Conversation.Value}").AsTask());
-        StringAssert.Contains(forbidden.Message, "forbidden");
+        StringAssert.Contains(forbidden.Message, "forbidden", StringComparison.Ordinal);
 
         // Unauthenticated caller is rejected.
         host.Caller.User = null;
         var unauth = await Assert.ThrowsExactlyAsync<McpProtocolException>(() => host.Client.ReadResourceAsync("ticketflow://helpcenter/articles/reset").AsTask());
-        StringAssert.Contains(unauth.Message, "unauthenticated");
+        StringAssert.Contains(unauth.Message, "unauthenticated", StringComparison.Ordinal);
 
         // Disabled toolset refuses resource access.
         await using var restricted = await McpTestHost.CreateAsync(o => o.Toolsets = TicketFlowToolsets.Conversations);
         restricted.Caller.User = "owner";
         var unavailable = await Assert.ThrowsExactlyAsync<McpProtocolException>(() => restricted.Client.ReadResourceAsync("ticketflow://helpcenter/articles/reset").AsTask());
-        StringAssert.Contains(unavailable.Message, "toolset-unavailable");
+        StringAssert.Contains(unavailable.Message, "toolset-unavailable", StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -85,18 +85,18 @@ public sealed class ResourceAndPromptTests
 
         var triage = await host.Client.GetPromptAsync("triage_conversation", new Dictionary<string, object?> { ["conversationId"] = host.Conversation.Value });
         var triageText = Assert.IsInstanceOfType<TextContentBlock>(Assert.ContainsSingle(triage.Messages).Content).Text;
-        StringAssert.Contains(triageText, host.Conversation.Value);
-        StringAssert.Contains(triageText, "untrusted");
+        StringAssert.Contains(triageText, host.Conversation.Value, StringComparison.Ordinal);
+        StringAssert.Contains(triageText, "untrusted", StringComparison.Ordinal);
 
         var draft = await host.Client.GetPromptAsync("draft_customer_reply", new Dictionary<string, object?> { ["conversationId"] = host.Conversation.Value, ["tone"] = "empathetic" });
         var draftText = Assert.IsInstanceOfType<TextContentBlock>(Assert.ContainsSingle(draft.Messages).Content).Text;
-        StringAssert.Contains(draftText, "empathetic");
-        StringAssert.Contains(draftText, "conversations_reply");
+        StringAssert.Contains(draftText, "empathetic", StringComparison.Ordinal);
+        StringAssert.Contains(draftText, "conversations_reply", StringComparison.Ordinal);
 
         var summary = await host.Client.GetPromptAsync("summarize_conversation", new Dictionary<string, object?> { ["conversationId"] = host.Conversation.Value });
-        StringAssert.Contains(Assert.IsInstanceOfType<TextContentBlock>(Assert.ContainsSingle(summary.Messages).Content).Text, "notesIncluded");
+        StringAssert.Contains(Assert.IsInstanceOfType<TextContentBlock>(Assert.ContainsSingle(summary.Messages).Content).Text, "notesIncluded", StringComparison.Ordinal);
 
         var sla = await host.Client.GetPromptAsync("investigate_sla_risk", new Dictionary<string, object?> { ["inboxId"] = "support" });
-        StringAssert.Contains(Assert.IsInstanceOfType<TextContentBlock>(Assert.ContainsSingle(sla.Messages).Content).Text, "support");
+        StringAssert.Contains(Assert.IsInstanceOfType<TextContentBlock>(Assert.ContainsSingle(sla.Messages).Content).Text, "support", StringComparison.Ordinal);
     }
 }

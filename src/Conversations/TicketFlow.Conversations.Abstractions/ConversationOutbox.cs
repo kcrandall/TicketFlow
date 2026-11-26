@@ -27,9 +27,9 @@ public sealed record ConversationEventSummary
         if (!Enum.IsDefined(kind))
             throw new ArgumentOutOfRangeException(nameof(kind));
         if (message == default(MessageId) || (direction is { } value && !Enum.IsDefined(value)))
-            throw new ArgumentException("Message references must be initialized.");
+            throw new ArgumentException("Message references must be initialized.", message == default(MessageId) ? nameof(message) : nameof(direction));
         if ((kind == ConversationEventKind.Message) != (direction is not null) || (kind is ConversationEventKind.Message or ConversationEventKind.Note) != (message is not null))
-            throw new ArgumentException("Message summaries carry a message and direction; note summaries a message; others neither.");
+            throw new ArgumentException("Message summaries carry a message and direction; note summaries a message; others neither.", nameof(kind));
         Sequence = sequence;
         Kind = kind;
         Message = message;
@@ -70,7 +70,7 @@ public sealed record ConversationChange
             throw new ArgumentException("A change identifier is required.", nameof(id));
         ArgumentNullException.ThrowIfNull(scope);
         if (conversation == default || inbox == default)
-            throw new ArgumentException("Conversation and inbox identifiers are required.");
+            throw new ArgumentException("Conversation and inbox identifiers are required.", conversation == default ? nameof(conversation) : nameof(inbox));
         ArgumentOutOfRangeException.ThrowIfLessThan(revision, 1);
         if (!Enum.IsDefined(kind))
             throw new ArgumentOutOfRangeException(nameof(kind));
@@ -83,7 +83,7 @@ public sealed record ConversationChange
                 throw new ArgumentException($"A change summarizes at most {MaximumEvents} events.", nameof(events));
         if ((kind == ConversationChangeKind.DeliveryUpdated) != (message is not null && delivery is not null) || message == default(MessageId)
             || (delivery is { } state && !Enum.IsDefined(state)))
-            throw new ArgumentException("Delivery changes, and only they, name a message and delivery state.");
+            throw new ArgumentException("Delivery changes, and only they, name a message and delivery state.", nameof(kind));
         if ((kind == ConversationChangeKind.EventsAppended && Events.Count == 0)
             || (kind is ConversationChangeKind.DeliveryUpdated or ConversationChangeKind.Deleted && Events.Count > 0))
             throw new ArgumentException("Appended changes summarize at least one event; delivery and delete changes none.", nameof(events));

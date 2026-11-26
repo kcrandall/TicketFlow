@@ -105,7 +105,7 @@ public sealed class PostgresAssistStore : IAssistStore
             recent.Parameters.Add(new NpgsqlParameter<int>("offset", NpgsqlDbType.Integer) { TypedValue = requestsPerMinute - 1 });
             await using var reader = await recent.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return new AssistQuotaExceeded(AssistQuotaKind.RequestsPerMinute, reader.GetFieldValue<DateTimeOffset>(0) + TimeSpan.FromMinutes(1));
+                return new AssistQuotaExceeded(AssistQuotaKind.RequestsPerMinute, await reader.GetFieldValueAsync<DateTimeOffset>(0, cancellationToken).ConfigureAwait(false) + TimeSpan.FromMinutes(1));
         }
         if (reservation.ReservedTokens > dailyTokenLimit)
             return new AssistQuotaExceeded(AssistQuotaKind.DailyTokens, dayStart.AddDays(1));

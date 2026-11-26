@@ -126,7 +126,7 @@ internal sealed class SignalRHost : IAsyncDisposable
         while (true)
         {
             var payload = await events.Reader.ReadAsync(timeout.Token);
-            if (payload.GetProperty("type").GetString() == type)
+            if (string.Equals(payload.GetProperty("type").GetString(), type, StringComparison.Ordinal))
                 return payload;
         }
     }

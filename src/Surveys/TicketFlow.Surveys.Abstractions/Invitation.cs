@@ -62,7 +62,7 @@ public sealed record SurveyInvitation
     {
         if (!id.IsInitialized || !survey.IsInitialized || conversation == default || contact == default || !locale.IsInitialized
             || inbox == default(InboxId) || team == default(TeamId) || agent == default(UserId) || tokenHash is { IsInitialized: false })
-            throw new ArgumentException("Invitation identifiers must be initialized.");
+            throw new ArgumentException("Invitation identifiers must be initialized.", nameof(id));
         if (!Enum.IsDefined(kind))
             throw new ArgumentOutOfRangeException(nameof(kind));
         if (!Enum.IsDefined(state))
@@ -71,13 +71,13 @@ public sealed record SurveyInvitation
         ArgumentOutOfRangeException.ThrowIfGreaterThan(attempts, MaximumAttempts);
         var issued = tokenHash is not null;
         if (issued != (issuedAt is not null) || issued != (expiresAt is not null))
-            throw new ArgumentException("Token hash, issue and expiry times are set together.");
+            throw new ArgumentException("Token hash, issue and expiry times are set together.", nameof(tokenHash));
         if (!issued && state is SurveyInvitationState.Sent or SurveyInvitationState.Responded)
-            throw new ArgumentException("Sent and responded invitations have a token.");
+            throw new ArgumentException("Sent and responded invitations have a token.", nameof(state));
         if ((state == SurveyInvitationState.Sending) != (leaseUntil is not null))
-            throw new ArgumentException("A lease is present exactly while the invitation is being sent.");
+            throw new ArgumentException("A lease is present exactly while the invitation is being sent.", nameof(leaseUntil));
         if (sendAfter < createdAt || (expiresAt is { } expiry && issuedAt is { } at && expiry <= at))
-            throw new ArgumentException("Invitation times are inconsistent.");
+            throw new ArgumentException("Invitation times are inconsistent.", sendAfter < createdAt ? nameof(sendAfter) : nameof(expiresAt));
         Id = id;
         Survey = survey;
         Kind = kind;
@@ -166,7 +166,7 @@ public sealed record SurveyResponse
     {
         if (!invitation.IsInitialized || !survey.IsInitialized || conversation == default || contact == default
             || inbox == default(InboxId) || team == default(TeamId) || agent == default(UserId))
-            throw new ArgumentException("Response identifiers must be initialized.");
+            throw new ArgumentException("Response identifiers must be initialized.", nameof(invitation));
         if (!SurveyScales.IsValid(kind, score))
             throw new ArgumentOutOfRangeException(nameof(score));
         if (comment is not null && !SurveyText.IsMultiline(comment, MaximumCommentLength))

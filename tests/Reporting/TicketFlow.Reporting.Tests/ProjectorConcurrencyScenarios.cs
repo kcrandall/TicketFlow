@@ -73,7 +73,7 @@ internal static class ProjectorConcurrencyScenarios
         static string Key(ReportFact fact) => $"{fact.SourceId}:{fact.Metric}:{fact.Value}:{fact.OccurredAt:O}:{fact.Dimensions.Agent}:{fact.Dimensions.Team}";
         var expected = (await reference.ListFactsAsync(fixture.Scope, new ReportFactQuery(ReportingFixture.Monday.AddDays(-1), ReportingFixture.Monday.AddDays(30), limit: 1000),
             AllowAllFilter.Instance)).Items.Select(Key).ToArray();
-        var actual = (await fixture.FactsAsync()).Where(fact => fact.Conversation.Value == conversation).Select(Key).ToArray();
+        var actual = (await fixture.FactsAsync()).Where(fact => string.Equals(fact.Conversation.Value, conversation, StringComparison.Ordinal)).Select(Key).ToArray();
         Assert.IsGreaterThan(10, expected.Length);
         CollectionAssert.AreEquivalent(expected, actual);
         var rollups = await fixture.Store.AggregateAsync(fixture.Scope, StoreContracts.ReportingStoreContract.Whole(ReportingFixture.Monday.AddDays(-1), ReportingFixture.Monday.AddDays(30)),

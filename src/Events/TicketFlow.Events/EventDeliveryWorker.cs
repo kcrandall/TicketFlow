@@ -90,7 +90,7 @@ public sealed class EventDeliveryWorker
         }
 
         // Share log reads and non-content CloudEvent renders across claims in the same run, with bounded delivery concurrency.
-        var logCache = new ConcurrentDictionary<(TicketScope Scope, long Cursor), Lazy<Task<IReadOnlyList<StoredIntegrationEvent>>>>();
+        var logCache = new ConcurrentDictionary<(TicketScope Scope, long Cursor), SingleFlight<IReadOnlyList<StoredIntegrationEvent>>>();
         var renderCache = new ConcurrentDictionary<(TicketScope Scope, long Sequence, EventPrivacy Privacy), string>();
         using var gate = new SemaphoreSlim(Math.Min(DeliveryConcurrency, claims.Count));
         var tasks = new Task<(Outcome Kind, int Events, bool Skipped)>[claims.Count];
@@ -116,7 +116,7 @@ public sealed class EventDeliveryWorker
     }
 
     private async Task<(Outcome Kind, int Events, bool Skipped)> RunClaimBoundedAsync(EventDeliveryClaim claim, SemaphoreSlim gate,
-        ConcurrentDictionary<(TicketScope Scope, long Cursor), Lazy<Task<IReadOnlyList<StoredIntegrationEvent>>>> logCache,
+        ConcurrentDictionary<(TicketScope Scope, long Cursor), SingleFlight<IReadOnlyList<StoredIntegrationEvent>>> logCache,
         ConcurrentDictionary<(TicketScope Scope, long Sequence, EventPrivacy Privacy), string> renderCache, CancellationToken cancellationToken)
     {
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -135,7 +135,7 @@ public sealed class EventDeliveryWorker
     }
 
     private async Task<(Outcome Kind, int Events)> ExecuteClaimAsync(EventDeliveryClaim claim,
-        ConcurrentDictionary<(TicketScope Scope, long Cursor), Lazy<Task<IReadOnlyList<StoredIntegrationEvent>>>>? logCache,
+        ConcurrentDictionary<(TicketScope Scope, long Cursor), SingleFlight<IReadOnlyList<StoredIntegrationEvent>>>? logCache,
         ConcurrentDictionary<(TicketScope Scope, long Sequence, EventPrivacy Privacy), string>? renderCache, CancellationToken cancellationToken)
     {
         try
@@ -159,8 +159,36 @@ public sealed class EventDeliveryWorker
         Suspended,
     }
 
+    private sealed class SingleFlight<T>(Func<Task<T>> factory)
+    {
+        private readonly TaskCompletionSource<T> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int started;
+
+        public async Task<T> RunAsync()
+        {
+            if (Interlocked.Exchange(ref started, 1) != 0)
+                return await completion.Task.ConfigureAwait(false);
+            try
+            {
+                var result = await factory().ConfigureAwait(false);
+                completion.TrySetResult(result);
+                return result;
+            }
+            catch (OperationCanceledException ex)
+            {
+                completion.TrySetCanceled(ex.CancellationToken);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                completion.TrySetException(ex);
+                throw;
+            }
+        }
+    }
+
     private async Task<(Outcome Kind, int Events)> DeliverAsync(EventDeliveryClaim claim,
-        ConcurrentDictionary<(TicketScope Scope, long Cursor), Lazy<Task<IReadOnlyList<StoredIntegrationEvent>>>>? logCache,
+        ConcurrentDictionary<(TicketScope Scope, long Cursor), SingleFlight<IReadOnlyList<StoredIntegrationEvent>>>? logCache,
         ConcurrentDictionary<(TicketScope Scope, long Sequence, EventPrivacy Privacy), string>? renderCache, CancellationToken cancellationToken)
     {
         var stored = claim.Subscription;
@@ -184,8 +212,8 @@ public sealed class EventDeliveryWorker
         IReadOnlyList<StoredIntegrationEvent> page;
         if (logCache is not null)
         {
-            var lazy = logCache.GetOrAdd((scope, start), key => new Lazy<Task<IReadOnlyList<StoredIntegrationEvent>>>(() => log.ReadAsync(key.Scope, key.Cursor, options.MaximumScan, cancellationToken)));
-            page = await lazy.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+            var flight = logCache.GetOrAdd((scope, start), key => new SingleFlight<IReadOnlyList<StoredIntegrationEvent>>(() => log.ReadAsync(key.Scope, key.Cursor, options.MaximumScan, cancellationToken)));
+            page = await flight.RunAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         else
             page = await log.ReadAsync(scope, start, options.MaximumScan, cancellationToken).ConfigureAwait(false);
@@ -262,7 +290,7 @@ public sealed class EventDeliveryWorker
     }
 
     /// <summary>Renders the batch; when hydration or rendering fails for an event, returns the events before it and that event as poison.</summary>
-    private async Task<(List<RenderedEvent> Rendered, StoredIntegrationEvent? Poison)> RenderAsync(IReadOnlyList<StoredIntegrationEvent> selected, EventPrivacy privacy,
+    private async Task<(List<RenderedEvent> Rendered, StoredIntegrationEvent? Poison)> RenderAsync(List<StoredIntegrationEvent> selected, EventPrivacy privacy,
         ApiClientPrincipal principal, ConcurrentDictionary<(TicketScope Scope, long Sequence, EventPrivacy Privacy), string>? renderCache, CancellationToken cancellationToken)
     {
         IReadOnlyDictionary<long, EventContent>? contents = null;
@@ -327,18 +355,18 @@ public sealed class EventDeliveryWorker
             : (Outcome.Lost, 0);
     }
 
-    private async Task<(Outcome, int)> FailAsync(EventDeliveryClaim claim, IReadOnlyList<StoredIntegrationEvent> batch, long cursor, EventSinkFailed failure, CancellationToken cancellationToken)
+    private async Task<(Outcome, int)> FailAsync(EventDeliveryClaim claim, StoredIntegrationEvent[] batch, long cursor, EventSinkFailed failure, CancellationToken cancellationToken)
     {
         var scope = claim.Subscription.Scope;
         var id = claim.Subscription.Subscription.Id;
         var attempts = claim.State.Attempts + 1;
         var now = time.GetUtcNow();
-        if (batch.Count > 0 && (failure.Permanent || attempts >= options.MaximumAttempts))
+        if (batch.Length > 0 && (failure.Permanent || attempts >= options.MaximumAttempts))
         {
             var letters = batch.Select(item => new EventDeadLetter(id, item.Sequence, item.Event.Id, item.Event.Type, attempts, failure.Code, now)).ToList();
             return await subscriptions.DeadLetterAsync(scope, id, claim.Fence, cursor, letters, now, cancellationToken).ConfigureAwait(false) ? (Outcome.DeadLettered, 0) : (Outcome.Lost, 0);
         }
-        if (batch.Count == 0 && failure.Code != EngineError && attempts >= options.MaximumAttempts)
+        if (batch.Length == 0 && !string.Equals(failure.Code, EngineError, StringComparison.Ordinal) && attempts >= options.MaximumAttempts)
             return await subscriptions.SuspendAsync(scope, id, claim.Fence, failure.Code, cancellationToken).ConfigureAwait(false) ? (Outcome.Suspended, 0) : (Outcome.Lost, 0);
         var delay = Backoff(attempts);
         if (failure.RetryAfter is { } requested && requested > delay)
@@ -361,7 +389,7 @@ public sealed class InProcessEventSink : IEventSink
 {
     public const string SinkKind = "in-process";
 
-    private readonly IReadOnlyDictionary<string, IEventSubscriber> subscribers;
+    private readonly Dictionary<string, IEventSubscriber> subscribers;
 
     public InProcessEventSink(IEnumerable<IEventSubscriber> subscribers)
     {

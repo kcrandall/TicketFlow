@@ -66,7 +66,7 @@ public sealed class SlaReviewRegressionTests
         Assert.AreEqual(1, (await fixture.RunTimersAsync()).Evaluated);
 
         var events = await fixture.SlaEventsWithActorsAsync("c1");
-        Assert.AreEqual(2, events.Count(item => item.Event.Kind == SlaEventCodec.AppliedKind), "the forged and the real event");
+        Assert.AreEqual(2, events.Count(item => string.Equals(item.Event.Kind, SlaEventCodec.AppliedKind, StringComparison.Ordinal)), "the forged and the real event");
         Assert.AreEqual(1, events.Count(item => item.Actor == SlaFixture.Worker));
         tracker = (await TrackerAsync(fixture, "c1"))!.Tracker;
         Assert.AreEqual(0, tracker.Pending.Count);

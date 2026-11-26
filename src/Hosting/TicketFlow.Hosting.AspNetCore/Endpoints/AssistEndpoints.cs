@@ -98,8 +98,8 @@ internal static class AssistEndpoints
         RetryAfter(http, failed.RetryAfter);
         var code = "provider-" + TicketFlowHttp.Token(failed.Failure);
         return failed.Failure is AssistProviderFailure.RateLimited or AssistProviderFailure.Overloaded or AssistProviderFailure.Timeout || failed.Retryable
-            ? TicketFlowHttp.Problem(StatusCodes.Status503ServiceUnavailable, code, extensions: new Dictionary<string, object?> { ["retryable"] = failed.Retryable })
-            : TicketFlowHttp.Problem(StatusCodes.Status502BadGateway, code, extensions: new Dictionary<string, object?> { ["retryable"] = failed.Retryable });
+            ? TicketFlowHttp.Problem(StatusCodes.Status503ServiceUnavailable, code, extensions: new Dictionary<string, object?>(StringComparer.Ordinal) { ["retryable"] = failed.Retryable })
+            : TicketFlowHttp.Problem(StatusCodes.Status502BadGateway, code, extensions: new Dictionary<string, object?>(StringComparer.Ordinal) { ["retryable"] = failed.Retryable });
     }
 
     private static void RetryAfter(HttpContext http, TimeSpan? retryAfter)

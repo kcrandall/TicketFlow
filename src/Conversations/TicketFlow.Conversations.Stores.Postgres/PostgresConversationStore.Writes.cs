@@ -273,7 +273,7 @@ public sealed partial class PostgresConversationStore
         if (write.Change.Inbox != current.Inbox)
             throw new ArgumentException("The change must name the message's inbox.", nameof(write));
         var externalId = current.ExternalId;
-        if (write.ExternalId is { } requested && requested != current.ExternalId)
+        if (write.ExternalId is { } requested && !string.Equals(requested, current.ExternalId, StringComparison.Ordinal))
         {
             if (current.ExternalId is not null)
                 throw new ArgumentException("A message's external identifier cannot be replaced.", nameof(write));
@@ -303,11 +303,11 @@ public sealed partial class PostgresConversationStore
                 sequence = await ExecuteBatchAsync(batch, cancellationToken).ConfigureAwait(false)
                     ?? throw new InvalidOperationException("The outbox entry was not written.");
             }
-            catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation)
+            catch (PostgresException error) when (string.Equals(error.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal))
             {
                 await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
                 var holder = await FindExternalAsync(connection, null, scope, current.Inbox, externalId!, cancellationToken).ConfigureAwait(false)
-                    ?? throw new InvalidOperationException("A message external identifier conflicted but no holder was found.");
+                    ?? throw new InvalidOperationException("A message external identifier conflicted but no holder was found.", error);
                 return new ConversationDuplicateMessage(holder);
             }
         }

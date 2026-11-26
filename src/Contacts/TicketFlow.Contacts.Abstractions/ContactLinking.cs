@@ -17,7 +17,7 @@ public sealed record ExternalAccountRef
         Address = ContactIdentityAddress.Normalize(ContactIdentityKind.ExternalUser, externalId, @namespace) switch
         {
             ContactIdentityAddress address => address,
-            ContactAddressInvalid invalid => throw new ArgumentException($"The external account is invalid: {invalid.Error}."),
+            ContactAddressInvalid invalid => throw new ArgumentException($"The external account is invalid: {invalid.Error}.", nameof(externalId)),
         };
     }
 
@@ -43,7 +43,7 @@ public sealed record ContactLinkRequest
         Account = account ?? throw new ArgumentNullException(nameof(account));
         VerificationSource = ContactText.RequireToken(verificationSource, IdentityVerification.MaximumSourceLength, nameof(verificationSource), "Verification sources");
         if ((contact is null) == (evidence is null))
-            throw new ArgumentException("Name exactly one of a contact or evidence.");
+            throw new ArgumentException("Name exactly one of a contact or evidence.", nameof(contact));
         if (contact == default(ContactId))
             throw new ArgumentException("Contact identifiers must be initialized.", nameof(contact));
         if (evidence is not null && evidence == account.Address)
@@ -130,7 +130,7 @@ public sealed record CustomerResolveRequest
             throw new ArgumentException($"At most {MaximumClaims} distinct claims are allowed.", nameof(claims));
         DisplayName = ContactText.OptionalText(displayName, ContactProfile.MaximumDisplayNameLength, nameof(displayName));
         if (linkContact is not null && linkEvidence is not null)
-            throw new ArgumentException("Name at most one of a contact or evidence to link.");
+            throw new ArgumentException("Name at most one of a contact or evidence to link.", nameof(linkContact));
         if (linkContact == default(ContactId))
             throw new ArgumentException("Contact identifiers must be initialized.", nameof(linkContact));
         if (linkEvidence is not null && linkEvidence == account.Address)
@@ -259,15 +259,15 @@ public sealed record ContactLinkSuggestion
         Guid? merge = null)
     {
         if (id == Guid.Empty || merge == Guid.Empty)
-            throw new ArgumentException("Suggestion and merge identifiers must be non-empty.");
+            throw new ArgumentException("Suggestion and merge identifiers must be non-empty.", id == Guid.Empty ? nameof(id) : nameof(merge));
         if (candidate == default || account == default || candidate == account)
-            throw new ArgumentException("Candidate and account must be initialized and distinct.");
+            throw new ArgumentException("Candidate and account must be initialized and distinct.", candidate == default ? nameof(candidate) : nameof(account));
         ArgumentNullException.ThrowIfNull(evidence);
         ArgumentNullException.ThrowIfNull(createdBy);
         if (!Enum.IsDefined(status))
             throw new ArgumentOutOfRangeException(nameof(status));
         if (status == ContactLinkSuggestionStatus.Pending && (decidedBy is not null || merge is not null))
-            throw new ArgumentException("Pending suggestions carry no decision.");
+            throw new ArgumentException("Pending suggestions carry no decision.", nameof(status));
         if (merge is not null && status != ContactLinkSuggestionStatus.Accepted)
             throw new ArgumentException("Only accepted suggestions carry a merge.", nameof(merge));
         Id = id;

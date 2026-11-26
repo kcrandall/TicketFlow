@@ -29,8 +29,8 @@ public sealed record EventScopeRule
     public bool Matches(TicketScope scope)
     {
         ArgumentNullException.ThrowIfNull(scope);
-        return scope.TenantId == TenantId && (ProjectId is null || scope.ProjectId == ProjectId) && (EnvironmentId is null || scope.EnvironmentId == EnvironmentId)
-            && (AppId is null || scope.AppId == AppId) && (WorkspaceId is null || scope.WorkspaceId == WorkspaceId);
+        return string.Equals(scope.TenantId, TenantId, StringComparison.Ordinal) && (ProjectId is null || string.Equals(scope.ProjectId, ProjectId, StringComparison.Ordinal)) && (EnvironmentId is null || string.Equals(scope.EnvironmentId, EnvironmentId, StringComparison.Ordinal))
+            && (AppId is null || string.Equals(scope.AppId, AppId, StringComparison.Ordinal)) && (WorkspaceId is null || scope.WorkspaceId == WorkspaceId);
     }
 
     /// <summary>True when any rule matches.</summary>
@@ -96,7 +96,7 @@ public sealed record EventSubscriptionFilter
         if (Types.Count is 0 or > MaximumPatterns || Types.Any(pattern => !pattern.IsInitialized))
             throw new ArgumentException($"A filter has 1-{MaximumPatterns} initialized type patterns.", nameof(types));
         if (Inboxes.Count > MaximumIdentifiers || Teams.Count > MaximumIdentifiers || Inboxes.Any(inbox => inbox == default) || Teams.Any(team => team == default))
-            throw new ArgumentException($"A filter lists at most {MaximumIdentifiers} initialized inboxes and teams.");
+            throw new ArgumentException($"A filter lists at most {MaximumIdentifiers} initialized inboxes and teams.", Inboxes.Count > MaximumIdentifiers || Inboxes.Any(inbox => inbox == default) ? nameof(inboxes) : nameof(teams));
     }
 
     /// <summary>Every event type, no inbox or team restriction.</summary>
@@ -167,7 +167,7 @@ public sealed record EventSubscription
         EventPrivacy privacy = EventPrivacy.IdsOnly, bool enabled = true, int batchSize = 50)
     {
         if (!id.IsInitialized || principal == default)
-            throw new ArgumentException("Subscription and principal identifiers are required.");
+            throw new ArgumentException("Subscription and principal identifiers are required.", !id.IsInitialized ? nameof(id) : nameof(principal));
         if (!Enum.IsDefined(privacy))
             throw new ArgumentOutOfRangeException(nameof(privacy));
         ArgumentOutOfRangeException.ThrowIfLessThan(batchSize, 1);

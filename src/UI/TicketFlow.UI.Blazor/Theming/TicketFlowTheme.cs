@@ -39,7 +39,7 @@ public sealed record TicketFlowThemePreference(string Theme, TicketFlowThemeMode
             "system" => TicketFlowThemeMode.System,
             _ => null,
         };
-        return mode is { } parsed && themes.Any(theme => theme.Id == id) ? new TicketFlowThemePreference(id, parsed) : null;
+        return mode is { } parsed && themes.Any(theme => string.Equals(theme.Id, id, StringComparison.Ordinal)) ? new TicketFlowThemePreference(id, parsed) : null;
     }
 }
 

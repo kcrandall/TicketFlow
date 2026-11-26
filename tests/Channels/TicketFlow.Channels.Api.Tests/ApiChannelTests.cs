@@ -175,7 +175,7 @@ public sealed class ApiChannelTests
         var policy = new ApiWebhookDestinationPolicy();
         var dialled = new List<IPAddress>();
         var guarded = ApiWebhookHttp.CreateHandler(policy,
-            resolve: (host, _) => Task.FromResult(host == "rebind.example.com" ? new[] { IPAddress.Parse("93.184.216.34"), IPAddress.Parse("10.0.0.5") } : [IPAddress.Parse("93.184.216.34")]),
+            resolve: (host, _) => Task.FromResult(string.Equals(host, "rebind.example.com", StringComparison.Ordinal) ? new[] { IPAddress.Parse("93.184.216.34"), IPAddress.Parse("10.0.0.5") } : [IPAddress.Parse("93.184.216.34")]),
             dial: (address, _, _) =>
             {
                 dialled.Add(address);

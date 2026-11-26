@@ -356,7 +356,7 @@ public static class ConversationStoreContract
         var lease = TimeSpan.FromMinutes(1);
         var first = await primary.ClaimAsync("realtime", 10, lease);
         CollectionAssert.AreEqual(new[] { "oa", "ob" }, first.Select(claim => claim.Entry.Change.Conversation.Value).ToArray());
-        Assert.IsTrue(first.All(claim => claim.Fence == 1 && claim.Attempt == 1 && claim.Consumer == "realtime"));
+        Assert.IsTrue(first.All(claim => claim.Fence == 1 && claim.Attempt == 1 && string.Equals(claim.Consumer, "realtime", StringComparison.Ordinal)));
         Assert.AreEqual(ConversationChangeKind.Started, first[0].Entry.Change.Kind);
         Assert.AreEqual(scope, first[0].Entry.Change.Scope);
         Assert.AreEqual(0, (await competing.ClaimAsync("realtime", 10, lease)).Count, "leased entries and their successors are not claimable");
@@ -392,7 +392,7 @@ public static class ConversationStoreContract
 
         // Other consumers are independent; entries before registration are not delivered.
         var sla = await competing.ClaimAsync("sla", 100, lease);
-        Assert.IsFalse(sla.Any(claim => claim.Entry.Change.Conversation.Value == "before-registration"));
+        Assert.IsFalse(sla.Any(claim => string.Equals(claim.Entry.Change.Conversation.Value, "before-registration", StringComparison.Ordinal)));
         CollectionAssert.AreEqual(new[] { "oa", "ob" }, sla.Select(claim => claim.Entry.Change.Conversation.Value).ToArray());
 
         // Pruning removes only fully completed entries.

@@ -15,5 +15,10 @@ public readonly record struct ApiClientId : IComparable<ApiClientId>
 
     public int CompareTo(ApiClientId other) => string.CompareOrdinal(value, other.value);
 
+    public static bool operator <(ApiClientId left, ApiClientId right) => left.CompareTo(right) < 0;
+    public static bool operator <=(ApiClientId left, ApiClientId right) => left.CompareTo(right) <= 0;
+    public static bool operator >(ApiClientId left, ApiClientId right) => left.CompareTo(right) > 0;
+    public static bool operator >=(ApiClientId left, ApiClientId right) => left.CompareTo(right) >= 0;
+
     public override string ToString() => value ?? string.Empty;
 }

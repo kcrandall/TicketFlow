@@ -110,7 +110,7 @@ public static class ContactStoreContract
             new ContactPut(NewContact("contact-d", identities: [Verified(Email("twin@example.com"))]), null),
             new ContactPut(NewContact("contact-e", identities: [Verified(Email("twin@example.com"))]), null),
         ]));
-        StringAssert.StartsWith(Describe(sameBatch), "taken:");
+        StringAssert.StartsWith(Describe(sameBatch), "taken:", StringComparison.Ordinal);
         Assert.IsNull(await primary.GetAsync(scope, new ContactId("contact-d")));
 
         foreach (var other in TestScopes.LevelVariants(scope).Skip(1))
@@ -281,7 +281,7 @@ public static class ContactStoreContract
         Assert.AreEqual("conflict:c00:1", Describe(failed));
         var taken = await competing.WriteAsync(scope, new ContactWriteBatch(puts: [new ContactPut(NewContact("v1", identities: [Verified(Email("v@example.com"))]), null),
             new ContactPut(NewContact("v2", identities: [Verified(Email("v@example.com"))]), null)], changes: [Change(ContactChangeKind.Created, "v1")]));
-        StringAssert.StartsWith(Describe(taken), "taken:");
+        StringAssert.StartsWith(Describe(taken), "taken:", StringComparison.Ordinal);
         var next = (ContactWriteApplied)(await competing.WriteAsync(scope, new ContactWriteBatch(puts: [new ContactPut(NewContact("after-failure"), null)],
             changes: [Change(ContactChangeKind.Created, "after-failure")]))).Value!;
         Assert.AreEqual(25L, next.Changes.Single().Sequence);
@@ -304,7 +304,7 @@ public static class ContactStoreContract
             var sourceStored = (await primary.GetAsync(scope, new ContactId(source)))!;
             StringAssert.StartsWith(Describe(await primary.WriteAsync(scope, new ContactWriteBatch(
                 puts: [new ContactPut(targetStored.Contact, targetStored.Revision), new ContactPut(sourceStored.Contact.Tombstone(targetStored.Id, At), sourceStored.Revision)],
-                createMerge: ContactMergerShape(targetStored.Contact, sourceStored.Contact, actor)))), "applied:");
+                createMerge: ContactMergerShape(targetStored.Contact, sourceStored.Contact, actor)))), "applied:", StringComparison.Ordinal);
         }
         await MergeAsync("child-a", "grandchild");
         await MergeAsync("root", "child-a");

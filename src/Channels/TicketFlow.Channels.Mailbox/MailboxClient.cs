@@ -56,7 +56,7 @@ public sealed class MailKitMailboxClientFactory : IMailboxClientFactory
         }
         catch
         {
-            client.Dispose();
+            await client.DisposeAsync().ConfigureAwait(false);
             throw;
         }
     }
@@ -138,7 +138,7 @@ internal sealed class MailKitMailboxClient(ImapClient client) : IMailboxClient
                 total += read;
                 if (total > maxBytes)
                     return new MailboxFetchedMessage(uid, total, null, TooLarge: true);
-                ms.Write(buffer, 0, read);
+                await ms.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
             }
             return new MailboxFetchedMessage(uid, total, ms.ToArray(), TooLarge: false);
         }

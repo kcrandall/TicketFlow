@@ -130,7 +130,7 @@ public sealed class PostgresAccessFilterTests
         // Rows missing the attribute (NULL column or absent key) are unknown under negation and excluded.
         CollectionAssert.AreEquivalent(new[] { "a" }, (await SelectAsync(database.First, PostgresAccessFilterTranslator.Translate(negated, Columns).OrDenyAll())).ToArray());
         var hostileMatch = PostgresAccessFilterTranslator.Translate(new AttributeInFilter("tier", [hostile]), Columns).OrDenyAll();
-        Assert.DoesNotContain("DROP", hostileMatch.Sql);
+        Assert.DoesNotContain("DROP", hostileMatch.Sql, StringComparison.Ordinal);
         CollectionAssert.AreEquivalent(new[] { "a" }, (await SelectAsync(database.First, hostileMatch)).ToArray());
 
         // Without an attribute column the negated predicate would match everything if dropped; it must deny all instead.
@@ -160,10 +160,10 @@ public sealed class PostgresAccessFilterTranslatorTests
         Assert.HasCount(12, sql.Parameters);
         CollectionAssert.AreEqual(Enumerable.Range(0, 12).Select(index => $"p_{index}").ToArray(), sql.Parameters.Select(parameter => parameter.ParameterName).ToArray());
         foreach (var literal in new[] { scope.TenantId, "t1", "ada", "vip", "tier", "gold", "region", "eu" })
-            Assert.DoesNotContain("'" + literal, sql.Sql);
-        CollectionAssert.AreEqual(new[] { "t1", "t2" }, (string[])sql.Parameters.Single(parameter => parameter.Value is string[] { Length: 2 } values && values[0] == "t1").Value!);
+            Assert.DoesNotContain("'" + literal, sql.Sql, StringComparison.Ordinal);
+        CollectionAssert.AreEqual(new[] { "t1", "t2" }, (string[])sql.Parameters.Single(parameter => parameter.Value is string[] { Length: 2 } values && string.Equals(values[0], "t1", StringComparison.Ordinal)).Value!);
         CollectionAssert.Contains(sql.Parameters.Select(parameter => parameter.Value).ToArray(), scope.TenantId);
-        StringAssert.Contains(sql.Sql, "\"r\".\"labels\"");
+        StringAssert.Contains(sql.Sql, "\"r\".\"labels\"", StringComparison.Ordinal);
     }
 
     [TestMethod]

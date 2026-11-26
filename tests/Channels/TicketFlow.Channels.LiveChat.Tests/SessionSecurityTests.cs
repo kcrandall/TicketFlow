@@ -18,7 +18,7 @@ public sealed class SessionSecurityTests
         var first = VisitorSessionTokens.Issue(id);
         var second = VisitorSessionTokens.Issue(id);
         Assert.AreNotEqual(first.Token, second.Token);
-        Assert.StartsWith("tfvs1.vs_abc.", first.Token);
+        Assert.StartsWith("tfvs1.vs_abc.", first.Token, StringComparison.Ordinal);
         var secret = first.Token["tfvs1.vs_abc.".Length..];
         Assert.AreEqual(52, secret.Length, "256-bit secrets in base32.");
         CollectionAssert.AreEqual(SHA256.HashData(Encoding.ASCII.GetBytes(secret)), first.Hash.ToArray());
@@ -29,7 +29,7 @@ public sealed class SessionSecurityTests
         foreach (var malformed in new[] { "", "tfvs1.", "tfvs2.vs_abc." + secret, "tfvs1.vs_abc", "tfvs1..x", $"tfvs1.vs_abc.{secret}!", $"tfvs1.vs_abc.{secret.ToUpperInvariant()}",
             $"tfvs1.vs_abc.{secret[..^1]}", new string('a', 500) })
             Assert.IsNull(VisitorSessionTokens.Parse(malformed), malformed);
-        Assert.Contains("redacted", first.ToString());
+        Assert.Contains("redacted", first.ToString(), StringComparison.Ordinal);
     }
 
     [TestMethod]

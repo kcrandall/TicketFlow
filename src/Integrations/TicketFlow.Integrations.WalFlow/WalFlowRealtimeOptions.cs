@@ -44,6 +44,6 @@ public sealed partial class WalFlowRealtimeOptions
             throw new InvalidOperationException("ReconnectDelay must be between 50ms and 5 minutes.");
     }
 
-    [GeneratedRegex("^[a-z_][a-z0-9_]{0,62}$")]
+    [GeneratedRegex("^[a-z_][a-z0-9_]{0,62}$", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 1000)]
     private static partial Regex PgIdentifier();
 }

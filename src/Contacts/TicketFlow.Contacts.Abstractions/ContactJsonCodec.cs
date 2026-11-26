@@ -49,7 +49,7 @@ public static class ContactJsonCodec
     public static IReadOnlyDictionary<string, ContactAttributeValue> DeserializeAttributes(string json)
     {
         ArgumentNullException.ThrowIfNull(json);
-        if (json == EmptyAttributesJson)
+        if (string.Equals(json, EmptyAttributesJson, StringComparison.Ordinal))
             return EmptyAttributes;
         return Read(json, static root =>
         {
@@ -159,7 +159,7 @@ public static class ContactJsonCodec
     public static ContactIdentityAddress RestoreAddress(ContactIdentityKind kind, string @namespace, string value) =>
         ContactIdentityAddress.Normalize(kind, value, @namespace.Length == 0 ? null : @namespace) switch
         {
-            ContactIdentityAddress address when address.Value == value => address,
+            ContactIdentityAddress address when string.Equals(address.Value, value, StringComparison.Ordinal) => address,
             ContactIdentityAddress => throw new FormatException("A stored address is not normalized."),
             ContactAddressInvalid => throw new FormatException("A stored address is invalid."),
         };

@@ -135,7 +135,7 @@ public static class InboxAgentGrants
     public static GrantId For(WorkspaceId workspace, InboxId inbox, UserId agent, RoleId role)
     {
         if (workspace == default || inbox == default || agent == default || !role.IsInitialized)
-            throw new ArgumentException("Workspace, inbox, agent and role identifiers are required.");
+            throw new ArgumentException("Workspace, inbox, agent and role identifiers are required.", workspace == default ? nameof(workspace) : inbox == default ? nameof(inbox) : agent == default ? nameof(agent) : nameof(role));
         var buffer = cachedBuffer;
         var writer = cachedWriter;
         cachedBuffer = null;

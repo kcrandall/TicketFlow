@@ -27,7 +27,7 @@ public sealed record ContactMergeAttributeChange
     {
         Key = ContactAttributeDefinition.RequireKey(key, nameof(key));
         if (previous is { Value: null } || merged.Value is null)
-            throw new ArgumentException("Attribute values must be initialized.");
+            throw new ArgumentException("Attribute values must be initialized.", previous is { Value: null } ? nameof(previous) : nameof(merged));
         Previous = previous;
         Merged = merged;
     }
@@ -62,7 +62,7 @@ public sealed record ContactMergeRecord
         if (id == Guid.Empty)
             throw new ArgumentException("A merge identifier is required.", nameof(id));
         if (target == default || source == default || target == source)
-            throw new ArgumentException("Merge target and source must be initialized and distinct.");
+            throw new ArgumentException("Merge target and source must be initialized and distinct.", target == default ? nameof(target) : nameof(source));
         ArgumentNullException.ThrowIfNull(actor);
         ArgumentNullException.ThrowIfNull(sourceSnapshot);
         if (sourceSnapshot.Id != source || sourceSnapshot.MergedInto is not null)
@@ -79,7 +79,7 @@ public sealed record ContactMergeRecord
         AddedLabels = Bounded(addedLabels, Contact.MaximumLabels, nameof(addedLabels));
         FilledProfileFields = Bounded(filledProfileFields, 5, nameof(filledProfileFields));
         if (FilledProfileFields.Any(field => !Enum.IsDefined(field)) || AddedLabels.Any(label => label == default))
-            throw new ArgumentException("Merge contributions must be valid.");
+            throw new ArgumentException("Merge contributions must be valid.", FilledProfileFields.Any(field => !Enum.IsDefined(field)) ? nameof(filledProfileFields) : nameof(addedLabels));
         BlockedChanged = blockedChanged;
     }
 
@@ -116,7 +116,7 @@ public sealed record ContactMergeRecord
 
     public override string ToString() => $"ContactMergeRecord {{ Id = {Id}, Target = {Target}, Source = {Source} }}";
 
-    private static IReadOnlyList<T> Bounded<T>(IEnumerable<T> values, int maximum, string parameterName)
+    private static System.Collections.ObjectModel.ReadOnlyCollection<T> Bounded<T>(IEnumerable<T> values, int maximum, string parameterName)
     {
         ArgumentNullException.ThrowIfNull(values, parameterName);
         var snapshot = values.ToList();

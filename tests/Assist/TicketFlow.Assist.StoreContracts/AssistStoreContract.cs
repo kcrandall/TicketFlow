@@ -210,7 +210,7 @@ public static class AssistStoreContract
         Assert.AreEqual(10, summaryTotal.ReservedTokens);
         var triage = summary.Totals[1];
         Assert.AreEqual(new AssistUsageTotal(AssistFeature.Triage, "model-b", 1, 0, 5, 6, 7, 8, 0, 0), triage);
-        Assert.ThrowsExactly<ArgumentException>(() => store.SummarizeAsync(scope, Noon, Noon.AddDays(93)).GetAwaiter().GetResult());
+        await Assert.ThrowsExactlyAsync<ArgumentException>(() => store.SummarizeAsync(scope, Noon, Noon.AddDays(93)));
 
         Assert.AreEqual(1, await store.PurgeUsageAsync(scope, Noon.AddMinutes(-1), 100));
         Assert.IsNull(await competing.GetUsageAsync(scope, old.Id));

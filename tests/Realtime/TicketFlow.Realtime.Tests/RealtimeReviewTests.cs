@@ -39,7 +39,7 @@ public sealed class RealtimeReviewTests
                 MessageDirection.Outgoing, "hi", MessageContentType.PlainText, [], host.Clock.GetUtcNow())));
         Assert.IsLessThan(TimeSpan.FromSeconds(1), watch.Elapsed, "Publishing only queues.");
 
-        await WaitUntilAsync(() => fast.Events<VisitorMessageEvent>().Any(message => message.Message.Value == "m5"));
+        await WaitUntilAsync(() => fast.Events<VisitorMessageEvent>().Any(message => string.Equals(message.Message.Value, "m5", StringComparison.Ordinal)));
         Assert.IsLessThan(TimeSpan.FromSeconds(4), watch.Elapsed, "The fast client was not held up by the blocked one.");
         await WaitUntilAsync(() => Volatile.Read(ref throwing.Attempts) > 0);
         Assert.IsGreaterThan(0L, registry.DroppedCount, "The blocked client's bounded queue dropped its oldest events.");

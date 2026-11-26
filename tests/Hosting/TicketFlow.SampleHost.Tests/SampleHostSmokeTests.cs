@@ -69,7 +69,7 @@ public sealed class SampleHostSmokeTests
                 $"{loop} is hosted by the sample's workers.");
         Assert.AreEqual(HttpStatusCode.Unauthorized, (await anonymous.GetAsync($"{Api}/conversations")).StatusCode);
         Assert.AreEqual(HttpStatusCode.OK, (await anonymous.GetAsync("/ticketflow/openapi/ticketflow.json")).StatusCode);
-        Assert.Contains("wk_demo", await anonymous.GetStringAsync("/demo"));
+        Assert.Contains("wk_demo", await anonymous.GetStringAsync("/demo"), StringComparison.Ordinal);
         var articles = await JsonAsync(await anonymous.GetAsync("/ticketflow/public/workspaces/acme/portals/help/en/articles"));
         CollectionAssert.Contains(articles.GetProperty("items").EnumerateArray().Select(item => item.GetProperty("slug").GetString()).ToList(), "reset-password");
 

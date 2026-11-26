@@ -56,7 +56,7 @@ public sealed class ModelAndCodecTests
             new SlaPausePolicy(false, true), 60);
         var json = SlaPolicyCodec.Serialize(policy);
         Assert.AreEqual(policy, SlaPolicyCodec.Deserialize(new SlaPolicyId("all"), json));
-        StringAssert.StartsWith(json, "{\"v\":1,");
+        StringAssert.StartsWith(json, "{\"v\":1,", StringComparison.Ordinal);
         Assert.ThrowsExactly<FormatException>(() => SlaPolicyCodec.Deserialize(new SlaPolicyId("all"), json.Replace("\"v\":1", "\"v\":2", StringComparison.Ordinal)));
         Assert.ThrowsExactly<FormatException>(() => SlaPolicyCodec.Deserialize(new SlaPolicyId("all"), json.Replace("\"risk\":60", "\"risk\":60,\"extra\":1", StringComparison.Ordinal)));
         Assert.ThrowsExactly<FormatException>(() => SlaPolicyCodec.Deserialize(new SlaPolicyId("all"), json.Replace("notify-user", "notify-everyone", StringComparison.Ordinal)));

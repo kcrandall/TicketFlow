@@ -95,8 +95,8 @@ public sealed class PrincipalTests
         foreach (var principal in TestPrincipals.AllKinds(TestScopes.Create(tenantId: "secret-tenant")))
         {
             var text = principal.ToString();
-            StringAssert.Contains(text, "<redacted>");
-            Assert.DoesNotContain("secret-tenant", text);
+            StringAssert.Contains(text, "<redacted>", StringComparison.Ordinal);
+            Assert.DoesNotContain("secret-tenant", text, StringComparison.Ordinal);
         }
     }
 }

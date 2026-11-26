@@ -168,7 +168,7 @@ public sealed class PostgresMigrationRunner
         var result = new List<AppliedPostgresMigration>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            result.Add(new(reader.GetInt32(0), reader.GetString(1), reader.GetString(2), reader.GetBoolean(3), reader.GetFieldValue<DateTimeOffset>(4)));
+            result.Add(new(reader.GetInt32(0), reader.GetString(1), reader.GetString(2), reader.GetBoolean(3), await reader.GetFieldValueAsync<DateTimeOffset>(4, cancellationToken).ConfigureAwait(false)));
         return Array.AsReadOnly(result.ToArray());
     }
     private void Validate(IReadOnlyList<AppliedPostgresMigration> history)
@@ -181,7 +181,7 @@ public sealed class PostgresMigrationRunner
             if (applied.Version > catalog.Migrations.Count)
                 throw new MigrationProtocolException(MigrationProtocolFailure.UnsupportedVersion);
             var expected = catalog.Migrations[index];
-            if (applied.Id != expected.Id || applied.Checksum != expected.Checksum)
+            if (!string.Equals(applied.Id, expected.Id, StringComparison.Ordinal) || !string.Equals(applied.Checksum, expected.Checksum, StringComparison.Ordinal))
                 throw new MigrationProtocolException(MigrationProtocolFailure.ChecksumMismatch);
         }
     }

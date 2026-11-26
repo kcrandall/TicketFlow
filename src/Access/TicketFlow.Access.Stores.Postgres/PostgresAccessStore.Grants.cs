@@ -270,7 +270,7 @@ public sealed partial class PostgresAccessStore
         for (var i = 0; i < targets.Count; i++)
         {
             RequireGrantId(targets[i].Id);
-            ArgumentOutOfRangeException.ThrowIfLessThan(targets[i].ExpectedRevision, 1);
+            ArgumentOutOfRangeException.ThrowIfLessThan(targets[i].ExpectedRevision, 1, nameof(targets));
             ids[i] = targets[i].Id.Value;
             revisions[i] = targets[i].ExpectedRevision;
         }

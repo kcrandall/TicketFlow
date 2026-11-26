@@ -37,14 +37,14 @@ public sealed class ServiceTests
         Assert.AreEqual("agent", usage.Actor.Id);
 
         var timeline = await fixture.TimelineAsync();
-        var recorded = timeline.Events.Last().Event;
+        var recorded = timeline.Events[^1].Event;
         var extension = (ExtensionEvent)recorded.Event.Value!;
         Assert.AreEqual(AssistTimelineKinds.Summary, extension.Kind);
         Assert.AreEqual("agent", recorded.Actor.Id);
         var payload = AssistJsonCodec.DecodeTimelinePayload(extension.PayloadVersion, extension.Payload);
         Assert.AreEqual(new AssistTimelinePayload(AssistFeature.ConversationSummary, "scripted-large", result.UsageId, result.Usage, []), payload);
-        Assert.DoesNotContain("double charged", extension.Payload);
-        Assert.DoesNotContain(AssistFixture.CustomerMessage, extension.Payload);
+        Assert.DoesNotContain("double charged", extension.Payload, StringComparison.Ordinal);
+        Assert.DoesNotContain(AssistFixture.CustomerMessage, extension.Payload, StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -85,9 +85,9 @@ public sealed class ServiceTests
         Assert.AreEqual("scripted-small", result.Model);
         Assert.AreEqual(AssistThinkingLevel.Low, fixture.ScriptedProvider!.Applied.Last().Request.ThinkingLevel);
         var schema = ((ChatResponseFormatJson)fixture.Model.Requests.Single().Options!.ResponseFormat!).Schema!.Value.GetRawText();
-        Assert.Contains("\"enum\":[\"billing\",\"refund\"]", schema);
-        Assert.Contains("<label id=\"billing\">Payments</label>", fixture.Model.Transcript);
-        Assert.DoesNotContain("<contact", fixture.Model.Transcript);
+        Assert.Contains("\"enum\":[\"billing\",\"refund\"]", schema, StringComparison.Ordinal);
+        Assert.Contains("<label id=\"billing\">Payments</label>", fixture.Model.Transcript, StringComparison.Ordinal);
+        Assert.DoesNotContain("<contact", fixture.Model.Transcript, StringComparison.Ordinal);
         var view = (ConversationView)(await fixture.Conversations.GetAsync(fixture.Owner, AssistFixture.C1)).Value!;
         Assert.IsEmpty(view.Labels, "suggestions are never applied");
         Assert.AreEqual(ConversationPriority.None, view.Priority);
@@ -116,23 +116,23 @@ public sealed class ServiceTests
         fixture.Model.Reply("""{"sentiment":"negative","sentiment_confidence":0.8,"intent":"other","intent_confidence":0.75}""");
         Assert.AreEqual("failed:InvalidResponse:retryable", AssistFixture.Describe(await fixture.Assist.AnalyzeSentimentAsync(agent, new AssistSentimentRequest(AssistFixture.C1, ["refund_request"]))));
 
-        var message = ((MessageEvent)(await fixture.TimelineAsync()).Events.First().Event.Event.Value!).Id;
+        var message = ((MessageEvent)(await fixture.TimelineAsync()).Events[0].Event.Event.Value!).Id;
         fixture.Model.Reply("""{"text":"Meine Karte wurde doppelt belastet","source_locale":"en"}""");
         var translation = AssistFixture.Succeeded(await fixture.Assist.TranslateAsync(agent, new AssistTranslateRequest(AssistFixture.C1, new HelpCenterLocale("de"), message: message)));
         Assert.AreEqual(new HelpCenterLocale("en"), translation.Value.SourceLocale);
-        Assert.Contains("<text_to_translate>" + AssistFixture.CustomerMessage + "</text_to_translate>", fixture.Model.Requests.Last().Messages.Single().Text);
+        Assert.Contains("<text_to_translate>" + AssistFixture.CustomerMessage + "</text_to_translate>", fixture.Model.Requests.Last().Messages.Single().Text, StringComparison.Ordinal);
         Assert.AreEqual("refused:NotFound", AssistFixture.Describe(await fixture.Assist.TranslateAsync(agent, new AssistTranslateRequest(AssistFixture.C1, new HelpCenterLocale("de"), message: new MessageId("nope")))));
 
         fixture.Model.Reply("""{"text":"Hola","source_locale":""}""");
         var text = AssistFixture.Succeeded(await fixture.Assist.TranslateAsync(agent, new AssistTranslateRequest(AssistFixture.C1, new HelpCenterLocale("es"), text: "Hello"))).Value;
         Assert.IsNull(text.SourceLocale);
-        Assert.DoesNotContain(AssistFixture.CustomerMessage, fixture.Model.Requests.Last().Messages.Single().Text, "text translation sends no timeline");
+        Assert.DoesNotContain(AssistFixture.CustomerMessage, fixture.Model.Requests.Last().Messages.Single().Text, StringComparison.Ordinal, "text translation sends no timeline");
 
         fixture.Model.Reply("""{"text":"We are truly sorry for the trouble."}""");
         var tone = AssistFixture.Succeeded(await fixture.Assist.RewriteToneAsync(agent, new AssistToneRewriteRequest(AssistFixture.C1, "sorry", AssistTone.Apologetic)));
         Assert.AreEqual(AssistTone.Apologetic, tone.Value.Tone);
         Assert.AreEqual(AssistRecording.NotApplicable, tone.Recording);
-        Assert.Contains("apologetic", fixture.Model.Requests.Last().Messages.Single().Text);
+        Assert.Contains("apologetic", fixture.Model.Requests.Last().Messages.Single().Text, StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -270,7 +270,7 @@ public sealed class ServiceTests
         await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => fixture.Assist.SummarizeAsync(agent, request));
 
         using var cancelled = new CancellationTokenSource();
-        cancelled.Cancel();
+        await cancelled.CancelAsync();
         await Assert.ThrowsAsync<OperationCanceledException>(() => fixture.Assist.SummarizeAsync(agent, request, cancelled.Token));
 
         var summary = await fixture.Store.SummarizeAsync(fixture.Scope, fixture.Clock.GetUtcNow().AddHours(-1), fixture.Clock.GetUtcNow().AddHours(1));

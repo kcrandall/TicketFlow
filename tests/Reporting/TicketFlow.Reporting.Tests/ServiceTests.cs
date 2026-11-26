@@ -56,7 +56,7 @@ public sealed class ServiceTests
     }
 
     private static async Task Apply(ReportingFixture fixture, ReportConversationState state, params ReportFact[] facts) =>
-        Assert.StartsWith("applied:1:", W(await fixture.Store.ApplyAsync(fixture.Scope, new ReportProjection(state, facts), null)));
+        Assert.StartsWith("applied:1:", W(await fixture.Store.ApplyAsync(fixture.Scope, new ReportProjection(state, facts), null)), StringComparison.Ordinal);
 
     [TestMethod]
     public async Task OverviewSummarizesVolumeResponseTimesSlaAndSatisfaction()
@@ -169,7 +169,7 @@ public sealed class ServiceTests
         Assert.IsTrue(lines.Any(line => line.Contains(",first-response-time,", StringComparison.Ordinal) && line.EndsWith(",600000000,us", StringComparison.Ordinal)));
         Assert.IsTrue(lines.Any(line => line.Contains(",\"'=HYPERLINK(\"\"x\"\")\",", StringComparison.Ordinal)), "formula neutralized and quoted");
         var audit = fixture.Get<InMemoryAccessAuditSink>().Snapshot();
-        Assert.IsTrue(audit.Any(item => item.Kind == AccessAuditKind.FilterPlanned && item.Permission == ReportPermissions.Export && item.Actor.Id == "owner"));
+        Assert.IsTrue(audit.Any(item => item.Kind == AccessAuditKind.FilterPlanned && item.Permission == ReportPermissions.Export && string.Equals(item.Actor.Id, "owner", StringComparison.Ordinal)));
 
         var bounded = new StringWriter(CultureInfo.InvariantCulture);
         var truncated = ReportingFixture.Value(await fixture.ReportAsync(service => service.ExportAsync(fixture.Owner, new ReportExportQuery(Week, maximumRows: 5), bounded)));
@@ -177,7 +177,7 @@ public sealed class ServiceTests
 
         var refused = await fixture.ReportAsync(service => service.ExportAsync(fixture.Supervisor, new ReportExportQuery(Week), new StringWriter()));
         Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)refused.Value!).Kind);
-        Assert.IsTrue(fixture.Get<InMemoryAccessAuditSink>().Snapshot().Any(item => item.Permission == ReportPermissions.Export && item.Actor.Id == "supervisor"),
+        Assert.IsTrue(fixture.Get<InMemoryAccessAuditSink>().Snapshot().Any(item => item.Permission == ReportPermissions.Export && string.Equals(item.Actor.Id, "supervisor", StringComparison.Ordinal)),
             "refused export plans are audited too");
     }
 

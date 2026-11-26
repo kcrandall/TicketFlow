@@ -13,7 +13,7 @@ namespace TicketFlow.Integrations.WalFlow;
 /// inserts through the published <see cref="ConversationOutboxRowCodec"/> contract, deduplicates idempotently by <c>entry_id</c>
 /// within a bounded window, and publishes identifier-only <see cref="ConversationChangedEvent"/>s onto <see cref="IRealtimePublisher"/>.
 /// </summary>
-public sealed class WalFlowRealtimeSink : ISink
+public sealed partial class WalFlowRealtimeSink : ISink
 {
     private readonly IRealtimePublisher publisher;
     private readonly IConversationStore? conversations;
@@ -46,7 +46,8 @@ public sealed class WalFlowRealtimeSink : ISink
 
         if (!ConversationOutboxRowCodec.TryDecode(payload.After, out var entry, out var error) || entry is null)
         {
-            logger?.LogWarning("Ignored malformed conversation outbox CDC row: {Error}", error);
+            if (logger is not null)
+                LogMalformedOutboxRow(logger, error);
             return;
         }
 
@@ -63,6 +64,9 @@ public sealed class WalFlowRealtimeSink : ISink
     }
 
     public Task FlushAsync(CancellationToken ct = default) => Task.CompletedTask;
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Ignored malformed conversation outbox CDC row: {Error}")]
+    private static partial void LogMalformedOutboxRow(ILogger logger, string? error);
 
     private bool TryMarkSeen(Guid entryId)
     {

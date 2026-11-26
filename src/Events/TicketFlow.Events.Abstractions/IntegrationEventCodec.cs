@@ -67,7 +67,7 @@ public static class IntegrationEventCodec
             var reader = new EventDataReader(root);
             var data = Read(type, ref reader);
             reader.Done();
-            if (data.Type != type)
+            if (!string.Equals(data.Type, type, StringComparison.Ordinal))
                 throw new FormatException("The payload type does not match.");
             return data;
         }

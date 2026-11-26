@@ -30,7 +30,7 @@ public sealed class AutomationEngineTests
         CollectionAssert.AreEqual(new[] { new LabelId("billing") }, conversation.Labels.ToArray());
         Assert.AreEqual(ConversationPriority.High, conversation.Priority);
         var timeline = await fixture.TimelineAsync("c1");
-        var automated = timeline.Where(item => item.Actor.Kind == AccessActorKind.ApiClient && item.Actor.Id == "automation-worker").ToList();
+        var automated = timeline.Where(item => item.Actor.Kind == AccessActorKind.ApiClient && string.Equals(item.Actor.Id, "automation-worker", StringComparison.Ordinal)).ToList();
         Assert.AreEqual(3, automated.Count, "Labels, priority and the marker.");
         var marker = automated.Single(item => item.Event.Value is ExtensionEvent);
         Assert.IsTrue(AutomationEventCodec.TryDecodeApplied((ExtensionEvent)marker.Event.Value!, out var rule, out var executionId, out var depth));
@@ -229,13 +229,13 @@ public sealed class AutomationEngineTests
 
         var result = Assert.IsInstanceOfType<TicketValue<AutomationDryRunResult>>((await fixture.RulesAsync(service => service.DryRunAsync(fixture.Owner,
             new AutomationDryRunRequest(C1, AutomationEvent.MessageReceived(), MessageBody: "Need a refund")))).Value).Value;
-        Assert.AreEqual(AutomationMatch.Matched, result.Rules.Single(rule => rule.Rule.Value == "refunds").Match);
-        var reply = result.Rules.Single(rule => rule.Rule.Value == "reply");
+        Assert.AreEqual(AutomationMatch.Matched, result.Rules.Single(rule => string.Equals(rule.Rule.Value, "refunds", StringComparison.Ordinal)).Match);
+        var reply = result.Rules.Single(rule => string.Equals(rule.Rule.Value, "reply", StringComparison.Ordinal));
         Assert.AreEqual("Hallo Ada", reply.Actions.Single().RenderedText, "Rendered in the contact's locale.");
-        Assert.AreEqual(AutomationMatch.NotTriggered, result.Rules.Single(rule => rule.Rule.Value == "created").Match);
+        Assert.AreEqual(AutomationMatch.NotTriggered, result.Rules.Single(rule => string.Equals(rule.Rule.Value, "created", StringComparison.Ordinal)).Match);
         var noMessage = Assert.IsInstanceOfType<TicketValue<AutomationDryRunResult>>((await fixture.RulesAsync(service => service.DryRunAsync(fixture.Owner,
             new AutomationDryRunRequest(C1, AutomationEvent.MessageReceived())))).Value).Value;
-        Assert.AreEqual(AutomationMatch.Unknown, noMessage.Rules.Single(rule => rule.Rule.Value == "refunds").Match);
+        Assert.AreEqual(AutomationMatch.Unknown, noMessage.Rules.Single(rule => string.Equals(rule.Rule.Value, "refunds", StringComparison.Ordinal)).Match);
         var draft = Assert.IsInstanceOfType<TicketValue<AutomationDryRunResult>>((await fixture.RulesAsync(service => service.DryRunAsync(fixture.Owner,
             new AutomationDryRunRequest(C1, AutomationEvent.ConversationCreated(), Draft: new AutomationRule(new AutomationRuleId("draft"), "Draft", ConversationCreatedTrigger.Instance,
                 new BusinessHoursCondition(true), [new AddLabelsAction(new LabelId("open"))], enabled: false))))).Value).Value;

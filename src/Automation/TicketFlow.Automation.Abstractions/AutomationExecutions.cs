@@ -187,7 +187,7 @@ public sealed record AutomationExecution
     }
 
     public bool Equals(AutomationExecution? other) =>
-        other is not null && Id == other.Id && Rule == other.Rule && Conversation == other.Conversation && TriggerKey == other.TriggerKey && EventKind == other.EventKind
+        other is not null && Id == other.Id && Rule == other.Rule && Conversation == other.Conversation && string.Equals(TriggerKey, other.TriggerKey, StringComparison.Ordinal) && EventKind == other.EventKind
         && Depth == other.Depth && Status == other.Status && Suppression == other.Suppression && StartedAt == other.StartedAt && CompletedAt == other.CompletedAt
         && ActionCount == other.ActionCount && Outcomes.SequenceEqual(other.Outcomes) && Marker == other.Marker;
 

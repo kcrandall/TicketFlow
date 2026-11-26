@@ -111,8 +111,8 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
             AddInt64(create, "max", ILiveChatWidgetStore.MaximumWidgetsPerScope);
             await using var reader = await create.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            insertedRevision = reader.IsDBNull(0) ? null : reader.GetInt64(0);
-            existingRevision = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+            insertedRevision = await reader.IsDBNullAsync(0, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt64(0);
+            existingRevision = await reader.IsDBNullAsync(1, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt64(1);
         }
         if (insertedRevision is { } rev)
         {
@@ -264,7 +264,7 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
         if (current is null || current.Scope != scope)
             return StoreNotFound.Instance;
         var existing = current.Session;
-        if (existing.ConfigurationId != session.ConfigurationId || existing.Inbox != session.Inbox || existing.VisitorId != session.VisitorId || existing.CreatedAt != session.CreatedAt)
+        if (!string.Equals(existing.ConfigurationId, session.ConfigurationId, StringComparison.Ordinal) || existing.Inbox != session.Inbox || !string.Equals(existing.VisitorId, session.VisitorId, StringComparison.Ordinal) || existing.CreatedAt != session.CreatedAt)
             throw new ArgumentException("Session identity fields are immutable.", nameof(session));
         return new StoreConflict(current.Revision);
     }
@@ -290,12 +290,12 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
             await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
             hasSession = reader.GetBoolean(0);
-            if (!reader.IsDBNull(1))
+            if (!await reader.IsDBNullAsync(1, cancellationToken).ConfigureAwait(false))
             {
                 if (reader.GetInt16(5) != 1)
                     throw new InvalidOperationException("A stored live-chat link is invalid or incompatible.");
                 resultLink = new VisitorConversationLink(new VisitorSessionId(reader.GetString(1)), new ConversationId(reader.GetString(2)),
-                    reader.GetFieldValue<DateTimeOffset>(3), reader.GetInt64(4));
+                    await reader.GetFieldValueAsync<DateTimeOffset>(3, cancellationToken).ConfigureAwait(false), reader.GetInt64(4));
                 wasInserted = reader.GetBoolean(6);
             }
         }
@@ -558,6 +558,6 @@ public sealed class PostgresLiveChatStore : ILiveChatWidgetStore, ILiveChatSessi
     private static void RequireIds(VisitorSessionId session, ConversationId conversation)
     {
         if (!session.IsInitialized || conversation == default)
-            throw new ArgumentException("Session and conversation identifiers are required.");
+            throw new ArgumentException("Session and conversation identifiers are required.", !session.IsInitialized ? nameof(session) : nameof(conversation));
     }
 }

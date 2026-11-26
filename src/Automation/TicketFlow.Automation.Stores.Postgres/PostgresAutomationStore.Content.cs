@@ -112,8 +112,8 @@ public sealed partial class PostgresAutomationStore
             AddLong(create, "max", IMacroStore.MaximumMacrosPerWorkspace);
             await using var reader = await create.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            insertedRevision = reader.IsDBNull(0) ? null : reader.GetInt64(0);
-            existingRevision = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+            insertedRevision = await reader.IsDBNullAsync(0, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt64(0);
+            existingRevision = await reader.IsDBNullAsync(1, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt64(1);
         }
         if (insertedRevision is { } rev)
         {
@@ -246,8 +246,8 @@ public sealed partial class PostgresAutomationStore
             AddLong(create, "max", ICannedResponseStore.MaximumResponsesPerWorkspace);
             await using var reader = await create.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            insertedRevision = reader.IsDBNull(0) ? null : reader.GetInt64(0);
-            existingRevision = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+            insertedRevision = await reader.IsDBNullAsync(0, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt64(0);
+            existingRevision = await reader.IsDBNullAsync(1, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt64(1);
             atCapacity = reader.GetBoolean(2);
         }
         if (insertedRevision is { } rev)
@@ -280,7 +280,7 @@ public sealed partial class PostgresAutomationStore
                 if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
                     return new StoreApplied<StoredCannedResponse>(new StoredCannedResponse(scope, response, revision));
             }
-            catch (PostgresException error) when (error.SqlState == UniqueViolation && error.ConstraintName == ShortcutConstraint)
+            catch (PostgresException error) when (string.Equals(error.SqlState, UniqueViolation, StringComparison.Ordinal) && string.Equals(error.ConstraintName, ShortcutConstraint, StringComparison.Ordinal))
             {
                 return new StoreRejected<AutomationWriteRejection>(AutomationWriteRejection.DuplicateShortcut);
             }

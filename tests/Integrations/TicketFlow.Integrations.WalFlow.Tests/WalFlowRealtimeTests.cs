@@ -53,7 +53,7 @@ public sealed partial class WalFlowRealtimeTests
         {
             var pub = new RealtimePublication(topics[i % topics.Length], events[i]);
             var json = RealtimePublicationEnvelope.Serialize(pub, "node-a");
-            StringAssert.StartsWith(json, "{\"v\":1,");
+            StringAssert.StartsWith(json, "{\"v\":1,", StringComparison.Ordinal);
             var decoded = RealtimePublicationEnvelope.Deserialize(json);
             Assert.AreEqual("node-a", decoded.Origin);
             Assert.AreEqual(pub.Topic, decoded.Publication.Topic);
@@ -233,7 +233,7 @@ public sealed partial class WalFlowRealtimeTests
             var name = match.Groups["name"].Value;
             if (match.Groups["quoted"].Success)
                 result[name] = match.Groups["quoted"].Value.Replace("''", "'", StringComparison.Ordinal);
-            else if (match.Groups["raw"].Value == "null")
+            else if (string.Equals(match.Groups["raw"].Value, "null", StringComparison.Ordinal))
                 result[name] = null;
             else
                 result[name] = match.Groups["raw"].Value;
@@ -241,6 +241,6 @@ public sealed partial class WalFlowRealtimeTests
         return result;
     }
 
-    [GeneratedRegex(@"(?<name>[a-z_]+)\[[^\]]+\]:(?:'(?<quoted>(?:''|[^'])*)'|(?<raw>[^\s]+))")]
+    [GeneratedRegex(@"(?<name>[a-z_]+)\[[^\]]+\]:(?:'(?<quoted>(?:''|[^'])*)'|(?<raw>[^\s]+))", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 1000)]
     private static partial Regex TestDecodingColumn();
 }

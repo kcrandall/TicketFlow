@@ -19,7 +19,7 @@ public sealed class QueryCountTests
     [TestMethod]
     public async Task ConversationsPageDoesNotIssueQueriesPerRow()
     {
-        var grants = Counting<IAccessGrantStore>.Wrap(new InMemoryAccessGrantStore());
+        var grants = WrapCounting<IAccessGrantStore>(new InMemoryAccessGrantStore());
         await using var app = SampleHostApp.Build(["--environment", "Development"], builder =>
         {
             builder.WebHost.UseTestServer();
@@ -43,6 +43,14 @@ public sealed class QueryCountTests
         await app.StopAsync();
     }
 
+    private static Counting<T> WrapCounting<T>(T inner) where T : class
+    {
+        var proxy = DispatchProxy.Create<T, Counting<T>>();
+        var counting = (Counting<T>)(object)proxy;
+        counting.SetInner(inner);
+        return counting;
+    }
+
     /// <summary>A call-counting proxy over a store interface.</summary>
     public class Counting<T> : DispatchProxy where T : class
     {
@@ -51,13 +59,7 @@ public sealed class QueryCountTests
 
         public T Proxy => (this as T)!;
 
-        public static Counting<T> Wrap(T inner)
-        {
-            var proxy = Create<T, Counting<T>>();
-            var counting = (Counting<T>)(object)proxy;
-            counting.inner = inner;
-            return counting;
-        }
+        internal void SetInner(T value) => inner = value;
 
         public void Reset()
         {

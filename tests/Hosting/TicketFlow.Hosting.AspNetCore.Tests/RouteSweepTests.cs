@@ -34,7 +34,7 @@ public sealed partial class RouteSweepTests
         var failures = new List<string>();
         foreach (var (method, pattern) in routes)
         {
-            var query = method != "GET" ? string.Empty : Query + (pattern.EndsWith("/aggregate", StringComparison.Ordinal) ? "&kind=csat" : string.Empty);
+            var query = !string.Equals(method, "GET", StringComparison.Ordinal) ? string.Empty : Query + (pattern.EndsWith("/aggregate", StringComparison.Ordinal) ? "&kind=csat" : string.Empty);
             using var request = new HttpRequestMessage(new HttpMethod(method), Concrete(pattern) + query);
             if (method is "POST" or "PUT" or "PATCH")
                 request.Content = new StringContent("{}", Encoding.UTF8, "application/json");
@@ -42,8 +42,8 @@ public sealed partial class RouteSweepTests
             var response = await stranger.SendAsync(request);
             var status = (int)response.StatusCode;
             var body = await response.Content.ReadAsStringAsync();
-            var allowed = method == "GET"
-                ? status is 403 or 404 || status == 200 && (IsEmptyCollection(body) || pattern.EndsWith("/me", StringComparison.Ordinal))
+            var allowed = string.Equals(method, "GET"
+, StringComparison.Ordinal) ? status is 403 or 404 || status == 200 && (IsEmptyCollection(body) || pattern.EndsWith("/me", StringComparison.Ordinal))
                 : status is 400 or 403 or 404 or 422;
             if (!allowed)
                 failures.Add($"{method} {pattern} -> {status}");
@@ -63,7 +63,7 @@ public sealed partial class RouteSweepTests
             if (OptionalFence.Contains($"{method} {relative}"))
                 continue;
             using var request = new HttpRequestMessage(new HttpMethod(method), Concrete(pattern));
-            if (method == "PUT")
+            if (string.Equals(method, "PUT", StringComparison.Ordinal))
                 request.Content = new StringContent("{}", Encoding.UTF8, "application/json");
             var response = await owner.SendAsync(request);
             if (response.StatusCode != HttpStatusCode.PreconditionRequired)
@@ -100,11 +100,11 @@ public sealed partial class RouteSweepTests
             .SelectMany(endpoint => (endpoint.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods ?? []).Select(method => (method, endpoint.RoutePattern.RawText!)))
             .Distinct().OrderBy(route => route.Item2, StringComparer.Ordinal);
 
-    private static string Concrete(string pattern) => Parameter().Replace(pattern, match => match.Groups[1].Value switch
+    private static string Concrete(string pattern) => Parameter().Replace(pattern, match => match.Groups["name"].Value switch
     {
         "workspaceId" => "workspace",
-        _ when match.Groups[2].Value == "guid" => Guid.NewGuid().ToString(),
-        _ when match.Groups[2].Value == "int" => "1",
+        _ when string.Equals(match.Groups["constraint"].Value, "guid", StringComparison.Ordinal) => Guid.NewGuid().ToString(),
+        _ when string.Equals(match.Groups["constraint"].Value, "int", StringComparison.Ordinal) => "1",
         _ => "x",
     });
 
@@ -116,6 +116,6 @@ public sealed partial class RouteSweepTests
             : root.TryGetProperty("items", out var items) && items.GetArrayLength() == 0 || root.TryGetProperty("rows", out var rows) && rows.GetArrayLength() == 0;
     }
 
-    [GeneratedRegex(@"\{([A-Za-z]+)(?::([a-z]+))?\}")]
+    [GeneratedRegex(@"\{(?<name>[A-Za-z]+)(?::(?<constraint>[a-z]+))?\}", RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture, matchTimeoutMilliseconds: 1000)]
     private static partial Regex Parameter();
 }

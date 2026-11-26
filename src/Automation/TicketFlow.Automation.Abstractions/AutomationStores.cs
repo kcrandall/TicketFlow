@@ -93,7 +93,7 @@ public sealed record AutomationExecutionQuery
         int limit = DefaultLimit, AutomationExecutionCursor? after = null)
     {
         if (rule is { IsInitialized: false } || conversation == default(ConversationId))
-            throw new ArgumentException("Criteria must be initialized when supplied.");
+            throw new ArgumentException("Criteria must be initialized when supplied.", rule is { IsInitialized: false } ? nameof(rule) : nameof(conversation));
         if (limit is < 1 or > MaximumLimit)
             throw new ArgumentOutOfRangeException(nameof(limit), $"Limits are 1-{MaximumLimit}.");
         if (from is { } start && to is { } end && end < start)

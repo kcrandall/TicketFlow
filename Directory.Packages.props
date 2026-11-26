@@ -44,5 +44,9 @@
     <PackageVersion Include="EnvelopeFlow.Chat.Abstractions" Version="0.1.0-alpha.3.1" />
     <!-- WalFlow sink contract for the event broker adapter (users add the specific WalFlow.Sinks.* package at the same version). -->
     <PackageVersion Include="WalFlow.Abstractions" Version="0.1.0-alpha.alpha.20260708090623" />
+    <!-- Static code quality analyzers -->
+    <PackageVersion Include="Meziantou.Analyzer" Version="3.0.342" />
+    <PackageVersion Include="Roslynator.Analyzers" Version="5.0.1" />
+    <PackageVersion Include="Microsoft.VisualStudio.Threading.Analyzers" Version="18.12.1" />
   </ItemGroup>
 </Project>

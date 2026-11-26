@@ -65,11 +65,11 @@ internal static class SurveyEndpoints
 
     private static SurveyDefinition Survey(string id, SurveyRequest request)
     {
-        ArgumentNullException.ThrowIfNull(request.Policy, "policy");
+        ArgumentNullException.ThrowIfNull(request.Policy, nameof(request));
         var policy = new SurveyTriggerPolicy(TimeSpan.FromSeconds(request.Policy.DelaySeconds), TimeSpan.FromSeconds(request.Policy.ContactCooldownSeconds),
             TimeSpan.FromSeconds(request.Policy.InvitationLifetimeSeconds), TicketFlowHttp.Parse<SurveyTrigger>(request.Policy.Trigger, "trigger"));
         return new SurveyDefinition(new SurveyId(id), request.Name, TicketFlowHttp.Parse<SurveyKind>(request.Kind, "kind"), new SurveyLocale(request.DefaultLocale),
-            (request.Questions ?? throw new ArgumentException("Questions are required.", nameof(request.Questions)))
+            (request.Questions ?? throw new ArgumentException("Questions are required.", nameof(request)))
                 .Select(question => new SurveyQuestion(new SurveyLocale(question.Locale), question.Text, question.CommentPrompt)),
             policy, request.InboxId is null ? null : new InboxId(request.InboxId), request.Enabled);
     }

@@ -91,7 +91,7 @@ public sealed class FoundationTests
             new { name = "Bad", channel = new { kind = "NOT A KIND secret@example.com", configurationId = "cfg" } }));
         Assert.AreEqual(HttpStatusCode.UnprocessableEntity, response.StatusCode);
         var text = await response.Content.ReadAsStringAsync();
-        Assert.DoesNotContain("secret@example.com", text);
+        Assert.DoesNotContain("secret@example.com", text, StringComparison.Ordinal);
         Assert.AreEqual("invalid", (await JsonAsync(response)).GetProperty("code").GetString());
 
         var badEnum = await host.Client().GetAsync($"{Api}/conversations?status=1");

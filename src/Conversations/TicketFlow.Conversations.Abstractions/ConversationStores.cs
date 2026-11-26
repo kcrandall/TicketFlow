@@ -84,7 +84,7 @@ public sealed record MessageDeliveryWrite
     public MessageDeliveryWrite(ConversationId conversation, MessageId message, long expectedDeliveryRevision, MessageDelivery delivery, string? externalId, ConversationChange change)
     {
         if (conversation == default || message == default)
-            throw new ArgumentException("Conversation and message identifiers are required.");
+            throw new ArgumentException("Conversation and message identifiers are required.", conversation == default ? nameof(conversation) : nameof(message));
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedDeliveryRevision, 1);
         ArgumentNullException.ThrowIfNull(delivery);
         ArgumentNullException.ThrowIfNull(change);
@@ -188,7 +188,7 @@ public sealed record ConversationListQuery
         ConversationListCursor? after = null)
     {
         if (inbox == default(InboxId) || assignee == default(UserId) || team == default(TeamId) || label == default(LabelId) || contact == default(ContactId))
-            throw new ArgumentException("Criteria must be initialized when supplied.");
+            throw new ArgumentException("Criteria must be initialized when supplied.", inbox == default(InboxId) ? nameof(inbox) : assignee == default(UserId) ? nameof(assignee) : team == default(TeamId) ? nameof(team) : label == default(LabelId) ? nameof(label) : nameof(contact));
         if (status is { } kind && !Enum.IsDefined(kind))
             throw new ArgumentOutOfRangeException(nameof(status));
         if (unassigned && assignee is not null)

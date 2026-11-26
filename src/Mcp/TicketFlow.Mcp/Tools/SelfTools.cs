@@ -87,7 +87,7 @@ public sealed class SelfTools(TicketFlowToolContext context)
             TicketFlowToolsets? filter = toolset is null ? null
                 : string.Equals(toolset, TicketFlowToolsetCatalog.SelfName, StringComparison.OrdinalIgnoreCase) ? TicketFlowToolsets.None
                 : TicketFlowToolsetCatalog.Find(toolset)?.Toolset ?? throw new ArgumentException("Unknown toolset; call list_toolsets.", nameof(toolset));
-            var tools = TicketFlowToolCatalog.Tools.Where(item => (filter is null || item.Toolset == filter) && (tool is null || item.Name == tool)).ToList();
+            var tools = TicketFlowToolCatalog.Tools.Where(item => (filter is null || item.Toolset == filter) && (tool is null || string.Equals(item.Name, tool, StringComparison.Ordinal))).ToList();
             var registry = context.Services.GetService<TicketFlowMcpRegistry>();
             PrincipalRef? principal = context.Workspace(workspace) is { } id ? await context.ResolvePrincipalAsync(id, cancellationToken) : null;
             IReadOnlyDictionary<string, bool?>? decisions = principal is { } caller

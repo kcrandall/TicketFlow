@@ -120,7 +120,7 @@ public sealed record SlaTargets
         NextResponse = Require(nextResponse, nameof(nextResponse));
         Resolution = Require(resolution, nameof(resolution));
         if (FirstResponse is null && NextResponse is null && Resolution is null)
-            throw new ArgumentException("At least one target is required.");
+            throw new ArgumentException("At least one target is required.", nameof(firstResponse));
     }
 
     public TimeSpan? FirstResponse { get; }
@@ -280,7 +280,7 @@ public sealed record SlaRule
     }
 
     public bool Equals(SlaRule? other) =>
-        other is not null && Name == other.Name && Condition.Equals(other.Condition) && Targets.Equals(other.Targets) && Basis == other.Basis
+        other is not null && string.Equals(Name, other.Name, StringComparison.Ordinal) && Condition.Equals(other.Condition) && Targets.Equals(other.Targets) && Basis == other.Basis
         && Escalations.SequenceEqual(other.Escalations);
 
     public override int GetHashCode() => HashCode.Combine(Name, Basis, Escalations.Count);
@@ -346,7 +346,7 @@ public sealed record SlaPolicy
     }
 
     public bool Equals(SlaPolicy? other) =>
-        other is not null && Id == other.Id && Name == other.Name && Rules.SequenceEqual(other.Rules) && Pause == other.Pause && AtRiskPercent == other.AtRiskPercent;
+        other is not null && Id == other.Id && string.Equals(Name, other.Name, StringComparison.Ordinal) && Rules.SequenceEqual(other.Rules) && Pause == other.Pause && AtRiskPercent == other.AtRiskPercent;
 
     public override int GetHashCode() => HashCode.Combine(Id, Name, Rules.Count, AtRiskPercent);
 

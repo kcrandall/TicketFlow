@@ -11,7 +11,7 @@ namespace TicketFlow.Integrations.WalFlow;
 /// and a dedicated <c>LISTEN</c> loop with automatic reconnect for receiving cross-node realtime envelopes. Call
 /// <see cref="StartAsync"/> (or run via a hosted service) before expecting remote notifications.
 /// </summary>
-public sealed class PostgresRealtimeBackplane : IRealtimeBackplane, IAsyncDisposable
+public sealed partial class PostgresRealtimeBackplane : IRealtimeBackplane, IAsyncDisposable
 {
     /// <summary>PostgreSQL <c>NOTIFY</c> hard payload limit is 8,000 bytes.</summary>
     public const int PostgresNotifyLimitBytes = 7_900;
@@ -49,7 +49,8 @@ public sealed class PostgresRealtimeBackplane : IRealtimeBackplane, IAsyncDispos
         ArgumentNullException.ThrowIfNull(envelopeJson);
         if (Encoding.UTF8.GetByteCount(envelopeJson) > PostgresNotifyLimitBytes)
         {
-            logger?.LogWarning("Skipped PostgreSQL NOTIFY broadcast exceeding {Limit} bytes.", PostgresNotifyLimitBytes);
+            if (logger is not null)
+                LogSkippedNotifyBroadcast(logger, PostgresNotifyLimitBytes);
             return;
         }
         await using var command = source.CreateCommand("SELECT pg_notify(@channel, @payload)");
@@ -73,7 +74,10 @@ public sealed class PostgresRealtimeBackplane : IRealtimeBackplane, IAsyncDispos
         {
             var json = envelopes[i] ?? throw new ArgumentNullException(nameof(envelopes));
             if (Encoding.UTF8.GetByteCount(json) > PostgresNotifyLimitBytes)
-                logger?.LogWarning("Skipped PostgreSQL NOTIFY broadcast exceeding {Limit} bytes.", PostgresNotifyLimitBytes);
+            {
+                if (logger is not null)
+                    LogSkippedNotifyBroadcast(logger, PostgresNotifyLimitBytes);
+            }
             else
                 valid.Add(json);
         }
@@ -130,7 +134,8 @@ public sealed class PostgresRealtimeBackplane : IRealtimeBackplane, IAsyncDispos
             }
             catch (Exception error)
             {
-                logger?.LogWarning("PostgreSQL realtime LISTEN connection failed with {Error}; reconnecting.", error.GetType().Name);
+                if (logger is not null)
+                    LogListenFailed(logger, error.GetType().Name);
                 try
                 {
                     await Task.Delay(options.ReconnectDelay, cancellationToken).ConfigureAwait(false);
@@ -143,6 +148,12 @@ public sealed class PostgresRealtimeBackplane : IRealtimeBackplane, IAsyncDispos
             }
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Skipped PostgreSQL NOTIFY broadcast exceeding {Limit} bytes.")]
+    private static partial void LogSkippedNotifyBroadcast(ILogger logger, int limit);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "PostgreSQL realtime LISTEN connection failed with {Error}; reconnecting.")]
+    private static partial void LogListenFailed(ILogger logger, string error);
 
     private async Task DispatchQueueAsync(System.Threading.Channels.ChannelReader<string> reader, CancellationToken cancellationToken)
     {

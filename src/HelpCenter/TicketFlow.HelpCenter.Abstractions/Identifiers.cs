@@ -16,6 +16,11 @@ public readonly record struct PortalId : IComparable<PortalId>
 
     public int CompareTo(PortalId other) => string.CompareOrdinal(value, other.value);
 
+    public static bool operator <(PortalId left, PortalId right) => left.CompareTo(right) < 0;
+    public static bool operator <=(PortalId left, PortalId right) => left.CompareTo(right) <= 0;
+    public static bool operator >(PortalId left, PortalId right) => left.CompareTo(right) > 0;
+    public static bool operator >=(PortalId left, PortalId right) => left.CompareTo(right) >= 0;
+
     public override string ToString() => value ?? string.Empty;
 }
 
@@ -33,6 +38,11 @@ public readonly record struct CollectionId : IComparable<CollectionId>
 
     public int CompareTo(CollectionId other) => string.CompareOrdinal(value, other.value);
 
+    public static bool operator <(CollectionId left, CollectionId right) => left.CompareTo(right) < 0;
+    public static bool operator <=(CollectionId left, CollectionId right) => left.CompareTo(right) <= 0;
+    public static bool operator >(CollectionId left, CollectionId right) => left.CompareTo(right) > 0;
+    public static bool operator >=(CollectionId left, CollectionId right) => left.CompareTo(right) >= 0;
+
     public override string ToString() => value ?? string.Empty;
 }
 
@@ -49,6 +59,11 @@ public readonly record struct ArticleId : IComparable<ArticleId>
     public bool IsInitialized => value is not null;
 
     public int CompareTo(ArticleId other) => string.CompareOrdinal(value, other.value);
+
+    public static bool operator <(ArticleId left, ArticleId right) => left.CompareTo(right) < 0;
+    public static bool operator <=(ArticleId left, ArticleId right) => left.CompareTo(right) <= 0;
+    public static bool operator >(ArticleId left, ArticleId right) => left.CompareTo(right) > 0;
+    public static bool operator >=(ArticleId left, ArticleId right) => left.CompareTo(right) >= 0;
 
     public override string ToString() => value ?? string.Empty;
 }
@@ -86,6 +101,11 @@ public readonly record struct HelpCenterSlug : IComparable<HelpCenterSlug>
     }
 
     public int CompareTo(HelpCenterSlug other) => string.CompareOrdinal(value, other.value);
+
+    public static bool operator <(HelpCenterSlug left, HelpCenterSlug right) => left.CompareTo(right) < 0;
+    public static bool operator <=(HelpCenterSlug left, HelpCenterSlug right) => left.CompareTo(right) <= 0;
+    public static bool operator >(HelpCenterSlug left, HelpCenterSlug right) => left.CompareTo(right) > 0;
+    public static bool operator >=(HelpCenterSlug left, HelpCenterSlug right) => left.CompareTo(right) >= 0;
 
     public override string ToString() => value ?? string.Empty;
 }
@@ -129,6 +149,11 @@ public readonly record struct HelpCenterLocale : IComparable<HelpCenterLocale>
     private HelpCenterLocale(string canonical, bool _) => value = canonical;
 
     public int CompareTo(HelpCenterLocale other) => string.CompareOrdinal(value, other.value);
+
+    public static bool operator <(HelpCenterLocale left, HelpCenterLocale right) => left.CompareTo(right) < 0;
+    public static bool operator <=(HelpCenterLocale left, HelpCenterLocale right) => left.CompareTo(right) <= 0;
+    public static bool operator >(HelpCenterLocale left, HelpCenterLocale right) => left.CompareTo(right) > 0;
+    public static bool operator >=(HelpCenterLocale left, HelpCenterLocale right) => left.CompareTo(right) >= 0;
 
     public override string ToString() => value ?? string.Empty;
 

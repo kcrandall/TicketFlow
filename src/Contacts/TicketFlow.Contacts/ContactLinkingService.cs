@@ -706,8 +706,8 @@ public sealed class ContactLinkingService : IContactLinkingService
 
     /// <summary>True when <paramref name="contact"/> holds a different verified account in the account's namespace.</summary>
     private static bool HoldsOtherAccount(Contact contact, ContactIdentityAddress account) =>
-        contact.Identities.Any(identity => identity.Address.Kind == ContactIdentityKind.ExternalUser && identity.Address.Namespace == account.Namespace
-            && identity.Address != account && identity.Verification.IsVerified);
+        contact.Identities.Any(identity => identity.Address.Kind == ContactIdentityKind.ExternalUser && string.Equals(identity.Address.Namespace, account.Namespace
+, StringComparison.Ordinal) && identity.Address != account && identity.Verification.IsVerified);
 
     /// <summary>True when the two contacts hold different verified accounts of one namespace (merging would combine two accounts).</summary>
     private static bool SharesNamespaceWithOtherAccount(Contact candidate, Contact account) =>

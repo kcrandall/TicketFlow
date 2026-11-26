@@ -29,7 +29,7 @@ public sealed class ChannelDispatchRetryException(string code, TimeSpan? retryAf
 /// it immediately. Delivery updates run as <see cref="ChannelsOptions.WorkerPrincipal"/>. Bodies are read through trusted store
 /// access and never logged. Messages of inboxes whose kind has no registered channel are left to other dispatchers.
 /// </summary>
-public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
+public sealed partial class ChannelOutboundDispatcher : IConversationOutboxHandler
 {
     private readonly IConversationStore conversationStore;
     private readonly IConversationService conversations;
@@ -115,7 +115,7 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
         }
         if (existing is { Dispatch.State: ChannelDispatchState.Sending })
         {
-            logger.LogWarning("A previous send attempt for message {Message} in conversation {Conversation} ended without an outcome; it is not retried.", messageId, conversationId);
+            LogPreviousAttemptUnknown(logger, messageId, conversationId);
             await FinishAsync(scope, existing, existing.Dispatch.Attempts, ChannelDispatchState.Unknown, null, "outcome-unknown", cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -134,11 +134,11 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
             await Task.WhenAll(eventsTask, stateTask, referencesTask).ConfigureAwait(false);
         else
             await Task.WhenAll(eventsTask, stateTask).ConfigureAwait(false);
-        var events = eventsTask.Result;
+        var events = await eventsTask.ConfigureAwait(false);
         if (events.Count != 1 || events[0].Event.Value is not MessageEvent { Direction: MessageDirection.Outgoing } outgoing || outgoing.Id != messageId)
             return;
 
-        var state = stateTask.Result;
+        var state = await stateTask.ConfigureAwait(false);
         var recipient = await RecipientAsync(scope, stored.Conversation, state?.State, channel, cancellationToken).ConfigureAwait(false);
         string? refusal = null;
         if (recipient is null)
@@ -154,10 +154,10 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
             return;
         }
 
-        IReadOnlyList<string> chain;
+        string[] chain;
         if (referencesTask is not null)
         {
-            var references = referencesTask.Result;
+            var references = await referencesTask.ConfigureAwait(false);
             var maxRefs = options.MaximumReplyReferences;
             if (references.Count == 0)
                 chain = [];
@@ -180,7 +180,7 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
         }
         else
             chain = [];
-        var inReplyTo = state?.State.LastIncomingExternalId ?? (chain.Count > 0 ? chain[^1] : null);
+        var inReplyTo = state?.State.LastIncomingExternalId ?? (chain.Length > 0 ? chain[^1] : null);
         var request = new OutboundChannelMessage(scope, stored.Conversation.Inbox, binding, conversationId, messageId, stored.Conversation.Contact, recipient!,
             outgoing.Body, outgoing.ContentType, ChannelAuthorization.IdempotencyKey(scope, binding.Kind.Value, conversationId.Value, messageId.Value),
             outgoing.Attachments, new ChannelThreadContext(state?.State.ExternalThreadId ?? stored.Conversation.ChannelThread?.ExternalThreadId, inReplyTo, chain, state?.State.Subject),
@@ -220,11 +220,11 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
                     throw new InvalidOperationException("The dispatch record changed concurrently; the entry will be retried.");
                 throw new ChannelDispatchRetryException(rejected.Code, rejected.RetryAfter);
             case ChannelSendRejected rejected:
-                logger.LogWarning("Channel {Channel} rejected message {Message} with {Code} after {Attempts} attempt(s).", binding.Kind, messageId, rejected.Code, attempts);
+                LogChannelRejected(logger, binding.Kind, messageId, rejected.Code, attempts);
                 await FinishAsync(scope, current, attempts, ChannelDispatchState.Rejected, null, rejected.Code, cancellationToken).ConfigureAwait(false);
                 break;
             case ChannelSendUnknown unknown:
-                logger.LogWarning("Channel {Channel} returned an unknown outcome for message {Message}; it is not retried.", binding.Kind, messageId);
+                LogChannelUnknown(logger, binding.Kind, messageId);
                 await FinishAsync(scope, current, attempts, ChannelDispatchState.Unknown, null, unknown.Code, cancellationToken).ConfigureAwait(false);
                 break;
         }
@@ -267,10 +267,22 @@ public sealed class ChannelOutboundDispatcher : IConversationOutboxHandler
             case ConversationRefused { Reason: ConversationRefusal.Rejected }:
                 throw new InvalidOperationException("The delivery update was rejected; the entry will be retried.");
             case ConversationRefused:
-                logger.LogWarning("The delivery update for message {Message} was refused as invalid.", dispatch.Message);
+                LogDeliveryUpdateRefused(logger, dispatch.Message);
                 return;
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "A previous send attempt for message {Message} in conversation {Conversation} ended without an outcome; it is not retried.")]
+    private static partial void LogPreviousAttemptUnknown(ILogger logger, MessageId message, ConversationId conversation);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Channel {Channel} rejected message {Message} with {Code} after {Attempts} attempt(s).")]
+    private static partial void LogChannelRejected(ILogger logger, ChannelKind channel, MessageId message, string code, int attempts);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Channel {Channel} returned an unknown outcome for message {Message}; it is not retried.")]
+    private static partial void LogChannelUnknown(ILogger logger, ChannelKind channel, MessageId message);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "The delivery update for message {Message} was refused as invalid.")]
+    private static partial void LogDeliveryUpdateRefused(ILogger logger, MessageId message);
 
     private async Task<ChannelRecipient?> RecipientAsync(TicketScope scope, Conversation conversation, ChannelConversationState? state, ITicketChannel channel, CancellationToken cancellationToken)
     {

@@ -63,8 +63,8 @@ public sealed class SurveyResponder(ISurveyStore store, TimeProvider clock) : IS
             : new SurveyResponseRejected(SurveyResponseRejection.AlreadyResponded);
 
     private static SurveyResponseResult Replay(SurveyResponse existing, int score, string? comment) =>
-        existing.Score == score && existing.Comment == comment
-            ? new SurveyResponseDuplicate(existing)
+        existing.Score == score && string.Equals(existing.Comment, comment
+, StringComparison.Ordinal) ? new SurveyResponseDuplicate(existing)
             : new SurveyResponseRejected(SurveyResponseRejection.AlreadyResponded);
 
     private async Task<StoredInvitation?> FindAsync(TicketScope scope, string token, CancellationToken cancellationToken)

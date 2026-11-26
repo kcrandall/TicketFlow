@@ -25,7 +25,7 @@ internal static class LiveChatEndpoints
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
                 return failure;
-            if (request.ConfigurationId != configurationId)
+            if (!string.Equals(request.ConfigurationId, configurationId, StringComparison.Ordinal))
                 throw new ArgumentException("The body configuration must match the route.", nameof(configurationId));
             return Map(http, await service.UpdateAsync(actor.Principal, Widget(request), revision, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision));
         }).WithName("UpdateWidget").Produces<WidgetResponse>();
@@ -53,7 +53,7 @@ internal static class LiveChatEndpoints
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
                 return failure;
-            if (request.Kind != kind || request.ConfigurationId != configurationId)
+            if (!string.Equals(request.Kind, kind, StringComparison.Ordinal) || !string.Equals(request.ConfigurationId, configurationId, StringComparison.Ordinal))
                 throw new ArgumentException("The body kind and configuration must match the route.", nameof(configurationId));
             return Map(http, await service.UpdateAsync(actor.Principal, Endpoint(request), revision, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Dto(stored), stored.Revision));
         }).WithName("UpdateChannelEndpoint").Produces<ChannelEndpointResponse>();

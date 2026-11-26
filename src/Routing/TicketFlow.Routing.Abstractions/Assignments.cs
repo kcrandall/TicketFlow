@@ -24,7 +24,7 @@ public sealed record RoutingAssignment
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(conversationRevision, 1);
         if (conversation == default || agent == default || inbox == default || contact == default || !channel.IsInitialized)
-            throw new ArgumentException("Conversation, agent, inbox, contact and channel are required.");
+            throw new ArgumentException("Conversation, agent, inbox, contact and channel are required.", conversation == default ? nameof(conversation) : agent == default ? nameof(agent) : inbox == default ? nameof(inbox) : contact == default ? nameof(contact) : nameof(channel));
         if (!Enum.IsDefined(state))
             throw new ArgumentOutOfRangeException(nameof(state));
         if ((state == RoutingAssignmentState.Reserved) != (reservedUntil is not null))
@@ -106,7 +106,7 @@ public sealed record RoutingReservationRequest
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(conversationRevision, 1);
         if (conversation == default || inbox == default || contact == default || !channel.IsInitialized || preferred == default(UserId))
-            throw new ArgumentException("Conversation, inbox, contact and channel are required; the preferred agent must be initialized when supplied.");
+            throw new ArgumentException("Conversation, inbox, contact and channel are required; the preferred agent must be initialized when supplied.", conversation == default ? nameof(conversation) : inbox == default ? nameof(inbox) : contact == default ? nameof(contact) : !channel.IsInitialized ? nameof(channel) : nameof(preferred));
         CursorKey = TicketScope.RequireIdentifier(cursorKey, nameof(cursorKey));
         if (!Enum.IsDefined(selection))
             throw new ArgumentOutOfRangeException(nameof(selection));
@@ -264,7 +264,7 @@ public sealed record RoutingAssignmentRecord
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(conversationRevision, 1);
         if (conversation == default || agent == default || inbox == default || contact == default || !channel.IsInitialized)
-            throw new ArgumentException("Conversation, agent, inbox, contact and channel are required.");
+            throw new ArgumentException("Conversation, agent, inbox, contact and channel are required.", conversation == default ? nameof(conversation) : agent == default ? nameof(agent) : inbox == default ? nameof(inbox) : contact == default ? nameof(contact) : nameof(channel));
         Conversation = conversation;
         ConversationRevision = conversationRevision;
         Agent = agent;

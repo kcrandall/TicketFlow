@@ -112,8 +112,8 @@ public sealed partial class PostgresRoutingStore : IRoutingPolicyStore, IAgentAv
             AddLong(create, "max", IRoutingPolicyStore.MaximumPoliciesPerWorkspace);
             await using var reader = await create.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            insertedRevision = reader.IsDBNull(0) ? null : reader.GetInt64(0);
-            existingRevision = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+            insertedRevision = await reader.IsDBNullAsync(0, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt64(0);
+            existingRevision = await reader.IsDBNullAsync(1, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt64(1);
         }
         if (insertedRevision is { } rev)
         {

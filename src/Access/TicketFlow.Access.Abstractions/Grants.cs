@@ -44,7 +44,7 @@ public sealed record AccessPartition
     }
 
     public bool Contains(TicketScope scope) =>
-        scope is not null && scope.TenantId == TenantId && scope.ProjectId == ProjectId && scope.EnvironmentId == EnvironmentId && scope.AppId == AppId;
+        scope is not null && string.Equals(scope.TenantId, TenantId, StringComparison.Ordinal) && string.Equals(scope.ProjectId, ProjectId, StringComparison.Ordinal) && string.Equals(scope.EnvironmentId, EnvironmentId, StringComparison.Ordinal) && string.Equals(scope.AppId, AppId, StringComparison.Ordinal);
 
     public TicketScope InWorkspace(WorkspaceId workspace) => new(TenantId, ProjectId, EnvironmentId, AppId, workspace);
 
@@ -181,7 +181,7 @@ public sealed record TeamGrantScope : GrantScope
     public TeamGrantScope(WorkspaceId workspace, TeamId team)
     {
         if (workspace == default || team == default)
-            throw new ArgumentException("Workspace and team identifiers are required.");
+            throw new ArgumentException("Workspace and team identifiers are required.", workspace == default ? nameof(workspace) : nameof(team));
         Workspace = workspace;
         Team = team;
     }
@@ -196,7 +196,7 @@ public sealed record InboxGrantScope : GrantScope
     public InboxGrantScope(WorkspaceId workspace, InboxId inbox)
     {
         if (workspace == default || inbox == default)
-            throw new ArgumentException("Workspace and inbox identifiers are required.");
+            throw new ArgumentException("Workspace and inbox identifiers are required.", workspace == default ? nameof(workspace) : nameof(inbox));
         Workspace = workspace;
         Inbox = inbox;
     }

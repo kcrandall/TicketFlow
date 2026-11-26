@@ -110,7 +110,7 @@ public readonly record struct EventTypePattern
     {
         ArgumentNullException.ThrowIfNull(type);
         var pattern = Value;
-        if (pattern == "*")
+        if (string.Equals(pattern, "*", StringComparison.Ordinal))
             return true;
         var span = pattern.AsSpan();
         return span.Length >= 2 && span[^1] == '*' && span[^2] == '.'
@@ -122,7 +122,7 @@ public readonly record struct EventTypePattern
 
     private static bool IsValid(string value)
     {
-        if (value == "*")
+        if (string.Equals(value, "*", StringComparison.Ordinal))
             return true;
         if (value.Length > IntegrationEventTypes.MaximumLength)
             return false;

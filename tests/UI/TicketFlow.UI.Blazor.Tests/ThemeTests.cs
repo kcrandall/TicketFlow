@@ -48,7 +48,7 @@ public sealed class ThemeTests
         var document = context.Render<TicketFlowDocument>(parameters => parameters.Add(p => p.Session, session));
 
         Assert.AreEqual("slate", document.Find("html").GetAttribute("data-tf-theme"));
-        StringAssert.Contains(document.Markup, "prefers-color-scheme: dark");
+        StringAssert.Contains(document.Markup, "prefers-color-scheme: dark", StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -75,7 +75,7 @@ public sealed class ThemeTests
         var document = context.Render<TicketFlowDocument>(parameters => parameters.Add(p => p.Session, session));
 
         Assert.AreEqual("acme", document.Find("html").GetAttribute("data-tf-theme"));
-        StringAssert.Contains(document.Find("style").TextContent, "--primary:oklch(0.62 0.24 293)");
+        StringAssert.Contains(document.Find("style").TextContent, "--primary:oklch(0.62 0.24 293)", StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -93,8 +93,8 @@ public sealed class ThemeTests
     {
         var http = new DefaultHttpContext();
         UiTheme.Write(http, new TicketFlowBlazorUIOptions(), new TicketFlowThemePreference("violet", TicketFlowThemeMode.Light));
-        StringAssert.Contains(http.Response.Headers.SetCookie.ToString(), "tf-theme=violet.light");
-        StringAssert.Contains(http.Response.Headers.SetCookie.ToString(), "samesite=lax");
+        StringAssert.Contains(http.Response.Headers.SetCookie.ToString(), "tf-theme=violet.light", StringComparison.Ordinal);
+        StringAssert.Contains(http.Response.Headers.SetCookie.ToString(), "samesite=lax", StringComparison.Ordinal);
     }
 
     [TestMethod]

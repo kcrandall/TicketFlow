@@ -175,7 +175,7 @@ public sealed record ContactRedirect
     public ContactRedirect(Guid merge, ContactId previous)
     {
         if (merge == Guid.Empty || previous == default)
-            throw new ArgumentException("A merge identifier and previous contact are required.");
+            throw new ArgumentException("A merge identifier and previous contact are required.", merge == Guid.Empty ? nameof(merge) : nameof(previous));
         Merge = merge;
         Previous = previous;
     }
@@ -222,13 +222,13 @@ public sealed record Conversation
         IEnumerable<ContactRedirect>? contactRedirects = null)
     {
         if (id == default || inbox == default || contact == default)
-            throw new ArgumentException("Conversation, inbox and contact identifiers are required.");
+            throw new ArgumentException("Conversation, inbox and contact identifiers are required.", id == default ? nameof(id) : inbox == default ? nameof(inbox) : nameof(contact));
         if (status.Value is null)
             throw new ArgumentException("A status is required.", nameof(status));
         if (!Enum.IsDefined(priority))
             throw new ArgumentOutOfRangeException(nameof(priority));
         if (assignee == default(UserId) || team == default(TeamId))
-            throw new ArgumentException("Assignee and team must be initialized when supplied.");
+            throw new ArgumentException("Assignee and team must be initialized when supplied.", assignee == default(UserId) ? nameof(assignee) : nameof(team));
         ArgumentOutOfRangeException.ThrowIfNegative(lastSequence);
         Id = id;
         Inbox = inbox;
@@ -349,7 +349,7 @@ public sealed record Conversation
     {
         var nextContact = contact ?? Contact;
         if (nextContact == default)
-            throw new ArgumentException("Conversation, inbox and contact identifiers are required.");
+            throw new ArgumentException("Conversation, inbox and contact identifiers are required.", nameof(contact));
         var nextStatus = status ?? Status;
         if (nextStatus.Value is null)
             throw new ArgumentException("A status is required.", nameof(status));
@@ -359,9 +359,9 @@ public sealed record Conversation
         var nextAssignee = assignee.HasValue ? assignee.Value : Assignee;
         var nextTeam = team.HasValue ? team.Value : Team;
         if (nextAssignee == default(UserId) || nextTeam == default(TeamId))
-            throw new ArgumentException("Assignee and team must be initialized when supplied.");
+            throw new ArgumentException("Assignee and team must be initialized when supplied.", nextAssignee == default(UserId) ? nameof(assignee) : nameof(team));
         var nextSequence = lastSequence ?? LastSequence;
-        ArgumentOutOfRangeException.ThrowIfNegative(nextSequence);
+        ArgumentOutOfRangeException.ThrowIfNegative(nextSequence, nameof(lastSequence));
         var nextLastActivity = lastActivityAt is { } la ? ConversationText.Instant(la) : LastActivityAt;
         if (nextLastActivity < CreatedAt)
             throw new ArgumentException("Last activity cannot precede creation.", nameof(lastActivityAt));
@@ -380,7 +380,7 @@ public sealed record Conversation
 
     public bool Equals(Conversation? other)
     {
-        if (other is null || Id != other.Id || Inbox != other.Inbox || Contact != other.Contact || !Status.Equals(other.Status)
+        if (other is null || Id != other.Id || Inbox != other.Inbox || Contact != other.Contact || !Equals(Status.Value, other.Status.Value)
             || Priority != other.Priority || Assignee != other.Assignee || Team != other.Team
             || Labels.Count != other.Labels.Count || Attributes.Count != other.Attributes.Count
             || Participants.Count != other.Participants.Count || ContactRedirects.Count != other.ContactRedirects.Count
@@ -400,7 +400,7 @@ public sealed record Conversation
         for (var i = 0; i < attributeKeys.Count; i++)
         {
             var key = attributeKeys[i];
-            if (!string.Equals(key, other.attributeKeys[i], StringComparison.Ordinal) || !Attributes[key].Equals(other.Attributes[key]))
+            if (!string.Equals(key, other.attributeKeys[i], StringComparison.Ordinal) || !Equals(Attributes[key].Value, other.Attributes[key].Value))
                 return false;
         }
         return true;
@@ -410,11 +410,11 @@ public sealed record Conversation
 
     public override string ToString() => $"Conversation {{ Id = {Id}, Status = {Status.Kind} }}";
 
-    private static IReadOnlyList<LabelId> SortedLabels(IEnumerable<LabelId> values, string parameterName)
+    private static System.Collections.ObjectModel.ReadOnlyCollection<LabelId> SortedLabels(IEnumerable<LabelId> values, string parameterName)
     {
         ArgumentNullException.ThrowIfNull(values, parameterName);
         if (values is ICollection<LabelId> { Count: 0 } or IReadOnlyCollection<LabelId> { Count: 0 })
-            return [];
+            return System.Collections.ObjectModel.ReadOnlyCollection<LabelId>.Empty;
         var list = values.TryGetNonEnumeratedCount(out var count) ? new List<LabelId>(Math.Min(count, MaximumLabels)) : [];
         foreach (var value in values)
         {
@@ -423,7 +423,7 @@ public sealed record Conversation
             list.Add(value);
         }
         if (list.Count == 0)
-            return [];
+            return System.Collections.ObjectModel.ReadOnlyCollection<LabelId>.Empty;
         if (list.Count == 1)
             return list.AsReadOnly();
         list.Sort(static (a, b) => string.CompareOrdinal(a.Value, b.Value));
@@ -438,11 +438,11 @@ public sealed record Conversation
         return list.AsReadOnly();
     }
 
-    private static IReadOnlyList<UserId> SortedUsers(IEnumerable<UserId> values, string parameterName)
+    private static System.Collections.ObjectModel.ReadOnlyCollection<UserId> SortedUsers(IEnumerable<UserId> values, string parameterName)
     {
         ArgumentNullException.ThrowIfNull(values, parameterName);
         if (values is ICollection<UserId> { Count: 0 } or IReadOnlyCollection<UserId> { Count: 0 })
-            return [];
+            return System.Collections.ObjectModel.ReadOnlyCollection<UserId>.Empty;
         var list = values.TryGetNonEnumeratedCount(out var count) ? new List<UserId>(Math.Min(count, MaximumParticipants)) : [];
         foreach (var value in values)
         {
@@ -451,7 +451,7 @@ public sealed record Conversation
             list.Add(value);
         }
         if (list.Count == 0)
-            return [];
+            return System.Collections.ObjectModel.ReadOnlyCollection<UserId>.Empty;
         if (list.Count == 1)
             return list.AsReadOnly();
         list.Sort(static (a, b) => string.CompareOrdinal(a.Value, b.Value));
@@ -466,7 +466,7 @@ public sealed record Conversation
         return list.AsReadOnly();
     }
 
-    private static IReadOnlyList<ContactRedirect> NormalizeRedirects(IEnumerable<ContactRedirect>? redirects, string parameterName)
+    private static ContactRedirect[] NormalizeRedirects(IEnumerable<ContactRedirect>? redirects, string parameterName)
     {
         if (redirects is null)
             return [];

@@ -296,7 +296,7 @@ public sealed class InMemorySurveyStore : ISurveyStore
         }
     }
 
-    private IEnumerable<StoredResponse> Responses(TicketScope scope, AccessFilter filter, DateTimeOffset from, DateTimeOffset to, SurveyId? survey) =>
+    private List<StoredResponse> Responses(TicketScope scope, AccessFilter filter, DateTimeOffset from, DateTimeOffset to, SurveyId? survey) =>
         (Find(scope)?.Responses.Values ?? Enumerable.Empty<StoredResponse>())
             .Where(stored => stored.Response.RespondedAt >= from && stored.Response.RespondedAt < to && (survey is null || stored.Response.Survey == survey))
             .Where(stored => AccessFilterEvaluator.Matches(filter, SurveyResources.Response(scope, stored.Response)))

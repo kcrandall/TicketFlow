@@ -30,7 +30,7 @@ public sealed class ModelAndCompositionTests
         Assert.ThrowsExactly<ArgumentException>(() => new AssistModelDefinition("x", "p", "", AssistModelCapabilities.None));
         Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new AssistUsage(-1, 0));
         Assert.AreEqual("AssistDraft { Citations = 0, Grounded = False }", new AssistDraft("secret body", [], false).ToString());
-        Assert.DoesNotContain("secret", new AssistSummary("secret", [], null).ToString());
+        Assert.DoesNotContain("secret", new AssistSummary("secret", [], null).ToString(), StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -95,7 +95,7 @@ public sealed class ModelAndCompositionTests
     }
 
     [TestMethod]
-    public void FactoryWrapsProviderClientsAndRejectsUnknownModels()
+    public async Task FactoryWrapsProviderClientsAndRejectsUnknownModels()
     {
         var model = new ScriptedChatClient();
         var scripted = new ScriptedChatProvider(model);
@@ -112,7 +112,7 @@ public sealed class ModelAndCompositionTests
 
         model.Reply("{}");
         var client = factory.GetChatClient(new AssistChatRequest("m", AssistFeature.Triage));
-        _ = client.GetResponseAsync([new ChatMessage(ChatRole.User, "hi")]).GetAwaiter().GetResult();
+        _ = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "hi")]);
         var sent = model.Requests.Single().Options!;
         Assert.AreEqual("m-v2", sent.ModelId);
         Assert.AreEqual(ReasoningEffort.High, sent.Reasoning!.Effort, "model default thinking level");
@@ -196,7 +196,7 @@ public sealed class ModelAndCompositionTests
         var activities = new List<System.Diagnostics.Activity>();
         using var listener = new System.Diagnostics.ActivityListener
         {
-            ShouldListenTo = source => source.Name == AssistTelemetry.ToolActivitySourceName,
+            ShouldListenTo = source => string.Equals(source.Name, AssistTelemetry.ToolActivitySourceName, StringComparison.Ordinal),
             Sample = (ref System.Diagnostics.ActivityCreationOptions<System.Diagnostics.ActivityContext> _) => System.Diagnostics.ActivitySamplingResult.AllDataAndRecorded,
             ActivityStopped = activities.Add,
         };

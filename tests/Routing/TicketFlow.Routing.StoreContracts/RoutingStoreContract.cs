@@ -331,7 +331,7 @@ public static class RoutingStoreContract
         Assert.AreEqual(3, mine.Count);
         Assert.AreEqual(3, mine.Select(claim => claim.Entry.Conversation).Distinct().Count());
         Assert.AreEqual(0, (await primary.ClaimDueAsync(10, TimeSpan.FromMinutes(1))).Count(claim => claim.Scope == scope));
-        var claim1 = mine.Single(claim => claim.Entry.Conversation.Value == "q-1");
+        var claim1 = mine.Single(claim => string.Equals(claim.Entry.Conversation.Value, "q-1", StringComparison.Ordinal));
         var later = clock.GetUtcNow().AddMinutes(5);
         Assert.IsFalse(await competing.CompleteAttemptAsync(scope, claim1.Entry.Conversation, claim1.Fence + 1000, new RoutingQueueUpdate(later, new InboxId("email"), 0, false)));
         Assert.IsTrue(await competing.CompleteAttemptAsync(scope, claim1.Entry.Conversation, claim1.Fence, new RoutingQueueUpdate(later, new InboxId("overflow"), 1, true)));

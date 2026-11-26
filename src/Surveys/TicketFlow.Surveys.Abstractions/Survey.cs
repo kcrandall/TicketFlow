@@ -113,7 +113,7 @@ public sealed record SurveyDefinition
     public SurveyDefinition(SurveyId id, string name, SurveyKind kind, SurveyLocale defaultLocale, IEnumerable<SurveyQuestion> questions, SurveyTriggerPolicy policy, InboxId? inbox = null, bool enabled = true)
     {
         if (!id.IsInitialized || !defaultLocale.IsInitialized || inbox == default(InboxId))
-            throw new ArgumentException("Survey identifier, default locale and inbox (when supplied) must be initialized.");
+            throw new ArgumentException("Survey identifier, default locale and inbox (when supplied) must be initialized.", !id.IsInitialized ? nameof(id) : !defaultLocale.IsInitialized ? nameof(defaultLocale) : nameof(inbox));
         if (!Enum.IsDefined(kind))
             throw new ArgumentOutOfRangeException(nameof(kind));
         ArgumentNullException.ThrowIfNull(questions);
@@ -154,7 +154,7 @@ public sealed record SurveyDefinition
         Questions.FirstOrDefault(question => locale is { } wanted && question.Locale == wanted) ?? Questions.First(question => question.Locale == DefaultLocale);
 
     public bool Equals(SurveyDefinition? other) =>
-        other is not null && Id == other.Id && Name == other.Name && Kind == other.Kind && DefaultLocale == other.DefaultLocale
+        other is not null && Id == other.Id && string.Equals(Name, other.Name, StringComparison.Ordinal) && Kind == other.Kind && DefaultLocale == other.DefaultLocale
         && Questions.SequenceEqual(other.Questions) && Policy == other.Policy && Inbox == other.Inbox && Enabled == other.Enabled;
 
     public override int GetHashCode() => HashCode.Combine(Id, Name, Kind, DefaultLocale, Questions.Count, Policy, Inbox, Enabled);

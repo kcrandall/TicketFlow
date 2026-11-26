@@ -17,7 +17,7 @@ public sealed record HelpCenterSearchQuery
     public HelpCenterSearchQuery(PortalId portal, HelpCenterLocale locale, string text, int limit = 10, int offset = 0)
     {
         if (!portal.IsInitialized || !locale.IsInitialized)
-            throw new ArgumentException("Portal and locale are required.");
+            throw new ArgumentException("Portal and locale are required.", !portal.IsInitialized ? nameof(portal) : nameof(locale));
         Text = HelpCenterText.RequireLine(text, MaximumQueryLength, nameof(text));
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, MaximumLimit);

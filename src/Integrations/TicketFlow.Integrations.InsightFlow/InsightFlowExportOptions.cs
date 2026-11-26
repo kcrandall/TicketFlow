@@ -48,7 +48,7 @@ public sealed class InsightFlowExportOptions
 
     internal void Validate()
     {
-        if (Endpoint is null || !Endpoint.IsAbsoluteUri || Endpoint.Scheme != Uri.UriSchemeHttps || Endpoint.UserInfo.Length != 0 || Endpoint.Query.Length != 0 || Endpoint.Fragment.Length != 0)
+        if (Endpoint is null || !Endpoint.IsAbsoluteUri || !string.Equals(Endpoint.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal) || Endpoint.UserInfo.Length != 0 || Endpoint.Query.Length != 0 || Endpoint.Fragment.Length != 0)
             throw new InvalidOperationException("InsightFlow Endpoint must be an absolute https URI without credentials, query or fragment.");
         if (ApiKey is not null && (string.IsNullOrWhiteSpace(ApiKey) || ApiKey.Length > 512 || ApiKey.Any(c => c is < '!' or > '~')))
             throw new InvalidOperationException("InsightFlow ApiKey must be printable ASCII without whitespace.");

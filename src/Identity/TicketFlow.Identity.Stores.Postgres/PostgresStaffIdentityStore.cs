@@ -159,7 +159,7 @@ public sealed class PostgresStaffIdentityStore(NpgsqlDataSource dataSource) : IS
         {
             if (reader.GetInt16(5) != 1)
                 throw new FormatException("Unsupported staff profile format version.");
-            return new StoredStaffProfile(scope, new StaffProfile(user, reader.NullableText(0), reader.NullableText(1), reader.NullableText(2)), reader.GetFieldValue<DateTimeOffset>(3), reader.GetInt64(4));
+            return new StoredStaffProfile(scope, new StaffProfile(user, reader.NullableText(0), reader.NullableText(1), reader.NullableText(2)), await reader.GetFieldValueAsync<DateTimeOffset>(3, cancellationToken).ConfigureAwait(false), reader.GetInt64(4));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
         {

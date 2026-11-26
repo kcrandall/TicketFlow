@@ -31,7 +31,7 @@ public sealed class DecisionContextTests
         foreach (var resource in resources)
             foreach (var permission in permissions)
                 Assert.AreEqual(await fixture.AuthorizeAsync(user, permission, resource), await context.DecideAsync(permission, resource), $"{permission}");
-        Assert.ThrowsExactly<ArgumentException>(() => context.DecideAsync(AccessPermissions.ConversationDelete, resources[0]).AsTask().GetAwaiter().GetResult());
+        await Assert.ThrowsExactlyAsync<ArgumentException>(async () => await context.DecideAsync(AccessPermissions.ConversationDelete, resources[0]));
 
         var automation = await fixture.Evaluator.LoadDecisionContextAsync(TestPrincipals.Automation(fixture.Scope), fixture.Scope, [AccessPermissions.ConversationRead]);
         Assert.AreEqual("denied:UnsupportedPrincipal", AccessFixture.Describe(await automation.DecideAsync(AccessPermissions.ConversationRead, resources[0])));

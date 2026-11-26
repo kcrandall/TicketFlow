@@ -239,7 +239,7 @@ public sealed class PostgresEventStore : IEventLog, IEventSubscriptionStore
         AddScope(command, scope);
         await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-        return new EventLogHead(reader.IsDBNull(1) ? null : reader.GetInt64(1), reader.IsDBNull(0) ? 0 : reader.GetInt64(0));
+        return new EventLogHead(await reader.IsDBNullAsync(1, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt64(1), await reader.IsDBNullAsync(0, cancellationToken).ConfigureAwait(false) ? 0 : reader.GetInt64(0));
     }
 
     public async Task<int> PruneAsync(DateTimeOffset olderThan, int limit, CancellationToken cancellationToken = default)

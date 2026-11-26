@@ -19,7 +19,7 @@ public static class SampleUsers
         new("viewer", "Taylor Brooks", "taylor.brooks@acme.test", "Viewer"),
     ];
 
-    public static SampleUser? Find(string id) => All.FirstOrDefault(user => user.Id == id);
+    public static SampleUser? Find(string id) => All.FirstOrDefault(user => string.Equals(user.Id, id, StringComparison.Ordinal));
 }
 
 internal sealed class SampleUserDirectory : ITicketFlowUserDirectory

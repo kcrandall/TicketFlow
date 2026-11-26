@@ -54,7 +54,7 @@ public sealed class CodecTests
         {
             Assert.IsTrue(IntegrationEventTypes.IsWellFormed(sample.Type), sample.Type);
             var json = IntegrationEventCodec.EncodeData(sample);
-            StringAssert.StartsWith(json, "{\"v\":1,");
+            StringAssert.StartsWith(json, "{\"v\":1,", StringComparison.Ordinal);
             var decoded = IntegrationEventCodec.DecodeData(sample.Type, json);
             Assert.AreEqual(json, IntegrationEventCodec.EncodeData(decoded), sample.Type);
             Assert.AreEqual(sample.Subject, decoded.Subject);

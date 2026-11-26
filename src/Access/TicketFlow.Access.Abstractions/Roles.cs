@@ -32,6 +32,11 @@ public readonly record struct RoleId : IComparable<RoleId>
 
     public int CompareTo(RoleId other) => string.CompareOrdinal(value, other.value);
 
+    public static bool operator <(RoleId left, RoleId right) => left.CompareTo(right) < 0;
+    public static bool operator <=(RoleId left, RoleId right) => left.CompareTo(right) <= 0;
+    public static bool operator >(RoleId left, RoleId right) => left.CompareTo(right) > 0;
+    public static bool operator >=(RoleId left, RoleId right) => left.CompareTo(right) >= 0;
+
     public override string ToString() => value ?? string.Empty;
 }
 
@@ -73,7 +78,7 @@ public sealed record AccessRole
     public bool Includes(Permission permission) => permission.IsInitialized && (IncludesAllPermissions || Permissions.Contains(permission));
 
     public bool Equals(AccessRole? other) =>
-        other is not null && Id == other.Id && Name == other.Name && IncludesAllPermissions == other.IncludesAllPermissions
+        other is not null && Id == other.Id && string.Equals(Name, other.Name, StringComparison.Ordinal) && IncludesAllPermissions == other.IncludesAllPermissions
         && IsBuiltIn == other.IsBuiltIn && Permissions.SetEquals(other.Permissions);
 
     public override int GetHashCode() => HashCode.Combine(Id, Name, Permissions.Count, IncludesAllPermissions, IsBuiltIn);

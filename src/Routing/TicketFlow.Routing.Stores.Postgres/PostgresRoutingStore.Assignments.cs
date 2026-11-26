@@ -100,8 +100,8 @@ public sealed partial class PostgresRoutingStore
                 if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 {
                     cursorFound = true;
-                    cursor = reader.IsDBNull(0) ? null : reader.GetString(0);
-                    now = Instant(reader.GetFieldValue<DateTimeOffset>(1));
+                    cursor = await reader.IsDBNullAsync(0, cancellationToken).ConfigureAwait(false) ? null : reader.GetString(0);
+                    now = Instant(await reader.GetFieldValueAsync<DateTimeOffset>(1, cancellationToken).ConfigureAwait(false));
                 }
                 await reader.NextResultAsync(cancellationToken).ConfigureAwait(false);
                 if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))

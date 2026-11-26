@@ -19,7 +19,7 @@ internal static class Attributes
 
     public static ContactAttributeValue Contact(AttributeValueModel? dto)
     {
-        ArgumentNullException.ThrowIfNull(dto, "value");
+        ArgumentNullException.ThrowIfNull(dto);
         return dto.Type switch
         {
             "text" => new TextAttributeValue(dto.Text ?? throw Missing("text")),
@@ -27,7 +27,7 @@ internal static class Attributes
             "boolean" => new BooleanAttributeValue(dto.Boolean ?? throw Missing("boolean")),
             "date" => new DateAttributeValue(dto.Date ?? throw Missing("date")),
             "list" => new ListAttributeValue(dto.Items ?? throw Missing("items")),
-            _ => throw new ArgumentException("Attribute value types are text, number, boolean, date or list.", "value"),
+            _ => throw new ArgumentException("Attribute value types are text, number, boolean, date or list.", nameof(dto)),
         };
     }
 
@@ -42,7 +42,7 @@ internal static class Attributes
 
     public static ConversationAttributeValue Conversation(AttributeValueModel? dto)
     {
-        ArgumentNullException.ThrowIfNull(dto, "value");
+        ArgumentNullException.ThrowIfNull(dto);
         return dto.Type switch
         {
             "text" => new ConversationTextValue(dto.Text ?? throw Missing("text")),
@@ -50,11 +50,11 @@ internal static class Attributes
             "boolean" => new ConversationBooleanValue(dto.Boolean ?? throw Missing("boolean")),
             "date" => new ConversationDateValue(dto.Date ?? throw Missing("date")),
             "list" => new ConversationListValue(dto.Items ?? throw Missing("items")),
-            _ => throw new ArgumentException("Attribute value types are text, number, boolean, date or list.", "value"),
+            _ => throw new ArgumentException("Attribute value types are text, number, boolean, date or list.", nameof(dto)),
         };
     }
 
     public static IReadOnlyList<MaskedFieldResponse> Masked(IEnumerable<MaskedField> fields) => [.. fields.Select(field => new MaskedFieldResponse(field.Field.Value, field.Revealable))];
 
-    private static ArgumentException Missing(string property) => new($"The '{property}' property is required for this attribute type.", "value");
+    private static ArgumentException Missing(string property) => new($"The '{property}' property is required for this attribute type.", property);
 }

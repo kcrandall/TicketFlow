@@ -124,8 +124,8 @@ public sealed class RoutingTools(TicketFlowToolContext context)
     private static DefinitionOutput PolicyOutput(StoredRoutingPolicy stored) =>
         new(stored.Policy.Id.Value, stored.Revision, TicketFlowToolJson.Parse(RoutingPolicyCodec.Serialize(stored.Policy)));
 
-    private static UserId Agent(PrincipalRef principal, string agentId) => agentId == "me"
-        ? principal is UserPrincipal user ? user.UserId : throw new ArgumentException("'me' requires a user principal.", nameof(agentId))
+    private static UserId Agent(PrincipalRef principal, string agentId) => string.Equals(agentId, "me"
+, StringComparison.Ordinal) ? principal is UserPrincipal user ? user.UserId : throw new ArgumentException("'me' requires a user principal.", nameof(agentId))
         : new UserId(agentId);
 
     private DateTimeOffset Now() => (context.Services.GetService<TimeProvider>() ?? TimeProvider.System).GetUtcNow();

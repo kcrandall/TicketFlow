@@ -65,7 +65,7 @@ public sealed partial class ConversationService : IConversationService
             if (request.InitialMessage is { } draft)
                 initial = Incoming(draft, request.Contact, now);
             conversation = new Conversation(request.Id ?? options.ConversationIdFactory(), request.Inbox, request.Contact, ConversationStatus.Open,
-                request.Priority, request.Assignee, request.Team, request.Labels ?? [], request.Attributes ?? new Dictionary<string, ConversationAttributeValue>(),
+                request.Priority, request.Assignee, request.Team, request.Labels ?? [], request.Attributes ?? new Dictionary<string, ConversationAttributeValue>(StringComparer.Ordinal),
                 [], request.ChannelThread, now, now, initial is null ? null : now, null, initial is null ? null : now, null, initial is null ? 0 : 1);
         }
         catch (ArgumentException)
@@ -85,17 +85,17 @@ public sealed partial class ConversationService : IConversationService
             : defsTask is not null ? [inboxTask, contactTask, defsTask]
             : [inboxTask, contactTask]).ConfigureAwait(false);
 
-        var inbox = inboxTask.Result;
+        var inbox = await inboxTask.ConfigureAwait(false);
         if (inbox is null || !inbox.Inbox.Enabled)
             return ConversationRefused.Invalid("The inbox does not exist or is disabled.");
-        var contact = contactTask.Result;
+        var contact = await contactTask.ConfigureAwait(false);
         if (contact is null)
             return ConversationRefused.Invalid("The contact does not exist.");
         if (contact.Contact.MergedInto is not null)
             return ConversationRefused.Invalid("The contact was merged; start the conversation with the surviving contact.");
-        if (teamTask is not null && teamTask.Result is null)
+        if (teamTask is not null && await teamTask.ConfigureAwait(false) is null)
             return ConversationRefused.Invalid("The team does not exist.");
-        if (defsTask is not null && ValidateAttributes(conversation.Attributes, defsTask.Result) is { } invalid)
+        if (defsTask is not null && ValidateAttributes(conversation.Attributes, await defsTask.ConfigureAwait(false)) is { } invalid)
             return invalid;
         if (request.Id is not null && initial?.ExternalId is { } external
             && await ReplayAsync(actor, scope, conversation.Inbox, external, cancellationToken).ConfigureAwait(false) is { } replay)
@@ -230,7 +230,7 @@ public sealed partial class ConversationService : IConversationService
                 return Decided(ConversationRefused.Closed);
             if (status.SnoozedUntil is { } until && until <= now)
                 return Decided(ConversationRefused.Invalid("A snooze must end in the future."));
-            if (conversation.Status.Equals(status))
+            if (Equals(conversation.Status.Value, status.Value))
                 return Decided(Unchanged(stored));
             var stopsWaiting = status.Value is ResolvedStatus or ClosedStatus;
             return Decided(new Plan(conversation.With(status: status, lastActivityAt: Later(conversation, now),
@@ -326,7 +326,7 @@ public sealed partial class ConversationService : IConversationService
                         return ConversationRefused.Invalid($"Attribute '{key}' is not defined.");
                     if (!definition.Accepts(present))
                         return ConversationRefused.Invalid($"Attribute '{key}' requires a {definition.Type} value.");
-                    if (previous is { } old && old.Equals(present))
+                    if (previous is { } old && Equals(old.Value, present.Value))
                         continue;
                     attributes[key] = present;
                 }
@@ -441,7 +441,7 @@ public sealed partial class ConversationService : IConversationService
             }
             if (message.Direction != MessageDirection.Outgoing)
                 return ConversationRefused.Invalid("Delivery reports apply to outgoing messages.");
-            if (update.ProviderMessageId is { } provider && message.ExternalId is { } recorded && provider != recorded)
+            if (update.ProviderMessageId is { } provider && message.ExternalId is { } recorded && !string.Equals(provider, recorded, StringComparison.Ordinal))
                 return ConversationRefused.Invalid("The message already has a different provider message identifier.");
             var externalId = message.ExternalId is null ? update.ProviderMessageId : null;
             var advance = MessageDelivery.CanAdvance(message.Delivery.State, update.State);

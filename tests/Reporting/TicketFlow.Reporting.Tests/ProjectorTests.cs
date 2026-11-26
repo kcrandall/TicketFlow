@@ -63,7 +63,7 @@ public sealed class ProjectorTests
         Assert.AreEqual(0, dispatched.Retried + dispatched.DeadLettered);
         var facts = await fixture.FactsAsync();
         CollectionAssert.AreEquivalent(LifecycleFacts, facts.Select(Describe).ToArray());
-        Assert.IsTrue(facts.All(fact => fact.Dimensions.Inbox == new InboxId("email") && fact.Dimensions.Channel == "email"));
+        Assert.IsTrue(facts.All(fact => fact.Dimensions.Inbox == new InboxId("email") && string.Equals(fact.Dimensions.Channel, "email", StringComparison.Ordinal)));
         Assert.AreEqual(ReportingFixture.Monday, facts.Single(fact => fact.Metric == ReportMetric.ConversationCreated).OccurredAt);
         var state = (await fixture.Store.GetConversationAsync(fixture.Scope, new ConversationId("c1")))!.State;
         Assert.AreEqual((ConversationStatusKind.Resolved, 2, (DateTimeOffset?)null), (state.Status, state.Resolutions, state.WaitingSince));
@@ -120,11 +120,11 @@ public sealed class ProjectorTests
         await fixture.ReplyAsync("chat-1", fixture.Ann, TimeSpan.Zero);
         await fixture.DispatchAsync();
         var facts = await fixture.FactsAsync();
-        TimeSpan Value(string conversation, ReportMetric metric) => facts.Single(fact => fact.Conversation.Value == conversation && fact.Metric == metric).Duration!.Value;
+        TimeSpan Value(string conversation, ReportMetric metric) => facts.Single(fact => string.Equals(fact.Conversation.Value, conversation, StringComparison.Ordinal) && fact.Metric == metric).Duration!.Value;
         Assert.AreEqual(TimeSpan.FromHours(65), Value("email-1", ReportMetric.FirstResponseTime));
         Assert.AreEqual(TimeSpan.FromHours(2), Value("email-1", ReportMetric.FirstResponseBusinessTime), "Friday 16-17 plus Monday 09-10");
         Assert.AreEqual(TimeSpan.FromHours(65), Value("chat-1", ReportMetric.FirstResponseBusinessTime), "no calendar: calendar time");
-        Assert.AreEqual("live-chat", facts.First(fact => fact.Conversation.Value == "chat-1").Dimensions.Channel);
+        Assert.AreEqual("live-chat", facts.First(fact => string.Equals(fact.Conversation.Value, "chat-1", StringComparison.Ordinal)).Dimensions.Channel);
     }
 
     [TestMethod]

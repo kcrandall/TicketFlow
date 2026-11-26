@@ -62,7 +62,7 @@ public sealed record ConversationChangedEvent : RealtimeEvent
         : base(scope)
     {
         if (conversation == default || inbox == default)
-            throw new ArgumentException("Conversation and inbox identifiers are required.");
+            throw new ArgumentException("Conversation and inbox identifiers are required.", conversation == default ? nameof(conversation) : nameof(inbox));
         ArgumentOutOfRangeException.ThrowIfLessThan(revision, 1);
         if (!Enum.IsDefined(kind))
             throw new ArgumentOutOfRangeException(nameof(kind));
@@ -166,7 +166,7 @@ public sealed record VisitorMessageEvent : RealtimeEvent
         : base(scope)
     {
         if (!session.IsInitialized || conversation == default || message == default)
-            throw new ArgumentException("Session, conversation and message identifiers are required.");
+            throw new ArgumentException("Session, conversation and message identifiers are required.", !session.IsInitialized ? nameof(session) : conversation == default ? nameof(conversation) : nameof(message));
         ArgumentOutOfRangeException.ThrowIfLessThan(sequence, 1);
         if (!Enum.IsDefined(direction) || !Enum.IsDefined(contentType))
             throw new ArgumentOutOfRangeException(nameof(direction));

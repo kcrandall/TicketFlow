@@ -93,7 +93,7 @@ public sealed class TicketFlowBlazorUIOptions
             theme.Validate();
         if (Themes.Select(theme => theme.Id).Distinct(StringComparer.Ordinal).Count() != Themes.Count)
             throw new InvalidOperationException("Theme identifiers must be unique.");
-        if (!Themes.Any(theme => theme.Id == DefaultTheme.Theme))
+        if (!Themes.Any(theme => string.Equals(theme.Id, DefaultTheme.Theme, StringComparison.Ordinal)))
             throw new InvalidOperationException("TicketFlowBlazorUIOptions.DefaultTheme must name a registered theme.");
     }
 }

@@ -59,7 +59,7 @@ public sealed class TicketFlowMcpOptions
 
     internal void Validate()
     {
-        if ((Toolsets & ~TicketFlowToolsets.All) != 0 || MaximumResultBytes < 4096 || MaximumTextLength < 256)
+        if ((Toolsets & ~TicketFlowToolsets.All) != TicketFlowToolsets.None || MaximumResultBytes < 4096 || MaximumTextLength < 256)
             throw new InvalidOperationException("TicketFlow MCP options are invalid.");
         if (DefaultWorkspace is not null)
             _ = new WorkspaceId(DefaultWorkspace);

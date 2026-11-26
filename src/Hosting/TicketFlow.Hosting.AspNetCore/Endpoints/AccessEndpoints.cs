@@ -97,7 +97,7 @@ internal static class AccessEndpoints
         group.MapPost("/access/break-glass", async (TicketFlowActor actor, BreakGlassActivationRequest request, [FromServices] IAccessAdministrator administrator, HttpContext http) =>
         {
             if (request.DurationMinutes is < 1 or > 24 * 60)
-                throw new ArgumentException("Break-glass durations are 1-1440 minutes.", nameof(request.DurationMinutes));
+                throw new ArgumentException("Break-glass durations are 1-1440 minutes.", nameof(request));
             var breakGlass = new BreakGlassRequest(actor.Principal, new GrantId(request.Id ?? Ids.New()), new RoleId(request.Role), Scope(actor.Scope, request.Scope),
                 TimeSpan.FromMinutes(request.DurationMinutes), request.Justification);
             return Map(http, await administrator.ActivateBreakGlassAsync(breakGlass, http.RequestAborted),
@@ -116,7 +116,7 @@ internal static class AccessEndpoints
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
                 return failure;
-            if (request.Field != field)
+            if (!string.Equals(request.Field, field, StringComparison.Ordinal))
                 throw new ArgumentException("The body field must match the route.", nameof(field));
             return Map(http, await administrator.UpdateFieldPolicyAsync(actor.Principal, Policy(request), revision, http.RequestAborted),
                 stored => TicketFlowHttp.Ok(http, Policy(stored), stored.Revision));
@@ -143,19 +143,19 @@ internal static class AccessEndpoints
         new(role.Id.Value, role.Name, [.. role.Permissions.Select(permission => permission.Value).Order(StringComparer.Ordinal)], role.IncludesAllPermissions, role.IsBuiltIn, revision);
 
     private static AccessRole Role(string id, RoleRequest request) =>
-        new(new RoleId(id), request.Name, (request.Permissions ?? throw new ArgumentException("Permissions are required.", nameof(request.Permissions))).Select(Permission.Parse));
+        new(new RoleId(id), request.Name, (request.Permissions ?? throw new ArgumentException("Permissions are required.", nameof(request))).Select(Permission.Parse));
 
     internal static GrantResponse Grant(StoredAccessGrant stored) => AccessDtos.Grant(stored);
 
     private static AccessGrant Grant(TicketScope scope, string id, GrantRequest request)
     {
-        ArgumentNullException.ThrowIfNull(request.Subject, nameof(request.Subject));
+        ArgumentNullException.ThrowIfNull(request.Subject, nameof(request));
         GrantSubject subject = request.Subject.Kind switch
         {
             "user" => new UserId(request.Subject.Id),
             "team" => new TeamId(request.Subject.Id),
             "apiClient" => new ApiClientId(request.Subject.Id),
-            _ => throw new ArgumentException("Subject kinds are user, team or apiClient.", nameof(request.Subject)),
+            _ => throw new ArgumentException("Subject kinds are user, team or apiClient.", nameof(request)),
         };
         return new AccessGrant(new GrantId(id), AccessPartition.From(scope), subject, new RoleId(request.Role), Scope(scope, request.Scope),
             request.Effect is null ? GrantEffect.Allow : TicketFlowHttp.Parse<GrantEffect>(request.Effect, "effect"),
@@ -165,14 +165,14 @@ internal static class AccessEndpoints
 
     private static GrantScope Scope(TicketScope scope, GrantScopeModel dto)
     {
-        ArgumentNullException.ThrowIfNull(dto, "scope");
+        ArgumentNullException.ThrowIfNull(dto);
         return dto.Kind switch
         {
             "tenant" => TenantGrantScope.Instance,
             "workspace" => new WorkspaceGrantScope(scope.WorkspaceId),
-            "team" => new TeamGrantScope(scope.WorkspaceId, new TeamId(dto.Id ?? throw new ArgumentException("Team scopes name a team.", "scope"))),
-            "inbox" => new InboxGrantScope(scope.WorkspaceId, new InboxId(dto.Id ?? throw new ArgumentException("Inbox scopes name an inbox.", "scope"))),
-            _ => throw new ArgumentException("Scope kinds are tenant, workspace, team or inbox.", "scope"),
+            "team" => new TeamGrantScope(scope.WorkspaceId, new TeamId(dto.Id ?? throw new ArgumentException("Team scopes name a team.", nameof(dto)))),
+            "inbox" => new InboxGrantScope(scope.WorkspaceId, new InboxId(dto.Id ?? throw new ArgumentException("Inbox scopes name an inbox.", nameof(dto)))),
+            _ => throw new ArgumentException("Scope kinds are tenant, workspace, team or inbox.", nameof(dto)),
         };
     }
 

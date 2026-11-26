@@ -63,7 +63,7 @@ public sealed class WalFlowEventSink : IEventSink
 {
     public const string SinkKind = "walflow";
 
-    private readonly IReadOnlyDictionary<string, WalFlowEventSinkRegistration> sinks;
+    private readonly Dictionary<string, WalFlowEventSinkRegistration> sinks;
     private readonly WalFlowEventSinkOptions options;
 
     public WalFlowEventSink(IOptions<WalFlowEventSinkOptions> options)

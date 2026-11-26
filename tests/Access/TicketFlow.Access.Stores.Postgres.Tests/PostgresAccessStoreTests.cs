@@ -140,8 +140,8 @@ public sealed class PostgresAccessStoreTests
             return store.UpdateAsync(new AccessGrant(grant.Id, partition, new UserId("ada"), roles[index % roles.Length].Id, grant.Scope), 1);
         });
         var outcomes = (await Task.WhenAll(writers)).Select(result => AccessStoreContract.Describe(result, stored => stored.Revision)).ToArray();
-        Assert.AreEqual(1, outcomes.Count(outcome => outcome == "applied:2"));
-        Assert.AreEqual(9, outcomes.Count(outcome => outcome == "conflict:2"));
+        Assert.AreEqual(1, outcomes.Count(outcome => string.Equals(outcome, "applied:2", StringComparison.Ordinal)));
+        Assert.AreEqual(9, outcomes.Count(outcome => string.Equals(outcome, "conflict:2", StringComparison.Ordinal)));
         Assert.AreEqual(2L, (await database.Competing.GetAsync(partition, grant.Id))!.Revision);
     }
 

@@ -11,12 +11,12 @@ public sealed class ModelTests
     {
         var token = SurveyToken.Create();
         Assert.HasCount(SurveyToken.Length, token.Value);
-        Assert.StartsWith(SurveyToken.Prefix, token.Value);
+        Assert.StartsWith(SurveyToken.Prefix, token.Value, StringComparison.Ordinal);
         Assert.AreNotEqual(token, SurveyToken.Create());
         Assert.IsTrue(SurveyToken.TryParse(token.Value, out var parsed));
         Assert.AreEqual(token.Hash(), parsed.Hash());
         Assert.HasCount(64, token.Hash().Hex);
-        Assert.DoesNotContain(token.Value[SurveyToken.Prefix.Length..], token.Hash().Hex);
+        Assert.DoesNotContain(token.Value[SurveyToken.Prefix.Length..], token.Hash().Hex, StringComparison.Ordinal);
         foreach (var bad in new[] { "", token.Value[..^1], token.Value + "a", "tfs2." + token.Value[5..], token.Value[..^1] + "=", token.Value[..^1] + " " })
             Assert.IsFalse(SurveyToken.TryParse(bad, out _), bad);
         Assert.AreEqual("SurveyToken { <redacted> }", token.ToString());

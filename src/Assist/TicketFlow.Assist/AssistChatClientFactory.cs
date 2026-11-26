@@ -17,7 +17,7 @@ namespace TicketFlow.Assist;
 public sealed class AssistChatClientFactory : IAssistChatClientFactory, IDisposable
 {
     private readonly IAssistModelRegistry registry;
-    private readonly IReadOnlyDictionary<string, IAssistChatProvider> providers;
+    private readonly Dictionary<string, IAssistChatProvider> providers;
     private readonly IServiceProvider? services;
     private readonly IReadOnlyList<Action<ChatClientBuilder, AssistModelDefinition, AssistChatRequest>> middleware;
     private readonly ILoggerFactory? loggerFactory;
@@ -130,6 +130,7 @@ public sealed class AssistChatClientFactory : IAssistChatClientFactory, IDisposa
     /// <summary>Shields a shared base client from the pipeline's dispose chain; the factory (or the host) owns it.</summary>
     private sealed class NonDisposingChatClient(IChatClient inner) : DelegatingChatClient(inner)
     {
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "CA2215:Dispose methods should call base class dispose", Justification = "Intentionally shields the shared inner IChatClient from disposal.")]
         protected override void Dispose(bool disposing)
         {
         }

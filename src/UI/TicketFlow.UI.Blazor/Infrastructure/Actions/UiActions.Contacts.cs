@@ -11,8 +11,8 @@ public static partial class UiActions
         handlers["contact.create"] = CreateContactAsync;
         handlers["contact.profile"] = context => EditContactAsync(context, "Profile saved",
             new SetContactProfile(new ContactProfile(context.Text("name"), null, context.Text("locale"), context.Text("timezone"), context.Text("company"))));
-        handlers["contact.block"] = context => EditContactAsync(context, context.Text("blocked") == "true" ? "Contact blocked" : "Contact unblocked",
-            new SetContactBlocked(context.Text("blocked") == "true"));
+        handlers["contact.block"] = context => EditContactAsync(context, string.Equals(context.Text("blocked"), "true", StringComparison.Ordinal) ? "Contact blocked" : "Contact unblocked",
+            new SetContactBlocked(string.Equals(context.Text("blocked"), "true", StringComparison.Ordinal)));
         handlers["contact.labels.add"] = context => EditContactAsync(context, "Label added",
             new AddContactLabel(new LabelId(context.Require("label", "Label").ToLowerInvariant().Replace(' ', '-'))));
         handlers["contact.labels.remove"] = context => EditContactAsync(context, "Label removed", new RemoveContactLabel(new LabelId(context.Require("label", "Label"))));

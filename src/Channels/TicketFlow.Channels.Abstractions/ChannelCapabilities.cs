@@ -45,7 +45,7 @@ public sealed record ChannelCapabilities
     {
         const ChannelFeatures all = ChannelFeatures.Attachments | ChannelFeatures.RichContent | ChannelFeatures.ReplyWindow | ChannelFeatures.Threading
             | ChannelFeatures.Typing | ChannelFeatures.DeliveryReceipts | ChannelFeatures.ReadReceipts | ChannelFeatures.Templates;
-        if ((features & ~all) != 0)
+        if ((features & ~all) != ChannelFeatures.None)
             throw new ArgumentOutOfRangeException(nameof(features));
         if (features.HasFlag(ChannelFeatures.ReplyWindow) != replyWindow.HasValue
             || replyWindow is { } window && (window < TimeSpan.FromMinutes(1) || window > MaximumReplyWindow))

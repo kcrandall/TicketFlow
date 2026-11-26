@@ -22,19 +22,19 @@ public sealed class InMemoryAssistStore : IAssistStore
             return Task.FromResult(settings.GetValueOrDefault(scope));
     }
 
-    public Task<AssistWriteResult<StoredAssistSettings>> PutSettingsAsync(TicketScope scope, AssistSettings value, long expectedRevision, CancellationToken cancellationToken = default)
+    public Task<AssistWriteResult<StoredAssistSettings>> PutSettingsAsync(TicketScope scope, AssistSettings settings, long expectedRevision, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
-        ArgumentNullException.ThrowIfNull(value);
+        ArgumentNullException.ThrowIfNull(settings);
         ArgumentOutOfRangeException.ThrowIfNegative(expectedRevision);
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
-            var current = settings.GetValueOrDefault(scope)?.Revision ?? 0;
+            var current = this.settings.GetValueOrDefault(scope)?.Revision ?? 0;
             if (current != expectedRevision)
                 return Task.FromResult<AssistWriteResult<StoredAssistSettings>>(new StoreConflict(current));
-            var stored = new StoredAssistSettings(scope, value, current + 1);
-            settings[scope] = stored;
+            var stored = new StoredAssistSettings(scope, settings, current + 1);
+            this.settings[scope] = stored;
             return Task.FromResult<AssistWriteResult<StoredAssistSettings>>(new StoreApplied<StoredAssistSettings>(stored));
         }
     }
@@ -72,22 +72,22 @@ public sealed class InMemoryAssistStore : IAssistStore
         }
     }
 
-    public Task<AssistUsageRecord?> SettleAsync(TicketScope scope, Guid id, AssistUsageState state, AssistUsage value, DateTimeOffset completedAt, bool estimated = false,
+    public Task<AssistUsageRecord?> SettleAsync(TicketScope scope, Guid id, AssistUsageState state, AssistUsage usage, DateTimeOffset completedAt, bool estimated = false,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
-        ArgumentNullException.ThrowIfNull(value);
+        ArgumentNullException.ThrowIfNull(usage);
         if (state is not (AssistUsageState.Completed or AssistUsageState.Failed))
             throw new ArgumentOutOfRangeException(nameof(state));
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
-            if (!usage.TryGetValue(scope, out var records))
+            if (!this.usage.TryGetValue(scope, out var records))
                 return Task.FromResult<AssistUsageRecord?>(null);
             var index = records.FindIndex(record => record.Id == id);
             if (index < 0 || records[index].State != AssistUsageState.Reserved)
                 return Task.FromResult<AssistUsageRecord?>(null);
-            var settled = records[index].Settle(state, value, completedAt, estimated);
+            var settled = records[index].Settle(state, usage, completedAt, estimated);
             records[index] = settled;
             return Task.FromResult<AssistUsageRecord?>(settled);
         }

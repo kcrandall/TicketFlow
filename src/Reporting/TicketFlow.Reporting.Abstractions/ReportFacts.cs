@@ -18,7 +18,7 @@ public sealed record ReportDimensions
     public ReportDimensions(InboxId inbox, TeamId? team, UserId? agent, string? channel, ConversationPriority priority, IEnumerable<LabelId>? labels = null)
     {
         if (inbox == default || team == default(TeamId) || agent == default(UserId))
-            throw new ArgumentException("Inbox, team and agent identifiers must be initialized when supplied.");
+            throw new ArgumentException("Inbox, team and agent identifiers must be initialized when supplied.", inbox == default ? nameof(inbox) : team == default(TeamId) ? nameof(team) : nameof(agent));
         if (!Enum.IsDefined(priority))
             throw new ArgumentOutOfRangeException(nameof(priority));
         Inbox = inbox;
@@ -54,12 +54,12 @@ public sealed record ReportDimensions
     public ReportDimensions WithAgent(UserId? agent)
     {
         if (agent == default(UserId))
-            throw new ArgumentException("Inbox, team and agent identifiers must be initialized when supplied.");
+            throw new ArgumentException("Inbox, team and agent identifiers must be initialized when supplied.", nameof(agent));
         return new(Inbox, Team, agent, Channel, Priority, Labels);
     }
 
     public bool Equals(ReportDimensions? other) =>
-        other is not null && Inbox == other.Inbox && Team == other.Team && Agent == other.Agent && Channel == other.Channel && Priority == other.Priority
+        other is not null && Inbox == other.Inbox && Team == other.Team && Agent == other.Agent && string.Equals(Channel, other.Channel, StringComparison.Ordinal) && Priority == other.Priority
         && Labels.SequenceEqual(other.Labels);
 
     public override int GetHashCode() => HashCode.Combine(Inbox, Team, Agent, Channel, Priority, Labels.Count);
@@ -131,7 +131,7 @@ public sealed record ReportFact
     public ReportFact(Guid sourceId, ReportMetric metric, ConversationId conversation, DateTimeOffset occurredAt, ReportDimensions dimensions, long value = 1)
     {
         if (sourceId == Guid.Empty || conversation == default)
-            throw new ArgumentException("Source and conversation identifiers are required.");
+            throw new ArgumentException("Source and conversation identifiers are required.", sourceId == Guid.Empty ? nameof(sourceId) : nameof(conversation));
         ReportMetrics.Require(metric, nameof(metric));
         ArgumentNullException.ThrowIfNull(dimensions);
         if (metric.IsDuration ? value < 0 || value > MaximumDuration.Ticks / 10 : value != 1)
@@ -229,7 +229,7 @@ public sealed record ReportConversationState
         int resolutions, long lastSequence)
     {
         if (conversation == default || inbox == default || assignee == default(UserId) || team == default(TeamId))
-            throw new ArgumentException("Conversation, inbox, assignee and team identifiers must be initialized.");
+            throw new ArgumentException("Conversation, inbox, assignee and team identifiers must be initialized.", conversation == default ? nameof(conversation) : inbox == default ? nameof(inbox) : assignee == default(UserId) ? nameof(assignee) : nameof(team));
         if (!Enum.IsDefined(status) || !Enum.IsDefined(priority))
             throw new ArgumentOutOfRangeException(nameof(status));
         ArgumentOutOfRangeException.ThrowIfNegative(resolutions);
@@ -277,7 +277,7 @@ public sealed record ReportConversationState
     public ReportDimensions Dimensions() => new(Inbox, Team, Assignee, Channel, Priority, Labels);
 
     public bool Equals(ReportConversationState? other) =>
-        other is not null && Conversation == other.Conversation && Inbox == other.Inbox && Channel == other.Channel && CreatedAt == other.CreatedAt
+        other is not null && Conversation == other.Conversation && Inbox == other.Inbox && string.Equals(Channel, other.Channel, StringComparison.Ordinal) && CreatedAt == other.CreatedAt
         && Status == other.Status && Assignee == other.Assignee && Team == other.Team && Priority == other.Priority && Labels.SequenceEqual(other.Labels)
         && WaitingSince == other.WaitingSince && FirstResponseAt == other.FirstResponseAt && Resolutions == other.Resolutions && LastSequence == other.LastSequence;
 

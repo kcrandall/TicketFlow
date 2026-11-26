@@ -79,7 +79,7 @@ public sealed record VisitorSession
         Identity = identity;
         DisplayName = LiveChatText.OptionalLine(displayName, 256, nameof(displayName));
         var answers = new SortedDictionary<string, string>(StringComparer.Ordinal);
-        foreach (var (key, value) in prechat ?? new Dictionary<string, string>())
+        foreach (var (key, value) in prechat ?? new Dictionary<string, string>(StringComparer.Ordinal))
             answers[LiveChatText.RequireToken(key, LiveChatPrechatField.MaximumKeyLength, nameof(prechat))] = LiveChatText.RequireLine(value, LiveChatPrechatField.MaximumAnswerLength, nameof(prechat));
         if (answers.Count > MaximumPrechatAnswers)
             throw new ArgumentException($"At most {MaximumPrechatAnswers} pre-chat answers are allowed.", nameof(prechat));
@@ -121,11 +121,11 @@ public sealed record VisitorSession
             identity ?? Identity, displayName ?? DisplayName, prechat ?? Prechat, revoked ?? Revoked);
 
     public bool Equals(VisitorSession? other) =>
-        other is not null && Id == other.Id && ConfigurationId == other.ConfigurationId && Inbox == other.Inbox && VisitorId == other.VisitorId
-        && TokenHash.Span.SequenceEqual(other.TokenHash.Span)
+        other is not null && Id == other.Id && string.Equals(ConfigurationId, other.ConfigurationId, StringComparison.Ordinal) && Inbox == other.Inbox && string.Equals(VisitorId, other.VisitorId
+, StringComparison.Ordinal) && TokenHash.Span.SequenceEqual(other.TokenHash.Span)
         && (PreviousTokenHash is null ? other.PreviousTokenHash is null : other.PreviousTokenHash is { } theirs && PreviousTokenHash.Value.Span.SequenceEqual(theirs.Span))
         && PreviousTokenValidUntil == other.PreviousTokenValidUntil && CreatedAt == other.CreatedAt && TokenIssuedAt == other.TokenIssuedAt && ExpiresAt == other.ExpiresAt
-        && Identity == other.Identity && DisplayName == other.DisplayName && Prechat.SequenceEqual(other.Prechat) && Revoked == other.Revoked;
+        && Identity == other.Identity && string.Equals(DisplayName, other.DisplayName, StringComparison.Ordinal) && Prechat.SequenceEqual(other.Prechat) && Revoked == other.Revoked;
 
     public override int GetHashCode() => HashCode.Combine(Id, ExpiresAt, Revoked);
 

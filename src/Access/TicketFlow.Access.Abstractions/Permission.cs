@@ -53,6 +53,11 @@ public readonly record struct Permission : IComparable<Permission>
 
     public int CompareTo(Permission other) => string.CompareOrdinal(value, other.value);
 
+    public static bool operator <(Permission left, Permission right) => left.CompareTo(right) < 0;
+    public static bool operator <=(Permission left, Permission right) => left.CompareTo(right) <= 0;
+    public static bool operator >(Permission left, Permission right) => left.CompareTo(right) > 0;
+    public static bool operator >=(Permission left, Permission right) => left.CompareTo(right) >= 0;
+
     public override string ToString() => value ?? string.Empty;
 
     private static string Join(string resource, string action)

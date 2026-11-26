@@ -38,7 +38,7 @@ public static class AutomationEventDerivation
     public static bool IsAutomationActor(AccessActor actor, ApiClientId client) => IsApiClient(actor, client);
 
     private static bool IsApiClient(AccessActor actor, ApiClientId client) =>
-        actor.Kind == AccessActorKind.ApiClient && client != default && actor.Id == client.Value;
+        actor.Kind == AccessActorKind.ApiClient && client != default && string.Equals(actor.Id, client.Value, StringComparison.Ordinal);
 
     private static IReadOnlyList<AutomationEvent> Sla(ExtensionEvent extension, long sequence)
     {

@@ -247,15 +247,15 @@ public sealed class MergeTests
         Assert.IsTrue(merged.Identities.All(identity => identity.Verification.IsVerified));
         Assert.HasCount(2, merged.Identities);
         CollectionAssert.AreEqual(new[] { "beta", "vip" }, merged.Labels.Select(label => label.Value).ToArray());
-        Assert.AreEqual(new TextAttributeValue("gold"), merged.Attributes.Single(attribute => attribute.Key == "tier").Value!.Value.Value);
-        Assert.AreEqual(new TextAttributeValue("pro"), merged.Attributes.Single(attribute => attribute.Key == "plan").Value!.Value.Value);
+        Assert.AreEqual(new TextAttributeValue("gold"), merged.Attributes.Single(attribute => string.Equals(attribute.Key, "tier", StringComparison.Ordinal)).Value!.Value.Value);
+        Assert.AreEqual(new TextAttributeValue("pro"), merged.Attributes.Single(attribute => string.Equals(attribute.Key, "plan", StringComparison.Ordinal)).Value!.Value.Value);
 
         var redirected = (ContactRefused)(await fixture.Contacts.GetAsync(fixture.Agent, new ContactId("source"))).Value!;
         Assert.AreEqual(ContactRefusal.Merged, redirected.Reason);
         Assert.AreEqual(new ContactId("target"), redirected.MergedInto);
         Assert.AreEqual("matched:Verified:target", ContactFixture.Describe(await fixture.Contacts.ResolveAsync(fixture.Crm,
             new ContactResolveRequest([new ContactIdentityEvidence(phone, new IdentityVerified("sms", fixture.Clock.GetUtcNow()))]))));
-        Assert.IsFalse(((ContactSearchPage)(await fixture.Contacts.SearchAsync(fixture.Agent, ContactSearch.ByName())).Value!).Contacts.Any(contact => contact.Id.Value == "source"));
+        Assert.IsFalse(((ContactSearchPage)(await fixture.Contacts.SearchAsync(fixture.Agent, ContactSearch.ByName())).Value!).Contacts.Any(contact => string.Equals(contact.Id.Value, "source", StringComparison.Ordinal)));
 
         var audit = fixture.Store.AuditEvents.Single(item => item.Kind == ContactAuditKind.Merged);
         Assert.AreEqual(outcome.AuditEventId, audit.Id);
@@ -290,7 +290,7 @@ public sealed class MergeTests
 
         var outcome = ContactFixture.Applied(await fixture.Contacts.MergeAsync(fixture.Supervisor,
             new ContactMergeRequest(new ContactId("target"), 1, new ContactId("source"), 1, ContactAttributeConflict.PreferSource)));
-        Assert.AreEqual(new TextAttributeValue("silver"), outcome.Target.Attributes.Single(attribute => attribute.Key == "tier").Value!.Value.Value);
+        Assert.AreEqual(new TextAttributeValue("silver"), outcome.Target.Attributes.Single(attribute => string.Equals(attribute.Key, "tier", StringComparison.Ordinal)).Value!.Value.Value);
         // A later edit to a merged contribution is kept on the target by unmerge.
         ContactFixture.Applied(await fixture.Contacts.UpdateAsync(fixture.Agent, new ContactId("target"), 2,
             [new SetContactAttribute("plan", new TextAttributeValue("enterprise")), new AddContactLabel(new LabelId("later"))]));
@@ -300,8 +300,8 @@ public sealed class MergeTests
         var unmerged = ContactFixture.Applied(await fixture.Contacts.UnmergeAsync(fixture.Supervisor, outcome.MergeId));
         var target = unmerged.Target;
         Assert.AreEqual(new ContactIdentityView(ContactIdentityKind.Email, "", "ada@example.com", targetEmail.Verification, false, false), target.Identities.Single());
-        Assert.AreEqual(new TextAttributeValue("gold"), target.Attributes.Single(attribute => attribute.Key == "tier").Value!.Value.Value);
-        Assert.AreEqual(new TextAttributeValue("enterprise"), target.Attributes.Single(attribute => attribute.Key == "plan").Value!.Value.Value);
+        Assert.AreEqual(new TextAttributeValue("gold"), target.Attributes.Single(attribute => string.Equals(attribute.Key, "tier", StringComparison.Ordinal)).Value!.Value.Value);
+        Assert.AreEqual(new TextAttributeValue("enterprise"), target.Attributes.Single(attribute => string.Equals(attribute.Key, "plan", StringComparison.Ordinal)).Value!.Value.Value);
         CollectionAssert.AreEqual(new[] { "later", "vip" }, target.Labels.Select(label => label.Value).ToArray());
 
         var restored = (await fixture.Store.GetAsync(fixture.Scope, new ContactId("source")))!;

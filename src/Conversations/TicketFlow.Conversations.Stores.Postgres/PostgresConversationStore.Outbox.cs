@@ -80,27 +80,27 @@ public sealed partial class PostgresConversationStore
         var claims = new List<ConversationOutboxClaim>(Math.Min(limit, 32));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            claims.Add(new ConversationOutboxClaim(ReadEntry(reader), consumer, reader.GetInt64(14), reader.GetInt32(15), reader.GetFieldValue<DateTimeOffset>(16)));
+            claims.Add(new ConversationOutboxClaim(ReadEntry(reader), consumer, reader.GetInt64(14), reader.GetInt32(15), await reader.GetFieldValueAsync<DateTimeOffset>(16, cancellationToken).ConfigureAwait(false)));
         return claims;
     }
 
     public Task<bool> AcknowledgeAsync(string consumer, long sequence, long fence, CancellationToken cancellationToken = default) =>
         CompleteAsync(consumer, sequence, fence, "state=1, completed_at=@now, lease_until=NULL", requireLease: true, null, cancellationToken);
 
-    public async Task<int> AcknowledgeBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> items, CancellationToken cancellationToken = default)
+    public async Task<int> AcknowledgeBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> claims, CancellationToken cancellationToken = default)
     {
         IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
-        ArgumentNullException.ThrowIfNull(items);
-        if (items.Count == 0)
+        ArgumentNullException.ThrowIfNull(claims);
+        if (claims.Count == 0)
             return 0;
-        if (items.Count == 1)
-            return await AcknowledgeAsync(consumer, items[0].Sequence, items[0].Fence, cancellationToken).ConfigureAwait(false) ? 1 : 0;
-        var sequences = new long[items.Count];
-        var fences = new long[items.Count];
-        for (var i = 0; i < items.Count; i++)
+        if (claims.Count == 1)
+            return await AcknowledgeAsync(consumer, claims[0].Sequence, claims[0].Fence, cancellationToken).ConfigureAwait(false) ? 1 : 0;
+        var sequences = new long[claims.Count];
+        var fences = new long[claims.Count];
+        for (var i = 0; i < claims.Count; i++)
         {
-            sequences[i] = items[i].Sequence;
-            fences[i] = items[i].Fence;
+            sequences[i] = claims[i].Sequence;
+            fences[i] = claims[i].Fence;
         }
         await using var command = source.CreateCommand("""
             UPDATE tf_conversation_outbox_deliveries d
@@ -118,22 +118,22 @@ public sealed partial class PostgresConversationStore
     public Task<bool> ReleaseAsync(string consumer, long sequence, long fence, DateTimeOffset retryAt, CancellationToken cancellationToken = default) =>
         CompleteAsync(consumer, sequence, fence, "lease_until=NULL, available_at=@retry", requireLease: true, retryAt, cancellationToken);
 
-    public async Task<int> ReleaseBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence, DateTimeOffset RetryAt)> items, CancellationToken cancellationToken = default)
+    public async Task<int> ReleaseBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence, DateTimeOffset RetryAt)> claims, CancellationToken cancellationToken = default)
     {
         IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
-        ArgumentNullException.ThrowIfNull(items);
-        if (items.Count == 0)
+        ArgumentNullException.ThrowIfNull(claims);
+        if (claims.Count == 0)
             return 0;
-        if (items.Count == 1)
-            return await ReleaseAsync(consumer, items[0].Sequence, items[0].Fence, items[0].RetryAt, cancellationToken).ConfigureAwait(false) ? 1 : 0;
-        var sequences = new long[items.Count];
-        var fences = new long[items.Count];
-        var retries = new DateTimeOffset[items.Count];
-        for (var i = 0; i < items.Count; i++)
+        if (claims.Count == 1)
+            return await ReleaseAsync(consumer, claims[0].Sequence, claims[0].Fence, claims[0].RetryAt, cancellationToken).ConfigureAwait(false) ? 1 : 0;
+        var sequences = new long[claims.Count];
+        var fences = new long[claims.Count];
+        var retries = new DateTimeOffset[claims.Count];
+        for (var i = 0; i < claims.Count; i++)
         {
-            sequences[i] = items[i].Sequence;
-            fences[i] = items[i].Fence;
-            retries[i] = items[i].RetryAt;
+            sequences[i] = claims[i].Sequence;
+            fences[i] = claims[i].Fence;
+            retries[i] = claims[i].RetryAt;
         }
         await using var command = source.CreateCommand("""
             UPDATE tf_conversation_outbox_deliveries d
@@ -152,20 +152,20 @@ public sealed partial class PostgresConversationStore
     public Task<bool> DeadLetterAsync(string consumer, long sequence, long fence, CancellationToken cancellationToken = default) =>
         CompleteAsync(consumer, sequence, fence, "state=2, completed_at=@now, lease_until=NULL", requireLease: false, null, cancellationToken);
 
-    public async Task<int> DeadLetterBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> items, CancellationToken cancellationToken = default)
+    public async Task<int> DeadLetterBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> claims, CancellationToken cancellationToken = default)
     {
         IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
-        ArgumentNullException.ThrowIfNull(items);
-        if (items.Count == 0)
+        ArgumentNullException.ThrowIfNull(claims);
+        if (claims.Count == 0)
             return 0;
-        if (items.Count == 1)
-            return await DeadLetterAsync(consumer, items[0].Sequence, items[0].Fence, cancellationToken).ConfigureAwait(false) ? 1 : 0;
-        var sequences = new long[items.Count];
-        var fences = new long[items.Count];
-        for (var i = 0; i < items.Count; i++)
+        if (claims.Count == 1)
+            return await DeadLetterAsync(consumer, claims[0].Sequence, claims[0].Fence, cancellationToken).ConfigureAwait(false) ? 1 : 0;
+        var sequences = new long[claims.Count];
+        var fences = new long[claims.Count];
+        for (var i = 0; i < claims.Count; i++)
         {
-            sequences[i] = items[i].Sequence;
-            fences[i] = items[i].Fence;
+            sequences[i] = claims[i].Sequence;
+            fences[i] = claims[i].Fence;
         }
         await using var command = source.CreateCommand("""
             UPDATE tf_conversation_outbox_deliveries d

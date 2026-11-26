@@ -50,7 +50,7 @@ public sealed record ChannelConversationState
         string? subject = null, DateTimeOffset? lastIncomingAt = null, string? lastIncomingExternalId = null, ContactId? contact = null)
     {
         if (conversation == default || inbox == default || contact == default(ContactId))
-            throw new ArgumentException("Conversation and inbox identifiers are required; the contact must be initialized when supplied.");
+            throw new ArgumentException("Conversation and inbox identifiers are required; the contact must be initialized when supplied.", conversation == default ? nameof(conversation) : inbox == default ? nameof(inbox) : nameof(contact));
         Contact = contact;
         if (!channel.IsInitialized)
             throw new ArgumentException("A channel kind is required.", nameof(channel));
@@ -136,7 +136,7 @@ public sealed record ChannelDispatch
         DateTimeOffset updatedAt, DateTimeOffset? nextAttemptAt = null, string? externalMessageId = null, string? code = null)
     {
         if (conversation == default || message == default || inbox == default)
-            throw new ArgumentException("Conversation, message and inbox identifiers are required.");
+            throw new ArgumentException("Conversation, message and inbox identifiers are required.", conversation == default ? nameof(conversation) : message == default ? nameof(message) : nameof(inbox));
         if (!channel.IsInitialized)
             throw new ArgumentException("A channel kind is required.", nameof(channel));
         if (!Enum.IsDefined(state))

@@ -244,7 +244,7 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
             for (var i = 0; i < targets.Count; i++)
             {
                 var (id, expectedRevision) = targets[i];
-                ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
+                ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1, nameof(targets));
                 if (grants.TryGetValue(partition, id, out var existing) && existing.Revision == expectedRevision)
                 {
                     grants.Remove(partition, id);

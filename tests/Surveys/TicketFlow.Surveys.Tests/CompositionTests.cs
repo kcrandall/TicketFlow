@@ -40,8 +40,8 @@ public sealed class CompositionTests
     public void InvalidOptionsFailFast()
     {
         var exception = Assert.ThrowsExactly<InvalidOperationException>(() => SurveyFixture.Create(options => options.MaximumSendAttempts = 0));
-        StringAssert.Contains(exception.Message, "MaximumSendAttempts");
-        StringAssert.Contains(Assert.ThrowsExactly<InvalidOperationException>(() => SurveyFixture.Create(options => options.TokenKey = new byte[16])).Message, "TokenKey");
-        StringAssert.Contains(Assert.ThrowsExactly<InvalidOperationException>(() => SurveyFixture.Create(options => options.SendLease = TimeSpan.Zero)).Message, "SendLease");
+        StringAssert.Contains(exception.Message, "MaximumSendAttempts", StringComparison.Ordinal);
+        StringAssert.Contains(Assert.ThrowsExactly<InvalidOperationException>(() => SurveyFixture.Create(options => options.TokenKey = new byte[16])).Message, "TokenKey", StringComparison.Ordinal);
+        StringAssert.Contains(Assert.ThrowsExactly<InvalidOperationException>(() => SurveyFixture.Create(options => options.SendLease = TimeSpan.Zero)).Message, "SendLease", StringComparison.Ordinal);
     }
 }

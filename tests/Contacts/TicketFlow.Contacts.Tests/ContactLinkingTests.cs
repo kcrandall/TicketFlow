@@ -44,7 +44,7 @@ public sealed class ContactLinkingTests
         Assert.ThrowsExactly<ArgumentException>(() => new CustomerClaim(Visitor("v"), true));
         Assert.ThrowsExactly<ArgumentException>(() => new ContactAutoMergeRules([ContactIdentityKind.ExternalUser]));
         Assert.ThrowsExactly<ArgumentException>(() => new ContactAutoMergeRules([]));
-        Assert.DoesNotContain("user-42", Account.ToString());
+        Assert.DoesNotContain("user-42", Account.ToString(), StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -179,7 +179,7 @@ public sealed class ContactLinkingTests
                 Assert.AreEqual(3, results.Count(result => result.Value is ContactMergedInto), $"round {round}");
                 var owners = await fixture.Store.FindByIdentityAsync(fixture.Scope, account.Address);
                 var winner = owners.Single().Contact;
-                foreach (var id in ids.Where(id => id != winner.Value))
+                foreach (var id in ids.Where(id => !string.Equals(id, winner.Value, StringComparison.Ordinal)))
                     Assert.AreEqual(winner, (await fixture.Store.GetAsync(fixture.Scope, new ContactId(id)))!.Contact.MergedInto, $"round {round}");
                 Assert.HasCount(5, (await fixture.Store.GetAsync(fixture.Scope, winner))!.Contact.Identities);
             }

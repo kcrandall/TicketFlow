@@ -55,7 +55,7 @@ public sealed class InMemoryRealtimeBackplane : IRealtimeBackplane
 /// <see cref="RealtimePublicationEnvelope"/> over <see cref="IRealtimeBackplane"/> to reach every other node. Incoming envelopes
 /// stamped with this node's own <see cref="NodeId"/> are ignored so local subscribers never see duplicates.
 /// </summary>
-public sealed class CrossNodeRealtimeBus : IRealtimeBus, IDisposable
+public sealed partial class CrossNodeRealtimeBus : IRealtimeBus, IDisposable
 {
     private readonly IRealtimeBackplane backplane;
     private readonly WalFlowRealtimeOptions options;
@@ -89,7 +89,8 @@ public sealed class CrossNodeRealtimeBus : IRealtimeBus, IDisposable
         catch (FormatException)
         {
             // Never log payloads (VisitorMessageEvent may hold customer text); skip oversized cross-node broadcast safely.
-            logger?.LogWarning("Skipped cross-node realtime broadcast because the serialized envelope exceeded {Limit} bytes.", options.MaximumEnvelopeBytes);
+            if (logger is not null)
+                LogSkippedOversizedBroadcast(logger, options.MaximumEnvelopeBytes);
             return;
         }
         try
@@ -98,9 +99,16 @@ public sealed class CrossNodeRealtimeBus : IRealtimeBus, IDisposable
         }
         catch (Exception error) when (!cancellationToken.IsCancellationRequested)
         {
-            logger?.LogWarning("Cross-node realtime backplane publish failed with {Error}.", error.GetType().Name);
+            if (logger is not null)
+                LogBackplanePublishFailed(logger, error.GetType().Name);
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Skipped cross-node realtime broadcast because the serialized envelope exceeded {Limit} bytes.")]
+    private static partial void LogSkippedOversizedBroadcast(ILogger logger, int limit);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Cross-node realtime backplane publish failed with {Error}.")]
+    private static partial void LogBackplanePublishFailed(ILogger logger, string error);
 
     public IDisposable Subscribe(Func<RealtimePublication, CancellationToken, Task> handler)
     {

@@ -20,12 +20,12 @@ public sealed class OutcomeTests
         var conflict = UiOutcomes.From(new ConversationConflict(7), "Reply sent");
         Assert.AreEqual(UiOutcomeKind.Conflict, conflict.Kind);
         Assert.AreEqual(7, conflict.CurrentRevision);
-        StringAssert.Contains(conflict.Messages[0], "revision 7");
+        StringAssert.Contains(conflict.Messages[0], "revision 7", StringComparison.Ordinal);
         Assert.AreEqual(UiOutcomeKind.NotFound, UiOutcomes.From(ConversationNotFound.Instance, "x").Kind);
         Assert.AreEqual(UiOutcomeKind.Forbidden, UiOutcomes.From(ConversationRefused.Forbidden, "x").Kind);
         var closed = UiOutcomes.From(ConversationRefused.Closed, "x");
         Assert.AreEqual(UiOutcomeKind.Rejected, closed.Kind);
-        StringAssert.Contains(closed.Title, "closed");
+        StringAssert.Contains(closed.Title, "closed", StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -54,7 +54,7 @@ public sealed class OutcomeTests
 
         var disabled = UiOutcome.FromFailure(TicketFailure.Conflict(2, ["Cannot issue an API key for a disabled service account."], code: "service-account-disabled"));
         Assert.AreEqual(UiOutcomeKind.Conflict, disabled.Kind);
-        StringAssert.Contains(disabled.Title, "disabled");
+        StringAssert.Contains(disabled.Title, "disabled", StringComparison.Ordinal);
         CollectionAssert.Contains(disabled.Messages.ToArray(), "Cannot issue an API key for a disabled service account.");
     }
 
@@ -67,8 +67,8 @@ public sealed class OutcomeTests
         var root = alert.Find(".tf-alert");
         Assert.AreEqual("conflict", root.GetAttribute("data-outcome"));
         Assert.AreEqual("alert", root.GetAttribute("role"));
-        StringAssert.Contains(alert.Find(".tf-alert__title").TextContent, "Someone else changed this record");
-        StringAssert.Contains(alert.Find(".tf-alert__messages").TextContent, "revision 9");
+        StringAssert.Contains(alert.Find(".tf-alert__title").TextContent, "Someone else changed this record", StringComparison.Ordinal);
+        StringAssert.Contains(alert.Find(".tf-alert__messages").TextContent, "revision 9", StringComparison.Ordinal);
 
         var success = context.Render<OutcomeAlert>(parameters => parameters.Add(p => p.Outcome, UiOutcome.Success("Reply sent")));
         Assert.AreEqual("status", success.Find(".tf-alert").GetAttribute("role"));
@@ -82,7 +82,7 @@ public sealed class OutcomeTests
         var post = new DefaultHttpContext();
         UiFlash.Write(post, options, new UiOutcome(UiOutcomeKind.Invalid, "Check the values", ["Name is required."]));
         var cookie = post.Response.Headers.SetCookie.ToString();
-        StringAssert.Contains(cookie, "httponly");
+        StringAssert.Contains(cookie, "httponly", StringComparison.Ordinal);
         var value = cookie.Split(';')[0];
 
         var get = new DefaultHttpContext();
@@ -91,7 +91,7 @@ public sealed class OutcomeTests
         Assert.IsNotNull(flash);
         Assert.AreEqual(UiOutcomeKind.Invalid, flash.Kind);
         CollectionAssert.AreEqual(new[] { "Name is required." }, flash.Messages.ToArray());
-        StringAssert.Contains(get.Response.Headers.SetCookie.ToString(), "expires=Thu, 01 Jan 1970", "The flash cookie is deleted after it is shown.");
+        StringAssert.Contains(get.Response.Headers.SetCookie.ToString(), "expires=Thu, 01 Jan 1970", StringComparison.Ordinal, "The flash cookie is deleted after it is shown.");
 
         var tampered = new DefaultHttpContext();
         tampered.Request.Headers.Cookie = UiFlash.CookieName + "=not-base64!";

@@ -105,7 +105,7 @@ public sealed record SkillsBasedStrategy
             var applies = rule.Match switch
             {
                 LabelSkillMatch label => conversation.Labels.Contains(label.Label),
-                AttributeSkillMatch attribute => conversation.Attributes.TryGetValue(attribute.Key, out var value) && value.ConditionValue == attribute.Value,
+                AttributeSkillMatch attribute => conversation.Attributes.TryGetValue(attribute.Key, out var value) && string.Equals(value.ConditionValue, attribute.Value, StringComparison.Ordinal),
             };
             if (applies)
                 required[rule.Skill] = Math.Max(required.GetValueOrDefault(rule.Skill), rule.MinimumLevel);
@@ -254,7 +254,7 @@ public sealed record RoutingPolicy
     public OfflineReassignment OnAgentOffline { get; }
 
     public bool Equals(RoutingPolicy? other) =>
-        other is not null && Id == other.Id && Name == other.Name && Strategy.Equals(other.Strategy) && Team == other.Team
+        other is not null && Id == other.Id && string.Equals(Name, other.Name, StringComparison.Ordinal) && Equals(Strategy.Value, other.Strategy.Value) && Team == other.Team
         && Overflow.SequenceEqual(other.Overflow) && MaximumWait == other.MaximumWait && OnAgentOffline == other.OnAgentOffline;
 
     public override int GetHashCode() => HashCode.Combine(Id, Name, Strategy.Kind, Team, Overflow.Count, MaximumWait, OnAgentOffline);

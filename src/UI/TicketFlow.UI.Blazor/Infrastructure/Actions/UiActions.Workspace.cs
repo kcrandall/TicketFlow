@@ -72,7 +72,7 @@ public static partial class UiActions
     internal static string NewId() => Guid.CreateVersion7().ToString("N")[..12];
 
     private static string PathId(UiActionContext context, string section) =>
-        context.Session.Path.Split('/') is [var first, var id] && first == section ? Uri.UnescapeDataString(id) : throw new UiInputException("The record is missing.");
+        context.Session.Path.Split('/') is [var first, var id] && string.Equals(first, section, StringComparison.Ordinal) ? Uri.UnescapeDataString(id) : throw new UiInputException("The record is missing.");
 
     private static Inbox Inbox(UiActionContext context, string id) => new(new InboxId(id), context.Require("name", "Name"),
         new ChannelBinding(new ChannelKind(context.Require("kind", "Channel")), context.Require("configuration", "Channel configuration ID")),

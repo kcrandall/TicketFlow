@@ -27,7 +27,7 @@ public static class ClaudeAssistTicketFlowBuilderExtensions
             services.AddOptions<AssistOptions>().Configure<IOptions<ClaudeAssistOptions>>((assist, claude) =>
             {
                 foreach (var model in ClaudeAssistProvider.DefaultModels)
-                    if (!assist.Models.Any(existing => existing.Id == model.Id))
+                    if (!assist.Models.Any(existing => string.Equals(existing.Id, model.Id, StringComparison.Ordinal)))
                         assist.Models.Add(model);
                 foreach (var feature in Enum.GetValues<AssistFeature>())
                     assist.FeatureModels.TryAdd(feature, feature is AssistFeature.Triage or AssistFeature.SentimentAndIntent

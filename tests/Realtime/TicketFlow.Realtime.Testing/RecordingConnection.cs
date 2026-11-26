@@ -42,6 +42,7 @@ public sealed class RecordingConnection(string id, RealtimeSubscriber subscriber
         return ValueTask.CompletedTask;
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "VSTHRD002:Avoid problematic synchronous waits", Justification = "Test helper synchronizes queued in-memory realtime delivery before synchronous assertions.")]
     private void Idle() => idle?.Invoke().GetAwaiter().GetResult();
 
     public ValueTask SendAsync(RealtimeTopic topic, RealtimeEvent realtimeEvent, CancellationToken cancellationToken = default)

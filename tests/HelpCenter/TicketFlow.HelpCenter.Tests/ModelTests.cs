@@ -73,7 +73,7 @@ public sealed class ModelTests
         Assert.IsTrue(HelpCenterSearchConfiguration.Names.All(name => name.All(char.IsAsciiLetterLower)));
         CollectionAssert.AreEqual(new[] { "reset", "your", "password", "cafe", "123" }, HelpCenterSearchText.Terms("Reset YOUR password! Café, 123 reset").ToArray());
         Assert.IsLessThanOrEqualTo(ArticleSnippet.MaximumSnippetLength, HelpCenterSearchText.Snippet(new string('x', 1000) + " needle " + new string('y', 1000), ["needle"]).Length);
-        StringAssert.Contains(HelpCenterSearchText.Snippet(new string('x', 1000) + " needle " + new string('y', 1000), ["needle"]), "needle");
+        StringAssert.Contains(HelpCenterSearchText.Snippet(new string('x', 1000) + " needle " + new string('y', 1000), ["needle"]), "needle", StringComparison.Ordinal);
     }
 
     [TestMethod]

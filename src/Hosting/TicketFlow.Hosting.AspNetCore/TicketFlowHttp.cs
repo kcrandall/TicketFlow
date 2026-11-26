@@ -287,7 +287,7 @@ public static class TicketFlowHttp
         }
         catch (Exception error) when (error is FormatException or JsonException)
         {
-            throw new ArgumentException("The cursor is invalid.", nameof(cursor));
+            throw new ArgumentException("The cursor is invalid.", nameof(cursor), error);
         }
     }
 

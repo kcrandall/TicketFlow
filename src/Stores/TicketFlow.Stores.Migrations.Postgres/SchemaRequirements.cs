@@ -32,7 +32,7 @@ public static class PostgresSchemaRequirements
                 foreach (var name in key)
                 {
                     Identifier(name);
-                    if (!table.Columns.Any(column => column.Name == name))
+                    if (!table.Columns.Any(column => string.Equals(column.Name, name, StringComparison.Ordinal)))
                         throw new ArgumentException("Baseline keys must reference declared columns.", nameof(requirements));
                 }
             }
@@ -42,7 +42,7 @@ public static class PostgresSchemaRequirements
                 if (foreignKey.Columns.Count is < 1 or > 32 || foreignKey.Columns.Count != foreignKey.ReferencedColumns.Count)
                     throw new ArgumentException("Baseline foreign keys must have bounded matching columns.", nameof(requirements));
                 foreach (var name in foreignKey.Columns.Concat(foreignKey.ReferencedColumns)) Identifier(name);
-                if (foreignKey.Columns.Any(name => !table.Columns.Any(column => column.Name == name)))
+                if (foreignKey.Columns.Any(name => !table.Columns.Any(column => string.Equals(column.Name, name, StringComparison.Ordinal))))
                     throw new ArgumentException("Baseline foreign keys must reference declared columns.", nameof(requirements));
             }
             tables.Add(new { name = table.Name,
@@ -97,6 +97,6 @@ public static class PostgresSchemaRequirements
     private static void Identifier(string value)
     {
         if (string.IsNullOrEmpty(value) || value.Length > 63 || value.AsSpan().ContainsAnyExcept(IdentifierChars))
-            throw new ArgumentException("Baseline identifiers require 1–63 lowercase ASCII letters, digits or underscores.");
+            throw new ArgumentException("Baseline identifiers require 1–63 lowercase ASCII letters, digits or underscores.", nameof(value));
     }
 }

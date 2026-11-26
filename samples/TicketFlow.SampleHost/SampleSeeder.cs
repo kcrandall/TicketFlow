@@ -19,7 +19,7 @@ namespace TicketFlow.SampleHost;
 /// with hashed API keys, demo IdentityFlow role federation mappings, a public help-center portal with one published article and a CSAT survey.
 /// Grants and stores are written directly (trusted provisioning), feature content through the authorized services as <c>admin</c>.
 /// </summary>
-public static class SampleSeeder
+public static partial class SampleSeeder
 {
     public const string WidgetKey = "wk_demo";
     public const string PortalSlug = "help";
@@ -103,8 +103,11 @@ public static class SampleSeeder
 
         await services.GetRequiredService<ConversationOutboxDispatcher>().RegisterAsync(cancellationToken);
         await SampleDemoData.SeedAsync(services, settings, cancellationToken);
-        logger.LogInformation("Seeded the sample workspace (widget key {WidgetKey}; users admin, agent1, agent2).", WidgetKey);
+        LogSeeded(logger, WidgetKey);
     }
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Seeded the sample workspace (widget key {WidgetKey}; users admin, agent1, agent2).")]
+    private static partial void LogSeeded(ILogger logger, string widgetKey);
 
     private static async Task SeedServiceAccountsAndFederationAsync(
         IServiceProvider services,

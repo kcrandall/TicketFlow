@@ -311,7 +311,7 @@ public static class SurveyStoreContract
             all.Select(item => item.Response.Invitation).ToArray());
         Assert.IsTrue(all.All(item => item.Scope == scope));
         var narrow = await store.ListResponsesAsync(scope, new SurveyResponseQuery(Now.AddDays(10), Now.AddDays(20), new SurveyId("nps"), 200), AllowAllFilter.Instance);
-        CollectionAssert.AreEquivalent(responses.Where(item => item.Survey.Value == "nps" && item.RespondedAt >= Now.AddDays(10) && item.RespondedAt < Now.AddDays(20)).Select(item => item.Invitation).ToArray(),
+        CollectionAssert.AreEquivalent(responses.Where(item => string.Equals(item.Survey.Value, "nps", StringComparison.Ordinal) && item.RespondedAt >= Now.AddDays(10) && item.RespondedAt < Now.AddDays(20)).Select(item => item.Invitation).ToArray(),
             narrow.Items.Select(item => item.Response.Invitation).ToArray());
         Assert.IsEmpty((await store.ListResponsesAsync(scope, new SurveyResponseQuery(from, to), DenyAllFilter.Instance)).Items);
         Assert.IsEmpty((await store.ListResponsesAsync(TestScopes.LevelVariants(scope)[1], new SurveyResponseQuery(from, to), AllowAllFilter.Instance)).Items);

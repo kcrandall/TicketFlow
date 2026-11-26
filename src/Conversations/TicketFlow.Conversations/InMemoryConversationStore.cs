@@ -221,7 +221,7 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
                 if (!includeNotes && item.Event.Kind == ConversationEventKind.Note)
                     continue;
                 if (item.Event.Value is MessageEvent message && messages.TryGetValue(scope, id, message.Id, out var current)
-                    && (current.Delivery != message.Delivery || current.ExternalId != message.ExternalId))
+                    && (current.Delivery != message.Delivery || !string.Equals(current.ExternalId, message.ExternalId, StringComparison.Ordinal)))
                     item = item.WithEvent(message.WithDelivery(current.Delivery, current.ExternalId));
                 page.Add(item);
             }
@@ -278,7 +278,7 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
             if (write.Change.Inbox != current.Inbox)
                 throw new ArgumentException("The change must name the message's inbox.", nameof(write));
             var externalId = current.ExternalId;
-            if (write.ExternalId is { } external && external != current.ExternalId)
+            if (write.ExternalId is { } external && !string.Equals(external, current.ExternalId, StringComparison.Ordinal))
             {
                 if (current.ExternalId is not null)
                     throw new ArgumentException("A message's external identifier cannot be replaced.", nameof(write));
@@ -406,11 +406,11 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
     public Task<bool> AcknowledgeAsync(string consumer, long sequence, long fence, CancellationToken cancellationToken = default) =>
         Complete(consumer, sequence, fence, requireLease: true, DeliveryState.Acknowledged, null);
 
-    public Task<int> AcknowledgeBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> items, CancellationToken cancellationToken = default)
+    public Task<int> AcknowledgeBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> claims, CancellationToken cancellationToken = default)
     {
         IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
-        ArgumentNullException.ThrowIfNull(items);
-        if (items.Count == 0)
+        ArgumentNullException.ThrowIfNull(claims);
+        if (claims.Count == 0)
             return Task.FromResult(0);
         lock (gate)
         {
@@ -418,9 +418,9 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
                 return Task.FromResult(0);
             var now = time.GetUtcNow();
             var updated = 0;
-            for (var i = 0; i < items.Count; i++)
+            for (var i = 0; i < claims.Count; i++)
             {
-                var (sequence, fence) = items[i];
+                var (sequence, fence) = claims[i];
                 if (pending.TryGetValue(sequence, out var delivery) && delivery.State == DeliveryState.Pending
                     && delivery.Fence != 0 && delivery.Fence == fence && delivery.LeaseUntil > now)
                 {
@@ -435,11 +435,11 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
     public Task<bool> ReleaseAsync(string consumer, long sequence, long fence, DateTimeOffset retryAt, CancellationToken cancellationToken = default) =>
         Complete(consumer, sequence, fence, requireLease: true, DeliveryState.Pending, retryAt);
 
-    public Task<int> ReleaseBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence, DateTimeOffset RetryAt)> items, CancellationToken cancellationToken = default)
+    public Task<int> ReleaseBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence, DateTimeOffset RetryAt)> claims, CancellationToken cancellationToken = default)
     {
         IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
-        ArgumentNullException.ThrowIfNull(items);
-        if (items.Count == 0)
+        ArgumentNullException.ThrowIfNull(claims);
+        if (claims.Count == 0)
             return Task.FromResult(0);
         lock (gate)
         {
@@ -447,9 +447,9 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
                 return Task.FromResult(0);
             var now = time.GetUtcNow();
             var updated = 0;
-            for (var i = 0; i < items.Count; i++)
+            for (var i = 0; i < claims.Count; i++)
             {
-                var (sequence, fence, retryAt) = items[i];
+                var (sequence, fence, retryAt) = claims[i];
                 if (pending.TryGetValue(sequence, out var delivery) && delivery.State == DeliveryState.Pending
                     && delivery.Fence != 0 && delivery.Fence == fence && delivery.LeaseUntil > now)
                 {
@@ -465,20 +465,20 @@ public sealed class InMemoryConversationStore : IConversationStore, IConversatio
     public Task<bool> DeadLetterAsync(string consumer, long sequence, long fence, CancellationToken cancellationToken = default) =>
         Complete(consumer, sequence, fence, requireLease: false, DeliveryState.DeadLettered, null);
 
-    public Task<int> DeadLetterBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> items, CancellationToken cancellationToken = default)
+    public Task<int> DeadLetterBatchAsync(string consumer, IReadOnlyList<(long Sequence, long Fence)> claims, CancellationToken cancellationToken = default)
     {
         IConversationOutbox.RequireConsumer(consumer, nameof(consumer));
-        ArgumentNullException.ThrowIfNull(items);
-        if (items.Count == 0)
+        ArgumentNullException.ThrowIfNull(claims);
+        if (claims.Count == 0)
             return Task.FromResult(0);
         lock (gate)
         {
             if (!deliveries.TryGetValue(consumer, out var pending))
                 return Task.FromResult(0);
             var updated = 0;
-            for (var i = 0; i < items.Count; i++)
+            for (var i = 0; i < claims.Count; i++)
             {
-                var (sequence, fence) = items[i];
+                var (sequence, fence) = claims[i];
                 if (pending.TryGetValue(sequence, out var delivery) && delivery.State == DeliveryState.Pending
                     && delivery.Fence != 0 && delivery.Fence == fence)
                 {

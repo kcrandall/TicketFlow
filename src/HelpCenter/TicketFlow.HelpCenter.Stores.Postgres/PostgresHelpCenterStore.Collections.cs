@@ -45,7 +45,7 @@ public sealed partial class PostgresHelpCenterStore
         var depth = 1;
         if (collection.Parent is { } parentId)
         {
-            if (await CollectionStateAsync(connection, transaction, scope, parentId, cancellationToken).ConfigureAwait(false) is not { } parent || parent.Portal != collection.Portal.Value)
+            if (await CollectionStateAsync(connection, transaction, scope, parentId, cancellationToken).ConfigureAwait(false) is not { } parent || !string.Equals(parent.Portal, collection.Portal.Value, StringComparison.Ordinal))
                 return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidReference);
             depth = parent.Depth + 1;
             if (depth > HelpCenterLimits.MaximumCollectionDepth)
@@ -82,7 +82,7 @@ public sealed partial class PostgresHelpCenterStore
         var existing = await CollectionStateAsync(connection, transaction, scope, collection.Id, cancellationToken).ConfigureAwait(false);
         if (Miss<StoredCollection>(existing?.Revision, expectedRevision) is { } miss)
             return miss;
-        if (existing!.Value.Portal != collection.Portal.Value || existing.Value.Parent != collection.Parent?.Value)
+        if (!string.Equals(existing!.Value.Portal, collection.Portal.Value, StringComparison.Ordinal) || !string.Equals(existing.Value.Parent, collection.Parent?.Value, StringComparison.Ordinal))
             return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidReference);
         await using (var update = new NpgsqlCommand($"UPDATE tf_helpcenter_collections SET position=@position, translations=@translations, revision=revision+1 WHERE {CollectionKeyWhere}", connection, transaction))
         {
@@ -129,7 +129,7 @@ public sealed partial class PostgresHelpCenterStore
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             return null;
-        return new CollectionState(reader.GetInt64(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetInt16(3));
+        return new CollectionState(reader.GetInt64(0), reader.GetString(1), await reader.IsDBNullAsync(2, cancellationToken).ConfigureAwait(false) ? null : reader.GetString(2), reader.GetInt16(3));
     }
 
     private static void BindCollectionKey(NpgsqlCommand command, TicketScope scope, CollectionId id)

@@ -11,7 +11,7 @@ public sealed record CollectionTranslation
     public CollectionTranslation(HelpCenterLocale locale, string name, HelpCenterSlug slug, string? description = null)
     {
         if (!locale.IsInitialized || !slug.IsInitialized)
-            throw new ArgumentException("Translation locale and slug are required.");
+            throw new ArgumentException("Translation locale and slug are required.", !locale.IsInitialized ? nameof(locale) : nameof(slug));
         Locale = locale;
         Name = HelpCenterText.RequireLine(name, MaximumNameLength, nameof(name));
         Slug = slug;
@@ -33,7 +33,7 @@ public sealed record HelpCollection
     public HelpCollection(CollectionId id, PortalId portal, IEnumerable<CollectionTranslation> translations, CollectionId? parent = null, int position = 0)
     {
         if (!id.IsInitialized || !portal.IsInitialized || parent is { IsInitialized: false })
-            throw new ArgumentException("Collection, portal and parent identifiers must be initialized.");
+            throw new ArgumentException("Collection, portal and parent identifiers must be initialized.", !id.IsInitialized ? nameof(id) : !portal.IsInitialized ? nameof(portal) : nameof(parent));
         if (parent == id)
             throw new ArgumentException("A collection cannot be its own parent.", nameof(parent));
         ArgumentOutOfRangeException.ThrowIfNegative(position);

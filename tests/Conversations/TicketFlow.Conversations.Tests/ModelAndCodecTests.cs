@@ -85,7 +85,7 @@ public sealed class ModelAndCodecTests
         foreach (var item in events)
         {
             var json = ConversationJsonCodec.SerializeEvent(item);
-            StringAssert.StartsWith(json, "{\"v\":1,\"k\":");
+            StringAssert.StartsWith(json, "{\"v\":1,\"k\":", StringComparison.Ordinal);
             Assert.AreEqual(item.Value, ConversationJsonCodec.DeserializeEvent(json).Value, json);
         }
     }

@@ -119,7 +119,7 @@ public sealed partial class TicketFlowToolContext
     public CallToolResult Fail(TicketFlowToolError error)
     {
         ArgumentNullException.ThrowIfNull(error);
-        if (error.Code == "forbidden" && error.Tool is null)
+        if (string.Equals(error.Code, "forbidden", StringComparison.Ordinal) && error.Tool is null)
             error = error with
             {
                 Tool = Tool.Name,

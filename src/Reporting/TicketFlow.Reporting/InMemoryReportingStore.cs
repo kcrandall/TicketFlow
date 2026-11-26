@@ -99,7 +99,7 @@ public sealed class InMemoryReportingStore : IReportingStore
         bool Admit(InboxId inbox, TeamId? team, UserId? agent, string? channel, ConversationPriority priority)
         {
             if ((restriction.Inbox is { } i && inbox != i) || (restriction.Team is { } t && team != t) || (restriction.Agent is { } a && agent != a)
-                || (restriction.Channel is { } c && channel != c) || (restriction.Priority is { } p && priority != p))
+                || (restriction.Channel is { } c && !string.Equals(channel, c, StringComparison.Ordinal)) || (restriction.Priority is { } p && priority != p))
                 return false;
             var resource = (inbox, team, agent);
             if (!decisions.TryGetValue(resource, out var allowed))

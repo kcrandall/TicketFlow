@@ -27,6 +27,11 @@ public readonly record struct ApiKeyId : IComparable<ApiKeyId>
 
     public int CompareTo(ApiKeyId other) => string.CompareOrdinal(value, other.value);
 
+    public static bool operator <(ApiKeyId left, ApiKeyId right) => left.CompareTo(right) < 0;
+    public static bool operator <=(ApiKeyId left, ApiKeyId right) => left.CompareTo(right) <= 0;
+    public static bool operator >(ApiKeyId left, ApiKeyId right) => left.CompareTo(right) > 0;
+    public static bool operator >=(ApiKeyId left, ApiKeyId right) => left.CompareTo(right) >= 0;
+
     public override string ToString() => value ?? string.Empty;
 }
 

@@ -21,7 +21,7 @@ public static class UiFormat
             : span.TotalHours < 24 ? $"{(int)span.TotalHours}h"
             : span.TotalDays < 30 ? $"{(int)span.TotalDays}d"
             : value.ToString("MMM d", CultureInfo.InvariantCulture);
-        return text == "just now" || span.TotalDays >= 30 ? text : future ? $"in {text}" : $"{text} ago";
+        return string.Equals(text, "just now", StringComparison.Ordinal) || span.TotalDays >= 30 ? text : future ? $"in {text}" : $"{text} ago";
     }
 
     public static string Short(DateTimeOffset? instant) => instant?.ToString("MMM d, HH:mm", CultureInfo.InvariantCulture) ?? "—";

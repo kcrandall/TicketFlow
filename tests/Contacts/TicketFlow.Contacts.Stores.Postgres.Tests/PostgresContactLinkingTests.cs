@@ -76,13 +76,13 @@ public sealed class PostgresContactLinkingTests
         }
 
         var byContact = await ExplainAsync(PostgresContactStore.ListSuggestionsCommand(scope, new ContactLinkSuggestionQuery(contact: new ContactId("c000")), AllowAllFilter.Instance, 1000));
-        StringAssert.Contains(byContact, "tf_contact_link_suggestions_candidate", byContact);
-        StringAssert.Contains(byContact, "tf_contact_link_suggestions_account");
+        StringAssert.Contains(byContact, "tf_contact_link_suggestions_candidate", StringComparison.Ordinal, byContact);
+        StringAssert.Contains(byContact, "tf_contact_link_suggestions_account", StringComparison.Ordinal);
         var all = await ExplainAsync(PostgresContactStore.ListSuggestionsCommand(scope, new ContactLinkSuggestionQuery(), AllowAllFilter.Instance, 1000));
-        StringAssert.Contains(all, "Index Scan on tf_contact_link_suggestions_", all);
+        StringAssert.Contains(all, "Index Scan on tf_contact_link_suggestions_", StringComparison.Ordinal, all);
         var prune = await ExplainAsync(PostgresContactStore.PruneSuggestionsCommand(ContactStoreContract.At.AddDays(1), 100));
-        StringAssert.Contains(prune, "tf_contact_link_suggestions_decided", prune);
-        Assert.DoesNotContain("Seq Scan on tf_contact_link_suggestions", byContact + all + prune);
+        StringAssert.Contains(prune, "tf_contact_link_suggestions_decided", StringComparison.Ordinal, prune);
+        Assert.DoesNotContain("Seq Scan on tf_contact_link_suggestions", byContact + all + prune, StringComparison.Ordinal);
     }
 
     [TestMethod]

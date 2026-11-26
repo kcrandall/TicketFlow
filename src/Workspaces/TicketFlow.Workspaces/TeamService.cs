@@ -132,13 +132,13 @@ public sealed class TeamService : ITeamService
         return Map(await teams.UpdateAsync(actor.Scope, replacement, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
-    private static IReadOnlyCollection<UserId> ComputeDiff(IReadOnlySet<UserId> source, IReadOnlySet<UserId> exclude)
+    private static List<UserId> ComputeDiff(IReadOnlySet<UserId> source, IReadOnlySet<UserId> exclude)
     {
         List<UserId>? diff = null;
         foreach (var member in source)
             if (!exclude.Contains(member))
                 (diff ??= []).Add(member);
-        return (IReadOnlyCollection<UserId>?)diff ?? [];
+        return diff ?? [];
     }
 
     private static void RequireId(TeamId id)

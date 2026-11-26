@@ -47,7 +47,7 @@ public sealed class ServiceTests
         await fixture.Dispatcher.DispatchDueAsync(fixture.Scope);
         foreach (var message in fixture.Sender.Sent)
         {
-            var score = scores.Single(item => item.Item1 == message.Invitation.Conversation.Value).Item3;
+            var score = scores.Single(item => string.Equals(item.Item1, message.Invitation.Conversation.Value, StringComparison.Ordinal)).Item3;
             Assert.AreEqual("accepted", Describe(await fixture.Responder.RespondAsync(fixture.Scope, message.Token.Value, score, "Comment for " + message.Invitation.Conversation.Value)));
         }
         var query = new SurveyResponseQuery(fixture.Clock.GetUtcNow().AddDays(-1), fixture.Clock.GetUtcNow().AddDays(1));
@@ -67,7 +67,7 @@ public sealed class ServiceTests
         Assert.IsEmpty(denied.Rows, "Like every list path, denial yields an empty aggregate.");
         Assert.IsFalse(denied.Truncated);
 
-        var c3 = fixture.Sender.Sent.Single(item => item.Invitation.Conversation.Value == "c3").Invitation.Id;
+        var c3 = fixture.Sender.Sent.Single(item => string.Equals(item.Invitation.Conversation.Value, "c3", StringComparison.Ordinal)).Invitation.Id;
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.GetResponseAsync(inboxReader, c3)));
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.GetInvitationAsync(inboxReader, c3)));
         Assert.AreEqual("Comment for c3", Value(await fixture.Service.GetResponseAsync(manager, c3)).Comment);

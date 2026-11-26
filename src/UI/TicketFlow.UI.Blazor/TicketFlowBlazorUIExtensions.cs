@@ -104,7 +104,7 @@ public static class TicketFlowBlazorUIEndpointExtensions
         var options = http.RequestServices.GetRequiredService<IOptions<TicketFlowBlazorUIOptions>>().Value;
         var returnTo = UiUrls.SafeReturn(options.BasePath, form["_return"].ToString() is { Length: > 0 } posted ? posted : http.Request.Path + http.Request.QueryString);
 
-        if (form["_action"].ToString() == "theme.set")
+        if (string.Equals(form["_action"].ToString(), "theme.set", StringComparison.Ordinal))
         {
             var theme = TicketFlowThemePreference.Parse($"{form["theme"]}.{form["mode"]}", options.Themes);
             if (theme is not null)
@@ -123,7 +123,7 @@ public static class TicketFlowBlazorUIEndpointExtensions
         if (route is null || !UiNavigation.Allows(session, route))
             return Render(session, route, pageState: null);
         var action = form["_action"].ToString();
-        if (UiActions.Find(action) is not { } handler || UiNavigation.ActionSection(action) != route.Section)
+        if (UiActions.Find(action) is not { } handler || !string.Equals(UiNavigation.ActionSection(action), route.Section, StringComparison.Ordinal))
             return TypedResults.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Unknown action for this page.");
 
         var result = await UiActions.RunAsync(handler, new UiActionContext(session, form));
@@ -138,7 +138,7 @@ public static class TicketFlowBlazorUIEndpointExtensions
         return Render(session, route, result.PageState, result.Outcome.Succeeded ? StatusCodes.Status200OK : StatusFor(result.Outcome.Kind));
     }
 
-    private static IResult Render(TicketFlowUISession session, UiRoute? route, object? pageState, int? status = null)
+    private static RazorComponentResult<TicketFlowDocument> Render(TicketFlowUISession session, UiRoute? route, object? pageState, int? status = null)
     {
         var http = session.Http;
         http.Response.Headers.CacheControl = "no-store";
@@ -148,7 +148,7 @@ public static class TicketFlowBlazorUIEndpointExtensions
         var code = route is null ? StatusCodes.Status404NotFound
             : !UiNavigation.Allows(session, route) ? StatusCodes.Status403Forbidden
             : status ?? StatusCodes.Status200OK;
-        return new RazorComponentResult<TicketFlowDocument>(new Dictionary<string, object?>
+        return new RazorComponentResult<TicketFlowDocument>(new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             [nameof(TicketFlowDocument.Session)] = session,
             [nameof(TicketFlowDocument.Route)] = route,
@@ -255,10 +255,21 @@ public static class TicketFlowBlazorUIEndpointExtensions
         protected override void Dispose(bool disposing)
         {
             if (disposing)
-                inner?.Dispose();
+            {
+                var writer = inner;
+                inner = null;
+                writer?.Dispose();
+            }
             base.Dispose(disposing);
         }
 
-        public override ValueTask DisposeAsync() => inner is null ? ValueTask.CompletedTask : inner.DisposeAsync();
+        public override async ValueTask DisposeAsync()
+        {
+            var writer = inner;
+            inner = null;
+            if (writer is not null)
+                await writer.DisposeAsync();
+            await base.DisposeAsync();
+        }
     }
 }

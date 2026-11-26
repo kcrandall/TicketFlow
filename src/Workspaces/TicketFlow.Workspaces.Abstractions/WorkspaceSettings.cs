@@ -35,7 +35,7 @@ public sealed record WorkspaceSettings
 
     public bool Equals(WorkspaceSettings? other)
     {
-        if (other is null || Name != other.Name || DefaultLocale != other.DefaultLocale || TimeZoneId != other.TimeZoneId || FeatureToggles.Count != other.FeatureToggles.Count)
+        if (other is null || !string.Equals(Name, other.Name, StringComparison.Ordinal) || !string.Equals(DefaultLocale, other.DefaultLocale, StringComparison.Ordinal) || !string.Equals(TimeZoneId, other.TimeZoneId, StringComparison.Ordinal) || FeatureToggles.Count != other.FeatureToggles.Count)
             return false;
         foreach (var pair in FeatureToggles)
             if (!other.FeatureToggles.TryGetValue(pair.Key, out var value) || value != pair.Value)

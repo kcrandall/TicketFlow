@@ -102,7 +102,7 @@ public sealed class MacroService(IMacroStore macros, IAccessEvaluator evaluator,
             .ConfigureAwait(false);
         if (context is null)
             return failure == AutomationContextFailure.Forbidden ? TicketFailure.Forbidden : TicketFailure.NotFound;
-        var agentName = (needs & AutomationContextNeeds.AgentName) != 0 && actor is UserPrincipal user && agents is not null
+        var agentName = (needs & AutomationContextNeeds.AgentName) != TicketFlow.Automation.AutomationContextNeeds.None && actor is UserPrincipal user && agents is not null
             ? await agents.GetDisplayNameAsync(scope, user.UserId, cancellationToken).ConfigureAwait(false)
             : null;
         var run = Guid.NewGuid();

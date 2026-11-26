@@ -19,7 +19,7 @@ public sealed class SignalRHubTests
         await visitor.StartAsync();
         var connected = Ok(await visitor.InvokeAsync<JsonElement>("Connect", WidgetKey, null));
         var token = connected.GetProperty("token").GetString()!;
-        Assert.StartsWith("tfvs1.", token);
+        Assert.StartsWith("tfvs1.", token, StringComparison.Ordinal);
         Assert.IsTrue(connected.GetProperty("widget").GetProperty("online").GetBoolean());
 
         var sent = Ok(await visitor.InvokeAsync<JsonElement>("SendMessage", "c1", "Where is my order?", null));
@@ -136,7 +136,7 @@ public sealed class SignalRHubTests
         Assert.AreEqual(HttpStatusCode.Forbidden, (await client.SendAsync(Upload(token, "https://evil.example"))).StatusCode);
         var response = await client.SendAsync(Upload(token));
         Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
-        var attachment = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        var attachment = JsonElement.Parse(await response.Content.ReadAsStringAsync());
         Assert.AreEqual("my photo.png", attachment.GetProperty("fileName").GetString());
         Assert.AreEqual(4, attachment.GetProperty("sizeBytes").GetInt64());
 

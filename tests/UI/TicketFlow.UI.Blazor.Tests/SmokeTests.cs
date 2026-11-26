@@ -106,8 +106,8 @@ public sealed partial class SmokeTests
         var html = await response.Content.ReadAsStringAsync();
         Assert.AreEqual(HttpStatusCode.OK, response.StatusCode, path);
         Assert.AreEqual("text/html", response.Content.Headers.ContentType?.MediaType);
-        StringAssert.Contains(html, expected, path);
-        StringAssert.Contains(html, "data-tf-theme=\"zinc\"");
+        StringAssert.Contains(html, expected, StringComparison.Ordinal, path);
+        StringAssert.Contains(html, "data-tf-theme=\"zinc\"", StringComparison.Ordinal);
         Assert.IsTrue(response.Headers.CacheControl?.NoStore, "Support data is never cached.");
     }
 
@@ -125,11 +125,11 @@ public sealed partial class SmokeTests
         var client = Client("viewer");
         var dashboard = await (await client.GetAsync("/support")).Content.ReadAsStringAsync();
         Assert.IsFalse(dashboard.Contains("href=\"/support/access\"", StringComparison.Ordinal), "Viewers do not hold access:manage.");
-        StringAssert.Contains(dashboard, "href=\"/support/conversations\"");
+        StringAssert.Contains(dashboard, "href=\"/support/conversations\"", StringComparison.Ordinal);
 
         var access = await client.GetAsync("/support/access");
         Assert.AreEqual(HttpStatusCode.Forbidden, access.StatusCode);
-        StringAssert.Contains(await access.Content.ReadAsStringAsync(), "Access denied");
+        StringAssert.Contains(await access.Content.ReadAsStringAsync(), "Access denied", StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -173,8 +173,8 @@ public sealed partial class SmokeTests
         using var follow = new HttpRequestMessage(HttpMethod.Get, "/support/conversations/c-1010");
         follow.Headers.Add("Cookie", flash);
         var page = await (await client.SendAsync(follow)).Content.ReadAsStringAsync();
-        StringAssert.Contains(page, "Note added");
-        StringAssert.Contains(page, "Checked the export settings for Ethan.");
+        StringAssert.Contains(page, "Note added", StringComparison.Ordinal);
+        StringAssert.Contains(page, "Checked the export settings for Ethan.", StringComparison.Ordinal);
 
         var stale = await PostAsync(client, "/support/conversations/c-1010", cookie, new Dictionary<string, string>
         {
@@ -186,8 +186,8 @@ public sealed partial class SmokeTests
         });
         Assert.AreEqual(HttpStatusCode.Conflict, stale.StatusCode);
         var html = await stale.Content.ReadAsStringAsync();
-        StringAssert.Contains(html, "Someone else changed this record");
-        StringAssert.Contains(html, "A second note from a stale page.", "The re-rendered form keeps what the agent typed.");
+        StringAssert.Contains(html, "Someone else changed this record", StringComparison.Ordinal);
+        StringAssert.Contains(html, "A second note from a stale page.", StringComparison.Ordinal, "The re-rendered form keeps what the agent typed.");
     }
 
     [TestMethod]
@@ -204,7 +204,7 @@ public sealed partial class SmokeTests
             ["priority"] = "Urgent",
         });
         Assert.AreEqual(HttpStatusCode.Forbidden, response.StatusCode);
-        StringAssert.Contains(await response.Content.ReadAsStringAsync(), "You don&#x27;t have permission to do that");
+        StringAssert.Contains(await response.Content.ReadAsStringAsync(), "You don&#x27;t have permission to do that", StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -227,8 +227,8 @@ public sealed partial class SmokeTests
         using var follow = new HttpRequestMessage(HttpMethod.Get, "/support");
         follow.Headers.Add("Cookie", themeCookie);
         var html = await (await client.SendAsync(follow)).Content.ReadAsStringAsync();
-        StringAssert.Contains(html, "data-tf-theme=\"blue\"");
-        Assert.IsFalse(Regex.IsMatch(html, "<html[^>]*class=\"dark\""));
+        StringAssert.Contains(html, "data-tf-theme=\"blue\"", StringComparison.Ordinal);
+        Assert.IsFalse(Regex.IsMatch(html, "<html[^>]*class=\"dark\"", RegexOptions.None, TimeSpan.FromSeconds(1)));
     }
 
     [TestMethod]
@@ -237,7 +237,7 @@ public sealed partial class SmokeTests
         var response = await Client("admin").GetAsync("/support/reports/export.csv");
         Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
         Assert.AreEqual("text/csv", response.Content.Headers.ContentType?.MediaType);
-        StringAssert.StartsWith(await response.Content.ReadAsStringAsync(), "source_id,metric,occurred_at");
+        StringAssert.StartsWith(await response.Content.ReadAsStringAsync(), "source_id,metric,occurred_at", StringComparison.Ordinal);
     }
 
     private static readonly (string Path, string Action)[] Sections =
@@ -273,7 +273,7 @@ public sealed partial class SmokeTests
                 ["permission"] = "conversation:read",
             });
             Assert.AreEqual(HttpStatusCode.Forbidden, post.StatusCode, path);
-            StringAssert.Contains(await post.Content.ReadAsStringAsync(), "Access denied", path);
+            StringAssert.Contains(await post.Content.ReadAsStringAsync(), "Access denied", StringComparison.Ordinal, path);
         }
         Assert.IsGreaterThanOrEqualTo(5, denied, "The viewer is denied several sections (access, automation, channels, ...).");
         var roles = await (await Client("admin").GetAsync("/support/access")).Content.ReadAsStringAsync();
@@ -301,8 +301,8 @@ public sealed partial class SmokeTests
         var dashboard = await client.GetAsync("/support");
         var home = await dashboard.Content.ReadAsStringAsync();
         Assert.AreEqual(HttpStatusCode.OK, dashboard.StatusCode);
-        StringAssert.Contains(home, "href=\"/support/conversations\"", "Team grants count for navigation.");
-        StringAssert.Contains(home, "Recent activity");
+        StringAssert.Contains(home, "href=\"/support/conversations\"", StringComparison.Ordinal, "Team grants count for navigation.");
+        StringAssert.Contains(home, "Recent activity", StringComparison.Ordinal);
         // Contacts are not team-scoped resources, so a team-only agent sees conversations but not contact names.
         Assert.IsTrue(new[] { "c-marcus", "c-mia", "c-hannah", "c-chloe" }.Any(home.Contains), "The dashboard shows the team's conversations.");
         Assert.IsFalse(home.Contains("c-james", StringComparison.Ordinal), "Escalations conversations stay hidden.");
@@ -310,7 +310,7 @@ public sealed partial class SmokeTests
         var list = await client.GetAsync("/support/conversations");
         var html = await list.Content.ReadAsStringAsync();
         Assert.AreEqual(HttpStatusCode.OK, list.StatusCode);
-        StringAssert.Contains(html, "/support/conversations/c-1002");
+        StringAssert.Contains(html, "/support/conversations/c-1002", StringComparison.Ordinal);
         Assert.IsFalse(html.Contains("/support/conversations/c-1004", StringComparison.Ordinal), "Billing-team conversations stay hidden.");
         Assert.IsFalse(html.Contains("href=\"/support/access\"", StringComparison.Ordinal));
     }
@@ -327,7 +327,7 @@ public sealed partial class SmokeTests
             ["assignee"] = "agent2",
         });
         Assert.AreEqual(HttpStatusCode.UnprocessableEntity, response.StatusCode);
-        StringAssert.Contains(await response.Content.ReadAsStringAsync(), "missing its revision");
+        StringAssert.Contains(await response.Content.ReadAsStringAsync(), "missing its revision", StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -344,7 +344,7 @@ public sealed partial class SmokeTests
         });
         var html = await preview.Content.ReadAsStringAsync();
         Assert.AreEqual(HttpStatusCode.OK, preview.StatusCode);
-        StringAssert.Contains(html, "name=\"sourceRevision\"");
+        StringAssert.Contains(html, "name=\"sourceRevision\"", StringComparison.Ordinal);
         Assert.IsTrue(preview.Headers.CacheControl?.NoStore);
 
         var stale = await PostAsync(client, "/support/contacts/c-leo", cookie, new Dictionary<string, string>
@@ -373,7 +373,7 @@ public sealed partial class SmokeTests
         Assert.AreEqual(HttpStatusCode.OK, reveal.StatusCode);
         Assert.IsTrue(reveal.Headers.CacheControl?.NoStore, "reveal");
         var revealed = await reveal.Content.ReadAsStringAsync();
-        StringAssert.Contains(revealed, "14155550142");
+        StringAssert.Contains(revealed, "14155550142", StringComparison.Ordinal);
         Assert.IsFalse(reveal.Headers.TryGetValues("Set-Cookie", out var revealCookies) && revealCookies.Any(value => value.StartsWith("tf-flash", StringComparison.Ordinal)));
 
         var (conversationToken, conversationCookie, conversationRevision) = await FormAsync(client, "/support/conversations/c-1001");
@@ -385,11 +385,11 @@ public sealed partial class SmokeTests
         });
         Assert.AreEqual(HttpStatusCode.OK, draft.StatusCode);
         Assert.IsTrue(draft.Headers.CacheControl?.NoStore, "AI draft");
-        StringAssert.Contains(await draft.Content.ReadAsStringAsync(), TestAssist.Draft);
+        StringAssert.Contains(await draft.Content.ReadAsStringAsync(), TestAssist.Draft, StringComparison.Ordinal);
 
         var (ruleToken, ruleCookie, _) = await FormAsync(client, "/support/automation/rules/tag-refunds");
         var rulePage = await (await client.GetAsync("/support/automation/rules/tag-refunds")).Content.ReadAsStringAsync();
-        var definition = WebUtility.HtmlDecode(Regex.Match(rulePage, "<textarea name=\"definition\"[^>]*>([^<]*)</textarea>").Groups[1].Value);
+        var definition = WebUtility.HtmlDecode(Regex.Match(rulePage, "<textarea name=\"definition\"[^>]*>(?<v>[^<]*)</textarea>", RegexOptions.ExplicitCapture, TimeSpan.FromSeconds(1)).Groups["v"].Value);
         var dryRun = await PostAsync(client, "/support/automation/rules/tag-refunds", ruleCookie, new Dictionary<string, string>
         {
             ["__RequestVerificationToken"] = ruleToken,
@@ -401,7 +401,7 @@ public sealed partial class SmokeTests
         });
         Assert.AreEqual(HttpStatusCode.OK, dryRun.StatusCode);
         Assert.IsTrue(dryRun.Headers.CacheControl?.NoStore, "dry run");
-        StringAssert.Contains(await dryRun.Content.ReadAsStringAsync(), "Dry run complete");
+        StringAssert.Contains(await dryRun.Content.ReadAsStringAsync(), "Dry run complete", StringComparison.Ordinal);
     }
 
     private static async Task<(string Token, string Cookie, string Revision)> FormAsync(HttpClient client, string path)
@@ -422,9 +422,9 @@ public sealed partial class SmokeTests
         return await client.SendAsync(request);
     }
 
-    [GeneratedRegex("name=\"__RequestVerificationToken\" value=\"([^\"]+)\"")]
+    [GeneratedRegex("name=\"__RequestVerificationToken\" value=\"(?<v>[^\"]+)\"", RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture, matchTimeoutMilliseconds: 1000)]
     private static partial Regex TokenPattern();
 
-    [GeneratedRegex("name=\"_revision\" value=\"(\\d+)\"")]
+    [GeneratedRegex("name=\"_revision\" value=\"(?<v>\\d+)\"", RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture, matchTimeoutMilliseconds: 1000)]
     private static partial Regex RevisionPattern();
 }

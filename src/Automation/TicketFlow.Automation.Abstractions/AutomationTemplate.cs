@@ -248,7 +248,7 @@ public sealed record AutomationTemplate
         return builder.ToString();
     }
 
-    public bool Equals(AutomationTemplate? other) => other is not null && Source == other.Source;
+    public bool Equals(AutomationTemplate? other) => other is not null && string.Equals(Source, other.Source, StringComparison.Ordinal);
 
     public override int GetHashCode() => Source.GetHashCode(StringComparison.Ordinal);
 

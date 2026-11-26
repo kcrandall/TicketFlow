@@ -36,9 +36,9 @@ internal sealed class ClaudeRetryHandler : DelegatingHandler
             {
                 return await base.SendAsync(request, linked.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
             {
-                throw new TimeoutException("The Claude request timed out.");
+                throw new TimeoutException("The Claude request timed out.", error);
             }
         }
 
@@ -54,10 +54,10 @@ internal sealed class ClaudeRetryHandler : DelegatingHandler
             {
                 response = await base.SendAsync(attemptRequest, linked.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
             {
                 if (attempt >= options.MaxRetries)
-                    throw new TimeoutException("The Claude request timed out.");
+                    throw new TimeoutException("The Claude request timed out.", error);
                 await DelayAsync(Backoff(attempt), cancellationToken).ConfigureAwait(false);
                 continue;
             }

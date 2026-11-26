@@ -27,7 +27,11 @@ public sealed class WorkerLoopTests
         var counter = new Counter();
         var builder = Host.CreateApplicationBuilder();
         builder.Services.AddSingleton(counter);
-        builder.Services.AddTicketFlow().AddTicketFlowWorkerLoop<Counter>("probe", (probe, _, _) => Task.FromResult(probe.Increment() >= 0 ? 0 : 0));
+        builder.Services.AddTicketFlow().AddTicketFlowWorkerLoop<Counter>("probe", (probe, _, _) =>
+        {
+            probe.Increment();
+            return Task.FromResult(0);
+        });
         builder.Services.Configure<TicketFlowWorkerOptions>(options =>
         {
             options.Jitter = 0;
@@ -38,8 +42,7 @@ public sealed class WorkerLoopTests
         await WaitUntilAsync(() => counter.Count >= 3);
         var health = host.Services.GetRequiredService<TicketFlowWorkerHealth>();
         Assert.AreEqual(TicketFlowLoopStatus.Running, health.Find("probe")!.Status);
-        var stopping = host.StopAsync();
-        Assert.AreSame(stopping, await Task.WhenAny(stopping, Task.Delay(Timeout)), "Shutdown completes promptly.");
+        await host.StopAsync().WaitAsync(Timeout);
         Assert.AreEqual(TicketFlowLoopStatus.Stopped, health.Find("probe")!.Status);
         var after = counter.Count;
         await Task.Delay(100);
@@ -166,12 +169,12 @@ public sealed class WorkerLoopTests
             await settings.CreateAsync(TestScopes.Create(workspaceId: workspace), new WorkspaceSettings(workspace, "en", "UTC"));
         await host.StartAsync();
         var health = host.Services.GetRequiredService<TicketFlowWorkerHealth>();
-        await WaitUntilAsync(() => dispatcher.Visits.Count(visit => visit == "ws-3") >= 5);
+        await WaitUntilAsync(() => dispatcher.Visits.Count(visit => string.Equals(visit, "ws-3", StringComparison.Ordinal)) >= 5);
         CollectionAssert.IsSubsetOf(new[] { "ws-1", "ws-3" }, dispatcher.Visits.ToArray());
         var state = health.Find(TicketFlowLoops.SurveyDispatch)!;
         Assert.AreEqual(0, state.ConsecutiveFailures, "Item failures never fail (and back off) the whole loop.");
         await WaitUntilAsync(() => health.Find(TicketFlowLoops.SurveyDispatch)!.LastItemFailures > 0 || dispatcher.FailedAttempts > 0);
-        Assert.IsLessThan(dispatcher.Visits.Count(visit => visit == "ws-3"), dispatcher.FailedAttempts, "The failing workspace is backed off on its own.");
+        Assert.IsLessThan(dispatcher.Visits.Count(visit => string.Equals(visit, "ws-3", StringComparison.Ordinal)), dispatcher.FailedAttempts, "The failing workspace is backed off on its own.");
         var report = await host.Services.GetRequiredService<HealthCheckService>().CheckHealthAsync();
         Assert.AreNotEqual(HealthStatus.Unhealthy, report.Status, "Isolated workspace failures degrade, never fail, health.");
         await host.StopAsync();
@@ -239,7 +242,7 @@ public sealed class WorkerLoopTests
         });
         using var host = builder.Build();
         var error = await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => host.StartAsync());
-        Assert.Contains("AutomationOptions.SlaWorkerClientId", error.Message);
+        Assert.Contains("AutomationOptions.SlaWorkerClientId", error.Message, StringComparison.Ordinal);
         var ids = TicketFlowServiceIdentities.Collect(host.Services);
         CollectionAssert.IsSubsetOf(new[] { new ApiClientId("sla-worker"), new ApiClientId("automation-worker"), new ApiClientId("other-sla") }, ids.ToArray());
     }
@@ -274,7 +277,7 @@ public sealed class WorkerLoopTests
         }
         await host.StartAsync();
         var checkpoints = host.Services.GetRequiredService<IWorkerCheckpointStore>();
-        await WaitUntilAsync(() => checkpoints.GetAsync(scope, "contact-merges").GetAwaiter().GetResult() is > 0);
+        await WaitUntilAsync(async () => await checkpoints.GetAsync(scope, "contact-merges") is > 0);
         await host.StopAsync();
     }
 
@@ -291,10 +294,13 @@ public sealed class WorkerLoopTests
 
     private static T As<T>(object? value) => value is T typed ? typed : throw new AssertFailedException($"Expected {typeof(T).Name} but got {value?.GetType().Name ?? "null"}.");
 
-    private static async Task WaitUntilAsync(Func<bool> condition, string? message = null)
+    private static Task WaitUntilAsync(Func<bool> condition, string? message = null) =>
+        WaitUntilAsync(() => Task.FromResult(condition()), message);
+
+    private static async Task WaitUntilAsync(Func<Task<bool>> condition, string? message = null)
     {
         var deadline = DateTime.UtcNow + Timeout;
-        while (!condition())
+        while (!await condition())
         {
             if (DateTime.UtcNow > deadline)
                 Assert.Fail(message ?? "The condition was not met in time.");
@@ -336,7 +342,7 @@ public sealed class WorkerLoopTests
 
         public Task<SurveyDispatchSummary> DispatchDueAsync(TicketScope scope, int limit = 100, CancellationToken cancellationToken = default)
         {
-            if (scope.WorkspaceId.Value == FailingWorkspace)
+            if (string.Equals(scope.WorkspaceId.Value, FailingWorkspace, StringComparison.Ordinal))
             {
                 Interlocked.Increment(ref failed);
                 throw new InvalidOperationException("boom");

@@ -34,11 +34,11 @@ public sealed class FlowTests
 
         Assert.AreEqual(new SurveyDispatchSummary(2, 0, 0, 0), await fixture.Dispatcher.DispatchDueAsync(fixture.Scope));
         Assert.AreEqual(new SurveyDispatchSummary(0, 0, 0, 0), await fixture.Dispatcher.DispatchDueAsync(fixture.Scope));
-        var message = fixture.Sender.Sent.Single(item => item.Invitation.Survey.Value == "inbox-csat");
+        var message = fixture.Sender.Sent.Single(item => string.Equals(item.Invitation.Survey.Value, "inbox-csat", StringComparison.Ordinal));
         Assert.AreEqual("Wie war es?", message.Question.Text);
         Assert.AreEqual((1, 5), (message.MinimumScore, message.MaximumScore));
         Assert.AreEqual("SurveyToken { <redacted> }", message.Token.ToString());
-        Assert.DoesNotContain(message.Token.Value, message.ToString());
+        Assert.DoesNotContain(message.Token.Value, message.ToString(), StringComparison.Ordinal);
         var stored = (await fixture.Store.GetInvitationAsync(fixture.Scope, invitation.Id))!.Invitation;
         Assert.AreEqual(SurveyInvitationState.Sent, stored.State);
         Assert.AreEqual(message.Token.Hash(), stored.TokenHash);

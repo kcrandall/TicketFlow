@@ -144,7 +144,7 @@ public static class SlaStoreContract
         clock.Advance(TimeSpan.FromMinutes(1.5));
         var again = await competing.ClaimDueAsync(10, TimeSpan.FromMinutes(1));
         CollectionAssert.AreEquivalent(new[] { "early", "other" }, again.Select(claim => claim.Conversation.Value).ToArray());
-        var early = again.Single(claim => claim.Conversation.Value == "early");
+        var early = again.Single(claim => string.Equals(claim.Conversation.Value, "early", StringComparison.Ordinal));
         Assert.IsTrue(early.Fence > claims[0].Fence);
         Assert.IsFalse(await primary.ReleaseAsync(claims[1], clock.GetUtcNow()), "the expired claim's fence is stale");
 
@@ -168,7 +168,7 @@ public static class SlaStoreContract
         Assert.IsFalse((await primary.ClaimDueAsync(10, TimeSpan.FromMinutes(1))).Any(claim => claim.Conversation.Value is "early" or "never"), "no next check, no timer");
 
         await primary.DeleteAsync(scope, new ConversationId("late"), 1);
-        Assert.IsFalse((await primary.ClaimDueAsync(10, TimeSpan.FromMinutes(1))).Any(claim => claim.Conversation.Value == "late"), "deleting a tracker deletes its timer");
+        Assert.IsFalse((await primary.ClaimDueAsync(10, TimeSpan.FromMinutes(1))).Any(claim => string.Equals(claim.Conversation.Value, "late", StringComparison.Ordinal)), "deleting a tracker deletes its timer");
     }
 
     public static async Task VerifyConcurrentClaimsAsync(IReadOnlyList<ISlaTrackerStore> clients, FakeTimeProvider clock)

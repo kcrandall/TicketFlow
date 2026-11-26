@@ -73,7 +73,7 @@ public sealed class PublicReaderTests
         Assert.IsInstanceOfType<FeedbackUnchanged>((await fixture.Public.RecordFeedbackAsync(fixture.Scope, slug, live, "visitor-123", true)).Value);
         Assert.IsInstanceOfType<FeedbackCounted>((await fixture.Public.RecordFeedbackAsync(fixture.Scope, slug, live, "visitor-456", false)).Value);
         Assert.IsInstanceOfType<FeedbackArticleNotFound>((await fixture.Public.RecordFeedbackAsync(fixture.Scope, slug, new ArticleId("draft"), "visitor-123", true)).Value);
-        Assert.ThrowsExactly<ArgumentException>(() => fixture.Public.RecordViewAsync(fixture.Scope, slug, live, "short").GetAwaiter().GetResult());
+        await Assert.ThrowsExactlyAsync<ArgumentException>(() => fixture.Public.RecordViewAsync(fixture.Scope, slug, live, "short"));
         Assert.AreEqual(new ArticleFeedbackCounts(2, 1, 1), Value(await fixture.Service.GetFeedbackAsync(editor, live)));
     }
 }

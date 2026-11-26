@@ -30,10 +30,10 @@ public sealed class EnvelopeFlowRoundTripTests
         Assert.AreEqual("support@acme.example", email.From.Address);
         Assert.AreEqual("ada@example.com", email.To.Single().Address);
         Assert.AreEqual($"Re: Order 42 [Ticket #{conversation.Value}]", email.Subject);
-        Assert.AreEqual(conversation.Value, email.Headers.Single(header => header.Name == ChannelTicketTag.ConversationHeaderName).Value);
+        Assert.AreEqual(conversation.Value, email.Headers.Single(header => string.Equals(header.Name, ChannelTicketTag.ConversationHeaderName, StringComparison.Ordinal)).Value);
         Assert.AreEqual("It ships today.", email.TextBody);
-        Assert.AreEqual("<m1@mail.example>", email.Headers.Single(header => header.Name == "In-Reply-To").Value);
-        Assert.AreEqual("<m1@mail.example>", email.Headers.Single(header => header.Name == "References").Value);
+        Assert.AreEqual("<m1@mail.example>", email.Headers.Single(header => string.Equals(header.Name, "In-Reply-To", StringComparison.Ordinal)).Value);
+        Assert.AreEqual("<m1@mail.example>", email.Headers.Single(header => string.Equals(header.Name, "References", StringComparison.Ordinal)).Value);
         Assert.IsTrue(email.SubmissionContext!.Key.StartsWith("tf1-", StringComparison.Ordinal));
         var sent = (await fixture.MessagesAsync(conversation)).Single(message => message.Id == reply);
         Assert.AreEqual(MessageDeliveryState.Sent, sent.Delivery.State);
@@ -52,8 +52,8 @@ public sealed class EnvelopeFlowRoundTripTests
         await fixture.ReplyAsync(conversation, "You're welcome.");
         await fixture.Host.DispatchAsync();
         var second = fixture.Email.Sent[1];
-        Assert.AreEqual("<m3@mail.example>", second.Headers.Single(header => header.Name == "In-Reply-To").Value);
-        Assert.AreEqual("<m1@mail.example> <out-1@ticketflow.example> <m2@mail.example> <m3@mail.example>", second.Headers.Single(header => header.Name == "References").Value);
+        Assert.AreEqual("<m3@mail.example>", second.Headers.Single(header => string.Equals(header.Name, "In-Reply-To", StringComparison.Ordinal)).Value);
+        Assert.AreEqual("<m1@mail.example> <out-1@ticketflow.example> <m2@mail.example> <m3@mail.example>", second.Headers.Single(header => string.Equals(header.Name, "References", StringComparison.Ordinal)).Value);
         Assert.AreEqual($"Re: Order 42 [Ticket #{conversation.Value}]", second.Subject);
 
         await fixture.Handler.HandleAsync(fixture.Receipt("mailgun", "acct", "<out-1@ticketflow.example>", InboundDeliveryState.Delivered));
@@ -225,11 +225,11 @@ public sealed class EnvelopeFlowRoundTripTests
         Assert.AreEqual(2, summary.Sent);
         var email = fixture.Email.Sent.Single();
         Assert.AreEqual("ada@example.com", email.To.Single().Address);
-        StringAssert.Contains(email.TextBody, "How did we do?");
-        StringAssert.Contains(email.TextBody, "https://support.acme.example/s/tfs1.");
+        StringAssert.Contains(email.TextBody, "How did we do?", StringComparison.Ordinal);
+        StringAssert.Contains(email.TextBody, "https://support.acme.example/s/tfs1.", StringComparison.Ordinal);
         var (request, _) = fixture.WhatsApp.Sent.Single();
         Assert.AreEqual("csat_invite", request.Message.Template!.Name, "Outside the 24-hour window an approved template is used.");
-        StringAssert.StartsWith(request.Message.Template.Components.Single().Parameters.Single(), "https://support.acme.example/s/tfs1.");
+        StringAssert.StartsWith(request.Message.Template.Components.Single().Parameters.Single(), "https://support.acme.example/s/tfs1.", StringComparison.Ordinal);
     }
 
     [TestMethod]

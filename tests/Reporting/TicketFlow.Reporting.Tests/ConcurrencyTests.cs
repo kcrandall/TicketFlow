@@ -32,7 +32,7 @@ public sealed class ConcurrencyTests
         var projector = new ReportingProjector(fixture.Get<IConversationStore>(), fixture.Get<IInboxStore>(), fixture.Get<IBusinessCalendarStore>(), store,
             Options.Create(new ReportingOptions { MaximumWriteAttempts = 3 }));
         var error = await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => projector.SyncAsync(fixture.Scope, new ConversationId("c1")));
-        StringAssert.Contains(error.Message, "kept winning");
+        StringAssert.Contains(error.Message, "kept winning", StringComparison.Ordinal);
         Assert.AreEqual(3, store.Applies);
     }
 

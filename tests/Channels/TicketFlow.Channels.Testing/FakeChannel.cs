@@ -7,12 +7,13 @@ namespace TicketFlow.Channels.Testing;
 public sealed class FakeChannel(ChannelKind kind, ChannelCapabilities capabilities, params ContactIdentityKind[] recipientKinds) : ITicketChannel
 {
     private readonly Queue<Func<OutboundChannelMessage, ChannelSendResult>> results = new();
+    private readonly List<OutboundChannelMessage> requests = [];
     private int sent;
 
     public ChannelKind Kind { get; } = kind;
     public ChannelCapabilities Capabilities { get; } = capabilities;
     public IReadOnlyList<ContactIdentityKind> RecipientKinds { get; } = recipientKinds;
-    public List<OutboundChannelMessage> Requests { get; } = [];
+    public IReadOnlyList<OutboundChannelMessage> Requests => requests;
 
     public FakeChannel Then(ChannelSendResult result)
     {
@@ -28,7 +29,7 @@ public sealed class FakeChannel(ChannelKind kind, ChannelCapabilities capabiliti
 
     public Task<ChannelSendResult> SendAsync(OutboundChannelMessage message, CancellationToken cancellationToken = default)
     {
-        Requests.Add(message);
+        requests.Add(message);
         var next = results.Count > 0 ? results.Dequeue() : _ => new ChannelSendAccepted($"ext-{Kind}-{Interlocked.Increment(ref sent)}");
         return Task.FromResult(next(message));
     }

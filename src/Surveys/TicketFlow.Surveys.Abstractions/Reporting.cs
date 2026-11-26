@@ -18,7 +18,7 @@ public sealed record SurveyResponseQuery
         if (to <= from || to - from > MaximumRange)
             throw new ArgumentException("The range must be non-empty and at most 366 days.", nameof(to));
         if (survey is { IsInitialized: false } || after is { Invitation.IsInitialized: false })
-            throw new ArgumentException("Survey and cursor identifiers must be initialized.");
+            throw new ArgumentException("Survey and cursor identifiers must be initialized.", survey is { IsInitialized: false } ? nameof(survey) : nameof(after));
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, SurveyLimits.MaximumPageSize);
         From = SurveyLimits.Truncate(from);

@@ -28,8 +28,8 @@ namespace TicketFlow.Routing;
 public sealed class RoutingEngine : IRoutingEngine
 {
     private static readonly ChannelKind UnknownChannel = new("unknown");
-    private static readonly RoutingOutcome? Retry = null;
-    private static readonly IReadOnlyDictionary<string, int> NoSkills = new Dictionary<string, int>();
+    private static RoutingOutcome? Retry => null;
+    private static readonly IReadOnlyDictionary<string, int> NoSkills = new Dictionary<string, int>(StringComparer.Ordinal);
 
     private readonly IConversationStore conversations;
     private readonly IConversationService service;
@@ -346,12 +346,12 @@ public sealed class RoutingEngine : IRoutingEngine
     }
 
     /// <summary>One Access plan per agent, reused within this engine instance (one run); missing plans are resolved in one batch.</summary>
-    private async Task<IReadOnlyDictionary<UserId, AccessFilter>> EligibilityAsync(TicketScope scope, IReadOnlyList<UserId> agentIds, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<UserId, AccessFilter>> EligibilityAsync(TicketScope scope, UserId[] agentIds, CancellationToken cancellationToken)
     {
         var now = time.GetUtcNow();
-        var filters = new Dictionary<UserId, AccessFilter>(agentIds.Count);
+        var filters = new Dictionary<UserId, AccessFilter>(agentIds.Length);
         List<UserId>? missing = null;
-        for (var i = 0; i < agentIds.Count; i++)
+        for (var i = 0; i < agentIds.Length; i++)
         {
             var agent = agentIds[i];
             if (eligibility.TryGetValue((scope, agent), out var cached) && cached.Until > now)
@@ -387,9 +387,7 @@ public sealed class RoutingEngine : IRoutingEngine
                 var principal = new UserPrincipal(scope, agent, teamsByAgent.GetValueOrDefault(agent) ?? []);
                 tasks[i] = planner.PlanAsync(new AccessQuery(principal, ConversationPermissions.Reply, scope), cancellationToken);
             }
-            await Task.WhenAll(tasks).ConfigureAwait(false);
-            for (var i = 0; i < missing.Count; i++)
-                results[i] = tasks[i].Result;
+            results = await Task.WhenAll(tasks).ConfigureAwait(false);
         }
         else
         {

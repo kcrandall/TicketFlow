@@ -675,7 +675,7 @@ public static class AutomationEventCodec
     {
         ArgumentNullException.ThrowIfNull(extension);
         (rule, execution, depth) = (default, Guid.Empty, 0);
-        if (extension.Kind != AppliedKind || extension.PayloadVersion != PayloadVersion)
+        if (!string.Equals(extension.Kind, AppliedKind, StringComparison.Ordinal) || extension.PayloadVersion != PayloadVersion)
             return false;
         try
         {

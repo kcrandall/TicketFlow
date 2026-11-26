@@ -21,7 +21,7 @@ namespace TicketFlow.Conversations;
 /// Runs as a trusted internal component: the contact merge itself was authorized (<c>contact:merge</c>); conversation writes go to the
 /// store directly with the system actor <c>contact-merge</c>.
 /// </summary>
-public sealed class ConversationContactMergeFollower : IContactChangeObserver
+public sealed partial class ConversationContactMergeFollower : IContactChangeObserver
 {
     /// <summary>The system actor recorded on re-pointing events.</summary>
     public static AccessActor Actor { get; } = new(AccessActorKind.System, "contact-merge");
@@ -54,11 +54,13 @@ public sealed class ConversationContactMergeFollower : IContactChangeObserver
             }
             catch (Exception error) when (error is not OperationCanceledException)
             {
-                logger.LogWarning("Following contact change {Sequence} ({Kind}) failed with {Error}; contact change catch-up will repair it.",
-                    change.Sequence, change.Event.Kind, error.GetType().Name);
+                LogContactChangeFailed(logger, change.Sequence, change.Event.Kind, error.GetType().Name);
             }
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Following contact change {Sequence} ({Kind}) failed with {Error}; contact change catch-up will repair it.")]
+    private static partial void LogContactChangeFailed(ILogger logger, long sequence, ContactChangeKind kind, string error);
 
     /// <summary>
     /// Applies merge and unmerge changes of <paramref name="scope"/> with a sequence greater than <paramref name="afterSequence"/>, in

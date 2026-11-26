@@ -80,7 +80,7 @@ public static partial class AssistTelemetry
                     activity.SetTag("ai.tool.call_id", context.CallContent.CallId);
                 }
                 using var scope = logger is not null && (logger.IsEnabled(LogLevel.Information) || logger.IsEnabled(LogLevel.Warning))
-                    ? logger.BeginScope(new Dictionary<string, object?> { ["tool_name"] = toolName, ["tool_call_id"] = context.CallContent.CallId })
+                    ? logger.BeginScope(new Dictionary<string, object?>(StringComparer.Ordinal) { ["tool_name"] = toolName, ["tool_call_id"] = context.CallContent.CallId })
                     : null;
                 var started = Stopwatch.GetTimestamp();
                 try

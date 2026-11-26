@@ -136,7 +136,7 @@ public sealed record SlaAppliedRule
     public SlaAppliedRule(SlaPolicyId policy, long policyRevision, int ruleIndex, SlaRule rule, SlaPausePolicy pause, int atRiskPercent, BusinessCalendarId? calendar)
     {
         if (!policy.IsInitialized || calendar is { IsInitialized: false })
-            throw new ArgumentException("Policy and calendar identifiers must be initialized.");
+            throw new ArgumentException("Policy and calendar identifiers must be initialized.", !policy.IsInitialized ? nameof(policy) : nameof(calendar));
         ArgumentOutOfRangeException.ThrowIfLessThan(policyRevision, 1);
         ArgumentOutOfRangeException.ThrowIfNegative(ruleIndex);
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(ruleIndex, SlaPolicy.MaximumRules);
@@ -199,14 +199,14 @@ public sealed record SlaAccessSnapshot
     public SlaAccessSnapshot(TeamId? team, UserId? assignee, IEnumerable<LabelId> labels, IEnumerable<KeyValuePair<string, string>> attributes)
     {
         if (team == default(TeamId) || assignee == default(UserId))
-            throw new ArgumentException("Team and assignee must be initialized when supplied.");
+            throw new ArgumentException("Team and assignee must be initialized when supplied.", team == default(TeamId) ? nameof(team) : nameof(assignee));
         Team = team;
         Assignee = assignee;
         ArgumentNullException.ThrowIfNull(labels);
         ArgumentNullException.ThrowIfNull(attributes);
         Labels = [.. labels.Distinct().OrderBy(label => label.Value, StringComparer.Ordinal)];
         if (Labels.Count > Conversation.MaximumLabels || Labels.Any(label => label == default))
-            throw new ArgumentException("The access snapshot exceeds conversation limits.");
+            throw new ArgumentException("The access snapshot exceeds conversation limits.", nameof(labels));
         SortedDictionary<string, string>? sorted = null;
         foreach (var pair in attributes)
         {
@@ -214,7 +214,7 @@ public sealed record SlaAccessSnapshot
             if (!sorted.TryAdd(pair.Key, pair.Value))
                 throw new ArgumentException("Duplicate attribute key.", nameof(attributes));
             if (sorted.Count > Conversation.MaximumAttributes)
-                throw new ArgumentException("The access snapshot exceeds conversation limits.");
+                throw new ArgumentException("The access snapshot exceeds conversation limits.", nameof(attributes));
             if (pair.Key.Length is 0 or > AccessResource.MaximumAttributeKeyLength || pair.Value is null || pair.Value.Length > AccessResource.MaximumAttributeValueLength)
                 throw new ArgumentException("Attribute condition values exceed Access limits.", nameof(attributes));
         }
@@ -250,7 +250,7 @@ public sealed record SlaAccessSnapshot
 
     public bool Equals(SlaAccessSnapshot? other) =>
         other is not null && Team == other.Team && Assignee == other.Assignee && Labels.SequenceEqual(other.Labels)
-        && Attributes.Count == other.Attributes.Count && Attributes.All(pair => other.Attributes.TryGetValue(pair.Key, out var value) && value == pair.Value);
+        && Attributes.Count == other.Attributes.Count && Attributes.All(pair => other.Attributes.TryGetValue(pair.Key, out var value) && string.Equals(value, pair.Value, StringComparison.Ordinal));
 
     public override int GetHashCode() => HashCode.Combine(Team, Assignee, Labels.Count, Attributes.Count);
 
@@ -274,7 +274,7 @@ public sealed record SlaSchedule
         Breached = breached;
         UrgencyAt = SlaText.Instant(urgencyAt);
         if ((breached || dueAt is not null) != (urgencyAt is not null) || (atRiskAt is not null && dueAt is null))
-            throw new ArgumentException("Urgency exists exactly when a clock is due or breached; at-risk clocks are due.");
+            throw new ArgumentException("Urgency exists exactly when a clock is due or breached; at-risk clocks are due.", nameof(urgencyAt));
     }
 
     public static SlaSchedule None { get; } = new(null, null, null, false, null);
@@ -318,7 +318,7 @@ public sealed record SlaTracker
         DateTimeOffset? flushRetryAt = null)
     {
         if (conversation == default || inbox == default)
-            throw new ArgumentException("Conversation and inbox identifiers are required.");
+            throw new ArgumentException("Conversation and inbox identifiers are required.", conversation == default ? nameof(conversation) : nameof(inbox));
         Conversation = conversation;
         Inbox = inbox;
         Applied = applied;

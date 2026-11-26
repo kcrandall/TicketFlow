@@ -45,7 +45,7 @@ public static partial class UiActions
         if (context.Session.Service<IHelpCenterService>() is not { } service)
             return UiOutcome.NotFound();
         var segments = context.Session.Path.Split('/');
-        var existing = segments is ["help-center", "articles", var id] && id != "new" ? Uri.UnescapeDataString(id) : null;
+        var existing = segments is ["help-center", "articles", var id] && !string.Equals(id, "new", global::System.StringComparison.Ordinal) ? Uri.UnescapeDataString(id) : null;
         var title = context.Require("title", "Title");
         var translation = new ArticleTranslation(new HelpCenterLocale(context.Text("locale") ?? "en"), title, new HelpCenterSlug(context.Text("slug") ?? Slug(title)),
             context.RequireRaw("body", "Body"), context.Text("excerpt"), context.Text("tags")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));

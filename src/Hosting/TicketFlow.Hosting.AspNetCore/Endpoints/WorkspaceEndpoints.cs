@@ -132,7 +132,7 @@ internal static class WorkspaceEndpoints
 
     private static Inbox Inbox(string id, InboxRequest request)
     {
-        ArgumentNullException.ThrowIfNull(request.Channel, nameof(request.Channel));
+        ArgumentNullException.ThrowIfNull(request.Channel, nameof(request));
         return new Inbox(new InboxId(id), request.Name, new ChannelBinding(new ChannelKind(request.Channel.Kind), request.Channel.ConfigurationId),
             request.CalendarId is null ? null : new BusinessCalendarId(request.CalendarId),
             request.SlaPolicyId is null ? null : new SlaPolicyId(request.SlaPolicyId),

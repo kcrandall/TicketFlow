@@ -120,7 +120,7 @@ public sealed class McpEndpointTests
         builder.Services.AddAuthentication(HeaderAuthenticationHandler.SchemeName)
             .AddScheme<AuthenticationSchemeOptions, HeaderAuthenticationHandler>(HeaderAuthenticationHandler.SchemeName, null);
         builder.Services.AddAuthorization(options => options.AddPolicy("mcp", rule => rule.RequireAuthenticatedUser()
-            .RequireAssertion(context => context.User.FindFirstValue("client") != "blocked")));
+            .RequireAssertion(context => !string.Equals(context.User.FindFirstValue("client"), "blocked", StringComparison.Ordinal))));
         builder.Services.AddMcpServer()
             .WithHttpTransport(options => options.Stateless = true)
             .WithTicketFlowTools(options => options.DefaultWorkspace = scope.WorkspaceId.Value)

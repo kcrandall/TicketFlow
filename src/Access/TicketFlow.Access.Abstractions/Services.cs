@@ -60,7 +60,7 @@ public sealed record BreakGlassRequest
         if (requester is null)
             throw new ArgumentException("A requester is required.", nameof(requester));
         if (!id.IsInitialized || !role.IsInitialized)
-            throw new ArgumentException("Grant and role identifiers are required.");
+            throw new ArgumentException("Grant and role identifiers are required.", !id.IsInitialized ? nameof(id) : nameof(role));
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(justification);
         Requester = requester;

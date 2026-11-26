@@ -124,9 +124,9 @@ public sealed partial class PostgresRoutingStore
                 AddLong(create, "max", IAgentAvailabilityStore.MaximumAgentsPerWorkspace);
                 await using var reader = await create.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
                 await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-                insertedRevision = reader.IsDBNull(0) ? null : reader.GetInt64(0);
-                changedAt = reader.IsDBNull(1) ? null : reader.GetFieldValue<DateTimeOffset>(1);
-                existingRevision = reader.IsDBNull(2) ? null : reader.GetInt64(2);
+                insertedRevision = await reader.IsDBNullAsync(0, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt64(0);
+                changedAt = await reader.IsDBNullAsync(1, cancellationToken).ConfigureAwait(false) ? null : await reader.GetFieldValueAsync<DateTimeOffset>(1, cancellationToken).ConfigureAwait(false);
+                existingRevision = await reader.IsDBNullAsync(2, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt64(2);
             }
             if (insertedRevision is { } rev)
             {
@@ -252,7 +252,7 @@ public sealed partial class PostgresRoutingStore
         var expired = new List<AgentPresenceExpired>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            expired.Add(new AgentPresenceExpired(ReadScope(reader, 0), new UserId(reader.GetString(5)), Instant(reader.GetFieldValue<DateTimeOffset>(6))));
+            expired.Add(new AgentPresenceExpired(ReadScope(reader, 0), new UserId(reader.GetString(5)), Instant(await reader.GetFieldValueAsync<DateTimeOffset>(6, cancellationToken).ConfigureAwait(false))));
         return expired;
     }
 
@@ -276,7 +276,7 @@ public sealed partial class PostgresRoutingStore
         var claims = new List<AgentReassignmentClaim>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            claims.Add(new AgentReassignmentClaim(ReadScope(reader, 0), new UserId(reader.GetString(5)), reader.GetInt64(6), Instant(reader.GetFieldValue<DateTimeOffset>(7))));
+            claims.Add(new AgentReassignmentClaim(ReadScope(reader, 0), new UserId(reader.GetString(5)), reader.GetInt64(6), Instant(await reader.GetFieldValueAsync<DateTimeOffset>(7, cancellationToken).ConfigureAwait(false))));
         return claims;
     }
 

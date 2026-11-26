@@ -149,7 +149,7 @@ public static class SlaTrackerCodec
             SlaJson.RequireProperties(item, "key", "kind", "payload", "after");
             var timelineEvent = SlaEventCodec.Deserialize(item.RequiredString("kind"), SlaEventCodec.PayloadVersion, item.RequiredString("payload"));
             var key = item.RequiredString("key");
-            if (timelineEvent.Key != key)
+            if (!string.Equals(timelineEvent.Key, key, StringComparison.Ordinal))
                 throw new FormatException("A pending emission key does not match its payload.");
             return new SlaPendingEmission(key, timelineEvent, item.GetProperty("after").GetInt64());
         }).ToList();

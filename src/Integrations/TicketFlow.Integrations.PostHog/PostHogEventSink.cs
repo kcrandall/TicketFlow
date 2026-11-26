@@ -39,7 +39,7 @@ public sealed record PostHogProject
         if (AllowedScopes.Count == 0 || AllowedScopes.Any(rule => rule is null))
             throw new ArgumentException("A PostHog project needs at least one allowed scope rule.", nameof(allowedScopes));
         ArgumentNullException.ThrowIfNull(host);
-        if (!host.IsAbsoluteUri || host.Scheme != Uri.UriSchemeHttps || host.UserInfo.Length != 0 || host.Query.Length != 0 || host.Fragment.Length != 0)
+        if (!host.IsAbsoluteUri || !string.Equals(host.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal) || host.UserInfo.Length != 0 || host.Query.Length != 0 || host.Fragment.Length != 0)
             throw new ArgumentException("PostHog hosts are absolute https URIs without credentials, query or fragment.", nameof(host));
         Host = host;
         ProjectApiKey = string.IsNullOrWhiteSpace(projectApiKey) || projectApiKey.Length > 256 || projectApiKey.Any(character => character is < '!' or > '~')
@@ -193,7 +193,7 @@ public sealed class PostHogEventSink : Events.IEventSink, IDisposable
             var holder = content.TryGetProperty("contact", out var related) ? related : content;
             if (holder.TryGetProperty("identities", out var identities))
                 foreach (var identity in identities.EnumerateArray())
-                    if (identity.GetProperty("kind").GetString() == "external-user")
+                    if (string.Equals(identity.GetProperty("kind").GetString(), "external-user", StringComparison.Ordinal))
                         return "external:" + (identity.TryGetProperty("namespace", out var issuer) ? issuer.GetString() : "") + ":" + identity.GetProperty("value").GetString();
         }
         // The event's subject contact (contact events), else the conversation's contact from the resource snapshot.

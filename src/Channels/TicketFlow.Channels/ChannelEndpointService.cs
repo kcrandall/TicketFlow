@@ -62,7 +62,7 @@ public sealed class ChannelEndpointService(
             return TicketFailure.Forbidden;
         if (await ValidateInboxAsync(scope, endpoint, cancellationToken).ConfigureAwait(false) is { } invalid)
             return invalid;
-        if (endpoint.Address != stored.Endpoint.Address && !await ownership.MayBindAsync(actor, scope, endpoint, cancellationToken).ConfigureAwait(false))
+        if (!string.Equals(endpoint.Address, stored.Endpoint.Address, StringComparison.Ordinal) && !await ownership.MayBindAsync(actor, scope, endpoint, cancellationToken).ConfigureAwait(false))
             return NotOwned;
         return Map(await endpoints.UpdateAsync(scope, endpoint, expectedRevision, cancellationToken).ConfigureAwait(false));
     }

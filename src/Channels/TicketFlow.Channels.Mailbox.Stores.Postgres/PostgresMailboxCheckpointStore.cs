@@ -39,7 +39,7 @@ public sealed class PostgresMailboxCheckpointStore(NpgsqlDataSource dataSource) 
             return null;
         if (reader.GetInt16(3) != 1)
             throw new FormatException("Unsupported mailbox checkpoint format version.");
-        return new MailboxCheckpoint((uint)reader.GetInt64(0), (uint)reader.GetInt64(1), reader.GetFieldValue<DateTimeOffset>(2));
+        return new MailboxCheckpoint((uint)reader.GetInt64(0), (uint)reader.GetInt64(1), await reader.GetFieldValueAsync<DateTimeOffset>(2, cancellationToken).ConfigureAwait(false));
     }
 
     public async Task SaveCheckpointAsync(TicketScope scope, string configurationId, string folder, MailboxCheckpoint checkpoint, CancellationToken cancellationToken = default)

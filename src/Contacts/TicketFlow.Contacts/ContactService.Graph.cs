@@ -392,13 +392,13 @@ public sealed partial class ContactService
                 }
                 else if (prop.NameEquals("ns"u8))
                 {
-                    if (prop.Value.GetString() != search.Namespace)
+                    if (!string.Equals(prop.Value.GetString(), search.Namespace, StringComparison.Ordinal))
                         return null;
                     bit = 3;
                 }
                 else if (prop.NameEquals("p"u8))
                 {
-                    if (prop.Value.GetString() != search.Prefix)
+                    if (!string.Equals(prop.Value.GetString(), search.Prefix, StringComparison.Ordinal))
                         return null;
                     bit = 4;
                 }

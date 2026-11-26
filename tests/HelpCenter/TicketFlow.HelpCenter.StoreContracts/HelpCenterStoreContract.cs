@@ -328,7 +328,7 @@ public static class HelpCenterStoreContract
         Assert.AreEqual(new HelpCenterSlug("a-reset"), hits[0].Slug);
         Assert.AreEqual(1, hits[0].RevisionNumber);
         Assert.IsTrue(hits.All(hit => hit.Snippet.Length <= ArticleSnippet.MaximumSnippetLength && !hit.Snippet.Contains('<') && !hit.Snippet.Contains("**", StringComparison.Ordinal)));
-        Assert.Contains("password", hits[1].Snippet);
+        Assert.Contains("password", hits[1].Snippet, StringComparison.Ordinal);
 
         Assert.HasCount(1, await store.SearchAsync(scope, new HelpCenterSearchQuery(new PortalId("portal"), English, "password", limit: 1)));
         CollectionAssert.AreEqual(new[] { "billing" }, (await store.SearchAsync(scope, new HelpCenterSearchQuery(new PortalId("portal"), English, "password", offset: 1))).Select(hit => hit.Article.Value).ToArray());

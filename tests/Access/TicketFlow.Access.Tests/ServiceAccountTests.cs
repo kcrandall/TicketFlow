@@ -8,7 +8,7 @@ namespace TicketFlow.Access.Tests;
 [TestClass]
 public sealed partial class ServiceAccountTests
 {
-    [GeneratedRegex(@"^tf_sa_[0-9a-f]{8}\.[A-Za-z0-9_-]{43}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^tf_sa_[0-9a-f]{8}\.[A-Za-z0-9_-]{43}$", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 1000)]
     private static partial Regex ApiKeyFormatRegex();
 
     [TestMethod]
@@ -438,11 +438,11 @@ public sealed partial class ServiceAccountTests
         // Verify PrintMembers redacts PlaintextKey and KeyHashHex
         var issuedText = issued.Value.Value.ToString();
         Assert.IsFalse(issuedText.Contains(issued.Value.Value.PlaintextKey, StringComparison.Ordinal));
-        StringAssert.Contains(issuedText, "<redacted>");
+        StringAssert.Contains(issuedText, "<redacted>", StringComparison.Ordinal);
         var secretRecord = new StoredApiKeySecret(issued.Value.Value.Key, new string('f', 64));
         var secretText = secretRecord.ToString();
         Assert.IsFalse(secretText.Contains(secretRecord.KeyHashHex, StringComparison.Ordinal));
-        StringAssert.Contains(secretText, "<redacted>");
+        StringAssert.Contains(secretText, "<redacted>", StringComparison.Ordinal);
 
         using var cts = new CancellationTokenSource();
         var cancellingStore = new CancellingOnDeleteServiceAccountStore(saStore, cts);
@@ -516,7 +516,7 @@ public sealed partial class ServiceAccountTests
         public async ValueTask<TicketResult<bool>> DeleteAsync(AccessPartition partition, ApiClientId clientId, long? expectedVersion = null, CancellationToken cancellationToken = default)
         {
             var result = await inner.DeleteAsync(partition, clientId, expectedVersion, cancellationToken).ConfigureAwait(false);
-            cts.Cancel();
+            await cts.CancelAsync().ConfigureAwait(false);
             return result;
         }
     }

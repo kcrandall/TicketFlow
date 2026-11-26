@@ -251,7 +251,7 @@ public static class AssistLimits
     public static void RequireRange(DateTimeOffset from, DateTimeOffset to)
     {
         if (to <= from || to - from > MaximumSummaryRange)
-            throw new ArgumentException($"Usage ranges must be non-empty and at most {MaximumSummaryRange.TotalDays} days.");
+            throw new ArgumentException($"Usage ranges must be non-empty and at most {MaximumSummaryRange.TotalDays} days.", nameof(to));
     }
 
     /// <summary>Start of the UTC day containing <paramref name="instant"/> (the daily quota window).</summary>

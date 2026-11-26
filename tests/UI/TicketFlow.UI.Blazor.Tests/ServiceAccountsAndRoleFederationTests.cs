@@ -29,17 +29,17 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
 
         // 1. Seeded demo service accounts are rendered and demo API key authenticates
         var initialHtml = await GetStringAsync(admin, "/support/access/service-accounts");
-        StringAssert.Contains(initialHtml, "Ticket Sync Worker");
-        StringAssert.Contains(initialHtml, "Reporting Exporter");
-        StringAssert.Contains(initialHtml, "tf_sa_demo0001…");
-        StringAssert.Contains(initialHtml, "tf_sa_demo0002…");
+        StringAssert.Contains(initialHtml, "Ticket Sync Worker", StringComparison.Ordinal);
+        StringAssert.Contains(initialHtml, "Reporting Exporter", StringComparison.Ordinal);
+        StringAssert.Contains(initialHtml, "tf_sa_demo0001…", StringComparison.Ordinal);
+        StringAssert.Contains(initialHtml, "tf_sa_demo0002…", StringComparison.Ordinal);
 
         using (var demoReq = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
         {
             demoReq.Headers.Add("X-Api-Key", SampleSeeder.DemoReportingExportApiKey);
             using var demoResp = await rawClient.SendAsync(demoReq);
             Assert.AreEqual(HttpStatusCode.OK, demoResp.StatusCode);
-            StringAssert.Contains(await demoResp.Content.ReadAsStringAsync(), "Reporting Exporter");
+            StringAssert.Contains(await demoResp.Content.ReadAsStringAsync(), "Reporting Exporter", StringComparison.Ordinal);
         }
 
         // Seeded tf_sa_* API key also works seamlessly on REST API endpoints (/ticketflow/api/...)
@@ -69,9 +69,9 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
         }
 
         var afterCreateHtml = await GetStringAsync(admin, "/support/access/service-accounts");
-        StringAssert.Contains(afterCreateHtml, "data-service-account=\"sa-e2e-lifecycle\"");
-        StringAssert.Contains(afterCreateHtml, "E2E Lifecycle Bot");
-        StringAssert.Contains(afterCreateHtml, "Viewer");
+        StringAssert.Contains(afterCreateHtml, "data-service-account=\"sa-e2e-lifecycle\"", StringComparison.Ordinal);
+        StringAssert.Contains(afterCreateHtml, "E2E Lifecycle Bot", StringComparison.Ordinal);
+        StringAssert.Contains(afterCreateHtml, "Viewer", StringComparison.Ordinal);
 
         // 3. Update display name & description
         var saCard = ExtractServiceAccountCard(afterCreateHtml, "sa-e2e-lifecycle");
@@ -91,7 +91,7 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
         }
 
         var afterUpdateHtml = await GetStringAsync(admin, "/support/access/service-accounts");
-        StringAssert.Contains(afterUpdateHtml, "E2E Lifecycle Bot v2");
+        StringAssert.Contains(afterUpdateHtml, "E2E Lifecycle Bot v2", StringComparison.Ordinal);
 
         // 4. Issue API key (one-time plaintext key via PageState, Cache-Control: no-store, no flash cookie)
         (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/service-accounts");
@@ -113,18 +113,18 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
                 "Issued API key must never be stored in a cookie.");
 
             var issueHtml = await issueResp.Content.ReadAsStringAsync();
-            StringAssert.Contains(issueHtml, "data-issued-api-key");
-            StringAssert.Contains(issueHtml, "X-Api-Key");
-            StringAssert.Contains(issueHtml, "Authorization: Bearer");
+            StringAssert.Contains(issueHtml, "data-issued-api-key", StringComparison.Ordinal);
+            StringAssert.Contains(issueHtml, "X-Api-Key", StringComparison.Ordinal);
+            StringAssert.Contains(issueHtml, "Authorization: Bearer", StringComparison.Ordinal);
             firstKey = ExtractIssuedApiKey(issueHtml);
-            StringAssert.StartsWith(firstKey, "tf_sa_");
+            StringAssert.StartsWith(firstKey, "tf_sa_", StringComparison.Ordinal);
         }
 
         // 5. Subsequent GET must NOT contain the plaintext key (only the non-secret prefix)
         var afterIssueHtml = await GetStringAsync(admin, "/support/access/service-accounts");
         Assert.IsFalse(afterIssueHtml.Contains(firstKey, StringComparison.Ordinal), "Plaintext key must never appear on subsequent GET.");
         var firstPrefix = firstKey[..firstKey.IndexOf('.')];
-        StringAssert.Contains(afterIssueHtml, $"{firstPrefix}…");
+        StringAssert.Contains(afterIssueHtml, $"{firstPrefix}…", StringComparison.Ordinal);
 
         // 6. Call UI with X-Api-Key: 200 on allowed page, 403 on admin page
         using (var allowedReq = new HttpRequestMessage(HttpMethod.Get, "/support/conversations"))
@@ -132,7 +132,7 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
             allowedReq.Headers.Add("X-Api-Key", firstKey);
             using var resp = await rawClient.SendAsync(allowedReq);
             Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
-            StringAssert.Contains(await resp.Content.ReadAsStringAsync(), "E2E Lifecycle Bot v2");
+            StringAssert.Contains(await resp.Content.ReadAsStringAsync(), "E2E Lifecycle Bot v2", StringComparison.Ordinal);
         }
         using (var adminReq = new HttpRequestMessage(HttpMethod.Get, "/support/access"))
         {
@@ -270,7 +270,7 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
         }
 
         var afterGrantHtml = await GetStringAsync(admin, "/support/access/service-accounts");
-        StringAssert.Contains(ExtractServiceAccountCard(afterGrantHtml, "sa-e2e-lifecycle"), "Upgrade to Agent");
+        StringAssert.Contains(ExtractServiceAccountCard(afterGrantHtml, "sa-e2e-lifecycle"), "Upgrade to Agent", StringComparison.Ordinal);
 
         // 11. Delete SA -> calling UI with second key returns 401
         (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/service-accounts");
@@ -305,14 +305,14 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
 
         // 1. Role Federation UI renders mode, seeded mappings, provider datalist, and role catalog
         var html = await GetStringAsync(admin, "/support/access/federation");
-        StringAssert.Contains(html, "data-federation-status");
-        StringAssert.Contains(html, "MergeWithLocalGrants");
-        StringAssert.Contains(html, "idf:support-agents");
-        StringAssert.Contains(html, "idf:support-viewers");
-        StringAssert.Contains(html, "oauth2-proxy");
-        StringAssert.Contains(html, "/.well-known/ticketflow-roles");
-        StringAssert.Contains(html, "IRoleFederationService");
-        StringAssert.Contains(html, "tf-role-catalog-json");
+        StringAssert.Contains(html, "data-federation-status", StringComparison.Ordinal);
+        StringAssert.Contains(html, "MergeWithLocalGrants", StringComparison.Ordinal);
+        StringAssert.Contains(html, "idf:support-agents", StringComparison.Ordinal);
+        StringAssert.Contains(html, "idf:support-viewers", StringComparison.Ordinal);
+        StringAssert.Contains(html, "oauth2-proxy", StringComparison.Ordinal);
+        StringAssert.Contains(html, "/.well-known/ticketflow-roles", StringComparison.Ordinal);
+        StringAssert.Contains(html, "IRoleFederationService", StringComparison.Ordinal);
+        StringAssert.Contains(html, "tf-role-catalog-json", StringComparison.Ordinal);
 
         // 2. Non-admin gets 403 on Role Federation UI
         using (var viewerUiResp = await viewer.GetAsync("/support/access/federation"))
@@ -337,7 +337,7 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
         }
 
         var afterCreate = await GetStringAsync(admin, "/support/access/federation");
-        StringAssert.Contains(afterCreate, "okta-support-supervisors");
+        StringAssert.Contains(afterCreate, "okta-support-supervisors", StringComparison.Ordinal);
         var mappingRow = ExtractFederationMappingRow(afterCreate, "okta-support-supervisors");
         var mappingId = ExtractFederationMappingId(mappingRow);
         var mappingVersion = ExtractRevision(mappingRow);
@@ -363,7 +363,7 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
 
         var afterDisable = await GetStringAsync(admin, "/support/access/federation");
         var disabledRow = ExtractFederationMappingRow(afterDisable, "okta-support-supervisors");
-        StringAssert.Contains(disabledRow, "Disabled");
+        StringAssert.Contains(disabledRow, "Disabled", StringComparison.Ordinal);
 
         // Delete mapping
         (token, cookie) = await GetAntiforgeryAsync(admin, "/support/access/federation");
@@ -397,7 +397,7 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
             var roles = doc.RootElement.GetProperty("roles");
             Assert.IsGreaterThanOrEqualTo(BuiltInRoles.All.Count, roles.GetArrayLength());
 
-            var agentRole = roles.EnumerateArray().First(r => r.GetProperty("roleId").GetProperty("value").GetString() == "agent");
+            var agentRole = roles.EnumerateArray().First(r => string.Equals(r.GetProperty("roleId").GetProperty("value").GetString(), "agent", StringComparison.Ordinal));
             var agentMappings = agentRole.GetProperty("mappings").EnumerateArray().Select(m => m.GetProperty("externalRole").GetString()).ToList();
             CollectionAssert.Contains(agentMappings, "idf:support-agents");
         }
@@ -498,7 +498,7 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
             using var resp = await client.SendAsync(userAllowed);
             Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
             var body = await resp.Content.ReadAsStringAsync();
-            StringAssert.Contains(body, "Elena Vance");
+            StringAssert.Contains(body, "Elena Vance", StringComparison.Ordinal);
         }
         using (var userAdmin = new HttpRequestMessage(HttpMethod.Get, "/support/access"))
         {
@@ -521,7 +521,7 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
             using var resp = await client.SendAsync(saAllowed);
             Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
             var body = await resp.Content.ReadAsStringAsync();
-            StringAssert.Contains(body, "Triage Bot");
+            StringAssert.Contains(body, "Triage Bot", StringComparison.Ordinal);
         }
         using (var saAdmin = new HttpRequestMessage(HttpMethod.Get, "/support/access"))
         {
@@ -543,7 +543,7 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
             Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
             var accessHtml = await resp.Content.ReadAsStringAsync();
             Assert.IsFalse(accessHtml.Contains("/support/access/service-accounts", StringComparison.Ordinal), "Service Accounts tab must be hidden when ManageApiKeysInUI is false.");
-            StringAssert.Contains(accessHtml, "/support/access/federation");
+            StringAssert.Contains(accessHtml, "/support/access/federation", StringComparison.Ordinal);
         }
 
         // Direct GET to /support/access/service-accounts shows external-IdP notice and no create/issue forms
@@ -554,7 +554,7 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
             using var resp = await client.SendAsync(directSaReq);
             Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
             var saHtml = await resp.Content.ReadAsStringAsync();
-            StringAssert.Contains(saHtml, "Service accounts managed externally");
+            StringAssert.Contains(saHtml, "Service accounts managed externally", StringComparison.Ordinal);
             Assert.IsFalse(saHtml.Contains("access.serviceaccount.create", StringComparison.Ordinal));
             Assert.IsFalse(saHtml.Contains("access.serviceaccount.key.create", StringComparison.Ordinal));
 
@@ -666,7 +666,7 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
             using var tempClient = CreateDevClient(app, "temp-tenant-admin");
             // Warm up UiSensitivePermissionCache while user holds AccessManageTenant
             var beforeRevokeHtml = await GetStringAsync(tempClient, "/support/access/service-accounts");
-            StringAssert.Contains(beforeRevokeHtml, "TOP-SECRET-TENANT-GRANT");
+            StringAssert.Contains(beforeRevokeHtml, "TOP-SECRET-TENANT-GRANT", StringComparison.Ordinal);
 
             // Now revoke the tenant-admin grant (UiSensitivePermissionCache STILL has stale AccessManageTenant!)
             await grants.DeleteAsync(settings.Partition, tenantAdminGrant.Id, expectedRevision: 1);
@@ -854,18 +854,18 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
         return match.Groups[1].Value;
     }
 
-    [GeneratedRegex("name=\"__RequestVerificationToken\" value=\"([^\"]+)\"")]
+    [GeneratedRegex("name=\"__RequestVerificationToken\" value=\"(?<v>[^\"]+)\"", RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture, matchTimeoutMilliseconds: 1000)]
     private static partial Regex TokenPattern();
 
-    [GeneratedRegex("name=\"_revision\" value=\"(\\d+)\"")]
+    [GeneratedRegex("name=\"_revision\" value=\"(?<v>\\d+)\"", RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture, matchTimeoutMilliseconds: 1000)]
     private static partial Regex RevisionPattern();
 
-    [GeneratedRegex("data-issued-api-key-value[^>]*>([^<]+)<")]
+    [GeneratedRegex("data-issued-api-key-value[^>]*>(?<v>[^<]+)<", RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture, matchTimeoutMilliseconds: 1000)]
     private static partial Regex IssuedKeyPattern();
 
-    [GeneratedRegex("name=\"keyId\" value=\"([^\"]+)\"")]
+    [GeneratedRegex("name=\"keyId\" value=\"(?<v>[^\"]+)\"", RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture, matchTimeoutMilliseconds: 1000)]
     private static partial Regex KeyIdPattern();
 
-    [GeneratedRegex("data-federation-mapping=\"([^\"]+)\"")]
+    [GeneratedRegex("data-federation-mapping=\"(?<v>[^\"]+)\"", RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture, matchTimeoutMilliseconds: 1000)]
     private static partial Regex FederationMappingIdPattern();
 }

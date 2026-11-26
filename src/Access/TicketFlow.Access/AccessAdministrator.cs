@@ -170,31 +170,31 @@ public sealed class AccessAdministrator : IAccessAdministrator
         return await CompleteAsync(change, await grants.DeleteAsync(partition, grant, expectedRevision, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<TicketResult<AccessChangeApplied<StoredAccessGrant>>>> RevokeGrantsAsync(PrincipalRef actor, IReadOnlyList<(GrantId Id, long ExpectedRevision)> targets, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<TicketResult<AccessChangeApplied<StoredAccessGrant>>>> RevokeGrantsAsync(PrincipalRef actor, IReadOnlyList<(GrantId Id, long ExpectedRevision)> grants, CancellationToken cancellationToken = default)
     {
         RequireActor(actor);
-        ArgumentNullException.ThrowIfNull(targets);
-        if (targets.Count == 0)
+        ArgumentNullException.ThrowIfNull(grants);
+        if (grants.Count == 0)
             return [];
-        if (targets.Count == 1)
-            return [await RevokeGrantAsync(actor, targets[0].Id, targets[0].ExpectedRevision, cancellationToken).ConfigureAwait(false)];
+        if (grants.Count == 1)
+            return [await RevokeGrantAsync(actor, grants[0].Id, grants[0].ExpectedRevision, cancellationToken).ConfigureAwait(false)];
 
         var partition = AccessPartition.From(actor.Scope);
-        var results = new TicketResult<AccessChangeApplied<StoredAccessGrant>>[targets.Count];
-        var toDelete = new List<(int Index, StoredAccessGrant Existing, Change Change)>(targets.Count);
+        var results = new TicketResult<AccessChangeApplied<StoredAccessGrant>>[grants.Count];
+        var toDelete = new List<(int Index, StoredAccessGrant Existing, Change Change)>(grants.Count);
         AccessContext? context = null;
 
-        for (var i = 0; i < targets.Count; i++)
+        for (var i = 0; i < grants.Count; i++)
         {
-            var (grantId, expectedRevision) = targets[i];
+            var (grantId, expectedRevision) = grants[i];
             if (!grantId.IsInitialized)
-                throw new ArgumentException("A grant identifier is required.", nameof(targets));
+                throw new ArgumentException("A grant identifier is required.", nameof(grants));
             var change = new Change(AccessAuditKind.GrantRevoked, actor, Grant: grantId);
             var refusal = ValidateRevision(expectedRevision);
             StoredAccessGrant? existing = null;
             if (refusal is null)
             {
-                existing = await grants.GetAsync(partition, grantId, cancellationToken).ConfigureAwait(false);
+                existing = await this.grants.GetAsync(partition, grantId, cancellationToken).ConfigureAwait(false);
                 refusal = Fence(existing?.Revision, expectedRevision);
                 if (existing is not null)
                 {
@@ -214,7 +214,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
             var batch = new (GrantId Id, long ExpectedRevision)[toDelete.Count];
             for (var i = 0; i < toDelete.Count; i++)
                 batch[i] = (toDelete[i].Existing.Grant.Id, toDelete[i].Existing.Revision);
-            var removed = await grants.DeleteManyAsync(partition, batch, cancellationToken).ConfigureAwait(false);
+            var removed = await this.grants.DeleteManyAsync(partition, batch, cancellationToken).ConfigureAwait(false);
             var removedById = new Dictionary<GrantId, StoredAccessGrant>(removed.Count);
             for (var i = 0; i < removed.Count; i++)
                 removedById[removed[i].Grant.Id] = removed[i];
@@ -226,7 +226,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
                     results[index] = await AppliedAsync(change, deleted, cancellationToken).ConfigureAwait(false);
                 else
                 {
-                    var current = await grants.GetAsync(partition, existing.Grant.Id, cancellationToken).ConfigureAwait(false);
+                    var current = await this.grants.GetAsync(partition, existing.Grant.Id, cancellationToken).ConfigureAwait(false);
                     var miss = current is null
                         ? new Refusal(TicketFailureKind.NotFound, ["The record does not exist."])
                         : new Refusal(TicketFailureKind.Conflict, ["The record changed concurrently."], CurrentRevision: current.Revision);

@@ -35,10 +35,10 @@ public sealed class StoreRoutingTeamMembershipResolver(ITeamStore teams, ITeamMe
             var tasks = new Task<IReadOnlyList<TeamId>>[distinct.Count];
             for (var i = 0; i < distinct.Count; i++)
                 tasks[i] = single.GetTeamsAsync(scope, distinct[i], cancellationToken);
-            await Task.WhenAll(tasks).ConfigureAwait(false);
+            var results = await Task.WhenAll(tasks).ConfigureAwait(false);
             var result = new Dictionary<UserId, IReadOnlyList<TeamId>>(distinct.Count);
             for (var i = 0; i < distinct.Count; i++)
-                result[distinct[i]] = tasks[i].Result;
+                result[distinct[i]] = results[i];
             return result;
         }
         var batched = await teams.ListTeamsForUsersAsync(scope, distinct, cancellationToken).ConfigureAwait(false);

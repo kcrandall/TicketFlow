@@ -219,10 +219,10 @@ public static class TicketFlowAccessAuthenticationExtensions
                     TicketFailure failure => failure.Kind switch
                     {
                         TicketFailureKind.Forbidden => Results.Json(
-                            new { error = failure.Errors.FirstOrDefault() ?? "Forbidden.", kind = failure.Kind.ToString(), code = failure.Code },
+                            new { error = failure.Errors.Count > 0 ? failure.Errors[0] : "Forbidden.", kind = failure.Kind.ToString(), code = failure.Code },
                             statusCode: StatusCodes.Status403Forbidden),
                         _ => Results.BadRequest(
-                            new { error = failure.Errors.FirstOrDefault() ?? "Invalid request.", kind = failure.Kind.ToString(), code = failure.Code }),
+                            new { error = failure.Errors.Count > 0 ? failure.Errors[0] : "Invalid request.", kind = failure.Kind.ToString(), code = failure.Code }),
                     },
                 };
             });

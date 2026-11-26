@@ -32,7 +32,7 @@ public sealed record Portal
         string? customDomain = null)
     {
         if (!id.IsInitialized || !slug.IsInitialized || !defaultLocale.IsInitialized)
-            throw new ArgumentException("Portal identifier, slug and default locale are required.");
+            throw new ArgumentException("Portal identifier, slug and default locale are required.", !id.IsInitialized ? nameof(id) : !slug.IsInitialized ? nameof(slug) : nameof(defaultLocale));
         if (!Enum.IsDefined(visibility))
             throw new ArgumentOutOfRangeException(nameof(visibility));
         Id = id;
@@ -68,8 +68,8 @@ public sealed record Portal
     public bool Supports(HelpCenterLocale locale) => locale.IsInitialized && SupportedLocales.Contains(locale);
 
     public bool Equals(Portal? other) =>
-        other is not null && Id == other.Id && Slug == other.Slug && Name == other.Name && DefaultLocale == other.DefaultLocale
-        && SupportedLocales.SequenceEqual(other.SupportedLocales) && Visibility == other.Visibility && CustomDomain == other.CustomDomain;
+        other is not null && Id == other.Id && Slug == other.Slug && string.Equals(Name, other.Name, StringComparison.Ordinal) && DefaultLocale == other.DefaultLocale
+        && SupportedLocales.SequenceEqual(other.SupportedLocales) && Visibility == other.Visibility && string.Equals(CustomDomain, other.CustomDomain, StringComparison.Ordinal);
 
     public override int GetHashCode() => HashCode.Combine(Id, Slug, Name, DefaultLocale, SupportedLocales.Count, Visibility, CustomDomain);
 

@@ -19,9 +19,9 @@ public closed record AccessCondition
     private protected AccessCondition(int depth, int nodeCount)
     {
         if (depth > MaximumDepth)
-            throw new ArgumentException($"Conditions can be at most {MaximumDepth} levels deep.");
+            throw new ArgumentException($"Conditions can be at most {MaximumDepth} levels deep.", nameof(depth));
         if (nodeCount > MaximumNodes)
-            throw new ArgumentException($"Conditions can contain at most {MaximumNodes} nodes.");
+            throw new ArgumentException($"Conditions can contain at most {MaximumNodes} nodes.", nameof(nodeCount));
         Depth = depth;
         NodeCount = nodeCount;
     }
@@ -171,7 +171,7 @@ public sealed record AttributeInCondition : AccessCondition
 
     public string Key { get; }
 
-    public bool Equals(AttributeInCondition? other) => other is not null && Key == other.Key && Values.SequenceEqual(other.Values);
+    public bool Equals(AttributeInCondition? other) => other is not null && string.Equals(Key, other.Key, StringComparison.Ordinal) && Values.SequenceEqual(other.Values, StringComparer.Ordinal);
 
     public override int GetHashCode() => HashCode.Combine(Key, Values.Count, Values[0]);
 }

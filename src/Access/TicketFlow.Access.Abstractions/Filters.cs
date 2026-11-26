@@ -261,7 +261,7 @@ public sealed record AttributeInFilter : AccessFilter
 
     public bool ContainsValue(string value) => Array.BinarySearch(values, value, StringComparer.Ordinal) >= 0;
 
-    public bool Equals(AttributeInFilter? other) => other is not null && Key == other.Key && Values.SequenceEqual(other.Values);
+    public bool Equals(AttributeInFilter? other) => other is not null && string.Equals(Key, other.Key, StringComparison.Ordinal) && Values.SequenceEqual(other.Values, StringComparer.Ordinal);
 
     public override int GetHashCode() => HashCode.Combine(Key, Values.Count);
 }
@@ -293,7 +293,7 @@ public static class AccessFilterEvaluator
         InboxInFilter inbox => resource.InboxId is { } inboxId && inbox.Inboxes.Contains(inboxId),
         AssigneeIsFilter assignee => resource.AssigneeId == assignee.Assignee,
         HasLabelFilter label => resource.Labels?.Contains(label.Label),
-        AttributeEqualsFilter equals => resource.Attributes.TryGetValue(equals.Key, out var value) ? value == equals.Value : null,
+        AttributeEqualsFilter equals => resource.Attributes.TryGetValue(equals.Key, out var value) ? string.Equals(value, equals.Value, global::System.StringComparison.Ordinal) : null,
         AttributeInFilter @in => resource.Attributes.TryGetValue(@in.Key, out var value) ? @in.ContainsValue(value) : null,
     };
 

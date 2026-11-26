@@ -54,7 +54,7 @@ public sealed record AutomationRule
     public AutomationSchedule? Schedule => Trigger.Value is ScheduledTrigger scheduled ? scheduled.Schedule : null;
 
     public bool Equals(AutomationRule? other) =>
-        other is not null && Id == other.Id && Name == other.Name && Trigger.Equals(other.Trigger) && Equals(Condition, other.Condition)
+        other is not null && Id == other.Id && string.Equals(Name, other.Name, StringComparison.Ordinal) && Equals(Trigger.Value, other.Trigger.Value) && Equals(Condition, other.Condition)
         && Actions.SequenceEqual(other.Actions) && Priority == other.Priority && Enabled == other.Enabled && StopProcessing == other.StopProcessing
         && RunOnAutomationEvents == other.RunOnAutomationEvents;
 
@@ -115,8 +115,8 @@ public sealed record Macro
     public string? Description { get; }
 
     public bool Equals(Macro? other) =>
-        other is not null && Id == other.Id && Name == other.Name && Visibility == other.Visibility && Owner == other.Owner && Actions.SequenceEqual(other.Actions)
-        && Description == other.Description;
+        other is not null && Id == other.Id && string.Equals(Name, other.Name, StringComparison.Ordinal) && Visibility == other.Visibility && Owner == other.Owner && Actions.SequenceEqual(other.Actions)
+        && string.Equals(Description, other.Description, StringComparison.Ordinal);
 
     public override int GetHashCode() => HashCode.Combine(Id, Name, Visibility, Actions.Count);
 }
@@ -257,8 +257,8 @@ public sealed record CannedResponse
     }
 
     public bool Equals(CannedResponse? other) =>
-        other is not null && Id == other.Id && Shortcut == other.Shortcut && Title == other.Title && DefaultLocale == other.DefaultLocale
-        && Variants.SequenceEqual(other.Variants) && ContentType == other.ContentType;
+        other is not null && Id == other.Id && string.Equals(Shortcut, other.Shortcut, StringComparison.Ordinal) && string.Equals(Title, other.Title, StringComparison.Ordinal) && string.Equals(DefaultLocale, other.DefaultLocale
+, StringComparison.Ordinal) && Variants.SequenceEqual(other.Variants) && ContentType == other.ContentType;
 
     public override int GetHashCode() => HashCode.Combine(Id, Shortcut, Variants.Count);
 }

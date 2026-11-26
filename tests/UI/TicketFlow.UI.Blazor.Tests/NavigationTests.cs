@@ -61,7 +61,7 @@ public sealed class NavigationTests
         var disabled = shell.FindAll(".tf-nav__link.is-disabled").Select(item => item.TextContent.Trim()).ToList();
         CollectionAssert.Contains(disabled, "Access");
         CollectionAssert.Contains(disabled, "Contacts");
-        Assert.IsTrue(shell.FindAll("a.tf-nav__link").All(link => link.TextContent.Trim() != "Access"), "Disabled sections are not links.");
+        Assert.IsTrue(shell.FindAll("a.tf-nav__link").All(link => !string.Equals(link.TextContent.Trim(), "Access", StringComparison.Ordinal)), "Disabled sections are not links.");
     }
 
     [TestMethod]
@@ -72,7 +72,7 @@ public sealed class NavigationTests
 
         var shell = context.Render<TicketFlowShell>(parameters => parameters.AddCascadingValue(session).Add(p => p.Route, UiRoutes.Match("access")).Add(p => p.StatusCode, 403));
 
-        StringAssert.Contains(shell.Find(".tf-state__title").TextContent, "Access denied");
+        StringAssert.Contains(shell.Find(".tf-state__title").TextContent, "Access denied", StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -107,7 +107,7 @@ public sealed class NavigationTests
         // Break-glass-only user sees Access nav pointing to access/break-glass and only break-glass route is allowed
         var bgSession = UiTestSupport.Session(context, [AccessPermissions.AccessBreakGlass]);
         var bgShell = context.Render<TicketFlowShell>(parameters => parameters.AddCascadingValue(bgSession));
-        var accessLink = bgShell.FindAll("a.tf-nav__link").Single(link => link.TextContent.Trim() == "Access");
+        var accessLink = bgShell.FindAll("a.tf-nav__link").Single(link => string.Equals(link.TextContent.Trim(), "Access", StringComparison.Ordinal));
         Assert.AreEqual("/support/access/break-glass", accessLink.GetAttribute("href"));
         Assert.IsTrue(UiNavigation.Allows(bgSession, UiRoutes.Match("access/break-glass")!));
         Assert.IsFalse(UiNavigation.Allows(bgSession, UiRoutes.Match("access")!));
@@ -120,7 +120,7 @@ public sealed class NavigationTests
         // Tenant-admin-only user sees Access nav pointing to service-accounts and only SA + Federation routes/tabs are allowed
         var tenantSession = UiTestSupport.Session(context, [AccessPermissions.AccessManageTenant]);
         var tenantShell = context.Render<TicketFlowShell>(parameters => parameters.AddCascadingValue(tenantSession));
-        var tenantLink = tenantShell.FindAll("a.tf-nav__link").Single(link => link.TextContent.Trim() == "Access");
+        var tenantLink = tenantShell.FindAll("a.tf-nav__link").Single(link => string.Equals(link.TextContent.Trim(), "Access", StringComparison.Ordinal));
         Assert.AreEqual("/support/access/service-accounts", tenantLink.GetAttribute("href"));
         Assert.IsTrue(UiNavigation.Allows(tenantSession, UiRoutes.Match("access/service-accounts")!));
         Assert.IsTrue(UiNavigation.Allows(tenantSession, UiRoutes.Match("access/federation")!));
@@ -133,7 +133,7 @@ public sealed class NavigationTests
     }
 
     [TestMethod]
-    public void BreakGlassAndRolePagesFilterAdminRolesRenderApiClientAndCheckOwnerPermissions()
+    public async Task BreakGlassAndRolePagesFilterAdminRolesRenderApiClientAndCheckOwnerPermissions()
     {
         var scope = UiTestSupport.Scope;
         var partition = AccessPartition.From(scope);
@@ -147,11 +147,11 @@ public sealed class NavigationTests
         var now = TimeProvider.System.GetUtcNow();
 
         // Seed owner grant for UiTestSupport's "agent" actor + custom role with AccessManageTenant + active ApiClientId break-glass grant
-        grantStore.CreateAsync(new AccessGrant(new GrantId("g-owner"), partition, new TicketFlow.Core.UserId("agent"), BuiltInRoles.Owner.Id, TenantGrantScope.Instance)).GetAwaiter().GetResult();
-        roleStore.CreateAsync(scope, new AccessRole(new RoleId("tenant-mgr"), "Tenant Manager", [AccessPermissions.AccessManageTenant])).GetAwaiter().GetResult();
-        roleStore.CreateAsync(scope, new AccessRole(new RoleId("safe-helper"), "Safe Helper", [AccessPermissions.ConversationRead])).GetAwaiter().GetResult();
-        grantStore.CreateAsync(new AccessGrant(new GrantId("g-bg-sa"), partition, new TicketFlow.Core.ApiClientId("sa-emergency"), BuiltInRoles.Supervisor.Id, new WorkspaceGrantScope(scope.WorkspaceId),
-            validFrom: now.AddMinutes(-5), validUntil: now.AddHours(1), justification: "Emergency automation", kind: GrantKind.BreakGlass)).GetAwaiter().GetResult();
+        await grantStore.CreateAsync(new AccessGrant(new GrantId("g-owner"), partition, new TicketFlow.Core.UserId("agent"), BuiltInRoles.Owner.Id, TenantGrantScope.Instance));
+        await roleStore.CreateAsync(scope, new AccessRole(new RoleId("tenant-mgr"), "Tenant Manager", [AccessPermissions.AccessManageTenant]));
+        await roleStore.CreateAsync(scope, new AccessRole(new RoleId("safe-helper"), "Safe Helper", [AccessPermissions.ConversationRead]));
+        await grantStore.CreateAsync(new AccessGrant(new GrantId("g-bg-sa"), partition, new TicketFlow.Core.ApiClientId("sa-emergency"), BuiltInRoles.Supervisor.Id, new WorkspaceGrantScope(scope.WorkspaceId),
+            validFrom: now.AddMinutes(-5), validUntil: now.AddHours(1), justification: "Emergency automation", kind: GrantKind.BreakGlass));
 
         var session = UiTestSupport.Session(context, [AccessPermissions.AccessManage, AccessPermissions.AccessManageTenant, AccessPermissions.AccessBreakGlass]);
 
@@ -162,12 +162,12 @@ public sealed class NavigationTests
         CollectionAssert.DoesNotContain(options, BuiltInRoles.Admin.Id.Value, "Admin must be excluded from break-glass.");
         CollectionAssert.DoesNotContain(options, "tenant-mgr", "Custom role with AccessManageTenant must be excluded from break-glass.");
         CollectionAssert.Contains(options, "safe-helper");
-        StringAssert.Contains(bgPage.Markup, "sa-emergency");
+        StringAssert.Contains(bgPage.Markup, "sa-emergency", StringComparison.Ordinal);
 
         // BreakGlassPage denies users lacking both AccessBreakGlass and AccessManage
         var deniedSession = UiTestSupport.Session(context, [AccessPermissions.AccessManageTenant]);
         var deniedBg = context.Render<TicketFlow.UI.Blazor.Pages.BreakGlassPage>(p => p.AddCascadingValue(deniedSession));
-        StringAssert.Contains(deniedBg.Markup, "Access denied");
+        StringAssert.Contains(deniedBg.Markup, "Access denied", StringComparison.Ordinal);
 
         // AccessRolePage checks every permission checkbox when viewing built-in Owner
         var rolePage = context.Render<TicketFlow.UI.Blazor.Pages.AccessRolePage>(p => p.AddCascadingValue(session).Add(r => r.Id, BuiltInRoles.Owner.Id.Value));
@@ -189,20 +189,20 @@ public sealed class NavigationTests
 
         // Whitespace / control-char IDs fail gracefully with StatePanel instead of throwing ArgumentException (500)
         var inbox = context.Render<TicketFlow.UI.Blazor.Pages.InboxDetailPage>(p => p.AddCascadingValue(session).Add(c => c.Id, "   "));
-        StringAssert.Contains(inbox.Markup, "Inbox not available");
+        StringAssert.Contains(inbox.Markup, "Inbox not available", StringComparison.Ordinal);
 
         var team = context.Render<TicketFlow.UI.Blazor.Pages.TeamDetailPage>(p => p.AddCascadingValue(session).Add(c => c.Id, "bad\nid"));
-        StringAssert.Contains(team.Markup, "Team not available");
+        StringAssert.Contains(team.Markup, "Team not available", StringComparison.Ordinal);
 
         var rule = context.Render<TicketFlow.UI.Blazor.Pages.AutomationRulePage>(p => p.AddCascadingValue(session).Add(c => c.Id, "bad\0rule"));
-        StringAssert.Contains(rule.Markup, "Rule not available");
+        StringAssert.Contains(rule.Markup, "Rule not available", StringComparison.Ordinal);
 
         var article = context.Render<TicketFlow.UI.Blazor.Pages.ArticleEditorPage>(p => p.AddCascadingValue(session).Add(c => c.Id, "   "));
-        StringAssert.Contains(article.Markup, "Article not available");
+        StringAssert.Contains(article.Markup, "Article not available", StringComparison.Ordinal);
 
         // Embedded <TicketFlowUI /> sets Cache-Control: no-store
         var http = new Microsoft.AspNetCore.Http.DefaultHttpContext { RequestServices = context.Services };
         context.Render<TicketFlowUI>(p => p.AddCascadingValue(http).Add(c => c.Path, ""));
-        StringAssert.Contains(http.Response.Headers.CacheControl.ToString(), "no-store");
+        StringAssert.Contains(http.Response.Headers.CacheControl.ToString(), "no-store", StringComparison.Ordinal);
     }
 }

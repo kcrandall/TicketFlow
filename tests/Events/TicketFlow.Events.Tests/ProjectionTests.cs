@@ -176,7 +176,7 @@ public sealed class ProjectionTests
         }
         var events = await fixture.EventsAsync();
         var types = events.Select(item => item.Event.Type).ToList();
-        Assert.AreEqual(2, types.Count(type => type == IntegrationEventTypes.ContactCreated));
+        Assert.AreEqual(2, types.Count(type => string.Equals(type, IntegrationEventTypes.ContactCreated, StringComparison.Ordinal)));
         var merged = events.Select(item => item.Event.Data.Value).OfType<ContactMergedData>().Single();
         Assert.AreEqual((new ContactId("dup"), new ContactId("ada"), merge), (merged.Contact, merged.Target, merged.Merge));
         Assert.AreEqual(merge, events.Select(item => item.Event.Data.Value).OfType<ContactUnmergedData>().Single().Merge);
@@ -246,6 +246,6 @@ public sealed class ProjectionTests
         var result = await fixture.InScopeAsync(provider => provider.GetRequiredService<ConversationOutboxDispatcher>().RunOnceAsync());
         Assert.AreEqual(3, result.Handled);
         var events = await fixture.EventsAsync();
-        Assert.AreEqual(3, events.Count(item => item.Event.Type == IntegrationEventTypes.ConversationCreated));
+        Assert.AreEqual(3, events.Count(item => string.Equals(item.Event.Type, IntegrationEventTypes.ConversationCreated, StringComparison.Ordinal)));
     }
 }

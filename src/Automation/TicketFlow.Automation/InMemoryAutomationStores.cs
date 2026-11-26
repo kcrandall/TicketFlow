@@ -266,7 +266,7 @@ public sealed class InMemoryAutomationExecutionStore(int maximumExecutionsPerSco
                 return Task.FromResult<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>>(StoreNotFound.Instance);
             if (existing.Revision != expectedRevision)
                 return Task.FromResult<StoreWriteResult<StoredAutomationExecution, AutomationWriteRejection>>(new StoreConflict(existing.Revision));
-            if (existing.Execution.Rule != execution.Rule || existing.Execution.Conversation != execution.Conversation || existing.Execution.TriggerKey != execution.TriggerKey)
+            if (existing.Execution.Rule != execution.Rule || existing.Execution.Conversation != execution.Conversation || !string.Equals(existing.Execution.TriggerKey, execution.TriggerKey, StringComparison.Ordinal))
                 throw new ArgumentException("An execution's rule, conversation and trigger key are immutable.", nameof(execution));
             var stored = new StoredAutomationExecution(scope, execution, existing.Revision + 1);
             bucket.Executions[execution.Id] = stored;
@@ -540,7 +540,7 @@ public sealed class InMemoryCannedResponseStore : ICannedResponseStore
         ArgumentNullException.ThrowIfNull(shortcut);
         cancellationToken.ThrowIfCancellationRequested();
         lock (responses.Gate)
-            return Task.FromResult(responses.InScope(scope).Where(entry => entry.Value.Shortcut == shortcut)
+            return Task.FromResult(responses.InScope(scope).Where(entry => string.Equals(entry.Value.Shortcut, shortcut, StringComparison.Ordinal))
                 .Select(entry => new StoredCannedResponse(scope, entry.Value, entry.Revision)).FirstOrDefault());
     }
 
@@ -588,5 +588,5 @@ public sealed class InMemoryCannedResponseStore : ICannedResponseStore
     }
 
     private bool ShortcutTaken(TicketScope scope, CannedResponse response) =>
-        responses.InScope(scope).Any(entry => entry.Id != response.Id.Value && entry.Value.Shortcut == response.Shortcut);
+        responses.InScope(scope).Any(entry => !string.Equals(entry.Id, response.Id.Value, StringComparison.Ordinal) && string.Equals(entry.Value.Shortcut, response.Shortcut, StringComparison.Ordinal));
 }

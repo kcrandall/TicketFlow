@@ -213,12 +213,12 @@ public sealed class AllToolsTests
             await GrantAsync(host, user, user, permissions.Where(permission => !tool.Permissions.Contains(permission.Value)));
             var (failed, content) = await host.CallAsync(tool.Name, await DeniedArgumentsAsync(host, tool.Name), user);
             var outcome = failed ? McpTestHost.Code(content) : "ok";
-            var expected = tool.Name == "contacts_reveal_field" ? "reveal-refused" : EmptyWhenDenied.Contains(tool.Name) ? "ok" : "forbidden";
-            if (outcome != expected)
+            var expected = string.Equals(tool.Name, "contacts_reveal_field", StringComparison.Ordinal) ? "reveal-refused" : EmptyWhenDenied.Contains(tool.Name) ? "ok" : "forbidden";
+            if (!string.Equals(outcome, expected, StringComparison.Ordinal))
                 failures.Add($"{tool.Name}: expected {expected}, got {outcome} {content.GetRawText()}");
-            else if (expected == "ok")
+            else if (string.Equals(expected, "ok", StringComparison.Ordinal))
                 Assert.AreEqual(0, Count(content), $"{tool.Name} must not return rows the caller cannot see.");
-            else if (expected == "forbidden")
+            else if (string.Equals(expected, "forbidden", StringComparison.Ordinal))
                 Assert.AreEqual(tool.Permissions[0], content.GetProperty("error").GetProperty("requiredPermissions")[0].GetString());
         }
         Assert.IsEmpty(failures, string.Join(Environment.NewLine, failures));

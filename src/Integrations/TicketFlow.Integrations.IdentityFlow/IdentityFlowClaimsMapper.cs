@@ -207,7 +207,7 @@ public static class IdentityFlowClaimsMapper
             || Resolve(sessionId, sessionIdAmbiguous) is not null && client is null && methodVal is null;
         if (!session && checkScopes && !hasRequiredScope)
             return null;
-        if (methodVal == ApiKeyMethod)
+        if (string.Equals(methodVal, ApiKeyMethod, StringComparison.Ordinal))
         {
             if (subject is null)
                 return null;
@@ -225,7 +225,7 @@ public static class IdentityFlowClaimsMapper
     {
         if (ambiguous)
             return;
-        if (found is not null && found != value)
+        if (found is not null && !string.Equals(found, value, StringComparison.Ordinal))
             ambiguous = true;
         else
             found = value;

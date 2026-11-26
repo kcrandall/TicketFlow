@@ -32,7 +32,7 @@ public sealed class SignalRReviewTests
         await Task.Delay(200);
         var typing = new List<bool>();
         while (agentEvents.Reader.TryRead(out var payload))
-            if (payload.GetProperty("type").GetString() == "typing")
+            if (string.Equals(payload.GetProperty("type").GetString(), "typing", StringComparison.Ordinal))
                 typing.Add(payload.GetProperty("data").GetProperty("typing").GetBoolean());
         CollectionAssert.AreEqual(new[] { true, false }, typing, "Repeats within the interval are dropped; one stop after a start passes.");
     }

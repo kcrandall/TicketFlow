@@ -70,7 +70,7 @@ public sealed class ReportingService : IReportingService
                 for (var i = 0; i < satRows.Count; i++)
                 {
                     var row = satRows[i];
-                    if (group.Key is null || row.Group == group.Key)
+                    if (group.Key is null || string.Equals(row.Group, group.Key, StringComparison.Ordinal))
                         sum = sum.Add(row.Satisfaction);
                 }
                 overall = sum;

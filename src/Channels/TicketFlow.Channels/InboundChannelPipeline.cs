@@ -18,7 +18,7 @@ namespace TicketFlow.Channels;
 /// messages into another contact's conversation. Channel state (recipient, last incoming time, references) is updated after the
 /// conversation write and again on replays, so at-least-once redelivery converges. Never logs bodies or addresses.
 /// </summary>
-public sealed class InboundChannelPipeline : IInboundChannelPipeline
+public sealed partial class InboundChannelPipeline : IInboundChannelPipeline
 {
     private readonly IChannelEndpointStore endpoints;
     private readonly IChannelConversationStateStore states;
@@ -59,6 +59,9 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
         this.time = time ?? throw new ArgumentNullException(nameof(time));
         this.logger = logger ?? NullLogger<InboundChannelPipeline>.Instance;
     }
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Dropped an inbound message from a blocked contact in inbox {Inbox}.")]
+    private static partial void LogDroppedBlockedContact(ILogger logger, InboxId inbox);
 
     public async Task<InboundResult> ReceiveAsync(PrincipalRef actor, InboundChannelMessage message, CancellationToken cancellationToken = default)
     {
@@ -136,7 +139,7 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
         }
         if (contact.Blocked)
         {
-            logger.LogInformation("Dropped an inbound message from a blocked contact in inbox {Inbox}.", inboxId);
+            LogDroppedBlockedContact(logger, inboxId);
             return InboundRejected.Of(InboundRejection.ContactBlocked, "The contact is blocked.");
         }
 
@@ -348,8 +351,8 @@ public sealed class InboundChannelPipeline : IInboundChannelPipeline
     }
 
     private static bool Same(ChannelConversationState left, ChannelConversationState right) =>
-        left.Recipient == right.Recipient && left.Contact == right.Contact && left.ExternalThreadId == right.ExternalThreadId && left.Subject == right.Subject
-        && left.LastIncomingAt == right.LastIncomingAt && left.LastIncomingExternalId == right.LastIncomingExternalId;
+        left.Recipient == right.Recipient && left.Contact == right.Contact && string.Equals(left.ExternalThreadId, right.ExternalThreadId, StringComparison.Ordinal) && string.Equals(left.Subject, right.Subject
+, StringComparison.Ordinal) && left.LastIncomingAt == right.LastIncomingAt && string.Equals(left.LastIncomingExternalId, right.LastIncomingExternalId, StringComparison.Ordinal);
 
     /// <summary>Provider receive times later than now plus <see cref="MaximumFutureSkew"/> are clamped, so a skewed or forged timestamp cannot hold a reply window open.</summary>
     private DateTimeOffset ReceivedAt(InboundChannelMessage message)

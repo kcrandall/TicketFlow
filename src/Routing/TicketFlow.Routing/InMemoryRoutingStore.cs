@@ -178,10 +178,10 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
                 return Result<StoredAgentProfile>(StoreNotFound.Instance);
             var profile = row.Profile;
             var wasOnline = profile.Presence.EffectiveStatus(now) != AgentStatus.Offline;
-            var presence = status == AgentStatus.Offline ? AgentPresence.Offline(now) : new AgentPresence(status, now, now, now + presenceTtl);
+            var nextPresence = status == AgentStatus.Offline ? AgentPresence.Offline(now) : new AgentPresence(status, now, now, now + presenceTtl);
             row.Profile = profile with
             {
-                Presence = presence,
+                Presence = nextPresence,
                 ReassignmentPending = profile.ReassignmentPending || (wasOnline && status == AgentStatus.Offline),
                 Revision = profile.Revision + 1,
             };
@@ -199,9 +199,9 @@ public sealed class InMemoryRoutingStore : IRoutingPolicyStore, IAgentAvailabili
         {
             if (!agents.TryGetValue(scope, agent, out var row))
                 return Result<StoredAgentProfile>(StoreNotFound.Instance);
-            var presence = row.Profile.Presence;
-            if (presence.EffectiveStatus(now) != AgentStatus.Offline)
-                row.Profile = row.Profile with { Presence = new AgentPresence(presence.Status, presence.ChangedAt, now, now + presenceTtl) };
+            var currentPresence = row.Profile.Presence;
+            if (currentPresence.EffectiveStatus(now) != AgentStatus.Offline)
+                row.Profile = row.Profile with { Presence = new AgentPresence(currentPresence.Status, currentPresence.ChangedAt, now, now + presenceTtl) };
             return Result<StoredAgentProfile>(new StoreApplied<StoredAgentProfile>(row.Profile));
         }
     }

@@ -55,14 +55,15 @@ public sealed partial class ContactService : IContactService
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(draft);
         var definitionMap = await DefinitionsAsync(scope, cancellationToken).ConfigureAwait(false);
-        if (ValidateAttributes(draft.Attributes ?? new Dictionary<string, ContactAttributeValue>(), definitionMap) is { } invalid)
+        var emptyAttributes = new Dictionary<string, ContactAttributeValue>(StringComparer.Ordinal);
+        if (ValidateAttributes(draft.Attributes ?? emptyAttributes, definitionMap) is { } invalid)
             return invalid;
         var now = Now;
         Contact contact;
         try
         {
             contact = new Contact(draft.Id ?? options.IdFactory(), draft.Profile ?? ContactProfile.Empty, draft.Identities ?? [],
-                draft.Attributes ?? new Dictionary<string, ContactAttributeValue>(), draft.Labels ?? [], draft.Blocked, now, now);
+                draft.Attributes ?? emptyAttributes, draft.Labels ?? [], draft.Blocked, now, now);
         }
         catch (ArgumentException)
         {

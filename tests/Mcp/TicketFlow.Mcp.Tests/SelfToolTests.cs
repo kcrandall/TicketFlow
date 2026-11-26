@@ -43,9 +43,9 @@ public sealed class SelfToolTests
         Assert.AreEqual("conversations", tools["conversations_reply"].GetProperty("toolset").GetString());
 
         var (_, toolsets) = await host.CallAsync("list_toolsets");
-        var conversations = toolsets.GetProperty("toolsets").EnumerateArray().Single(item => item.GetProperty("name").GetString() == "conversations");
+        var conversations = toolsets.GetProperty("toolsets").EnumerateArray().Single(item => string.Equals(item.GetProperty("name").GetString(), "conversations", StringComparison.Ordinal));
         Assert.IsTrue(conversations.GetProperty("enabled").GetBoolean());
-        var assist = toolsets.GetProperty("toolsets").EnumerateArray().Single(item => item.GetProperty("name").GetString() == "assist");
+        var assist = toolsets.GetProperty("toolsets").EnumerateArray().Single(item => string.Equals(item.GetProperty("name").GetString(), "assist", StringComparison.Ordinal));
         Assert.IsFalse(assist.GetProperty("registered").GetBoolean());
         Assert.AreEqual("contacts_search", TicketFlowToolCatalog.Find("contacts_search")!.Name);
         Assert.AreEqual("toolset-unavailable", McpTestHost.Code((await host.CallAsync("contacts_search")).Content), "Unregistered toolsets are not callable.");
@@ -65,7 +65,7 @@ public sealed class SelfToolTests
         var (_, masked) = await host.CallAsync("explain_access", new() { ["permission"] = "contact:read", ["contactId"] = host.Contact.Value }, user: "agent");
         Assert.AreEqual("masked", masked.GetProperty("permissions")[0].GetProperty("decision").GetString());
         Assert.AreEqual("contact.email", masked.GetProperty("permissions")[0].GetProperty("maskedFields")[0].GetProperty("field").GetString());
-        Assert.DoesNotContain("grace", masked.GetRawText());
+        Assert.DoesNotContain("grace", masked.GetRawText(), StringComparison.Ordinal);
 
         var (hidden, notVisible) = await host.CallAsync("explain_access", new() { ["permission"] = "conversation:read", ["conversationId"] = host.Conversation.Value }, user: "nobody");
         Assert.IsTrue(hidden);

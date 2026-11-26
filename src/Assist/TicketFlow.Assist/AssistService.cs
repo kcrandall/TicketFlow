@@ -276,7 +276,7 @@ public sealed class AssistService : IAssistService
         }
     }
 
-    private Task SettleAsync(TicketScope scope, Guid id, AssistUsageState state, AssistUsage usage, bool estimated) =>
+    private Task<AssistUsageRecord?> SettleAsync(TicketScope scope, Guid id, AssistUsageState state, AssistUsage usage, bool estimated) =>
         // Settlement must happen even when the caller cancelled, so the reservation does not stay unsettled.
         store.SettleAsync(scope, id, state, usage, time.GetUtcNow(), estimated, CancellationToken.None);
 
@@ -350,7 +350,7 @@ public sealed class AssistService : IAssistService
         var priorityValue = priorityElement.GetProperty("priority").GetString();
         if (priorityConfidence is null || priorityValue is null || !AssistPrompts.Priorities.Contains(priorityValue))
             return null;
-        AssistPrioritySuggestion? priority = !request.SuggestPriority || priorityValue == "unknown" ? null : new(priorityValue switch
+        AssistPrioritySuggestion? priority = !request.SuggestPriority || string.Equals(priorityValue, "unknown", StringComparison.Ordinal) ? null : new(priorityValue switch
         {
             "none" => ConversationPriority.None,
             "low" => ConversationPriority.Low,
@@ -379,7 +379,7 @@ public sealed class AssistService : IAssistService
         var intent = root.GetProperty("intent").GetString();
         var intentConfidence = Confidence(root.GetProperty("intent_confidence"));
         if (sentiment is null || sentimentConfidence is null || intentConfidence is null || intent is null
-            || !AssistText.IsToken(intent, AssistSentimentRequest.MaximumIntentLength) || (request.Intents.Count > 0 && !request.Intents.Contains(intent)))
+            || !AssistText.IsToken(intent, AssistSentimentRequest.MaximumIntentLength) || (request.Intents.Count > 0 && !request.Intents.Contains(intent, StringComparer.Ordinal)))
             return null;
         return (new AssistSentimentAndIntent(sentiment.Value, sentimentConfidence.Value, intent, intentConfidence.Value), []);
     }
@@ -402,7 +402,7 @@ public sealed class AssistService : IAssistService
         root.TryGetProperty(property, out var element) && element.ValueKind == JsonValueKind.String && element.GetString() is { } value && AssistText.IsText(value, maximumLength)
             ? value.Trim() : null;
 
-    private static IReadOnlyList<string>? Strings(JsonElement root, string property, int maximumCount, int maximumLength)
+    private static List<string>? Strings(JsonElement root, string property, int maximumCount, int maximumLength)
     {
         if (!root.TryGetProperty(property, out var element) || element.ValueKind != JsonValueKind.Array || element.GetArrayLength() > maximumCount)
             return null;

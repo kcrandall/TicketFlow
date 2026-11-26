@@ -117,7 +117,7 @@ public static class AutomationStoreContract
 
         await primary.DeleteAsync(scope, new AutomationRuleId("due"), 1);
         clock.Advance(TimeSpan.FromMinutes(10));
-        Assert.IsFalse((await primary.ClaimDueSchedulesAsync(10, TimeSpan.FromMinutes(1))).Any(claim => claim.Scope == scope && claim.Rule.Value == "due"));
+        Assert.IsFalse((await primary.ClaimDueSchedulesAsync(10, TimeSpan.FromMinutes(1))).Any(claim => claim.Scope == scope && string.Equals(claim.Rule.Value, "due", StringComparison.Ordinal)));
     }
 
     public static async Task VerifyConcurrentScheduleClaimsAsync(IReadOnlyList<IAutomationRuleStore> clients, FakeTimeProvider clock)

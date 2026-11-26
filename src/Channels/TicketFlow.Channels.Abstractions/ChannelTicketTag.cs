@@ -46,7 +46,7 @@ public static partial class ChannelTicketTag
             return false;
         foreach (Match match in TicketTagPattern().Matches(subject))
         {
-            var raw = match.Groups[1].Value;
+            var raw = match.Groups["id"].Value;
             try
             {
                 conversationId = new ConversationId(raw);
@@ -69,9 +69,9 @@ public static partial class ChannelTicketTag
         return CollapseWhitespacePattern().Replace(stripped, " ").Trim();
     }
 
-    [GeneratedRegex(@"\[\s*Ticket\s*#\s*([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\s*\]", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\[\s*Ticket\s*#\s*(?<id>[A-Za-z0-9][A-Za-z0-9._:-]{0,127})\s*\]", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture, matchTimeoutMilliseconds: 1000)]
     private static partial Regex TicketTagPattern();
 
-    [GeneratedRegex(@"\s{2,}", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\s{2,}", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 1000)]
     private static partial Regex CollapseWhitespacePattern();
 }

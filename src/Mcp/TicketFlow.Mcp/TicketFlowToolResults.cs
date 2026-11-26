@@ -149,9 +149,9 @@ public static class TicketFlowToolJson
                 throw new FormatException();
             return parts;
         }
-        catch (FormatException)
+        catch (FormatException error)
         {
-            throw new ArgumentException("The cursor is invalid; pass back the 'next' value of a previous page unchanged.", nameof(cursor));
+            throw new ArgumentException("The cursor is invalid; pass back the 'next' value of a previous page unchanged.", nameof(cursor), error);
         }
     }
 

@@ -204,8 +204,8 @@ public static class AccessStoreContract
         var outcomes = await Task.WhenAll(Enumerable.Range(0, writers).Select(index =>
             (index % 2 == 0 ? primary : competing).CreateAsync(new AccessGrant(new GrantId($"race-{index}"), partition, subject, BuiltInRoles.Viewer.Id, workspace))));
         var described = outcomes.Select(Grant).ToArray();
-        Assert.AreEqual(1, described.Count(outcome => outcome == "applied:1"), string.Join(",", described));
-        Assert.AreEqual(writers - 1, described.Count(outcome => outcome == "rejected:CapacityExceeded"));
+        Assert.AreEqual(1, described.Count(outcome => string.Equals(outcome, "applied:1", StringComparison.Ordinal)), string.Join(",", described));
+        Assert.AreEqual(writers - 1, described.Count(outcome => string.Equals(outcome, "rejected:CapacityExceeded", StringComparison.Ordinal)));
         Assert.HasCount(AccessLimits.MaximumGrantsPerSubject, await competing.ListForSubjectsAsync(partition, new WorkspaceId("workspace"), [subject]));
     }
 

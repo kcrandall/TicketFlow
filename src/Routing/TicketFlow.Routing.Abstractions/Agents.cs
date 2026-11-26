@@ -186,7 +186,7 @@ public sealed record AvailableAgentQuery
         int limit = IAgentAvailabilityStore.MaximumAvailableList)
     {
         if (!channel.IsInitialized || after == default(UserId))
-            throw new ArgumentException("A channel kind is required; the cursor must be initialized when supplied.");
+            throw new ArgumentException("A channel kind is required; the cursor must be initialized when supplied.", !channel.IsInitialized ? nameof(channel) : nameof(after));
         if (agents is not null)
         {
             var set = new SortedSet<string>(StringComparer.Ordinal);
@@ -200,7 +200,7 @@ public sealed record AvailableAgentQuery
             Agents = [.. set.Select(value => new UserId(value))];
         }
         var skills = new SortedDictionary<string, int>(StringComparer.Ordinal);
-        foreach (var (name, level) in requiredSkills ?? new Dictionary<string, int>())
+        foreach (var (name, level) in requiredSkills ?? new Dictionary<string, int>(StringComparer.Ordinal))
         {
             AgentSkill.RequireName(name, nameof(requiredSkills));
             if (level is < AgentSkill.MinimumLevel or > AgentSkill.MaximumLevel || skills.Count >= AgentRoutingSettings.MaximumSkills)

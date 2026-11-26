@@ -81,10 +81,10 @@ public sealed class NormalizationTests
             var once = ContactIdentityAddress.Parse(kind, value, ns);
             Assert.AreEqual(once, ContactIdentityAddress.Parse(kind, once.Value, ns));
             Assert.AreEqual(once, ContactJsonCodec.RestoreAddress(kind, once.Namespace, once.Value));
-            Assert.DoesNotContain(once.Value, once.ToString());
+            Assert.DoesNotContain(once.Value, once.ToString(), StringComparison.Ordinal);
         }
         var error = Assert.ThrowsExactly<ArgumentException>(() => ContactIdentityAddress.Parse(ContactIdentityKind.Email, "secret-not-an-email"));
-        Assert.DoesNotContain("secret", error.Message);
+        Assert.DoesNotContain("secret", error.Message, StringComparison.Ordinal);
         Assert.ThrowsExactly<FormatException>(() => ContactJsonCodec.RestoreAddress(ContactIdentityKind.Email, "", "Upper@example.com"));
     }
 
@@ -134,7 +134,7 @@ public sealed class ModelAndCodecTests
         CollectionAssert.AreEqual(new[] { "alpha", "vip" }, contact.Labels.Select(label => label.Value).ToArray());
         CollectionAssert.AreEqual(new[] { "birthday", "score", "tags", "tier", "vip" }, contact.AttributeKeys.ToArray());
         Assert.AreEqual(At.AddTicks(12340), contact.Identities[0].Verification.At);
-        Assert.DoesNotContain("Ada", contact.ToString());
+        Assert.DoesNotContain("Ada", contact.ToString(), StringComparison.Ordinal);
         var email = contact.Identities[0];
         Assert.ThrowsExactly<ArgumentException>(() => contact.With(identities: [email, email]));
         Assert.ThrowsExactly<ArgumentException>(() => contact.With(labels: Enumerable.Range(0, 65).Select(index => new LabelId($"l{index}"))));
@@ -159,7 +159,7 @@ public sealed class ModelAndCodecTests
         Assert.HasCount(5, attributes);
         foreach (var key in contact.AttributeKeys)
             Assert.AreEqual(contact.Attributes[key], attributes[key]);
-        StringAssert.Contains(ContactJsonCodec.SerializeAttributes(contact.Attributes), "\"t\":\"number\",\"v\":\"-1234567.890123\"");
+        StringAssert.Contains(ContactJsonCodec.SerializeAttributes(contact.Attributes), "\"t\":\"number\",\"v\":\"-1234567.890123\"", StringComparison.Ordinal);
     }
 
     [TestMethod]

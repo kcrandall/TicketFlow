@@ -90,9 +90,9 @@ public sealed class TicketFlowMcpResources(IServiceProvider services)
         {
             return parse();
         }
-        catch (ArgumentException)
+        catch (ArgumentException error)
         {
-            throw new McpException("invalid: The resource identifier is invalid.");
+            throw new McpException("invalid: The resource identifier is invalid.", error);
         }
     }
 

@@ -16,8 +16,8 @@ public sealed class ContentEndpointTests
     {
         await using var host = await CreateAsync();
         var owner = host.Client();
-        var definition = JsonDocument.Parse(AutomationCodec.SerializeCannedResponse(new CannedResponse(new CannedResponseId("ignored"), "thanks", "Thanks", "en",
-            [new CannedResponseVariant("en", new AutomationTemplate("Thanks for reaching out."))]))).RootElement;
+        var definition = JsonElement.Parse(AutomationCodec.SerializeCannedResponse(new CannedResponse(new CannedResponseId("ignored"), "thanks", "Thanks", "en",
+            [new CannedResponseVariant("en", new AutomationTemplate("Thanks for reaching out."))])));
         var created = await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/canned-responses", new { id = "cr-1", definition }));
         Assert.AreEqual(HttpStatusCode.Created, created.StatusCode);
         Assert.AreEqual("cr-1", (await JsonAsync(created)).GetProperty("id").GetString());
@@ -31,7 +31,7 @@ public sealed class ContentEndpointTests
         Assert.AreEqual(HttpStatusCode.OK, rendered.StatusCode);
         Assert.AreEqual("Thanks for reaching out.", (await JsonAsync(rendered)).GetProperty("body").GetString());
 
-        var invalid = await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/canned-responses", new { definition = JsonDocument.Parse("""{"v":99}""").RootElement }));
+        var invalid = await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/canned-responses", new { definition = JsonElement.Parse("""{"v":99}""") }));
         Assert.AreEqual(HttpStatusCode.UnprocessableEntity, invalid.StatusCode);
         var dryRun = await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/automation/dry-run", new { conversationId = "conv-1", @event = new { kind = "messageReceived" } }));
         Assert.AreEqual(HttpStatusCode.OK, dryRun.StatusCode);
@@ -67,8 +67,8 @@ public sealed class ContentEndpointTests
         Assert.AreEqual("reset-password", list.GetProperty("items")[0].GetProperty("slug").GetString());
         var read = await JsonAsync(await anonymous.GetAsync($"{Public}/portals/help/en/articles/reset-password"));
         var html = read.GetProperty("html").GetString()!;
-        Assert.Contains("<strong>Forgot password</strong>", html);
-        Assert.DoesNotContain("<script", html);
+        Assert.Contains("<strong>Forgot password</strong>", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("<script", html, StringComparison.Ordinal);
         Assert.AreEqual(HttpStatusCode.NoContent, (await anonymous.SendAsync(Request(HttpMethod.Post, $"{Public}/portals/help/articles/a1/feedback",
             new { visitorKey = "visitor-1", helpful = true }))).StatusCode);
         var feedback = await JsonAsync(await owner.GetAsync($"{Api}/help-center/articles/a1/feedback"));

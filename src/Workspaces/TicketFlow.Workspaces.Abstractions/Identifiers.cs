@@ -21,6 +21,11 @@ public readonly record struct ChannelKind : IComparable<ChannelKind>
 
     public int CompareTo(ChannelKind other) => string.CompareOrdinal(value, other.value);
 
+    public static bool operator <(ChannelKind left, ChannelKind right) => left.CompareTo(right) < 0;
+    public static bool operator <=(ChannelKind left, ChannelKind right) => left.CompareTo(right) <= 0;
+    public static bool operator >(ChannelKind left, ChannelKind right) => left.CompareTo(right) > 0;
+    public static bool operator >=(ChannelKind left, ChannelKind right) => left.CompareTo(right) >= 0;
+
     public override string ToString() => value ?? string.Empty;
 }
 

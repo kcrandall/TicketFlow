@@ -28,7 +28,7 @@ public sealed record SlaWarningEvent(
     IReadOnlyList<SlaAction> Actions)
 {
     public bool Equals(SlaWarningEvent? other) =>
-        other is not null && Key == other.Key && Policy == other.Policy && Metric == other.Metric && Cycle == other.Cycle && ThresholdPercent == other.ThresholdPercent
+        other is not null && string.Equals(Key, other.Key, StringComparison.Ordinal) && Policy == other.Policy && Metric == other.Metric && Cycle == other.Cycle && ThresholdPercent == other.ThresholdPercent
         && Target == other.Target && At == other.At && DueAt == other.DueAt && Actions.SequenceEqual(other.Actions);
 
     public override int GetHashCode() => HashCode.Combine(Key, Metric, Cycle, ThresholdPercent);
@@ -45,7 +45,7 @@ public sealed record SlaBreachedEvent(
     IReadOnlyList<SlaAction> Actions)
 {
     public bool Equals(SlaBreachedEvent? other) =>
-        other is not null && Key == other.Key && Policy == other.Policy && Metric == other.Metric && Cycle == other.Cycle && Target == other.Target
+        other is not null && string.Equals(Key, other.Key, StringComparison.Ordinal) && Policy == other.Policy && Metric == other.Metric && Cycle == other.Cycle && Target == other.Target
         && At == other.At && Actions.SequenceEqual(other.Actions);
 
     public override int GetHashCode() => HashCode.Combine(Key, Metric, Cycle);

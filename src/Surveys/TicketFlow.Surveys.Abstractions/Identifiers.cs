@@ -21,6 +21,11 @@ public readonly record struct SurveyId : IComparable<SurveyId>
 
     public int CompareTo(SurveyId other) => string.CompareOrdinal(value, other.value);
 
+    public static bool operator <(SurveyId left, SurveyId right) => left.CompareTo(right) < 0;
+    public static bool operator <=(SurveyId left, SurveyId right) => left.CompareTo(right) <= 0;
+    public static bool operator >(SurveyId left, SurveyId right) => left.CompareTo(right) > 0;
+    public static bool operator >=(SurveyId left, SurveyId right) => left.CompareTo(right) >= 0;
+
     public override string ToString() => value ?? string.Empty;
 }
 
@@ -41,6 +46,11 @@ public readonly record struct SurveyInvitationId : IComparable<SurveyInvitationI
     public static SurveyInvitationId New() => new(Guid.CreateVersion7());
 
     public int CompareTo(SurveyInvitationId other) => Value.CompareTo(other.Value);
+
+    public static bool operator <(SurveyInvitationId left, SurveyInvitationId right) => left.CompareTo(right) < 0;
+    public static bool operator <=(SurveyInvitationId left, SurveyInvitationId right) => left.CompareTo(right) <= 0;
+    public static bool operator >(SurveyInvitationId left, SurveyInvitationId right) => left.CompareTo(right) > 0;
+    public static bool operator >=(SurveyInvitationId left, SurveyInvitationId right) => left.CompareTo(right) >= 0;
 
     public override string ToString() => Value.ToString("D");
 }
@@ -72,6 +82,11 @@ public readonly record struct SurveyLocale : IComparable<SurveyLocale>
     private SurveyLocale(string canonical, bool _) => value = canonical;
 
     public int CompareTo(SurveyLocale other) => string.CompareOrdinal(value, other.value);
+
+    public static bool operator <(SurveyLocale left, SurveyLocale right) => left.CompareTo(right) < 0;
+    public static bool operator <=(SurveyLocale left, SurveyLocale right) => left.CompareTo(right) <= 0;
+    public static bool operator >(SurveyLocale left, SurveyLocale right) => left.CompareTo(right) > 0;
+    public static bool operator >=(SurveyLocale left, SurveyLocale right) => left.CompareTo(right) >= 0;
 
     public override string ToString() => value ?? string.Empty;
 

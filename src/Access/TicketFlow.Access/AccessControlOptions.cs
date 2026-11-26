@@ -28,6 +28,7 @@ public sealed class AccessControlOptions
     };
 
     /// <exception cref="ArgumentOutOfRangeException">An option is out of range.</exception>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "MA0015:Specify the parameter name in ArgumentException", Justification = "Parameterless options validation reports the invalid property name.")]
     public void Validate()
     {
         if (MaximumBreakGlassDuration <= TimeSpan.Zero || MaximumBreakGlassDuration > BreakGlassDurationCeiling)

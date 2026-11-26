@@ -105,7 +105,7 @@ public sealed record OutboundChannelMessage
     {
         Scope = scope ?? throw new ArgumentNullException(nameof(scope));
         if (inbox == default || conversation == default || contact == default || message == default(MessageId))
-            throw new ArgumentException("Inbox, conversation, contact and (when supplied) message identifiers are required.");
+            throw new ArgumentException("Inbox, conversation, contact and (when supplied) message identifiers are required.", inbox == default ? nameof(inbox) : conversation == default ? nameof(conversation) : contact == default ? nameof(contact) : nameof(message));
         Inbox = inbox;
         Binding = binding ?? throw new ArgumentNullException(nameof(binding));
         Conversation = conversation;

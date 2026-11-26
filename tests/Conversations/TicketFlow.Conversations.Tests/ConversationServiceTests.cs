@@ -269,8 +269,8 @@ public sealed class ConversationServiceTests
 
         var agentView = ConversationFixture.View(await fixture.Conversations.GetAsync(fixture.Agent, C1));
         Assert.IsTrue(agentView.Attributes.All(attribute => attribute.Masked && attribute.Value is null));
-        Assert.IsTrue(agentView.Attributes.Single(attribute => attribute.Key == "account").Revealable);
-        Assert.IsFalse(agentView.Attributes.Single(attribute => attribute.Key == "ssn").Revealable);
+        Assert.IsTrue(agentView.Attributes.Single(attribute => string.Equals(attribute.Key, "account", StringComparison.Ordinal)).Revealable);
+        Assert.IsFalse(agentView.Attributes.Single(attribute => string.Equals(attribute.Key, "ssn", StringComparison.Ordinal)).Revealable);
         Assert.IsTrue(agentView.ChannelThread!.Masked);
         Assert.IsNull(agentView.ChannelThread.ExternalThreadId);
         CollectionAssert.AreEqual(new[] { "conversation.attribute.account", "conversation.attribute.ssn", "conversation.channel" },
@@ -278,8 +278,8 @@ public sealed class ConversationServiceTests
         Assert.IsFalse(agentView.ToString().Contains("ada@", StringComparison.Ordinal));
 
         var ownerView = ConversationFixture.View(await fixture.Conversations.GetAsync(fixture.Owner, C1));
-        Assert.AreEqual(new ConversationTextValue("ACC-1"), ownerView.Attributes.Single(attribute => attribute.Key == "account").Value!.Value.Value);
-        Assert.IsTrue(ownerView.Attributes.Single(attribute => attribute.Key == "ssn").Masked, "a sensitive attribute without a policy fails closed for everyone");
+        Assert.AreEqual(new ConversationTextValue("ACC-1"), ownerView.Attributes.Single(attribute => string.Equals(attribute.Key, "account", StringComparison.Ordinal)).Value!.Value.Value);
+        Assert.IsTrue(ownerView.Attributes.Single(attribute => string.Equals(attribute.Key, "ssn", StringComparison.Ordinal)).Masked, "a sensitive attribute without a policy fails closed for everyone");
         Assert.AreEqual("ada@example.com", ownerView.ChannelThread!.ExternalThreadId);
 
         var agentTimeline = ConversationFixture.Page(await fixture.Conversations.ReadTimelineAsync(fixture.Agent, C1));

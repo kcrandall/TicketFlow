@@ -15,7 +15,7 @@ public sealed class TicketFlowMcpPrompts
 
     [McpServerPrompt(Name = "triage_conversation")]
     [Description("Inspects a conversation's timeline, SLA status and contact context and proposes priority, team, labels and next steps without mutating anything.")]
-    public IEnumerable<ChatMessage> TriageConversation(
+    public static IEnumerable<ChatMessage> TriageConversation(
         [Description("Conversation identifier.")] string conversationId,
         [Description("Optional workspace identifier.")] string? workspace = null) =>
     [
@@ -29,7 +29,7 @@ public sealed class TicketFlowMcpPrompts
 
     [McpServerPrompt(Name = "draft_customer_reply")]
     [Description("Drafts a grounded reply to a customer conversation using timeline context and help center search, without sending it.")]
-    public IEnumerable<ChatMessage> DraftCustomerReply(
+    public static IEnumerable<ChatMessage> DraftCustomerReply(
         [Description("Conversation identifier.")] string conversationId,
         [Description("Optional desired tone (for example concise, empathetic, technical).")] string? tone = null,
         [Description("Optional workspace identifier.")] string? workspace = null) =>
@@ -45,7 +45,7 @@ public sealed class TicketFlowMcpPrompts
 
     [McpServerPrompt(Name = "summarize_conversation")]
     [Description("Produces a concise internal handoff summary of a conversation including key facts, open questions and SLA status.")]
-    public IEnumerable<ChatMessage> SummarizeConversation(
+    public static IEnumerable<ChatMessage> SummarizeConversation(
         [Description("Conversation identifier.")] string conversationId,
         [Description("Optional workspace identifier.")] string? workspace = null) =>
     [
@@ -58,7 +58,7 @@ public sealed class TicketFlowMcpPrompts
 
     [McpServerPrompt(Name = "investigate_sla_risk")]
     [Description("Reviews at-risk and breached SLA conversations and groups them by urgency, inbox and assignment state.")]
-    public IEnumerable<ChatMessage> InvestigateSlaRisk(
+    public static IEnumerable<ChatMessage> InvestigateSlaRisk(
         [Description("Optional inbox identifier to filter by.")] string? inboxId = null,
         [Description("Optional workspace identifier.")] string? workspace = null) =>
     [

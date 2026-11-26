@@ -32,7 +32,7 @@ public sealed record ArticleListQuery
     public ArticleListQuery(PortalId portal, CollectionId? collection = null, ArticleState? state = null, int limit = 50, ArticleId? after = null)
     {
         if (!portal.IsInitialized || collection is { IsInitialized: false } || after is { IsInitialized: false })
-            throw new ArgumentException("Portal, collection and cursor identifiers must be initialized.");
+            throw new ArgumentException("Portal, collection and cursor identifiers must be initialized.", !portal.IsInitialized ? nameof(portal) : collection is { IsInitialized: false } ? nameof(collection) : nameof(after));
         if (state is { } value && !Enum.IsDefined(value))
             throw new ArgumentOutOfRangeException(nameof(state));
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
@@ -73,7 +73,7 @@ public sealed record PublishedArticleQuery
     public PublishedArticleQuery(PortalId portal, HelpCenterLocale locale, CollectionId? collection = null, int limit = 50, PublishedArticleCursor? after = null)
     {
         if (!portal.IsInitialized || !locale.IsInitialized || collection is { IsInitialized: false })
-            throw new ArgumentException("Portal, locale and collection must be initialized.");
+            throw new ArgumentException("Portal, locale and collection must be initialized.", !portal.IsInitialized ? nameof(portal) : !locale.IsInitialized ? nameof(locale) : nameof(collection));
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, HelpCenterLimits.MaximumPageSize);
         Portal = portal;

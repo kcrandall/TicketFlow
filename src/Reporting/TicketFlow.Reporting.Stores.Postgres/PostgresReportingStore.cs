@@ -165,7 +165,7 @@ public sealed class PostgresReportingStore : IReportingStore
     internal static NpgsqlCommand? CreateAggregateCommand(TicketScope scope, ReportAggregateQuery query, AccessFilter filter)
     {
         var access = PostgresAccessFilterTranslator.Translate(filter, RollupColumns).OrDenyAll();
-        if (access.Sql == "FALSE")
+        if (string.Equals(access.Sql, "FALSE", StringComparison.Ordinal))
             return null;
         var group = query.GroupBy switch
         {
@@ -247,7 +247,7 @@ public sealed class PostgresReportingStore : IReportingStore
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(filter);
         var access = PostgresAccessFilterTranslator.Translate(filter, StateFilterColumns).OrDenyAll();
-        if (access.Sql == "FALSE")
+        if (string.Equals(access.Sql, "FALSE", StringComparison.Ordinal))
             return 0;
         var where = new StringBuilder();
         await using var command = source.CreateCommand();
@@ -269,7 +269,7 @@ public sealed class PostgresReportingStore : IReportingStore
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(filter);
         var access = PostgresAccessFilterTranslator.Translate(filter, FactFilterColumns).OrDenyAll();
-        if (access.Sql == "FALSE")
+        if (string.Equals(access.Sql, "FALSE", StringComparison.Ordinal))
             return new ReportFactPage([], null);
         var where = new StringBuilder();
         await using var command = source.CreateCommand();

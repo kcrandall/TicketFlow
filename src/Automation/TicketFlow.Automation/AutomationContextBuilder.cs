@@ -49,7 +49,7 @@ internal static class AutomationContextNeedsHelper
             var v = vars[i];
             if (v is AutomationTemplate.ContactName or AutomationTemplate.ContactCompany || v.StartsWith(AutomationTemplate.ContactAttributePrefix, StringComparison.Ordinal))
                 needs |= AutomationContextNeeds.Contact;
-            else if (v == AutomationTemplate.AgentName)
+            else if (string.Equals(v, AutomationTemplate.AgentName, StringComparison.Ordinal))
                 needs |= AutomationContextNeeds.AgentName;
         }
         return needs;
@@ -138,9 +138,9 @@ public sealed class AutomationContextBuilder(IConversationService conversations,
         if (view is null)
             return (null, failure);
         var scope = principal.Scope;
-        var needContact = (needs & AutomationContextNeeds.Contact) != 0;
-        var needInbox = (needs & (AutomationContextNeeds.Inbox | AutomationContextNeeds.Calendar)) != 0;
-        var needCalendar = (needs & AutomationContextNeeds.Calendar) != 0;
+        var needContact = (needs & AutomationContextNeeds.Contact) != AutomationContextNeeds.None;
+        var needInbox = (needs & (AutomationContextNeeds.Inbox | AutomationContextNeeds.Calendar)) != AutomationContextNeeds.None;
+        var needCalendar = (needs & AutomationContextNeeds.Calendar) != AutomationContextNeeds.None;
 
         AutomationContactFacts? contact = null;
         Inbox? inbox = null;

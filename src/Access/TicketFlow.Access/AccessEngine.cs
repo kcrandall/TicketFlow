@@ -368,7 +368,7 @@ internal sealed class AccessEngine(
         NotCondition not => !Evaluate(not.Operand, context, resource),
         AssigneeIsSelfCondition => context.User is { } user ? resource.AssigneeId == user.UserId : null,
         TeamInPrincipalTeamsCondition => context.User is { } user ? resource.TeamId is { } team && user.Teams.Contains(team) : null,
-        AttributeEqualsCondition equals => resource.Attributes.TryGetValue(equals.Key, out var value) ? value == equals.Value : null,
+        AttributeEqualsCondition equals => resource.Attributes.TryGetValue(equals.Key, out var value) ? string.Equals(value, equals.Value, global::System.StringComparison.Ordinal) : null,
         AttributeInCondition @in => resource.Attributes.TryGetValue(@in.Key, out var value) ? @in.ContainsValue(value) : null,
         HasLabelCondition label => resource.Labels?.Contains(label.Label),
         TimeWindowCondition window => window.Contains(context.Now),

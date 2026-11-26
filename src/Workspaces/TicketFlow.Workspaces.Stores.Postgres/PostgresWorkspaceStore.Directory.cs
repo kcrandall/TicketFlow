@@ -54,7 +54,7 @@ public sealed partial class PostgresWorkspaceStore
                     throw StoredDataError(error, "workspace scope");
                 }
                 if (scopes.Count == limit)
-                    lastKey = reader.GetFieldValue<byte[]>(5);
+                    lastKey = await reader.GetFieldValueAsync<byte[]>(5, cancellationToken).ConfigureAwait(false);
             }
         }
         return new WorkspaceScopePage(scopes, hasMore ? Convert.ToHexStringLower(lastKey!) : null);

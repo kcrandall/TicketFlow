@@ -46,7 +46,7 @@ public sealed record Inbox
             throw new ArgumentException("An inbox identifier is required.", nameof(id));
         ArgumentNullException.ThrowIfNull(channel);
         if (calendar is { IsInitialized: false } || slaPolicy is { IsInitialized: false } || routingPolicy is { IsInitialized: false })
-            throw new ArgumentException("Calendar, SLA policy and routing references must be initialized when supplied.");
+            throw new ArgumentException("Calendar, SLA policy and routing references must be initialized when supplied.", calendar is { IsInitialized: false } ? nameof(calendar) : slaPolicy is { IsInitialized: false } ? nameof(slaPolicy) : nameof(routingPolicy));
         Id = id;
         Name = WorkspaceText.RequireText(name, MaximumNameLength, nameof(name));
         Channel = channel;

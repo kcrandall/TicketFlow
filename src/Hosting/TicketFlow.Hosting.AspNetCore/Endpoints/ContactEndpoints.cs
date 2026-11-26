@@ -47,7 +47,7 @@ internal static class ContactEndpoints
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
                 return failure;
-            var edits = (request.Edits ?? throw new ArgumentException("Edits are required.", nameof(request.Edits))).Select(edit => Edit(edit, time)).ToList();
+            var edits = (request.Edits ?? throw new ArgumentException("Edits are required.", nameof(request))).Select(edit => Edit(edit, time)).ToList();
             return Map(http, await service.UpdateAsync(actor.Principal, new ContactId(contactId), revision, edits, http.RequestAborted), view => TicketFlowHttp.Ok(http, Dto(view), view.Revision));
         }).WithName("UpdateContact").Produces<ContactResponse>();
         group.MapDelete("/contacts/{contactId}", async (TicketFlowActor actor, string contactId, string? justification, [FromServices] IContactService service, HttpContext http) =>
@@ -65,7 +65,7 @@ internal static class ContactEndpoints
                     [.. revealed.Identities.Select(identity => new ContactIdentityValueResponse(TicketFlowHttp.Token(identity.Kind), identity.Namespace, identity.Value))],
                     revealed.Attribute is { } attribute ? Attributes.Dto(attribute) : null, revealed.AuditEventId)),
                 ContactRevealRefused refused => TicketFlowHttp.Problem(StatusCodes.Status403Forbidden, "reveal-refused", [TicketFlowHttp.Token(refused.Reason)],
-                    extensions: new Dictionary<string, object?> { ["auditEventId"] = refused.AuditEventId }),
+                    extensions: new Dictionary<string, object?>(StringComparer.Ordinal) { ["auditEventId"] = refused.AuditEventId }),
                 ContactRefused refused => Refused(http, refused),
             };
         }).WithName("RevealContactField").Produces<ContactRevealResponse>();
@@ -84,7 +84,7 @@ internal static class ContactEndpoints
         group.MapPost("/contacts/export", async (TicketFlowActor actor, ContactExportStartRequest request, [FromServices] IContactService service, [FromServices] IOptions<TicketFlowEndpointOptions> options, HttpContext http) =>
         {
             if (request.MaximumContacts > options.Value.MaximumExportContacts)
-                throw new ArgumentException($"Exports are limited to {options.Value.MaximumExportContacts} contacts.", nameof(request.MaximumContacts));
+                throw new ArgumentException($"Exports are limited to {options.Value.MaximumExportContacts} contacts.", nameof(request));
             return await service.ExportAsync(actor.Principal, new ContactExportRequest(request.MaximumContacts, request.Justification), http.RequestAborted) switch
             {
                 ContactExportStarted started => Stream(http, started),
@@ -103,7 +103,7 @@ internal static class ContactEndpoints
         {
             if (!TicketFlowHttp.TryRequireRevision(http, out var revision, out var failure))
                 return failure;
-            if (request.Key != key)
+            if (!string.Equals(request.Key, key, StringComparison.Ordinal))
                 throw new ArgumentException("The body key must match the route.", nameof(key));
             return Map(http, await service.UpdateAsync(actor.Principal, Definition(request), revision, http.RequestAborted), stored => TicketFlowHttp.Ok(http, Definition(stored), stored.Revision));
         }).WithName("UpdateContactAttribute").Produces<AttributeDefinitionResponse>();
@@ -116,7 +116,7 @@ internal static class ContactEndpoints
         return group;
     }
 
-    private static IResult Stream(HttpContext http, ContactExportStarted started)
+    private static NdjsonContactExportResult Stream(HttpContext http, ContactExportStarted started)
     {
         http.Response.Headers[AuditEventHeader] = started.AuditEventId.ToString("D");
         http.Response.Headers.CacheControl = "no-store";
@@ -130,7 +130,7 @@ internal static class ContactEndpoints
         {
             httpContext.Response.ContentType = "application/x-ndjson";
             var pipe = httpContext.Response.BodyWriter;
-            var typeInfo = options.GetTypeInfo(typeof(ContactResponse));
+            var typeInfo = options.GetTypeInfo<ContactResponse>();
             var cancellationToken = httpContext.RequestAborted;
             using var writer = new Utf8JsonWriter(pipe);
             long buffered = 0;
@@ -138,7 +138,7 @@ internal static class ContactEndpoints
             {
                 writer.Reset(pipe);
                 JsonSerializer.Serialize(writer, Dto(contact), typeInfo);
-                writer.Flush();
+                await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
                 var span = pipe.GetSpan(1);
                 span[0] = (byte)'\n';
                 pipe.Advance(1);
@@ -170,7 +170,7 @@ internal static class ContactEndpoints
         ContactRefusal.Conflict => TicketFlowHttp.Refused(http, RefusalKind.Conflict, refused.Errors, refused.CurrentRevision),
         ContactRefusal.IdentityTaken => TicketFlowHttp.Problem(StatusCodes.Status409Conflict, "identity-taken", refused.Errors),
         ContactRefusal.Merged => TicketFlowHttp.Problem(StatusCodes.Status409Conflict, "merged", refused.Errors,
-            extensions: new Dictionary<string, object?> { ["mergedInto"] = refused.MergedInto?.Value }),
+            extensions: new Dictionary<string, object?>(StringComparer.Ordinal) { ["mergedInto"] = refused.MergedInto?.Value }),
         _ => TicketFlowHttp.Refused(http, RefusalKind.Rejected, refused.Errors),
     };
 
@@ -193,7 +193,7 @@ internal static class ContactEndpoints
 
     private static ContactIdentity Identity(ContactIdentityInput? input, [FromServices] TimeProvider time)
     {
-        ArgumentNullException.ThrowIfNull(input, "identity");
+        ArgumentNullException.ThrowIfNull(input);
         var address = ContactIdentityAddress.Parse(TicketFlowHttp.Parse<ContactIdentityKind>(input.Kind, "kind"), input.Value, input.Namespace);
         var now = time.GetUtcNow();
         IdentityVerification verification = input.Verified ? new IdentityVerified(input.Source, now) : new IdentityClaimed(input.Source, now);
@@ -202,7 +202,7 @@ internal static class ContactEndpoints
 
     private static ContactEdit Edit(ContactEditInput edit, [FromServices] TimeProvider time)
     {
-        ArgumentNullException.ThrowIfNull(edit, "edits");
+        ArgumentNullException.ThrowIfNull(edit);
         return edit.Kind switch
         {
             "setProfile" => new SetContactProfile(Profile(edit.Profile)),
@@ -213,7 +213,7 @@ internal static class ContactEndpoints
             "setBlocked" => new SetContactBlocked(edit.Blocked ?? throw Missing("blocked")),
             "addIdentity" => new AddContactIdentity(Identity(edit.Identity, time)),
             "removeIdentity" => new RemoveContactIdentity(Identity(edit.Identity, time).Address),
-            _ => throw new ArgumentException("Unknown contact edit kind.", "kind"),
+            _ => throw new ArgumentException("Unknown contact edit kind.", nameof(edit)),
         };
     }
 

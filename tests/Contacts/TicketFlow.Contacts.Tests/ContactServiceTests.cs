@@ -156,16 +156,16 @@ public sealed class ContactServiceTests
         var id = new ContactId("ada");
 
         var ownerView = ContactFixture.Applied(await fixture.Contacts.GetAsync(fixture.Owner, id));
-        var secret = ownerView.Attributes.Single(attribute => attribute.Key == "national-id");
+        var secret = ownerView.Attributes.Single(attribute => string.Equals(attribute.Key, "national-id", StringComparison.Ordinal));
         Assert.IsTrue(secret.Masked && secret.Value is null && !secret.Revealable && secret.Sensitive);
-        Assert.AreEqual(new TextAttributeValue("gold"), ownerView.Attributes.Single(attribute => attribute.Key == "tier").Value!.Value.Value);
+        Assert.AreEqual(new TextAttributeValue("gold"), ownerView.Attributes.Single(attribute => string.Equals(attribute.Key, "tier", StringComparison.Ordinal)).Value!.Value.Value);
         Assert.AreEqual(RevealRefusal.NoPolicy, ((ContactRevealRefused)(await fixture.Contacts.RevealAsync(fixture.Owner, id, ContactFieldPaths.Attribute("national-id"))).Value!).Reason);
 
         await fixture.PolicyAsync(ContactFieldPaths.SensitivePolicy(ContactFieldPaths.Attribute("national-id"), [BuiltInRoles.Supervisor.Id]));
-        Assert.IsFalse(ContactFixture.Applied(await fixture.Contacts.GetAsync(fixture.Supervisor, id)).Attributes.Single(attribute => attribute.Key == "national-id").Masked);
-        var agentSecret = ContactFixture.Applied(await fixture.Contacts.GetAsync(fixture.Agent, id)).Attributes.Single(attribute => attribute.Key == "national-id");
+        Assert.IsFalse(ContactFixture.Applied(await fixture.Contacts.GetAsync(fixture.Supervisor, id)).Attributes.Single(attribute => string.Equals(attribute.Key, "national-id", StringComparison.Ordinal)).Masked);
+        var agentSecret = ContactFixture.Applied(await fixture.Contacts.GetAsync(fixture.Agent, id)).Attributes.Single(attribute => string.Equals(attribute.Key, "national-id", StringComparison.Ordinal));
         Assert.IsTrue(agentSecret.Masked && !agentSecret.Revealable);
-        Assert.IsTrue(ContactFixture.Applied(await fixture.Contacts.GetAsync(fixture.Owner, id)).Attributes.Single(attribute => attribute.Key == "national-id").Revealable);
+        Assert.IsTrue(ContactFixture.Applied(await fixture.Contacts.GetAsync(fixture.Owner, id)).Attributes.Single(attribute => string.Equals(attribute.Key, "national-id", StringComparison.Ordinal)).Revealable);
         var revealed = (ContactFieldRevealed)(await fixture.Contacts.RevealAsync(fixture.Owner, id, ContactFieldPaths.Attribute("national-id"))).Value!;
         Assert.AreEqual(new TextAttributeValue("AB123"), revealed.Attribute!.Value.Value);
         Assert.IsEmpty(revealed.Identities);

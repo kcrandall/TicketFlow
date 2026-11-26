@@ -27,11 +27,11 @@ internal sealed class ContactMasking
         var definitionsTask = definitionStore.ListAsync(scope, cancellationToken);
         var policiesTask = policyStore.ListAsync(scope, cancellationToken);
         await Task.WhenAll(definitionsTask, policiesTask).ConfigureAwait(false);
-        var storedDefs = definitionsTask.Result;
-        var definitions = new Dictionary<string, ContactAttributeDefinition>(storedDefs.Count, StringComparer.Ordinal);
+        var storedDefs = await definitionsTask.ConfigureAwait(false);
+        var definitionMap = new Dictionary<string, ContactAttributeDefinition>(storedDefs.Count, StringComparer.Ordinal);
         foreach (var stored in storedDefs)
-            definitions[stored.Definition.Key] = stored.Definition;
-        return new(definitions, BuildPolicyFields(policiesTask.Result, permission));
+            definitionMap[stored.Definition.Key] = stored.Definition;
+        return new(definitionMap, BuildPolicyFields(await policiesTask.ConfigureAwait(false), permission));
     }
 
     public static async Task<ContactMasking> LoadAsync(TicketScope scope, Permission permission,

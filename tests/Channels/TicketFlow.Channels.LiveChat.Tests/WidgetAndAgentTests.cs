@@ -69,8 +69,8 @@ public sealed class WidgetAndAgentTests
         Assert.IsTrue(view.Verified);
         Assert.AreEqual("user-42", view.IdentityValue);
         Assert.AreEqual("Ada", view.DisplayName);
-        Assert.AreEqual("ada@example.com", view.Prechat.Single(answer => answer.Key == "email").Value);
-        var order = view.Prechat.Single(answer => answer.Key == "order");
+        Assert.AreEqual("ada@example.com", view.Prechat.Single(answer => string.Equals(answer.Key, "email", StringComparison.Ordinal)).Value);
+        var order = view.Prechat.Single(answer => string.Equals(answer.Key, "order", StringComparison.Ordinal));
         Assert.IsTrue(order.Masked, "Sensitive answers without a field policy are masked (fail closed).");
         Assert.IsNull(order.Value);
 
@@ -80,10 +80,10 @@ public sealed class WidgetAndAgentTests
         Assert.IsInstanceOfType<StoreApplied<StoredAccessFieldPolicy>>((await policies.CreateAsync(host.Scope,
             new AccessFieldPolicy(ContactFieldPaths.Attribute("order"), [ContactPermissions.Read], [BuiltInRoles.Agent.Id]))).Value);
         var masked = Value(await agents.GetVisitorAsync(host.Host.Agent, accepted.Conversation));
-        Assert.IsNull(masked.Prechat.Single(answer => answer.Key == "email").Value);
-        Assert.AreEqual("A-42", masked.Prechat.Single(answer => answer.Key == "order").Value, "A field policy unmasks the answer for the Agent role.");
+        Assert.IsNull(masked.Prechat.Single(answer => string.Equals(answer.Key, "email", StringComparison.Ordinal)).Value);
+        Assert.AreEqual("A-42", masked.Prechat.Single(answer => string.Equals(answer.Key, "order", StringComparison.Ordinal)).Value, "A field policy unmasks the answer for the Agent role.");
         Assert.IsTrue(masked.MaskedFields.Any(field => field.Field == ContactFieldPaths.Email));
-        Assert.AreEqual("ada@example.com", Value(await agents.GetVisitorAsync(host.Host.Owner, accepted.Conversation)).Prechat.Single(answer => answer.Key == "email").Value);
+        Assert.AreEqual("ada@example.com", Value(await agents.GetVisitorAsync(host.Host.Owner, accepted.Conversation)).Prechat.Single(answer => string.Equals(answer.Key, "email", StringComparison.Ordinal)).Value);
 
         Assert.AreEqual(LiveChatRefusal.Forbidden, Refusal(await agents.GetVisitorAsync(TestPrincipals.User(host.Scope, "stranger"), accepted.Conversation)));
         Assert.AreEqual(LiveChatRefusal.NotFound, Refusal(await agents.GetVisitorAsync(host.Host.Agent, new ConversationId("missing"))));

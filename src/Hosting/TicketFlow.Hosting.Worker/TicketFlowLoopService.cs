@@ -23,7 +23,7 @@ public sealed record TicketFlowLoopDefinition(string Name, IReadOnlyList<Type> R
 /// times, while runs report work), exponential backoff with jitter after failures, cancellation on host shutdown. Exceptions are logged by
 /// type only (messages may carry customer data); telemetry carries loop names and outcomes only.
 /// </summary>
-internal sealed class TicketFlowLoopService(TicketFlowLoopDefinition definition, IServiceScopeFactory scopes, IServiceProviderIsService services, IOptions<TicketFlowWorkerOptions> options,
+internal sealed partial class TicketFlowLoopService(TicketFlowLoopDefinition definition, IServiceScopeFactory scopes, IServiceProviderIsService services, IOptions<TicketFlowWorkerOptions> options,
     TicketFlowWorkerHealth health, TimeProvider time, ILogger<TicketFlowLoopService> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -40,7 +40,7 @@ internal sealed class TicketFlowLoopService(TicketFlowLoopDefinition definition,
         if (!definition.RequiredServices.All(services.IsService))
         {
             health.Set(definition.Name, TicketFlowLoopStatus.NotConfigured);
-            logger.LogInformation("TicketFlow worker loop {Loop} is not configured (its service is not registered) and will not run.", definition.Name);
+            LogLoopNotConfigured(logger, definition.Name);
             return;
         }
         health.Started(definition.Name, loop.Interval);
@@ -68,7 +68,7 @@ internal sealed class TicketFlowLoopService(TicketFlowLoopDefinition definition,
                     failures = 0;
                     health.Succeeded(definition.Name, run.Items, run.Failures);
                     if (run.Failures > 0)
-                        logger.LogWarning("TicketFlow worker loop {Loop} completed with {Failures} item failures.", definition.Name, run.Failures);
+                        LogLoopPartialFailures(logger, definition.Name, run.Failures);
                     if (run.Items > 0 && run.Failures == 0 && drained < loop.MaximumDrainRuns)
                     {
                         drained++;
@@ -88,7 +88,7 @@ internal sealed class TicketFlowLoopService(TicketFlowLoopDefinition definition,
                     activity?.SetStatus(ActivityStatusCode.Error, error.GetType().Name);
                     TicketFlowWorkerTelemetry.Record(definition.Name, "failure", 0, started);
                     health.Failed(definition.Name, failures);
-                    logger.LogWarning("TicketFlow worker loop {Loop} failed ({Failures} consecutive) with {Error}.", definition.Name, failures, error.GetType().Name);
+                    LogLoopFailed(logger, definition.Name, failures, error.GetType().Name);
                     delay = Backoff(loop, failures, settings.Jitter);
                 }
                 await Task.Delay(delay, time, stoppingToken).ConfigureAwait(false);
@@ -103,6 +103,15 @@ internal sealed class TicketFlowLoopService(TicketFlowLoopDefinition definition,
             health.Set(definition.Name, TicketFlowLoopStatus.Stopped);
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "TicketFlow worker loop {Loop} is not configured (its service is not registered) and will not run.")]
+    private static partial void LogLoopNotConfigured(ILogger logger, string loop);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "TicketFlow worker loop {Loop} completed with {Failures} item failures.")]
+    private static partial void LogLoopPartialFailures(ILogger logger, string loop, int failures);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "TicketFlow worker loop {Loop} failed ({Failures} consecutive) with {Error}.")]
+    private static partial void LogLoopFailed(ILogger logger, string loop, int failures, string error);
 
     internal static TimeSpan Backoff(TicketFlowLoopOptions loop, int failures, double jitter)
     {

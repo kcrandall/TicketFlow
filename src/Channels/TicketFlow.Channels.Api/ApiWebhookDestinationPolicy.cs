@@ -44,8 +44,8 @@ public sealed class ApiWebhookDestinationPolicy
     /// <summary>True when <paramref name="destination"/> satisfies the URI rules (addresses are checked again at connect time).</summary>
     public bool Allows(Uri? destination)
     {
-        if (destination is null || !destination.IsAbsoluteUri || destination.OriginalString.Length > MaximumUriLength || destination.Scheme != Uri.UriSchemeHttps
-            || destination.UserInfo.Length != 0 || destination.Fragment.Length != 0 || !ports.Contains(destination.Port))
+        if (destination is null || !destination.IsAbsoluteUri || destination.OriginalString.Length > MaximumUriLength || !string.Equals(destination.Scheme, Uri.UriSchemeHttps
+, StringComparison.Ordinal) || destination.UserInfo.Length != 0 || destination.Fragment.Length != 0 || !ports.Contains(destination.Port))
             return false;
         switch (destination.HostNameType)
         {

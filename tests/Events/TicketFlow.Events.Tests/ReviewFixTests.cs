@@ -15,7 +15,7 @@ public sealed class ReviewFixTests
 {
     private static IEventSubscriptionService Service(IServiceProvider provider) => provider.GetRequiredService<IEventSubscriptionService>();
 
-    private static JsonElement Data(RenderedEvent rendered) => JsonDocument.Parse(rendered.Json).RootElement.GetProperty("data");
+    private static JsonElement Data(RenderedEvent rendered) => JsonElement.Parse(rendered.Json).GetProperty("data");
 
     [TestMethod]
     public async Task ManagersCannotDelegateToAMorePrivilegedPrincipal()
@@ -24,7 +24,7 @@ public sealed class ReviewFixTests
         // narrow-manager holds events:manage but not conversation:read/contact:read, which the hooks principal holds.
         var refused = (TicketFailure)(await fixture.SubscribeAsync("s1", principal: "hooks", actor: fixture.NarrowManager)).Value!;
         Assert.AreEqual(TicketFailureKind.Forbidden, refused.Kind);
-        StringAssert.Contains(refused.Errors.Single(), "delegate");
+        StringAssert.Contains(refused.Errors.Single(), "delegate", StringComparison.Ordinal);
         EventsFixture.Value(await fixture.SubscribeAsync("s1", principal: "billing-hooks", actor: fixture.Manager));
 
         // The same rule applies when an update switches the principal.
@@ -194,8 +194,8 @@ public sealed class ReviewFixTests
         var principal = new ApiClientPrincipal(fixture.Scope, new ApiClientId("content-hooks"));
         var contents = await fixture.InScopeAsync(async provider =>
         {
-            var counting = CountingProxy<IConversationService>.Wrap(provider.GetRequiredService<IConversationService>(), out var counter);
-            var contactCounting = CountingProxy<IContactService>.Wrap(provider.GetRequiredService<IContactService>(), out var contactCounter);
+            var counting = WrapCounting(provider.GetRequiredService<IConversationService>(), out var counter);
+            var contactCounting = WrapCounting(provider.GetRequiredService<IContactService>(), out var contactCounter);
             var hydrator = new EventContentHydrator(counting, contactCounting, provider.GetRequiredService<ISurveyService>());
             var result = await hydrator.HydrateAsync(events, principal);
             Assert.AreEqual(1, counter.Calls(nameof(IConversationService.ReadTimelineAsync)), "One timeline range read for the conversation.");
@@ -204,8 +204,16 @@ public sealed class ReviewFixTests
         });
         var messages = events.Where(item => item.Event.Type is IntegrationEventTypes.ConversationMessageReceived or IntegrationEventTypes.ConversationMessageSent).ToList();
         Assert.AreEqual(4, messages.Count);
-        Assert.IsTrue(messages.All(item => contents[item.Sequence].Value?.Value is MessageEventContent && contents[item.Sequence].Contact?.DisplayName == "ada"));
+        Assert.IsTrue(messages.All(item => contents[item.Sequence].Value?.Value is MessageEventContent && string.Equals(contents[item.Sequence].Contact?.DisplayName, "ada", StringComparison.Ordinal)));
         Assert.AreEqual("Still broken", ((MessageEventContent)contents[messages[2].Sequence].Value!.Value.Value!).Body);
+    }
+
+    private static T WrapCounting<T>(T target, out CountingProxy<T> counter) where T : class
+    {
+        var proxy = DispatchProxy.Create<T, CountingProxy<T>>();
+        counter = (CountingProxy<T>)(object)proxy;
+        counter.SetTarget(target);
+        return proxy;
     }
 
     /// <summary>Counts interface calls by method name while delegating to the real implementation.</summary>
@@ -214,13 +222,7 @@ public sealed class ReviewFixTests
         private readonly Dictionary<string, int> calls = [];
         private T target = null!;
 
-        public static T Wrap(T target, out CountingProxy<T> counter)
-        {
-            var proxy = Create<T, CountingProxy<T>>();
-            counter = (CountingProxy<T>)(object)proxy;
-            counter.target = target;
-            return proxy;
-        }
+        internal void SetTarget(T value) => target = value;
 
         public int Calls(string method) => calls.GetValueOrDefault(method);
 

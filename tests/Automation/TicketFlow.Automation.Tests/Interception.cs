@@ -15,6 +15,7 @@ internal sealed class CallLog
     public void Reset() => Counts.Clear();
 }
 
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1852:Seal internal types", Justification = "DispatchProxy requires a non-sealed proxy base type.")]
 internal class Interceptor<T> : DispatchProxy where T : class
 {
     private T inner = null!;

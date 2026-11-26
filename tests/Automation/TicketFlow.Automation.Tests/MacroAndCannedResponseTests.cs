@@ -60,7 +60,7 @@ public sealed class MacroAndCannedResponseTests
         var timeline = await fixture.TimelineAsync("c1");
         var reply = timeline.Select(item => item.Event.Value).OfType<MessageEvent>().Single(message => message.Direction == MessageDirection.Outgoing);
         Assert.AreEqual("Danke Ada, Plan gold, verborgen", reply.Body, "Contact locale, masked SSN never substituted.");
-        Assert.IsTrue(timeline.Where(item => item.Event.Value is MessageEvent { Direction: MessageDirection.Outgoing } or StatusChanged).All(item => item.Actor.Id == "agent"));
+        Assert.IsTrue(timeline.Where(item => item.Event.Value is MessageEvent { Direction: MessageDirection.Outgoing } or StatusChanged).All(item => string.Equals(item.Actor.Id, "agent", StringComparison.Ordinal)));
         Assert.IsTrue(timeline.Any(item => item.Event.Value is ExtensionEvent { Kind: AutomationEventCodec.MacroAppliedKind }));
 
         Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>((await MacrosAsync(fixture, service => service.RunAsync(fixture.Viewer, macro.Id, C1))).Value, "Viewers lack macro:run.").Kind);
@@ -133,7 +133,7 @@ public sealed class MacroAndCannedResponseTests
         var request = capture.Requests.Single();
         var body = request.Body;
         var text = Encoding.UTF8.GetString(body);
-        StringAssert.Contains(text, "\"conversation\":\"c1\"");
+        StringAssert.Contains(text, "\"conversation\":\"c1\"", StringComparison.Ordinal);
         Assert.IsFalse(text.Contains("4111", StringComparison.Ordinal), "Webhook payloads never carry message bodies.");
         Assert.IsFalse(text.Contains("Ada", StringComparison.Ordinal));
         var verification = ApiWebhookSignature.Verify(key, request.Headers[ApiWebhookHeaders.Id], request.Headers[ApiWebhookHeaders.Timestamp],

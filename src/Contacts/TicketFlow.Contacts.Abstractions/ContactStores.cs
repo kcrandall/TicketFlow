@@ -78,11 +78,11 @@ public sealed record ContactChangeDraft
     public ContactChangeDraft(Guid id, ContactChangeKind kind, ContactId contact, DateTimeOffset occurredAt, ContactId? related = null, Guid? merge = null)
     {
         if (id == Guid.Empty || merge == Guid.Empty)
-            throw new ArgumentException("Event and merge identifiers must be non-empty.");
+            throw new ArgumentException("Event and merge identifiers must be non-empty.", id == Guid.Empty ? nameof(id) : nameof(merge));
         if (!Enum.IsDefined(kind))
             throw new ArgumentOutOfRangeException(nameof(kind));
         if (contact == default || related == default(ContactId))
-            throw new ArgumentException("Contact identifiers must be initialized.");
+            throw new ArgumentException("Contact identifiers must be initialized.", contact == default ? nameof(contact) : nameof(related));
         Id = id;
         Kind = kind;
         Contact = contact;
@@ -151,13 +151,13 @@ public sealed record ContactAuditEvent
         string? justification = null)
     {
         if (id == Guid.Empty || merge == Guid.Empty)
-            throw new ArgumentException("Event and merge identifiers must be non-empty.");
+            throw new ArgumentException("Event and merge identifiers must be non-empty.", id == Guid.Empty ? nameof(id) : nameof(merge));
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(actor);
         if (!Enum.IsDefined(kind))
             throw new ArgumentOutOfRangeException(nameof(kind));
         if (contact == default(ContactId) || related == default(ContactId))
-            throw new ArgumentException("Contact identifiers must be initialized when supplied.");
+            throw new ArgumentException("Contact identifiers must be initialized when supplied.", contact == default(ContactId) ? nameof(contact) : nameof(related));
         if (count is < 0)
             throw new ArgumentOutOfRangeException(nameof(count));
         Id = id;
@@ -219,18 +219,18 @@ public sealed record ContactWriteBatch
         Changes = changes is null ? [] : [.. changes];
         for (var i = 0; i < Puts.Count; i++)
             if (Puts[i] is null)
-                throw new ArgumentException("Batch entries cannot be null.");
+                throw new ArgumentException("Batch entries cannot be null.", nameof(puts));
         for (var i = 0; i < Deletes.Count; i++)
             if (Deletes[i] is null)
-                throw new ArgumentException("Batch entries cannot be null.");
+                throw new ArgumentException("Batch entries cannot be null.", nameof(deletes));
         for (var i = 0; i < Changes.Count; i++)
             if (Changes[i] is null)
-                throw new ArgumentException("Batch entries cannot be null.");
+                throw new ArgumentException("Batch entries cannot be null.", nameof(changes));
         var total = Puts.Count + Deletes.Count;
         if (total is 0 or > MaximumContacts)
-            throw new ArgumentException($"A batch writes 1-{MaximumContacts} contacts.");
+            throw new ArgumentException($"A batch writes 1-{MaximumContacts} contacts.", nameof(puts));
         if (Changes.Count > MaximumChanges)
-            throw new ArgumentException($"A batch appends at most {MaximumChanges} changes.");
+            throw new ArgumentException($"A batch appends at most {MaximumChanges} changes.", nameof(changes));
         if (total > 1)
         {
             for (var i = 0; i < total; i++)
@@ -240,12 +240,12 @@ public sealed record ContactWriteBatch
                 {
                     var right = j < Puts.Count ? Puts[j].Contact.Id : Deletes[j - Puts.Count].Id;
                     if (left == right)
-                        throw new ArgumentException("A batch writes each contact at most once.");
+                        throw new ArgumentException("A batch writes each contact at most once.", nameof(puts));
                 }
             }
         }
         if (deleteMerge == Guid.Empty || (createMerge is not null && deleteMerge is not null))
-            throw new ArgumentException("A batch creates or deletes at most one merge record.");
+            throw new ArgumentException("A batch creates or deletes at most one merge record.", nameof(deleteMerge));
         CreateMerge = createMerge;
         DeleteMerge = deleteMerge;
         Audit = audit;

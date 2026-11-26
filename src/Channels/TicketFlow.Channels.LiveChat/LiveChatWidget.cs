@@ -50,7 +50,7 @@ public sealed record LiveChatDeflection
     public LiveChatDeflection(PortalId portal, HelpCenterLocale locale, int maximumResults = 5)
     {
         if (!portal.IsInitialized || !locale.IsInitialized)
-            throw new ArgumentException("A portal and locale are required.");
+            throw new ArgumentException("A portal and locale are required.", !portal.IsInitialized ? nameof(portal) : nameof(locale));
         if (maximumResults is < 1 or > 10)
             throw new ArgumentOutOfRangeException(nameof(maximumResults));
         Portal = portal;
@@ -95,7 +95,7 @@ public sealed record LiveChatAttachmentPolicy
 
     public bool Allows(string mediaType) => AllowedMediaTypes.Contains(mediaType, StringComparer.Ordinal);
 
-    public bool Equals(LiveChatAttachmentPolicy? other) => other is not null && MaximumBytes == other.MaximumBytes && AllowedMediaTypes.SequenceEqual(other.AllowedMediaTypes);
+    public bool Equals(LiveChatAttachmentPolicy? other) => other is not null && MaximumBytes == other.MaximumBytes && AllowedMediaTypes.SequenceEqual(other.AllowedMediaTypes, StringComparer.Ordinal);
 
     public override int GetHashCode() => HashCode.Combine(MaximumBytes, AllowedMediaTypes.Count);
 
@@ -200,8 +200,7 @@ public sealed record LiveChatWidget
     public LiveChatIdentityPolicy Identity { get; }
 
     public bool Equals(LiveChatWidget? other) =>
-        other is not null && ConfigurationId == other.ConfigurationId && Inbox == other.Inbox && AllowedOrigins.SequenceEqual(other.AllowedOrigins) && ThemeRef == other.ThemeRef
-        && PrechatFields.SequenceEqual(other.PrechatFields) && GreetingMessage == other.GreetingMessage && AwayMessage == other.AwayMessage && Deflection == other.Deflection
+        other is not null && string.Equals(ConfigurationId, other.ConfigurationId, StringComparison.Ordinal) && Inbox == other.Inbox && AllowedOrigins.SequenceEqual(other.AllowedOrigins, StringComparer.Ordinal) && string.Equals(ThemeRef, other.ThemeRef, StringComparison.Ordinal) && PrechatFields.SequenceEqual(other.PrechatFields) && string.Equals(GreetingMessage, other.GreetingMessage, StringComparison.Ordinal) && string.Equals(AwayMessage, other.AwayMessage, StringComparison.Ordinal) && Deflection == other.Deflection
         && Equals(Attachments, other.Attachments) && Identity == other.Identity;
 
     public override int GetHashCode() => HashCode.Combine(ConfigurationId, Inbox, AllowedOrigins.Count, PrechatFields.Count);
@@ -224,7 +223,7 @@ public static class LiveChatOrigin
         if (string.IsNullOrEmpty(origin) || origin.Length > 512 || !Uri.TryCreate(origin, UriKind.Absolute, out var uri))
             return null;
         if (uri.Scheme is not ("http" or "https") || uri.UserInfo.Length > 0 || uri.Query.Length > 0 || uri.Fragment.Length > 0
-            || uri.AbsolutePath != "/" || origin.Contains('@') || string.IsNullOrEmpty(uri.IdnHost))
+            || !string.Equals(uri.AbsolutePath, "/", StringComparison.Ordinal) || origin.Contains('@') || string.IsNullOrEmpty(uri.IdnHost))
             return null;
         var host = uri.HostNameType == UriHostNameType.IPv6 ? $"[{uri.IdnHost.Trim('[', ']')}]" : uri.IdnHost.ToLowerInvariant();
         return uri.IsDefaultPort ? $"{uri.Scheme}://{host}" : $"{uri.Scheme}://{host}:{uri.Port}";

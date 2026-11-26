@@ -24,7 +24,7 @@ public sealed class SupportEndpointTests
             id = "office",
             name = "Office",
             timeZoneId = "UTC",
-            schedule = JsonDocument.Parse("""{"v":1,"week":[{"d":1,"s":540,"e":1020}],"overrides":[]}""").RootElement,
+            schedule = JsonElement.Parse("""{"v":1,"week":[{"d":1,"s":540,"e":1020}],"overrides":[]}"""),
         }));
         Assert.AreEqual(HttpStatusCode.Created, calendar.StatusCode);
         Assert.AreEqual(540, (await JsonAsync(calendar)).GetProperty("schedule").GetProperty("week")[0].GetProperty("s").GetInt32());
@@ -43,7 +43,7 @@ public sealed class SupportEndpointTests
         Assert.AreEqual("g-triage", listed.GetProperty("items")[0].GetProperty("id").GetString());
         Assert.AreEqual("allow", listed.GetProperty("items")[0].GetProperty("effect").GetString());
         var roles = await JsonAsync(await owner.GetAsync($"{Api}/access/roles"));
-        Assert.IsTrue(roles.GetProperty("items").EnumerateArray().Any(item => item.GetProperty("id").GetString() == "owner" && item.GetProperty("builtIn").GetBoolean()));
+        Assert.IsTrue(roles.GetProperty("items").EnumerateArray().Any(item => string.Equals(item.GetProperty("id").GetString(), "owner", StringComparison.Ordinal) && item.GetProperty("builtIn").GetBoolean()));
 
         Assert.AreEqual(HttpStatusCode.Forbidden, (await host.Client("agent").GetAsync($"{Api}/access/roles")).StatusCode);
         Assert.AreEqual(HttpStatusCode.Forbidden, (await host.Client("agent").SendAsync(Request(HttpMethod.Post, $"{Api}/access/roles",
@@ -62,7 +62,7 @@ public sealed class SupportEndpointTests
                 id,
                 name = id,
                 timeZoneId = "UTC",
-                schedule = JsonDocument.Parse("""{"v":1,"week":[],"overrides":[]}""").RootElement,
+                schedule = JsonElement.Parse("""{"v":1,"week":[],"overrides":[]}"""),
             }))).StatusCode);
         var first = await JsonAsync(await owner.GetAsync($"{Api}/calendars?limit=2"));
         Assert.AreEqual(2, first.GetProperty("items").GetArrayLength());
@@ -135,7 +135,7 @@ public sealed class SupportEndpointTests
         Assert.IsTrue(export.Headers.Contains("X-TicketFlow-Audit-Event"));
         var lines = (await export.Content.ReadAsStringAsync()).Split('\n', StringSplitOptions.RemoveEmptyEntries);
         Assert.HasCount(1, lines);
-        Assert.AreEqual("c1", JsonDocument.Parse(lines[0]).RootElement.GetProperty("id").GetString());
+        Assert.AreEqual("c1", JsonElement.Parse(lines[0]).GetProperty("id").GetString());
         Assert.AreEqual(HttpStatusCode.Forbidden, (await host.Client("agent").SendAsync(Request(HttpMethod.Post, $"{Api}/contacts/export",
             new { maximumContacts = 10, justification = "quarterly audit export" }))).StatusCode);
     }
@@ -176,7 +176,7 @@ public sealed class SupportEndpointTests
         var kinds = timeline.GetProperty("events").EnumerateArray().Select(item => item.GetProperty("kind").GetString()).ToList();
         CollectionAssert.Contains(kinds, "message");
         CollectionAssert.Contains(kinds, "note");
-        var message = timeline.GetProperty("events").EnumerateArray().First(item => item.GetProperty("kind").GetString() == "message").GetProperty("message");
+        var message = timeline.GetProperty("events").EnumerateArray().First(item => string.Equals(item.GetProperty("kind").GetString(), "message", StringComparison.Ordinal)).GetProperty("message");
         Assert.AreEqual("We are on it.", message.GetProperty("body").GetString());
         Assert.AreEqual("outgoing", message.GetProperty("direction").GetString());
         Assert.AreEqual("pending", message.GetProperty("delivery").GetProperty("state").GetString());

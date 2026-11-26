@@ -90,7 +90,7 @@ internal static class TicketFlowToolListFilter
 
     private static Tool CloneWith(Tool tool, bool permitted)
     {
-        var info = (JsonTypeInfo<Tool>)McpJsonUtilities.DefaultOptions.GetTypeInfo(typeof(Tool));
+        var info = McpJsonUtilities.DefaultOptions.GetTypeInfo<Tool>();
         var clone = JsonSerializer.Deserialize(JsonSerializer.SerializeToUtf8Bytes(tool, info), info)!;
         var meta = clone.Meta ?? [];
         meta["ticketflow/permitted"] = permitted;

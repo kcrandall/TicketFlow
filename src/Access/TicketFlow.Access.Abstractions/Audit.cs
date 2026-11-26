@@ -107,7 +107,7 @@ public sealed record AccessAuditEvent
             throw new ArgumentOutOfRangeException(nameof(denialReason));
         if (permission is { IsInitialized: false } || team == default(TeamId) || inbox == default(InboxId) || grant is { IsInitialized: false }
             || role is { IsInitialized: false } || field is { IsInitialized: false })
-            throw new ArgumentException("Supplied identifiers must be initialized.");
+            throw new ArgumentException("Supplied identifiers must be initialized.", nameof(grant));
         Id = id;
         OccurredAt = new DateTimeOffset(occurredAt.UtcTicks - occurredAt.UtcTicks % 10, TimeSpan.Zero);
         Scope = scope;

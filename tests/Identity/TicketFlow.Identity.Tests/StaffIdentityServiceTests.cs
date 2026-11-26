@@ -76,14 +76,14 @@ public sealed class StaffIdentityServiceTests
     private sealed class FixedTeams : ITeamMembershipResolver
     {
         public Task<IReadOnlyList<TeamId>> GetTeamsAsync(TicketScope scope, UserId user, CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<TeamId>>(user.Value == "teamed" ? [new TeamId("escalation")] : []);
+            Task.FromResult<IReadOnlyList<TeamId>>(string.Equals(user.Value, "teamed", StringComparison.Ordinal) ? [new TeamId("escalation")] : []);
     }
 
     private static string Describe<T>(TicketResult<T> result) => result switch
     {
         TicketValue<T> => "applied",
-        TicketFailure refused => refused.Code == "taken"
-            ? "refused:Taken"
+        TicketFailure refused => string.Equals(refused.Code, "taken"
+, StringComparison.Ordinal) ? "refused:Taken"
             : $"refused:{refused.Kind}" + (refused.CurrentRevision is { } revision ? $":{revision}" : ""),
     };
 
@@ -102,8 +102,8 @@ public sealed class StaffIdentityServiceTests
         Assert.ThrowsExactly<ArgumentException>(() => new StaffIdentityRef("google", new string('x', 257)));
         Assert.ThrowsExactly<ArgumentException>(() => new StaffProfile(new UserId("a"), notificationEmail: "not-an-email"));
         Assert.ThrowsExactly<ArgumentException>(() => new StaffProfile(new UserId("a"), displayName: "lone \ud800"));
-        Assert.DoesNotContain("sub-ada", Google.ToString());
-        Assert.DoesNotContain("ada@example.com", new StaffProfile(new UserId("a"), notificationEmail: "ada@example.com").ToString());
+        Assert.DoesNotContain("sub-ada", Google.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("ada@example.com", new StaffProfile(new UserId("a"), notificationEmail: "ada@example.com").ToString(), StringComparison.Ordinal);
         Assert.IsTrue(StaffIdentityPermissions.Definitions.Single().IsSensitive);
     }
 

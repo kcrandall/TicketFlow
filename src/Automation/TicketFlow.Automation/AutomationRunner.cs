@@ -198,7 +198,7 @@ public sealed class AutomationRunner
         for (var i = 0; i < execution.Outcomes.Count; i++)
             outcomes.Add(execution.Outcomes[i]);
         var actionNeeds = AutomationContextNeedsHelper.ForActions(rule.Actions);
-        var agentName = (actionNeeds & AutomationContextNeeds.AgentName) != 0 && context.Conversation.Assignee is { } assignee && agents is not null
+        var agentName = (actionNeeds & AutomationContextNeeds.AgentName) != TicketFlow.Automation.AutomationContextNeeds.None && context.Conversation.Assignee is { } assignee && agents is not null
             ? await agents.GetDisplayNameAsync(scope, assignee, cancellationToken).ConfigureAwait(false)
             : null;
         var conversationDirty = false;

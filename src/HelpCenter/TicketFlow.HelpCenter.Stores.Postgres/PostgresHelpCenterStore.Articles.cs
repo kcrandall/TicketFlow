@@ -91,7 +91,7 @@ public sealed partial class PostgresHelpCenterStore
         if (Miss<StoredArticle>(existing?.Revision, expectedRevision) is { } miss)
             return miss;
         var current = existing!.Value;
-        if (current.Portal != article.Portal.Value || await InvalidReferencesAsync(connection, transaction, scope, article, cancellationToken).ConfigureAwait(false))
+        if (!string.Equals(current.Portal, article.Portal.Value, StringComparison.Ordinal) || await InvalidReferencesAsync(connection, transaction, scope, article, cancellationToken).ConfigureAwait(false))
             return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.InvalidReference);
         if (appendRevision is not null || record.PublishedRevision != current.PublishedRevision)
         {
@@ -138,7 +138,7 @@ public sealed partial class PostgresHelpCenterStore
         else if (wasPublished && nowPublished && appendRevision is null && record.PublishedRevision == current.PublishedRevision)
         {
             // Draft-only edit of an already-published article: only update collection/position if they changed.
-            if (current.Collection != article.Collection?.Value || current.Position != article.Position)
+            if (!string.Equals(current.Collection, article.Collection?.Value, StringComparison.Ordinal) || current.Position != article.Position)
             {
                 await using var syncMeta = new NpgsqlCommand(
                     $"UPDATE tf_helpcenter_published SET collection_id=@collection, position=@position WHERE {ArticleKeyWhere}", connection, transaction);
@@ -165,7 +165,7 @@ public sealed partial class PostgresHelpCenterStore
                 {
                     await InsertPublishedBatchAsync(connection, transaction, scope, record, revision!, cancellationToken).ConfigureAwait(false);
                 }
-                catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == "tf_helpcenter_published_slug")
+                catch (PostgresException error) when (string.Equals(error.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(error.ConstraintName, "tf_helpcenter_published_slug", StringComparison.Ordinal))
                 {
                     // The transaction is aborted; disposing it rolls back the revision insert and article update.
                     return new StoreRejected<HelpCenterWriteRejection>(HelpCenterWriteRejection.SlugConflict);
@@ -346,7 +346,7 @@ public sealed partial class PostgresHelpCenterStore
         await using var reader = await command.ExecuteReaderAsync(System.Data.CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
             ? new ArticleRow(reader.GetInt64(0), reader.GetString(1), (ArticleState)reader.GetInt16(2),
-                reader.IsDBNull(3) ? null : reader.GetInt32(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetInt32(5))
+                await reader.IsDBNullAsync(3, cancellationToken).ConfigureAwait(false) ? null : reader.GetInt32(3), await reader.IsDBNullAsync(4, cancellationToken).ConfigureAwait(false) ? null : reader.GetString(4), reader.GetInt32(5))
             : null;
     }
 
@@ -355,7 +355,7 @@ public sealed partial class PostgresHelpCenterStore
         if (await PortalRevisionAsync(connection, transaction, scope, article.Portal, cancellationToken).ConfigureAwait(false) is null)
             return true;
         return article.Collection is { } collection
-            && (await CollectionStateAsync(connection, transaction, scope, collection, cancellationToken).ConfigureAwait(false) is not { } stored || stored.Portal != article.Portal.Value);
+            && (await CollectionStateAsync(connection, transaction, scope, collection, cancellationToken).ConfigureAwait(false) is not { } stored || !string.Equals(stored.Portal, article.Portal.Value, StringComparison.Ordinal));
     }
 
     private static void BindArticleKey(NpgsqlCommand command, TicketScope scope, ArticleId id)

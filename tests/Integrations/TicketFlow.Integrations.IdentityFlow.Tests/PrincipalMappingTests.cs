@@ -252,7 +252,7 @@ public sealed class PrincipalMappingTests
         public Task<UserId?> ResolveUserAsync(TicketScope scope, StaffIdentityRef identity, CancellationToken cancellationToken = default)
         {
             Last = identity;
-            return Task.FromResult<UserId?>(identity.Subject == Subject ? new UserId("agent-ada") : null);
+            return Task.FromResult<UserId?>(string.Equals(identity.Subject, Subject, StringComparison.Ordinal) ? new UserId("agent-ada") : null);
         }
     }
 

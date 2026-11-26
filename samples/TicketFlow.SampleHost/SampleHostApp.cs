@@ -275,7 +275,7 @@ public sealed record SampleSettings(bool UsePostgres, AccessPartition Partition,
         var partition = new AccessPartition(configuration["TicketFlow:Partition:Tenant"] ?? "sample", configuration["TicketFlow:Partition:Project"] ?? "support",
             configuration["TicketFlow:Partition:Environment"] ?? "development", configuration["TicketFlow:Partition:App"] ?? "web");
         var origins = configuration.GetSection("TicketFlow:WidgetOrigins").Get<string[]>() is { Length: > 0 } configured ? configured : ["http://localhost:5080"];
-        return new SampleSettings(storage == "Postgres", partition, new WorkspaceId(configuration["TicketFlow:Workspace"] ?? "acme"), origins,
+        return new SampleSettings(string.Equals(storage, "Postgres", StringComparison.Ordinal), partition, new WorkspaceId(configuration["TicketFlow:Workspace"] ?? "acme"), origins,
             configuration["TicketFlow:WidgetPath"] ?? "../../clients/widget/dist", configuration.GetValue<bool>("TicketFlow:SeedOnStartup"));
     }
 }
@@ -292,7 +292,7 @@ internal sealed class PostgresHealthCheck(NpgsqlDataSource dataSource) : IHealth
         }
         catch (NpgsqlException error)
         {
-            return HealthCheckResult.Unhealthy("PostgreSQL is unreachable.", data: new Dictionary<string, object> { ["error"] = error.GetType().Name });
+            return HealthCheckResult.Unhealthy("PostgreSQL is unreachable.", data: new Dictionary<string, object>(StringComparer.Ordinal) { ["error"] = error.GetType().Name });
         }
     }
 }
@@ -306,7 +306,7 @@ internal static class HealthResponses
         return http.Response.WriteAsJsonAsync(new
         {
             status = report.Status.ToString(),
-            checks = report.Entries.ToDictionary(entry => entry.Key, entry => new { status = entry.Value.Status.ToString(), data = entry.Value.Data }),
+            checks = report.Entries.ToDictionary(entry => entry.Key, entry => new { status = entry.Value.Status.ToString(), data = entry.Value.Data }, StringComparer.Ordinal),
         });
     }
 }

@@ -109,7 +109,7 @@ internal sealed class EventsFixture : IDisposable
         services.AddSingleton<IEventSubscriber>(subscriber);
         services.AddSingleton<IEventSink>(new SplittingSink(subscriber));
         services.AddSingleton<ISurveyInvitationSender, NoSurveySender>();
-        var storage = StoreFactory is { } factory ? await factory(services.AddTicketFlow()) : null;
+        var createdStorage = StoreFactory is { } factory ? await factory(services.AddTicketFlow()) : null;
         services.AddTicketFlow()
             .AddAccessControl().AddInMemoryAccessStores()
             .AddWorkspaces().AddInMemoryWorkspaceStores()
@@ -125,7 +125,7 @@ internal sealed class EventsFixture : IDisposable
             }).AddInMemoryEventStores();
         var fixture = new EventsFixture(services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true }), clock, subscriber, surveys)
         {
-            storage = storage,
+            storage = createdStorage,
         };
         await fixture.GrantAsync(new UserId("owner"), BuiltInRoles.Owner);
         await fixture.GrantAsync(new UserId("agent"), BuiltInRoles.Agent);
@@ -256,6 +256,7 @@ internal sealed class EventsFixture : IDisposable
         TicketFailure failure => throw new AssertFailedException($"Failed: {failure.Kind} {string.Join("; ", failure.Errors)}"),
     };
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "VSTHRD002:Avoid problematic synchronous waits", Justification = "Synchronous IDisposable bridge for optional async test storage.")]
     public void Dispose()
     {
         Provider.Dispose();

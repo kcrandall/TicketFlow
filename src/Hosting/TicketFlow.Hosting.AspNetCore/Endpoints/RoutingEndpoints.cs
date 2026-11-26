@@ -98,7 +98,7 @@ internal static class RoutingEndpoints
             return Map(http, await service.AcquireReplyLockAsync(actor.Principal, new ConversationId(conversationId), duration, http.RequestAborted), result => result switch
             {
                 ReplyLockAcquired acquired => TicketFlowHttp.Ok(http, new ReplyLockAcquireResponse(true, acquired.Renewed, Dto(acquired.Lock)), acquired.Lock.Fence),
-                ReplyLockHeld held => TicketFlowHttp.Problem(StatusCodes.Status409Conflict, "reply-lock-held", extensions: new Dictionary<string, object?> { ["lock"] = Dto(held.Current) }),
+                ReplyLockHeld held => TicketFlowHttp.Problem(StatusCodes.Status409Conflict, "reply-lock-held", extensions: new Dictionary<string, object?>(StringComparer.Ordinal) { ["lock"] = Dto(held.Current) }),
             });
         }).WithName("AcquireReplyLock").Produces<ReplyLockAcquireResponse>();
         group.MapDelete("/conversations/{conversationId}/reply-lock", async (TicketFlowActor actor, string conversationId, [FromServices] IConversationCollisionService service, HttpContext http) =>

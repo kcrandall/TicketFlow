@@ -138,7 +138,7 @@ internal static class HelpCenterEndpoints
         [.. stored.Portal.SupportedLocales.Select(locale => locale.Value)], TicketFlowHttp.Token(stored.Portal.Visibility), stored.Portal.CustomDomain, stored.Revision);
 
     private static HelpCollection Collection(string id, CollectionRequest request) => new(new CollectionId(id), new PortalId(request.PortalId),
-        (request.Translations ?? throw new ArgumentException("Translations are required.", nameof(request.Translations)))
+        (request.Translations ?? throw new ArgumentException("Translations are required.", nameof(request)))
             .Select(translation => new CollectionTranslation(new HelpCenterLocale(translation.Locale), translation.Name, new HelpCenterSlug(translation.Slug), translation.Description)),
         request.ParentId is null ? null : new CollectionId(request.ParentId), request.Position);
 
@@ -147,7 +147,7 @@ internal static class HelpCenterEndpoints
         stored.Revision);
 
     private static Article Article(string id, ArticleRequest request) => new(new ArticleId(id), new PortalId(request.PortalId),
-        (request.Translations ?? throw new ArgumentException("Translations are required.", nameof(request.Translations))).Select(Translation),
+        (request.Translations ?? throw new ArgumentException("Translations are required.", nameof(request))).Select(Translation),
         request.CollectionId is null ? null : new CollectionId(request.CollectionId), request.Position);
 
     private static ArticleTranslation Translation(ArticleTranslationModel dto) =>

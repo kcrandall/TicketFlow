@@ -66,7 +66,7 @@ public static class UiNavigation
     /// <summary>The default landing path for <paramref name="section"/> given the viewer's permissions.</summary>
     public static string SectionPath(TicketFlowUISession session, UiSection section)
     {
-        if (section.Key == "access" && !session.Can(AccessPermissions.AccessManage))
+        if (string.Equals(section.Key, "access", StringComparison.Ordinal) && !session.Can(AccessPermissions.AccessManage))
         {
             if (session.Can(AccessPermissions.AccessManageTenant))
             {
@@ -87,7 +87,7 @@ public static class UiNavigation
 
     private static bool AllowsRoute(TicketFlowUISession session, UiRoute route)
     {
-        if (route.Section != "access")
+        if (!string.Equals(route.Section, "access", StringComparison.Ordinal))
             return true;
 
         return route.Pattern switch

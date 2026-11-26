@@ -175,7 +175,7 @@ public sealed record Contact
         for (var i = 0; i < AttributeKeys.Count; i++)
         {
             var key = AttributeKeys[i];
-            if (!string.Equals(key, other.AttributeKeys[i], StringComparison.Ordinal) || !Attributes[key].Equals(other.Attributes[key]))
+            if (!string.Equals(key, other.AttributeKeys[i], StringComparison.Ordinal) || !Equals(Attributes[key].Value, other.Attributes[key].Value))
                 return false;
         }
         return true;
@@ -187,11 +187,11 @@ public sealed record Contact
 
     private static DateTimeOffset Max(DateTimeOffset left, DateTimeOffset right) => left >= right ? left : right;
 
-    private static IReadOnlyList<ContactIdentity> NormalizeIdentities(IEnumerable<ContactIdentity> identities, ContactId? mergedInto)
+    private static ReadOnlyCollection<ContactIdentity> NormalizeIdentities(IEnumerable<ContactIdentity> identities, ContactId? mergedInto)
     {
         var capacity = identities.TryGetNonEnumeratedCount(out var count) ? Math.Min(count, MaximumIdentities) : 0;
         if (capacity == 0 && identities is ICollection<ContactIdentity> { Count: 0 } or IReadOnlyCollection<ContactIdentity> { Count: 0 })
-            return [];
+            return ReadOnlyCollection<ContactIdentity>.Empty;
         var list = capacity > 0 ? new List<ContactIdentity>(capacity) : [];
         HashSet<ContactIdentityAddress>? addresses = capacity > 1 ? new(capacity) : null;
         foreach (var identity in identities)
@@ -211,7 +211,7 @@ public sealed record Contact
             list.Add(identity);
         }
         if (list.Count == 0)
-            return [];
+            return ReadOnlyCollection<ContactIdentity>.Empty;
         if (mergedInto is not null)
             throw new ArgumentException("A merge tombstone holds no identities.", nameof(identities));
         if (list.Count > 1)
@@ -254,11 +254,11 @@ public sealed record Contact
         return (new ReadOnlyDictionary<string, ContactAttributeValue>(map), keys);
     }
 
-    private static IReadOnlyList<LabelId> NormalizeLabels(IEnumerable<LabelId> labels)
+    private static ReadOnlyCollection<LabelId> NormalizeLabels(IEnumerable<LabelId> labels)
     {
         var capacity = labels.TryGetNonEnumeratedCount(out var count) ? Math.Min(count, MaximumLabels) : 0;
         if (capacity == 0 && labels is ICollection<LabelId> { Count: 0 } or IReadOnlyCollection<LabelId> { Count: 0 })
-            return [];
+            return ReadOnlyCollection<LabelId>.Empty;
         var list = capacity > 0 ? new List<LabelId>(capacity) : [];
         foreach (var label in labels)
         {
@@ -267,7 +267,7 @@ public sealed record Contact
             list.Add(label);
         }
         if (list.Count == 0)
-            return [];
+            return ReadOnlyCollection<LabelId>.Empty;
         if (list.Count == 1)
             return list.AsReadOnly();
         list.Sort(static (left, right) => string.CompareOrdinal(left.Value, right.Value));

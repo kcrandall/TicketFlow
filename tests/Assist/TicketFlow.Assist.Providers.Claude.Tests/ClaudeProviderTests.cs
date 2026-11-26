@@ -6,7 +6,7 @@ namespace TicketFlow.Assist.Providers.Claude.Tests;
 [TestClass]
 public sealed class ClaudeProviderTests
 {
-    private static readonly AssistModelDefinition Haiku = ClaudeAssistProvider.DefaultModels.Single(model => model.Id == ClaudeAssistOptions.HaikuModel);
+    private static readonly AssistModelDefinition Haiku = ClaudeAssistProvider.DefaultModels.Single(model => string.Equals(model.Id, ClaudeAssistOptions.HaikuModel, StringComparison.Ordinal));
     private const string Schema = """{"type":"object","properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false}""";
 
     private static (ClaudeAssistProvider Provider, FakeAnthropicHandler Handler, InstantTimeProvider Time) Create(Action<ClaudeAssistOptions>? configure = null, TimeSpan? fireThreshold = null)
@@ -26,7 +26,7 @@ public sealed class ClaudeProviderTests
             ModelId = Haiku.ProviderModel,
             Instructions = instructions,
             MaxOutputTokens = 2048,
-            ResponseFormat = ChatResponseFormat.ForJsonSchema(JsonDocument.Parse(Schema).RootElement.Clone(), "triage"),
+            ResponseFormat = ChatResponseFormat.ForJsonSchema(JsonElement.Parse(Schema), "triage"),
             Reasoning = thinking is null ? null : new ReasoningOptions { Effort = ReasoningEffort.Low },
         };
         return await provider.CreateClient(Haiku).GetResponseAsync([new ChatMessage(ChatRole.User, "<task>x</task>")], provider.ApplyOptions(Haiku, request, options));
@@ -42,7 +42,7 @@ public sealed class ClaudeProviderTests
 
         var (request, body) = handler.Requests.Single();
         Assert.AreEqual(HttpMethod.Post, request.Method);
-        Assert.EndsWith("/v1/messages", request.RequestUri!.AbsolutePath);
+        Assert.EndsWith("/v1/messages", request.RequestUri!.AbsolutePath, StringComparison.Ordinal);
         Assert.IsTrue(request.Headers.Contains("anthropic-version"));
         Assert.AreEqual("Bearer sk-test-not-real", string.Join(",", request.Headers.GetValues("Authorization")));
         using var json = JsonDocument.Parse(body);
@@ -60,10 +60,10 @@ public sealed class ClaudeProviderTests
         var output = root.GetProperty("output_config");
         Assert.AreEqual("low", output.GetProperty("effort").GetString());
         Assert.AreEqual("json_schema", output.GetProperty("format").GetProperty("type").GetString());
-        Assert.AreEqual(JsonSerializer.Serialize(JsonDocument.Parse(Schema).RootElement), JsonSerializer.Serialize(output.GetProperty("format").GetProperty("schema")));
+        Assert.AreEqual(JsonSerializer.Serialize(JsonElement.Parse(Schema)), JsonSerializer.Serialize(output.GetProperty("format").GetProperty("schema")));
         Assert.AreEqual("adaptive", root.GetProperty("thinking").GetProperty("type").GetString(), "the SDK adapter maps reasoning options to adaptive thinking");
         Assert.IsFalse(root.TryGetProperty("temperature", out _));
-        Assert.DoesNotContain("sk-test-not-real", body);
+        Assert.DoesNotContain("sk-test-not-real", body, StringComparison.Ordinal);
 
         Assert.AreEqual("""{"a":"x"}""", response.Text);
         Assert.AreEqual(ChatFinishReason.Stop, response.FinishReason);
@@ -106,7 +106,7 @@ public sealed class ClaudeProviderTests
         Assert.AreEqual(retryable, error.Retryable);
         Assert.AreEqual(status, error.StatusCode);
         Assert.HasCount(1, handler.Requests);
-        Assert.DoesNotContain("secret-detail", error.Message);
+        Assert.DoesNotContain("secret-detail", error.Message, StringComparison.Ordinal);
         Assert.IsFalse(error.TokensMayHaveBeenConsumed, "an error status means nothing was generated");
     }
 
@@ -129,7 +129,7 @@ public sealed class ClaudeProviderTests
         Assert.IsTrue(delays[0] >= TimeSpan.FromMilliseconds(500) && delays[0] <= TimeSpan.FromSeconds(1), $"first backoff {delays[0]}");
         Assert.IsTrue(delays[1] >= TimeSpan.FromSeconds(1) && delays[1] <= TimeSpan.FromSeconds(2), $"second backoff {delays[1]}");
         CollectionAssert.AreEqual(new[] { "0", "1", "2" }, handler.Requests.Select(request => request.Request.Headers.GetValues("x-stainless-retry-count").Single()).ToArray());
-        Assert.IsTrue(handler.Requests.All(request => request.Body == handler.Requests[0].Body), "the same body is replayed");
+        Assert.IsTrue(handler.Requests.All(request => string.Equals(request.Body, handler.Requests[0].Body, StringComparison.Ordinal)), "the same body is replayed");
     }
 
     [TestMethod]
@@ -196,7 +196,7 @@ public sealed class ClaudeProviderTests
         var call = provider.CreateClient(Haiku).GetResponseAsync([new ChatMessage(ChatRole.User, "x")], provider.ApplyOptions(Haiku, request, new ChatOptions { MaxOutputTokens = 10 }), cancellation.Token);
         while (handler.Requests.Count == 0)
             await Task.Yield();
-        cancellation.Cancel();
+        await cancellation.CancelAsync();
         await Assert.ThrowsAsync<OperationCanceledException>(() => call);
     }
 
@@ -230,6 +230,6 @@ public sealed class ClaudeProviderTests
         Assert.ThrowsExactly<InvalidOperationException>(() => new ClaudeAssistProvider(new ClaudeAssistOptions { MaxRetries = 7 }, new FakeAnthropicHandler()));
         Assert.ThrowsExactly<InvalidOperationException>(() => new ClaudeAssistProvider(new ClaudeAssistOptions { AttemptTimeout = TimeSpan.FromMinutes(5), TotalTimeout = TimeSpan.FromMinutes(1) }, new FakeAnthropicHandler()));
         Assert.HasCount(3, ClaudeAssistProvider.DefaultModels);
-        Assert.IsTrue(ClaudeAssistProvider.DefaultModels.All(model => model.Provider == ClaudeAssistOptions.ProviderName && model.Capabilities.HasFlag(AssistModelCapabilities.PromptCaching)));
+        Assert.IsTrue(ClaudeAssistProvider.DefaultModels.All(model => string.Equals(model.Provider, ClaudeAssistOptions.ProviderName, StringComparison.Ordinal) && model.Capabilities.HasFlag(AssistModelCapabilities.PromptCaching)));
     }
 }

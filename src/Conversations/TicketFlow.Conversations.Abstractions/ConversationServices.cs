@@ -75,7 +75,7 @@ public sealed record DeliveryStatusUpdate
     public static DeliveryStatusUpdate ByMessage(ConversationId conversation, MessageId message, MessageDeliveryState state, string? failureCode = null, string? providerMessageId = null)
     {
         if (conversation == default || message == default)
-            throw new ArgumentException("Conversation and message identifiers are required.");
+            throw new ArgumentException("Conversation and message identifiers are required.", conversation == default ? nameof(conversation) : nameof(message));
         return new(conversation, message, null, null, state, failureCode, providerMessageId);
     }
 

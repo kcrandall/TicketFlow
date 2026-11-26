@@ -215,7 +215,7 @@ public sealed record MessageEvent
 
     public bool Equals(MessageEvent? other)
     {
-        if (other is null || Id != other.Id || Direction != other.Direction || !Sender.Equals(other.Sender) || !string.Equals(Body, other.Body, StringComparison.Ordinal)
+        if (other is null || Id != other.Id || Direction != other.Direction || !Equals(Sender.Value, other.Sender.Value) || !string.Equals(Body, other.Body, StringComparison.Ordinal)
             || ContentType != other.ContentType || Attachments.Count != other.Attachments.Count || !string.Equals(ExternalId, other.ExternalId, StringComparison.Ordinal)
             || Delivery != other.Delivery)
             return false;
@@ -246,7 +246,7 @@ public sealed record NoteEvent
     public string Body { get; }
     public IReadOnlyList<AttachmentRef> Attachments { get; }
 
-    public bool Equals(NoteEvent? other) => other is not null && Id == other.Id && Body == other.Body && Attachments.SequenceEqual(other.Attachments);
+    public bool Equals(NoteEvent? other) => other is not null && Id == other.Id && string.Equals(Body, other.Body, StringComparison.Ordinal) && Attachments.SequenceEqual(other.Attachments);
 
     public override int GetHashCode() => HashCode.Combine(Id, Body.Length);
 
@@ -271,7 +271,7 @@ public sealed record LabelsChanged
         Added = Normalize(added);
         Removed = Normalize(removed);
         if (Added.Count + Removed.Count == 0 || Added.Count + Removed.Count > 2 * Conversation.MaximumLabels)
-            throw new ArgumentException("Label changes must be initialized, disjoint and non-empty.");
+            throw new ArgumentException("Label changes must be initialized, disjoint and non-empty.", nameof(added));
         if (Added.Count > 0 && Removed.Count > 0)
         {
             int i = 0, j = 0;
@@ -279,7 +279,7 @@ public sealed record LabelsChanged
             {
                 var cmp = string.CompareOrdinal(Added[i].Value, Removed[j].Value);
                 if (cmp == 0)
-                    throw new ArgumentException("Label changes must be initialized, disjoint and non-empty.");
+                    throw new ArgumentException("Label changes must be initialized, disjoint and non-empty.", nameof(removed));
                 if (cmp < 0)
                     i++;
                 else
@@ -288,17 +288,17 @@ public sealed record LabelsChanged
         }
     }
 
-    private static IReadOnlyList<LabelId> Normalize(IEnumerable<LabelId> source)
+    private static System.Collections.ObjectModel.ReadOnlyCollection<LabelId> Normalize(IEnumerable<LabelId> source)
     {
         var list = new List<LabelId>();
         foreach (var label in source)
         {
             if (label == default)
-                throw new ArgumentException("Label changes must be initialized, disjoint and non-empty.");
+                throw new ArgumentException("Label changes must be initialized, disjoint and non-empty.", nameof(source));
             list.Add(label);
         }
         if (list.Count == 0)
-            return [];
+            return System.Collections.ObjectModel.ReadOnlyCollection<LabelId>.Empty;
         if (list.Count == 1)
             return list.AsReadOnly();
         list.Sort(static (a, b) => string.CompareOrdinal(a.Value, b.Value));
@@ -326,7 +326,7 @@ public sealed record AttributeChanged
     {
         Key = ConversationAttributeDefinition.RequireKey(key, nameof(key));
         if (previous is { Value: null } || current is { Value: null })
-            throw new ArgumentException("Attribute values must be initialized when supplied.");
+            throw new ArgumentException("Attribute values must be initialized when supplied.", previous is { Value: null } ? nameof(previous) : nameof(current));
         Previous = previous;
         Current = current;
     }
@@ -366,7 +366,7 @@ public sealed record ContactChanged
     public ContactChanged(ContactId previous, ContactId current, Guid? merge)
     {
         if (previous == default || current == default || previous == current || merge == Guid.Empty)
-            throw new ArgumentException("Contact changes name two different contacts and a non-empty merge identifier when supplied.");
+            throw new ArgumentException("Contact changes name two different contacts and a non-empty merge identifier when supplied.", previous == default ? nameof(previous) : merge == Guid.Empty ? nameof(merge) : nameof(current));
         Previous = previous;
         Current = current;
         Merge = merge;

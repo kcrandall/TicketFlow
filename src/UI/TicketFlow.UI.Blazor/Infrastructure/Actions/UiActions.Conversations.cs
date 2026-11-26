@@ -62,7 +62,7 @@ public static partial class UiActions
             return UiOutcome.NotFound();
         var body = context.Raw("body") is { } raw && raw.Trim().Length > 0 ? raw.Trim() : throw new UiInputException("Write a message before sending.");
         var id = ConversationFromPath(context);
-        var note = context.Text("kind") == "note";
+        var note = string.Equals(context.Text("kind"), "note", StringComparison.Ordinal);
         var revision = context.RequireRevision();
         var result = note
             ? await service.AddNoteAsync(context.Actor, id, new NoteDraft(body), revision, context.Aborted)

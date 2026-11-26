@@ -25,8 +25,8 @@ public sealed class IdentityLinkingTests
         return host;
     }
 
-    private static Task<VisitorSessionContext> IdentifyAsync(LiveChatHost host, VisitorSessionContext context) =>
-        Task.FromResult(Value(host.Visitors.IdentifyAsync(context, new HmacVisitorIdentification("user-42", VisitorIdentityHmac.Compute(Secret, "user-42"))).GetAwaiter().GetResult()));
+    private static async Task<VisitorSessionContext> IdentifyAsync(LiveChatHost host, VisitorSessionContext context) =>
+        Value(await host.Visitors.IdentifyAsync(context, new HmacVisitorIdentification("user-42", VisitorIdentityHmac.Compute(Secret, "user-42"))));
 
     private static async Task<ContactId> ContactOfAsync(LiveChatHost host, ConversationId conversation) =>
         (await host.Host.Services.GetRequiredService<IConversationStore>().GetAsync(host.Scope, conversation))!.Conversation.Contact;

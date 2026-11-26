@@ -69,7 +69,7 @@ public sealed class MaskingTests
 
         var events = fixture.Audit.Snapshot();
         Assert.HasCount(8, events);
-        Assert.IsTrue(events.All(e => e.Kind == AccessAuditKind.Reveal && e.ResourceId == "contact-1" && e.Justification == "Customer asked to verify identity"));
+        Assert.IsTrue(events.All(e => e.Kind == AccessAuditKind.Reveal && string.Equals(e.ResourceId, "contact-1", StringComparison.Ordinal) && string.Equals(e.Justification, "Customer asked to verify identity", StringComparison.Ordinal)));
         var revealed = events.Single(e => e.Id == ((RevealGranted)granted.Value!).AuditEventId);
         Assert.AreEqual(AccessAuditOutcome.Allowed, revealed.Outcome);
         Assert.AreEqual(new FieldPath("contact.email"), revealed.Field);
@@ -94,8 +94,8 @@ public sealed class MaskingTests
         foreach (var auditEvent in events)
         {
             var text = auditEvent.ToString() + string.Join("|", typeof(AccessAuditEvent).GetProperties().Select(property => property.GetValue(auditEvent)?.ToString()));
-            Assert.DoesNotContain(SecretEmail, text);
-            Assert.DoesNotContain(SecretPhone, text);
+            Assert.DoesNotContain(SecretEmail, text, StringComparison.Ordinal);
+            Assert.DoesNotContain(SecretPhone, text, StringComparison.Ordinal);
         }
         Assert.AreEqual("AccessResource { <redacted> }", contact.ToString());
     }

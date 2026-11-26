@@ -151,7 +151,7 @@ public sealed partial class PostgresWorkspaceStore
             BindTeamKey(check, scope, team.Id);
             await using var reader = await check.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
             await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            if (!reader.IsDBNull(0))
+            if (!await reader.IsDBNullAsync(0, cancellationToken).ConfigureAwait(false))
                 return new StoreConflict(reader.GetInt64(0));
             if (reader.GetInt64(1) >= WorkspaceLimits.MaximumTeamsPerWorkspace)
                 return new StoreRejected<WorkspaceWriteRejection>(WorkspaceWriteRejection.CapacityExceeded);

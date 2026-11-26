@@ -129,7 +129,7 @@ public sealed class PostgresEventStoreTests
         Assert.AreEqual("brin", await database.ScalarAsync(
             "SELECT am.amname FROM pg_class c JOIN pg_am am ON am.oid = c.relam WHERE c.relname = 'tf_events_recorded_brin' AND c.relnamespace = current_schema()::regnamespace"));
         StringAssert.Contains((string)(await database.ScalarAsync(
-            "SELECT array_to_string(reloptions, ',') FROM pg_class WHERE relname = 'tf_event_heads' AND relnamespace = current_schema()::regnamespace"))!, "fillfactor=50");
+            "SELECT array_to_string(reloptions, ',') FROM pg_class WHERE relname = 'tf_event_heads' AND relnamespace = current_schema()::regnamespace"))!, "fillfactor=50", StringComparison.Ordinal);
         Assert.AreEqual("bytea", await database.ScalarAsync(
             "SELECT data_type FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'tf_events' AND column_name = 'scope_key'"));
         var scope = new TicketScope(TestScopes.LongIdentifier(1), TestScopes.LongIdentifier(2), TestScopes.LongIdentifier(3), TestScopes.LongIdentifier(4),

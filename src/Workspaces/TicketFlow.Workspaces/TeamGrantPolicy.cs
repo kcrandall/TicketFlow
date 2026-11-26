@@ -37,10 +37,10 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
             await Task.WhenAll(teamGrantsTask, removedGrantsTask).ConfigureAwait(false);
         else
             await teamGrantsTask.ConfigureAwait(false);
-        var teamGrants = teamGrantsTask.Result;
-        if (addedGrantsTask is not null && await CheckAdditionsWithGrantsAsync(actor, team, teamGrants, addedGrantsTask.Result, cancellationToken).ConfigureAwait(false) is { } escalation)
+        var teamGrants = await teamGrantsTask.ConfigureAwait(false);
+        if (addedGrantsTask is not null && await CheckAdditionsWithGrantsAsync(actor, team, teamGrants, await addedGrantsTask.ConfigureAwait(false), cancellationToken).ConfigureAwait(false) is { } escalation)
             return escalation;
-        if (removedGrantsTask is not null && await CheckRemovalsWithGrantsAsync(actor, teamGrants, removedGrantsTask.Result, cancellationToken).ConfigureAwait(false) is { } lifted)
+        if (removedGrantsTask is not null && await CheckRemovalsWithGrantsAsync(actor, teamGrants, await removedGrantsTask.ConfigureAwait(false), cancellationToken).ConfigureAwait(false) is { } lifted)
             return lifted;
         return null;
     }
@@ -52,7 +52,7 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
         var teamGrantsTask = TeamGrantsAsync(actor, team, cancellationToken);
         var addedGrantsTask = MemberGrantsAsync(actor, added, cancellationToken);
         await Task.WhenAll(teamGrantsTask, addedGrantsTask).ConfigureAwait(false);
-        return await CheckAdditionsWithGrantsAsync(actor, team, teamGrantsTask.Result, addedGrantsTask.Result, cancellationToken).ConfigureAwait(false);
+        return await CheckAdditionsWithGrantsAsync(actor, team, await teamGrantsTask.ConfigureAwait(false), await addedGrantsTask.ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<TicketFailure?> CheckAdditionsWithGrantsAsync(PrincipalRef actor, TeamId team, IReadOnlyList<StoredAccessGrant> teamGrants, List<AccessGrant> memberGrants, CancellationToken cancellationToken)

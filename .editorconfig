@@ -18,5 +18,79 @@ csharp_prefer_simple_using_statement = true:suggestion
 csharp_style_var_for_built_in_types = false:suggestion
 csharp_style_var_when_type_is_apparent = true:suggestion
 
+# ==============================================================================
+# Analyzer Ruleset
+#
+# High-signal correctness, security (CA2100, CA3001-CA3012, CA5350-CA5405),
+# async/deadlock (VSTHRD002, VSTHRD011, VSTHRD100, VSTHRD101, VSTHRD103, VSTHRD110),
+# disposal (CA2000, CA1816, CA2213, CA2215), culture/string-comparison
+# (CA1304, CA1305, CA1307, CA1309, CA1310, MA0002, MA0006, MA0011, MA0074, MA0076),
+# cancellation (CA2016, MA0040), nullability, and performance
+# (CA1822, CA1826, CA1848, CA1859, CA1860, CA1861, CA1865-CA1869, CA1873)
+# rules remain enforced as errors (via TreatWarningsAsErrors=true).
+#
+# Only genuinely subjective style rules, VS-IDE-only threading rules, or rules
+# demanding breaking public API renames are tuned below.
+# ==============================================================================
+
+# Braces: repo convention is csharp_prefer_braces = false
+dotnet_diagnostic.IDE0011.severity = none
+
+# File / method size & doc-comment style noise
+# MA0048: File name must match type name (multi-type contract/model files are idiomatic here)
+dotnet_diagnostic.MA0048.severity = none
+# MA0051: Method is too long (arbitrary line-count limit)
+dotnet_diagnostic.MA0051.severity = none
+# RCS1139: Add summary element to documentation comment (CS1591 is already disabled repo-wide)
+dotnet_diagnostic.RCS1139.severity = none
+# MA0008: Add StructLayoutAttribute (subjective micro-optimization on ordinary domain record structs)
+dotnet_diagnostic.MA0008.severity = none
+# RCS1194: Implement standard exception constructors (domain exceptions enforce required arguments)
+dotnet_diagnostic.RCS1194.severity = none
+
+# ConfigureAwait(false): intentionally omitted across ASP.NET Core, Blazor, modern .NET libraries & tests
+dotnet_diagnostic.CA2007.severity = none
+dotnet_diagnostic.MA0004.severity = none
+dotnet_diagnostic.VSTHRD111.severity = none
+
+# VSTHRD003: Avoid awaiting foreign Task (Visual Studio JoinableTaskFactory rule; awaiting stored
+# background loop / TaskCompletionSource tasks is standard and safe in server .NET)
+dotnet_diagnostic.VSTHRD003.severity = none
+
+# VSTHRD200: Use "Async" suffix for async methods (noisy on existing public APIs, Razor components, tests)
+dotnet_diagnostic.VSTHRD200.severity = none
+
+# CA1062: Validate arguments of public methods (redundant with <Nullable>enable</Nullable>)
+dotnet_diagnostic.CA1062.severity = none
+
+# Public API naming rules (EnablePackageValidation=true; domain names are intentional and C#-idiomatic)
+# CA1711: Identifiers should not have incorrect suffix (e.g., Permission, *Attribute, PublicCollection)
+dotnet_diagnostic.CA1711.severity = none
+# CA1716: Identifiers should not match keywords (e.g., Optional<T>, parameters named error/to)
+dotnet_diagnostic.CA1716.severity = none
+# CA1720: Identifier contains type name (e.g., single, Int, Short)
+dotnet_diagnostic.CA1720.severity = none
+
+[tests/**.cs]
+# Underscores in test method names (e.g., Given_When_Then)
+dotnet_diagnostic.CA1707.severity = none
+# Test methods and helpers do not need to be static
+dotnet_diagnostic.CA1822.severity = none
+# Test fixtures often own disposable lifetimes across test steps
+dotnet_diagnostic.CA2000.severity = none
+# Tests frequently create short-lived helpers/collections without devirtualization ceremony
+dotnet_diagnostic.CA1859.severity = none
+# Inline expected arrays in CollectionAssert.AreEqual(new[] { ... }, ...) are called once per test
+dotnet_diagnostic.CA1861.severity = none
+# MSTest 4.5 added Assert.AreEqual<T>(..., IEqualityComparer<T>), tripping MA0002 on ~2,000 idiomatic
+# Assert.AreEqual("expected", actual) calls (already ordinal via EqualityComparer<string>.Default).
+# MA0002 remains strictly enforced across src/ and samples/.
+dotnet_diagnostic.MA0002.severity = none
+
+[samples/**.cs]
+# Sample host code favors readability over strict static/lifetime ceremony
+dotnet_diagnostic.CA1822.severity = none
+dotnet_diagnostic.CA2000.severity = none
+
 [*.md]
 trim_trailing_whitespace = false

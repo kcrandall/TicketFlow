@@ -53,7 +53,7 @@ internal static class EventSubjects
     {
         for (var i = 0; i < initialized.Length; i++)
             if (!initialized[i])
-                throw new ArgumentException("Event identifiers must be initialized.");
+                throw new ArgumentException("Event identifiers must be initialized.", nameof(initialized));
     }
 }
 

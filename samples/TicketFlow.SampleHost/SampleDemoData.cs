@@ -290,7 +290,7 @@ internal static class SampleDemoData
             var count = (weekday ? 6 : 2) + random.Next(0, weekday ? 5 : 3);
             for (var item = 0; item < count; item++)
             {
-                var start = now.Date.AddDays(-day).AddHours(8 + random.Next(0, 10)).AddMinutes(random.Next(0, 60));
+                var start = new DateTimeOffset(now.Date, now.Offset).AddDays(-day).AddHours(8 + random.Next(0, 10)).AddMinutes(random.Next(0, 60));
                 var inbox = inboxes[random.Next(inboxes.Length)];
                 var agent = new UserPrincipal(scope, new UserId(inbox == Billing ? "agent3" : agents[random.Next(agents.Length)]));
                 var topic = Topics[random.Next(Topics.Length)];
@@ -332,31 +332,31 @@ internal static class SampleDemoData
                 Attributes: attributes, Team: team, InitialMessage: new IncomingMessageDraft(message), Id: Id), cancellationToken) is ConversationApplied;
         }
 
-        public Task IncomingAsync(TimeSpan ago, string message)
+        public Task<ConversationCommandResult> IncomingAsync(TimeSpan ago, string message)
         {
             At(ago);
             return conversations.AppendIncomingAsync(admin, Id, new IncomingMessageDraft(message), cancellationToken);
         }
 
-        public Task ReplyAsync(TimeSpan ago, string agent, string message)
+        public Task<ConversationCommandResult> ReplyAsync(TimeSpan ago, string agent, string message)
         {
             At(ago);
             return conversations.ReplyAsync(User(agent), Id, new OutgoingMessageDraft(message), null, cancellationToken);
         }
 
-        public Task NoteAsync(TimeSpan ago, string agent, string note)
+        public Task<ConversationCommandResult> NoteAsync(TimeSpan ago, string agent, string note)
         {
             At(ago);
             return conversations.AddNoteAsync(User(agent), Id, new NoteDraft(note), null, cancellationToken);
         }
 
-        public Task AssignAsync(TimeSpan ago, string agent)
+        public Task<ConversationCommandResult> AssignAsync(TimeSpan ago, string agent)
         {
             At(ago);
             return conversations.AssignAsync(admin, Id, new UserId(agent), null, cancellationToken);
         }
 
-        public Task StatusAsync(TimeSpan ago, string agent, ConversationStatus status)
+        public Task<ConversationCommandResult> StatusAsync(TimeSpan ago, string agent, ConversationStatus status)
         {
             At(ago);
             return conversations.ChangeStatusAsync(User(agent), Id, status, null, cancellationToken);

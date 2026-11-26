@@ -23,9 +23,9 @@ public closed record AutomationCondition
     private protected AutomationCondition(int depth, int nodeCount)
     {
         if (depth > MaximumDepth)
-            throw new ArgumentException($"Conditions can be at most {MaximumDepth} levels deep.");
+            throw new ArgumentException($"Conditions can be at most {MaximumDepth} levels deep.", nameof(depth));
         if (nodeCount > MaximumNodes)
-            throw new ArgumentException($"Conditions can contain at most {MaximumNodes} nodes.");
+            throw new ArgumentException($"Conditions can contain at most {MaximumNodes} nodes.", nameof(nodeCount));
         Depth = depth;
         NodeCount = nodeCount;
     }
@@ -330,7 +330,7 @@ public sealed record AttributeCondition : AutomationCondition
             : Array.BinarySearch(valuesArray, value, StringComparer.Ordinal) >= 0;
 
     public bool Equals(AttributeCondition? other) =>
-        other is not null && Target == other.Target && Key == other.Key && Operator == other.Operator && Values.SequenceEqual(other.Values, StringComparer.Ordinal);
+        other is not null && Target == other.Target && string.Equals(Key, other.Key, StringComparison.Ordinal) && Operator == other.Operator && Values.SequenceEqual(other.Values, StringComparer.Ordinal);
 
     public override int GetHashCode() => HashCode.Combine(Target, Key, Operator, Values.Count);
 }
@@ -393,7 +393,7 @@ public sealed record MessageContentCondition : AutomationCondition
     public Regex? Regex { get; }
 
     public bool Equals(MessageContentCondition? other) =>
-        other is not null && Operator == other.Operator && Value == other.Value && IgnoreCase == other.IgnoreCase && Timeout == other.Timeout;
+        other is not null && Operator == other.Operator && string.Equals(Value, other.Value, StringComparison.Ordinal) && IgnoreCase == other.IgnoreCase && Timeout == other.Timeout;
 
     public override int GetHashCode() => HashCode.Combine(Operator, Value, IgnoreCase, Timeout);
 }

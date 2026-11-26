@@ -82,7 +82,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         await Task.WhenAll(widgetTask, conversationsTask).ConfigureAwait(false);
         var widget = await widgetTask.ConfigureAwait(false);
         var conversations = await conversationsTask.ConfigureAwait(false);
-        return HubResult.Success(new Dictionary<string, object?>(6)
+        return HubResult.Success(new Dictionary<string, object?>(6, StringComparer.Ordinal)
         {
             ["token"] = issued,
             ["visitorId"] = session.Session.Session.VisitorId,
@@ -93,11 +93,12 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         });
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "MA0016:Prefer using collection abstraction instead of implementation", Justification = "SignalR hub parameter binds concrete Dictionary<string, string> in public contract.")]
     public async Task<HubResult> SubmitPrechat(Dictionary<string, string> answers)
     {
         if (Session() is not { } session)
             return HubResult.Failure("unauthenticated");
-        return Store(await visitors.SubmitPrechatAsync(session, answers ?? [], Context.ConnectionAborted).ConfigureAwait(false));
+        return Store(await visitors.SubmitPrechatAsync(session, answers ?? new Dictionary<string, string>(StringComparer.Ordinal), Context.ConnectionAborted).ConfigureAwait(false));
     }
 
     /// <summary><paramref name="method"/> is <c>hmac</c> (<paramref name="value"/> = user id, <paramref name="signature"/> = hex HMAC) or <c>token</c> (<paramref name="value"/> = signed token).</summary>
@@ -122,7 +123,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             return HubResult.Failure("unauthenticated");
         return await visitors.SendMessageAsync(session, new VisitorMessageDraft(clientMessageId ?? string.Empty, text, attachments), Context.ConnectionAborted).ConfigureAwait(false) switch
         {
-            TicketValue<VisitorMessageAccepted> accepted => HubResult.Success(new Dictionary<string, object?>(5)
+            TicketValue<VisitorMessageAccepted> accepted => HubResult.Success(new Dictionary<string, object?>(5, StringComparer.Ordinal)
             {
                 ["conversation"] = accepted.Value.Conversation.Value,
                 ["message"] = accepted.Value.Message.Value,
@@ -189,7 +190,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             return HubResult.Failure("unauthenticated");
         return await visitors.SearchArticlesAsync(session, text ?? string.Empty, Context.ConnectionAborted).ConfigureAwait(false) switch
         {
-            TicketValue<IReadOnlyList<TicketFlow.HelpCenter.ArticleSnippet>> hits => HubResult.Success(hits.Value.Select(hit => new Dictionary<string, object?>
+            TicketValue<IReadOnlyList<TicketFlow.HelpCenter.ArticleSnippet>> hits => HubResult.Success(hits.Value.Select(hit => new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["article"] = hit.Article.Value,
                 ["title"] = hit.Title,
@@ -221,7 +222,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         {
             case TicketValue<VisitorSessionContext> updated:
                 Context.Items[ContextKey] = updated.Value;
-                return HubResult.Success(new Dictionary<string, object?> { ["verified"] = updated.Value.Session.Session.Identity is not null });
+                return HubResult.Success(new Dictionary<string, object?>(StringComparer.Ordinal) { ["verified"] = updated.Value.Session.Session.Identity is not null });
             case LiveChatRefused refused:
                 return Failure(refused);
         }
@@ -264,7 +265,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         for (var i = 0; i < page.Messages.Count; i++)
         {
             var message = page.Messages[i];
-            messages[i] = new Dictionary<string, object?>(8)
+            messages[i] = new Dictionary<string, object?>(8, StringComparer.Ordinal)
             {
                 ["message"] = message.Message.Value,
                 ["sequence"] = message.Sequence,
@@ -276,7 +277,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
                 ["delivery"] = RealtimeWireFormat.Token(message.Delivery),
             };
         }
-        return new Dictionary<string, object?>(4)
+        return new Dictionary<string, object?>(4, StringComparer.Ordinal)
         {
             ["conversation"] = page.Conversation.Value,
             ["readSequence"] = page.ReadSequence,
@@ -285,7 +286,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         };
     }
 
-    private static Dictionary<string, object?> Conversation(VisitorConversationView view) => new(5)
+    private static Dictionary<string, object?> Conversation(VisitorConversationView view) => new(5, StringComparer.Ordinal)
     {
         ["conversation"] = view.Conversation.Value,
         ["closed"] = view.Closed,
@@ -300,7 +301,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         for (var i = 0; i < state.PrechatFields.Count; i++)
         {
             var field = state.PrechatFields[i];
-            prechat[i] = new Dictionary<string, object?>(5)
+            prechat[i] = new Dictionary<string, object?>(5, StringComparer.Ordinal)
             {
                 ["key"] = field.Key,
                 ["label"] = field.Label,
@@ -309,7 +310,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
                 ["maxLength"] = field.MaximumLength,
             };
         }
-        return new Dictionary<string, object?>(8)
+        return new Dictionary<string, object?>(8, StringComparer.Ordinal)
         {
             ["themeRef"] = state.ThemeRef,
             ["greeting"] = state.GreetingMessage,
@@ -318,7 +319,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
             ["deflection"] = state.DeflectionEnabled,
             ["requireVerified"] = state.RequireVerifiedIdentity,
             ["attachments"] = state.Attachments is { } policy
-                ? new Dictionary<string, object?>(2) { ["maxBytes"] = policy.MaximumBytes, ["types"] = policy.AllowedMediaTypes }
+                ? new Dictionary<string, object?>(2, StringComparer.Ordinal) { ["maxBytes"] = policy.MaximumBytes, ["types"] = policy.AllowedMediaTypes }
                 : null,
             ["prechat"] = prechat,
         };

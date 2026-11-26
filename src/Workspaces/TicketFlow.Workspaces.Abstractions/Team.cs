@@ -33,7 +33,7 @@ public sealed record Team
     public Team WithMembers(IEnumerable<UserId> members) => new(Id, Name, Description, members);
 
     public bool Equals(Team? other) =>
-        other is not null && Id == other.Id && Name == other.Name && Description == other.Description && Members.SetEquals(other.Members);
+        other is not null && Id == other.Id && string.Equals(Name, other.Name, StringComparison.Ordinal) && string.Equals(Description, other.Description, StringComparison.Ordinal) && Members.SetEquals(other.Members);
 
     public override int GetHashCode() => HashCode.Combine(Id, Name, Description, Members.Count);
 

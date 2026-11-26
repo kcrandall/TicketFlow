@@ -90,7 +90,7 @@ public static class HelpCenterJsonCodec
         return System.Text.Encoding.UTF8.GetString(buffer.ToArray());
     }
 
-    private static IReadOnlyList<T> Decode<T>(string json, string[] allowed, Func<JsonElement, T> read)
+    private static List<T> Decode<T>(string json, string[] allowed, Func<JsonElement, T> read)
     {
         ArgumentNullException.ThrowIfNull(json);
         using var document = JsonDocument.Parse(json, Options);

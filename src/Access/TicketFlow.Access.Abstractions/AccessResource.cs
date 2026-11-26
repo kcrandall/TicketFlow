@@ -28,7 +28,7 @@ public sealed record AccessResource
     {
         ArgumentNullException.ThrowIfNull(scope);
         if (team == default(TeamId) || inbox == default(InboxId) || assignee == default(UserId))
-            throw new ArgumentException("Resource team, inbox and assignee identifiers must be initialized when supplied.");
+            throw new ArgumentException("Resource team, inbox and assignee identifiers must be initialized when supplied.", team == default(TeamId) ? nameof(team) : inbox == default(InboxId) ? nameof(inbox) : nameof(assignee));
         Scope = scope;
         ResourceId = resourceId is null ? null : TicketScope.RequireIdentifier(resourceId, nameof(resourceId));
         TeamId = team;
@@ -55,14 +55,14 @@ public sealed record AccessResource
 
     public bool Equals(AccessResource? other)
     {
-        if (other is null || Scope != other.Scope || ResourceId != other.ResourceId || TeamId != other.TeamId || InboxId != other.InboxId || AssigneeId != other.AssigneeId)
+        if (other is null || Scope != other.Scope || !string.Equals(ResourceId, other.ResourceId, StringComparison.Ordinal) || TeamId != other.TeamId || InboxId != other.InboxId || AssigneeId != other.AssigneeId)
             return false;
         if (Labels is null ? other.Labels is not null : other.Labels is null || !Labels.SetEquals(other.Labels))
             return false;
         if (Attributes.Count != other.Attributes.Count)
             return false;
         foreach (var pair in Attributes)
-            if (!other.Attributes.TryGetValue(pair.Key, out var value) || value != pair.Value)
+            if (!other.Attributes.TryGetValue(pair.Key, out var value) || !string.Equals(value, pair.Value, StringComparison.Ordinal))
                 return false;
         return true;
     }
@@ -173,6 +173,11 @@ public readonly record struct FieldPath : IComparable<FieldPath>
     public bool IsInitialized => value is not null;
 
     public int CompareTo(FieldPath other) => string.CompareOrdinal(value, other.value);
+
+    public static bool operator <(FieldPath left, FieldPath right) => left.CompareTo(right) < 0;
+    public static bool operator <=(FieldPath left, FieldPath right) => left.CompareTo(right) <= 0;
+    public static bool operator >(FieldPath left, FieldPath right) => left.CompareTo(right) > 0;
+    public static bool operator >=(FieldPath left, FieldPath right) => left.CompareTo(right) >= 0;
 
     public override string ToString() => value ?? string.Empty;
 

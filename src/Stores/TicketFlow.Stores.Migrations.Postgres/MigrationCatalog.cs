@@ -88,6 +88,7 @@ public sealed record PostgresMigrationOptions
 {
     public TimeSpan OperationTimeout { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan LockTimeout { get; init; } = TimeSpan.FromSeconds(5);
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "MA0015:Specify the parameter name in ArgumentException", Justification = "Parameterless options validation checks multiple timeout properties together.")]
     internal void Validate()
     {
         if (OperationTimeout <= TimeSpan.Zero || OperationTimeout > TimeSpan.FromMinutes(5) || LockTimeout <= TimeSpan.Zero || LockTimeout > OperationTimeout)

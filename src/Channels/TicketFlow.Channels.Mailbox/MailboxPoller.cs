@@ -89,7 +89,7 @@ public sealed class MailboxMimeNormalizer(IMailboxAttachmentStore attachmentStor
                             oversized = true;
                             break;
                         }
-                        buffer.Write(chunk, 0, read);
+                        await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
                     }
                     if (oversized || total == 0)
                         continue;
@@ -198,7 +198,7 @@ public sealed class MailboxMimeNormalizer(IMailboxAttachmentStore attachmentStor
 /// messages through <see cref="IInboundChannelPipeline"/>. UIDVALIDITY changes trigger a safe rescan from UID 1 deduplicated
 /// by Message-Id. Checkpoints advance strictly after each message is processed so crashes never skip messages.
 /// </summary>
-public sealed class MailboxPoller(
+public sealed partial class MailboxPoller(
     IMailboxClientFactory clientFactory,
     IMailboxCredentialProvider credentials,
     IMailboxCheckpointStore checkpoints,
@@ -230,7 +230,8 @@ public sealed class MailboxPoller(
         uint lastUid = rescanned ? 0 : (existing?.LastUid ?? 0);
         if (rescanned)
         {
-            logger?.LogInformation("IMAP UIDVALIDITY changed for mailbox {Config}/{Folder}; rescanning safely with Message-Id deduplication.", config.ConfigurationId, config.Folder);
+            if (logger is not null)
+                LogUidValidityChanged(logger, config.ConfigurationId, config.Folder);
             await checkpoints.SaveCheckpointAsync(config.Scope, config.ConfigurationId, config.Folder,
                 new MailboxCheckpoint(state.UidValidity, 0, time.GetUtcNow()), cancellationToken).ConfigureAwait(false);
         }
@@ -322,7 +323,8 @@ public sealed class MailboxPoller(
 
             if (inbound is null)
             {
-                logger?.LogDebug("Skipped IMAP message UID {Uid} in {Config}/{Folder}: {Reason}.", uid, config.ConfigurationId, config.Folder, skipReason);
+                if (logger is not null)
+                    LogSkippedMessage(logger, uid, config.ConfigurationId, config.Folder, skipReason);
                 skipped++;
                 lastUid = uid;
                 await checkpoints.RecordAndSaveCheckpointAsync(config.Scope, config.ConfigurationId, config.Folder, messageId,
@@ -353,8 +355,8 @@ public sealed class MailboxPoller(
                     }
                     else
                     {
-                        logger?.LogWarning("Stopped IMAP poll for {Config}/{Folder} on pipeline rejection {Reason}; will retry next poll.",
-                            config.ConfigurationId, config.Folder, rejected.Reason);
+                        if (logger is not null)
+                            LogStoppedOnRejection(logger, config.ConfigurationId, config.Folder, rejected.Reason);
                         return new MailboxPollResult(fetched, ingested, deduplicated, skipped, rescanned, state.UidValidity, lastUid);
                     }
                     break;
@@ -367,4 +369,13 @@ public sealed class MailboxPoller(
 
         return new MailboxPollResult(fetched, ingested, deduplicated, skipped, rescanned, state.UidValidity, lastUid);
     }
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "IMAP UIDVALIDITY changed for mailbox {Config}/{Folder}; rescanning safely with Message-Id deduplication.")]
+    private static partial void LogUidValidityChanged(ILogger logger, string config, string folder);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Skipped IMAP message UID {Uid} in {Config}/{Folder}: {Reason}.")]
+    private static partial void LogSkippedMessage(ILogger logger, uint uid, string config, string folder, string? reason);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Stopped IMAP poll for {Config}/{Folder} on pipeline rejection {Reason}; will retry next poll.")]
+    private static partial void LogStoppedOnRejection(ILogger logger, string config, string folder, InboundRejection reason);
 }

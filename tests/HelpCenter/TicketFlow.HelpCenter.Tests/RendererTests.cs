@@ -13,17 +13,17 @@ public sealed class RendererTests
     public void RendersStructuralMarkdown()
     {
         var html = Html("# Title\n\nSome **bold** and *em* and `code` and ~~gone~~.\n\n- one\n- two\n\n1. first\n\n> quote\n\n```\nblock\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n[docs](https://example.com/docs \"Docs\") ![logo](https://example.com/logo.png)");
-        StringAssert.Contains(html, "<h1>Title</h1>");
-        StringAssert.Contains(html, "<strong>bold</strong>");
-        StringAssert.Contains(html, "<em>em</em>");
-        StringAssert.Contains(html, "<code>code</code>");
-        StringAssert.Contains(html, "<del>gone</del>");
-        StringAssert.Contains(html, "<li>one</li>");
-        StringAssert.Contains(html, "<blockquote>");
-        StringAssert.Contains(html, "<pre><code>block");
-        StringAssert.Contains(html, "<table>");
-        StringAssert.Contains(html, "<a href=\"https://example.com/docs\" title=\"Docs\" rel=\"nofollow noopener noreferrer\">docs</a>");
-        StringAssert.Contains(html, "<img src=\"https://example.com/logo.png\" alt=\"logo\">");
+        StringAssert.Contains(html, "<h1>Title</h1>", StringComparison.Ordinal);
+        StringAssert.Contains(html, "<strong>bold</strong>", StringComparison.Ordinal);
+        StringAssert.Contains(html, "<em>em</em>", StringComparison.Ordinal);
+        StringAssert.Contains(html, "<code>code</code>", StringComparison.Ordinal);
+        StringAssert.Contains(html, "<del>gone</del>", StringComparison.Ordinal);
+        StringAssert.Contains(html, "<li>one</li>", StringComparison.Ordinal);
+        StringAssert.Contains(html, "<blockquote>", StringComparison.Ordinal);
+        StringAssert.Contains(html, "<pre><code>block", StringComparison.Ordinal);
+        StringAssert.Contains(html, "<table>", StringComparison.Ordinal);
+        StringAssert.Contains(html, "<a href=\"https://example.com/docs\" title=\"Docs\" rel=\"nofollow noopener noreferrer\">docs</a>", StringComparison.Ordinal);
+        StringAssert.Contains(html, "<img src=\"https://example.com/logo.png\" alt=\"logo\">", StringComparison.Ordinal);
     }
 
     [TestMethod]
@@ -79,17 +79,17 @@ public sealed class RendererTests
     [TestMethod]
     public void SafeLinksKeepSchemesAndGetRel()
     {
-        StringAssert.Contains(Html("[mail](mailto:help@example.com)"), "href=\"mailto:help@example.com\" rel=\"nofollow noopener noreferrer\"");
-        StringAssert.Contains(Html("[rel](/articles/reset)"), "href=\"/articles/reset\" rel=\"nofollow noopener noreferrer\"");
-        StringAssert.Contains(Html("Visit https://example.com today"), "<a href=\"https://example.com\" rel=\"nofollow noopener noreferrer\">");
+        StringAssert.Contains(Html("[mail](mailto:help@example.com)"), "href=\"mailto:help@example.com\" rel=\"nofollow noopener noreferrer\"", StringComparison.Ordinal);
+        StringAssert.Contains(Html("[rel](/articles/reset)"), "href=\"/articles/reset\" rel=\"nofollow noopener noreferrer\"", StringComparison.Ordinal);
+        StringAssert.Contains(Html("Visit https://example.com today"), "<a href=\"https://example.com\" rel=\"nofollow noopener noreferrer\">", StringComparison.Ordinal);
     }
 
     [TestMethod]
     public void HtmlInTextIsEscaped()
     {
         var html = Html("Use `<b>` tags or 2 < 3 & \"quotes\" <b>bold</b>");
-        StringAssert.Contains(html, "<code>&lt;b&gt;</code>");
-        StringAssert.Contains(html, "&lt;b&gt;bold&lt;/b&gt;");
+        StringAssert.Contains(html, "<code>&lt;b&gt;</code>", StringComparison.Ordinal);
+        StringAssert.Contains(html, "&lt;b&gt;bold&lt;/b&gt;", StringComparison.Ordinal);
         Assert.DoesNotContain("<b>", html, StringComparison.Ordinal);
     }
 
@@ -122,8 +122,8 @@ public sealed class RendererTests
     public void PlainTextStripsMarkdown()
     {
         var text = Renderer.ToPlainText("# Reset\n\nOpen **settings** and [choose](https://example.com) reset.\n\n<script>x</script>");
-        StringAssert.Contains(text, "Reset");
-        StringAssert.Contains(text, "Open settings and choose reset.");
+        StringAssert.Contains(text, "Reset", StringComparison.Ordinal);
+        StringAssert.Contains(text, "Open settings and choose reset.", StringComparison.Ordinal);
         Assert.DoesNotContain("**", text, StringComparison.Ordinal);
         Assert.DoesNotContain("https://example.com", text, StringComparison.Ordinal);
     }
@@ -148,21 +148,21 @@ public sealed class RendererTests
     /// <summary>Every real tag (escaped text is not a tag) is allow-listed, with allow-listed attributes and safe URLs.</summary>
     private static void AssertSafe(string html)
     {
-        foreach (System.Text.RegularExpressions.Match tag in System.Text.RegularExpressions.Regex.Matches(html, "<(/?)([^\\s>/]+)([^>]*)>"))
+        foreach (System.Text.RegularExpressions.Match tag in System.Text.RegularExpressions.Regex.Matches(html, "<(?:/?)(?<tag>[^\\s>/]+)(?<attrs>[^>]*)>", System.Text.RegularExpressions.RegexOptions.ExplicitCapture, TimeSpan.FromSeconds(1)))
         {
-            var name = tag.Groups[2].Value;
+            var name = tag.Groups["tag"].Value;
             Assert.Contains(name, AllowedTags, $"Unexpected tag <{name}> in {html}");
-            foreach (System.Text.RegularExpressions.Match attribute in System.Text.RegularExpressions.Regex.Matches(tag.Groups[3].Value, "([^\\s=\"']+)(?:=\"([^\"]*)\")?"))
+            foreach (System.Text.RegularExpressions.Match attribute in System.Text.RegularExpressions.Regex.Matches(tag.Groups["attrs"].Value, "(?<name>[^\\s=\"']+)(?:=\"(?<val>[^\"]*)\")?", System.Text.RegularExpressions.RegexOptions.ExplicitCapture, TimeSpan.FromSeconds(1)))
             {
-                var attributeName = attribute.Groups[1].Value;
+                var attributeName = attribute.Groups["name"].Value;
                 Assert.Contains(attributeName, AllowedAttributes, $"Unexpected attribute {attributeName} in {tag.Value}");
                 if (attributeName is "href" or "src")
                 {
-                    var url = System.Net.WebUtility.HtmlDecode(attribute.Groups[2].Value).Trim();
+                    var url = System.Net.WebUtility.HtmlDecode(attribute.Groups["val"].Value).Trim();
                     var colon = url.IndexOf(':');
                     var slash = url.IndexOfAny(['/', '?', '#']);
                     var scheme = colon >= 0 && (slash < 0 || colon < slash) ? url[..colon].ToLowerInvariant() : null;
-                    Assert.IsTrue(scheme is null or "http" or "https" || (scheme == "mailto" && attributeName == "href"), $"Unsafe URL in {tag.Value}");
+                    Assert.IsTrue(scheme is null or "http" or "https" || (string.Equals(scheme, "mailto", StringComparison.Ordinal) && string.Equals(attributeName, "href", StringComparison.Ordinal)), $"Unsafe URL in {tag.Value}");
                 }
             }
         }

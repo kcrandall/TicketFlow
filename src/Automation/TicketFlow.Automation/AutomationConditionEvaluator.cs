@@ -131,8 +131,8 @@ public static class AutomationConditionEvaluator
         return condition.Operator switch
         {
             AttributeOperator.Exists => true,
-            AttributeOperator.Equal => fact.Scalar is { } scalar ? scalar == value : null,
-            AttributeOperator.NotEqual => fact.Scalar is { } scalar ? scalar != value : null,
+            AttributeOperator.Equal => fact.Scalar is { } scalar ? string.Equals(scalar, value, global::System.StringComparison.Ordinal) : null,
+            AttributeOperator.NotEqual => fact.Scalar is { } scalar ? !string.Equals(scalar, value, global::System.StringComparison.Ordinal) : null,
             AttributeOperator.In => fact.Scalar is { } scalar ? condition.ContainsValue(scalar) : null,
             AttributeOperator.Contains => fact.Kind == AutomationAttributeKind.List
                 ? ContainsOrdinal(fact.Items!, value!)

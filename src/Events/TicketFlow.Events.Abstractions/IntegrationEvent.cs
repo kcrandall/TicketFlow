@@ -40,7 +40,7 @@ public sealed record EventResource
     public EventResource(ConversationId? conversation = null, InboxId? inbox = null, TeamId? team = null, UserId? assignee = null, ContactId? contact = null)
     {
         if (conversation == default(ConversationId) || inbox == default(InboxId) || team == default(TeamId) || assignee == default(UserId) || contact == default(ContactId))
-            throw new ArgumentException("Resource identifiers must be initialized when supplied.");
+            throw new ArgumentException("Resource identifiers must be initialized when supplied.", conversation == default(ConversationId) ? nameof(conversation) : inbox == default(InboxId) ? nameof(inbox) : team == default(TeamId) ? nameof(team) : assignee == default(UserId) ? nameof(assignee) : nameof(contact));
         Conversation = conversation;
         Inbox = inbox;
         Team = team;

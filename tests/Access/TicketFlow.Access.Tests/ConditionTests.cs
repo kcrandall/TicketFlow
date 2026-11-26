@@ -121,9 +121,9 @@ public sealed class ConditionTests
             new HasLabelCondition(new LabelId("escalated")),
             new TimeWindowCondition(new(22, 0, 30), new(6, 15)));
         var json = AccessConditionCodec.Serialize(condition);
-        StringAssert.StartsWith(json, "{\"v\":1,\"c\":{\"op\":\"and\"");
+        StringAssert.StartsWith(json, "{\"v\":1,\"c\":{\"op\":\"and\"", StringComparison.Ordinal);
         foreach (var op in new[] { "\"or\"", "\"not\"", "\"assignee-self\"", "\"team-in-principal\"", "\"attr-in\"", "\"attr-eq\"", "\"label\"", "\"time\"" })
-            StringAssert.Contains(json, op);
+            StringAssert.Contains(json, op, StringComparison.Ordinal);
         Assert.AreEqual(condition, AccessConditionCodec.Deserialize(json));
     }
 

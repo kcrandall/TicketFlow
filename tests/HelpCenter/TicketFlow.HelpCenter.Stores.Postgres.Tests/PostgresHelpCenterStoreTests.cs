@@ -103,8 +103,8 @@ public sealed class PostgresHelpCenterStoreTests
         Assert.IsEmpty(await store.SearchAsync(scope, new HelpCenterSearchQuery(portal.Id, English, "password -reset")), "websearch negation.");
         Assert.IsEmpty(await store.SearchAsync(scope, new HelpCenterSearchQuery(portal.Id, English, "the")), "Stop words alone match nothing.");
         var hit = (await store.SearchAsync(scope, new HelpCenterSearchQuery(portal.Id, English, "\"reset link\"")))!.Single();
-        Assert.Contains("reset link", hit.Snippet);
-        Assert.DoesNotContain("<b>", hit.Snippet);
+        Assert.Contains("reset link", hit.Snippet, StringComparison.Ordinal);
+        Assert.DoesNotContain("<b>", hit.Snippet, StringComparison.Ordinal);
         Assert.AreEqual("english", await database.ScalarAsync("SELECT ts_config::text FROM tf_helpcenter_published WHERE locale='en'"));
         Assert.AreEqual("simple", await database.ScalarAsync("SELECT ts_config::text FROM tf_helpcenter_published WHERE locale='ja'"));
     }

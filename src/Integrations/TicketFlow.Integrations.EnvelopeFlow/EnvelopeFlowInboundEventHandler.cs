@@ -28,7 +28,7 @@ public sealed class EnvelopeFlowReceiptPendingException() : Exception("The deliv
 /// Runs as the principal from <see cref="IChannelWorkerPrincipalResolver"/>. Unknown providers, endpoints and invalid messages are dropped (not
 /// retried). Never logs bodies or addresses.
 /// </summary>
-public sealed class EnvelopeFlowInboundEventHandler : IInboundEventHandler
+public sealed partial class EnvelopeFlowInboundEventHandler : IInboundEventHandler
 {
     private readonly IChannelEndpointStore endpoints;
     private readonly IInboundChannelPipeline pipeline;
@@ -59,7 +59,7 @@ public sealed class EnvelopeFlowInboundEventHandler : IInboundEventHandler
             return;
         if (!options.ProviderKinds.TryGetValue(inboundEvent.Provider, out var kind))
         {
-            logger.LogWarning("Dropped an EnvelopeFlow event from an unmapped provider.");
+            LogUnmappedProvider(logger);
             return;
         }
         StoredChannelEndpoint? endpoint;
@@ -73,7 +73,7 @@ public sealed class EnvelopeFlowInboundEventHandler : IInboundEventHandler
         }
         if (endpoint is null)
         {
-            logger.LogWarning("Dropped an EnvelopeFlow {Kind} event without a matching channel endpoint.", inboundEvent.Kind);
+            LogNoMatchingEndpoint(logger, inboundEvent.Kind);
             return;
         }
         var actor = workers.Resolve(endpoint.Scope);
@@ -112,7 +112,7 @@ public sealed class EnvelopeFlowInboundEventHandler : IInboundEventHandler
         }
         catch (ArgumentException)
         {
-            logger.LogWarning("Dropped an invalid EnvelopeFlow {Channel} message.", kind);
+            LogInvalidMessage(logger, kind);
             return;
         }
         switch (await pipeline.ReceiveAsync(actor, message, cancellationToken).ConfigureAwait(false))
@@ -124,14 +124,14 @@ public sealed class EnvelopeFlowInboundEventHandler : IInboundEventHandler
             case InboundRejected { Reason: InboundRejection.Forbidden }:
                 throw new InvalidOperationException("The channel worker principal lacks the ingestion grants.");
             case InboundRejected rejected:
-                logger.LogInformation("Dropped an EnvelopeFlow {Channel} message: {Reason}.", kind, rejected.Reason);
+                LogDroppedMessage(logger, kind, rejected.Reason);
                 return;
         }
     }
 
     private InboundChannelMessage Normalize(StoredChannelEndpoint endpoint, ChannelKind kind, InboundEvent inboundEvent)
     {
-        var from = inboundEvent.From ?? throw new ArgumentException("A sender is required.");
+        var from = inboundEvent.From ?? throw new ArgumentException("A sender is required.", nameof(inboundEvent));
         var verified = options.VerifiedSenderKinds.Contains(kind);
         ChannelSenderEvidence sender;
         string? thread = null;
@@ -149,7 +149,7 @@ public sealed class EnvelopeFlowInboundEventHandler : IInboundEventHandler
         else if (kind == EnvelopeFlowChannelKinds.Slack)
         {
             sender = new ChannelSenderEvidence(ContactIdentityKind.ExternalUser, from, verified, "slack");
-            var channel = inboundEvent.To ?? throw new ArgumentException("A Slack channel is required.");
+            var channel = inboundEvent.To ?? throw new ArgumentException("A Slack channel is required.", nameof(inboundEvent));
             thread = $"{channel}:{LastSegment(inboundEvent.InReplyTo ?? inboundEvent.ProviderMessageId)}";
         }
         else
@@ -210,10 +210,25 @@ public sealed class EnvelopeFlowInboundEventHandler : IInboundEventHandler
             case DeliveryReportRejected { Reason: DeliveryReportRejection.Conflict }:
                 throw new InvalidOperationException("The delivery update conflicted with concurrent updates; it will be retried.");
             case DeliveryReportRejected rejected:
-                logger.LogInformation("Dropped an EnvelopeFlow {Channel} delivery receipt: {Reason}.", kind, rejected.Reason);
+                LogDroppedReceipt(logger, kind, rejected.Reason);
                 return;
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Dropped an EnvelopeFlow event from an unmapped provider.")]
+    private static partial void LogUnmappedProvider(ILogger logger);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Dropped an EnvelopeFlow {Kind} event without a matching channel endpoint.")]
+    private static partial void LogNoMatchingEndpoint(ILogger logger, InboundEventKind kind);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Dropped an invalid EnvelopeFlow {Channel} message.")]
+    private static partial void LogInvalidMessage(ILogger logger, ChannelKind channel);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Dropped an EnvelopeFlow {Channel} message: {Reason}.")]
+    private static partial void LogDroppedMessage(ILogger logger, ChannelKind channel, InboundRejection reason);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Dropped an EnvelopeFlow {Channel} delivery receipt: {Reason}.")]
+    private static partial void LogDroppedReceipt(ILogger logger, ChannelKind channel, DeliveryReportRejection reason);
 
     private static string LastSegment(string value)
     {

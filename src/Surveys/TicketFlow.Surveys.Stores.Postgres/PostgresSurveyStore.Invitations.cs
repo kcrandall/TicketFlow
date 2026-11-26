@@ -55,7 +55,7 @@ public sealed partial class PostgresSurveyStore
             await insert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == "tf_survey_invitations_conversation")
+        catch (PostgresException error) when (string.Equals(error.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(error.ConstraintName, "tf_survey_invitations_conversation", StringComparison.Ordinal))
         {
             // A concurrent create for the same conversation (but another contact lock) won; report it as the duplicate it is.
             await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
@@ -173,7 +173,7 @@ public sealed partial class PostgresSurveyStore
             if (await update.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is long revision)
                 return new StoreApplied<StoredInvitation>(new(scope, invitation, revision));
         }
-        catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation && error.ConstraintName == "tf_survey_invitations_token")
+        catch (PostgresException error) when (string.Equals(error.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(error.ConstraintName, "tf_survey_invitations_token", StringComparison.Ordinal))
         {
             return new StoreRejected<SurveyWriteRejection>(SurveyWriteRejection.InUse);
         }
@@ -338,7 +338,7 @@ public sealed partial class PostgresSurveyStore
     private static (string From, string? Predicate) FilteredResponses(AccessFilter filter, NpgsqlCommand command)
     {
         var translated = PostgresAccessFilterTranslator.Translate(filter, ResponseAccessColumns, "access_").OrDenyAll();
-        if (translated.Sql == "FALSE")
+        if (string.Equals(translated.Sql, "FALSE", StringComparison.Ordinal))
             return (string.Empty, null);
         foreach (var parameter in translated.Parameters)
             command.Parameters.Add(parameter.Clone());

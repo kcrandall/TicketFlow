@@ -104,13 +104,13 @@ public sealed class EnvelopeFlowDestinationContextResolver(IChannelConversationS
     {
         ArgumentNullException.ThrowIfNull(owner);
         if (!EnvelopeFlowDestinations.TryDecode(owner.Scope, destinationId, out var scope, out var configurationId, out var conversation)
-            || owner.Identity.IdentityNamespace != EnvelopeFlowDestinations.IdentityNamespace)
+            || !string.Equals(owner.Identity.IdentityNamespace, EnvelopeFlowDestinations.IdentityNamespace, StringComparison.Ordinal))
             return null;
         var storedTask = conversations.GetAsync(scope, conversation, cancellationToken);
         var stateTask = states.GetAsync(scope, conversation, cancellationToken);
         await Task.WhenAll(storedTask, stateTask).ConfigureAwait(false);
         var stored = storedTask.Result;
-        if (stored is null || stored.Conversation.Contact.Value != owner.RecipientId)
+        if (stored is null || !string.Equals(stored.Conversation.Contact.Value, owner.RecipientId, StringComparison.Ordinal))
             return null;
         var state = stateTask.Result;
         if (state is null)

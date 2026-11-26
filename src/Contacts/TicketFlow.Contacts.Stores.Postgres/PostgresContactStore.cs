@@ -103,7 +103,7 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
             try
             {
                 owners.Add(new ContactIdentityOwner(new ContactId(reader.GetString(0)),
-                    ContactJsonCodec.RestoreVerification(reader.GetBoolean(1), reader.GetString(2), reader.GetFieldValue<DateTimeOffset>(3))));
+                    ContactJsonCodec.RestoreVerification(reader.GetBoolean(1), reader.GetString(2), await reader.GetFieldValueAsync<DateTimeOffset>(3, cancellationToken).ConfigureAwait(false))));
             }
             catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
             {
@@ -213,7 +213,7 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
                 SELECT s.name_folded AS sort_key, s.contact_id, s.tenant_id, s.project_id, s.environment_id, s.app_id, s.workspace_id, s.labels
                 FROM tf_contacts s
                 WHERE s.scope_key={ScopeKey} AND s.tenant_id=@tenant AND s.project_id=@project AND s.environment_id=@environment AND s.app_id=@app
-                  AND s.workspace_id=@workspace AND s.merged_into IS NULL{string.Format(prefix, "s.name_folded")}{string.Format(after, "s.name_folded", "s.contact_id")}
+                  AND s.workspace_id=@workspace AND s.merged_into IS NULL{string.Format(System.Globalization.CultureInfo.InvariantCulture, prefix, "s.name_folded")}{string.Format(System.Globalization.CultureInfo.InvariantCulture, after, "s.name_folded", "s.contact_id")}
                 ORDER BY s.name_folded, s.contact_id LIMIT @scan
                 """;
         }
@@ -227,7 +227,7 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
                 SELECT i.value AS sort_key, i.contact_id, s.tenant_id, s.project_id, s.environment_id, s.app_id, s.workspace_id, s.labels
                 FROM tf_contact_identities i JOIN tf_contacts s ON s.contact_key=i.contact_key AND s.contact_id=i.contact_id
                 WHERE i.scope_key={ScopeKey} AND i.tenant_id=@tenant AND i.project_id=@project AND i.environment_id=@environment AND i.app_id=@app
-                  AND i.workspace_id=@workspace AND i.kind=@kind{ns}{string.Format(prefix, "i.value")}{string.Format(after, "i.value", "i.contact_id")}
+                  AND i.workspace_id=@workspace AND i.kind=@kind{ns}{string.Format(System.Globalization.CultureInfo.InvariantCulture, prefix, "i.value")}{string.Format(System.Globalization.CultureInfo.InvariantCulture, after, "i.value", "i.contact_id")}
                   AND s.merged_into IS NULL
                 ORDER BY i.value, i.contact_id LIMIT @scan
                 """;
@@ -301,7 +301,7 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
             if (reader.GetInt16(6) != 1)
                 throw new FormatException("Unsupported merge format version.");
             return ContactJsonCodec.DeserializeMergeRecord(reader.GetString(5), mergeId, new ContactId(reader.GetString(0)), new ContactId(reader.GetString(1)),
-                reader.GetFieldValue<DateTimeOffset>(2), new AccessActor((AccessActorKind)reader.GetInt16(3), reader.GetString(4)));
+                await reader.GetFieldValueAsync<DateTimeOffset>(2, cancellationToken).ConfigureAwait(false), new AccessActor((AccessActorKind)reader.GetInt16(3), reader.GetString(4)));
         }
         catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
         {
@@ -327,8 +327,8 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
                 if (reader.GetInt16(7) != 1)
                     throw new FormatException("Unsupported change format version.");
                 changes.Add(new ContactChange(scope, reader.GetInt64(0), new ContactChangeDraft(reader.GetGuid(1), (ContactChangeKind)reader.GetInt16(2),
-                    new ContactId(reader.GetString(3)), reader.GetFieldValue<DateTimeOffset>(6),
-                    reader.IsDBNull(4) ? null : new ContactId(reader.GetString(4)), reader.IsDBNull(5) ? null : reader.GetGuid(5))));
+                    new ContactId(reader.GetString(3)), await reader.GetFieldValueAsync<DateTimeOffset>(6, cancellationToken).ConfigureAwait(false),
+                    await reader.IsDBNullAsync(4, cancellationToken).ConfigureAwait(false) ? null : new ContactId(reader.GetString(4)), await reader.IsDBNullAsync(5, cancellationToken).ConfigureAwait(false) ? null : reader.GetGuid(5))));
             }
             catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
             {
@@ -419,7 +419,7 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
             {
                 identity = new ContactIdentity(
                     ContactJsonCodec.RestoreAddress((ContactIdentityKind)reader.GetInt16(1), reader.GetString(2), reader.GetString(3)),
-                    ContactJsonCodec.RestoreVerification(reader.GetBoolean(4), reader.GetString(5), reader.GetFieldValue<DateTimeOffset>(6)));
+                    ContactJsonCodec.RestoreVerification(reader.GetBoolean(4), reader.GetString(5), await reader.GetFieldValueAsync<DateTimeOffset>(6, cancellationToken).ConfigureAwait(false)));
                 owner = reader.GetString(0);
             }
             catch (Exception error) when (error is ArgumentException or FormatException or InvalidCastException or InvalidOperationException)
@@ -440,7 +440,7 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
                     if (reader.GetInt16(1) != 1)
                         throw new FormatException("Unsupported contact format version.");
                     var id = reader.GetString(0);
-                    var rawLabels = reader.GetFieldValue<string[]>(8);
+                    var rawLabels = await reader.GetFieldValueAsync<string[]>(8, cancellationToken).ConfigureAwait(false);
                     LabelId[] labels;
                     if (rawLabels.Length == 0)
                         labels = [];
@@ -457,8 +457,8 @@ public sealed partial class PostgresContactStore : IContactStore, IContactAttrib
                         ContactJsonCodec.DeserializeAttributes(reader.GetString(7)),
                         labels,
                         reader.GetBoolean(9),
-                        reader.GetFieldValue<DateTimeOffset>(11),
-                        reader.GetFieldValue<DateTimeOffset>(12),
+                        await reader.GetFieldValueAsync<DateTimeOffset>(11, cancellationToken).ConfigureAwait(false),
+                        await reader.GetFieldValueAsync<DateTimeOffset>(12, cancellationToken).ConfigureAwait(false),
                         reader.NullableText(10) is { } mergedInto ? new ContactId(mergedInto) : null);
                     var stored = new StoredContact(scope, contact, reader.GetInt64(13));
                     result[stored.Id] = stored;

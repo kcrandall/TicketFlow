@@ -26,54 +26,54 @@ public static class RealtimeWireFormat
         var (type, data) = realtimeEvent switch
         {
             ConversationChangedEvent changed => ("conversation.changed", BuildConversationChanged(changed)),
-            PresenceChangedEvent presence => ("presence.changed", new Dictionary<string, object?>(4)
+            PresenceChangedEvent presence => ("presence.changed", new Dictionary<string, object?>(4, StringComparer.Ordinal)
             {
                 ["conversation"] = presence.Conversation.Value,
                 ["user"] = presence.User.Value,
                 ["activity"] = presence.Activity is { } activity ? Token(activity) : null,
                 ["at"] = presence.At,
             }),
-            ReplyLockChangedEvent replyLock => ("replylock.changed", new Dictionary<string, object?>(4)
+            ReplyLockChangedEvent replyLock => ("replylock.changed", new Dictionary<string, object?>(4, StringComparer.Ordinal)
             {
                 ["conversation"] = replyLock.Conversation.Value,
                 ["holder"] = replyLock.Holder?.Value,
                 ["expiresAt"] = replyLock.ExpiresAt,
                 ["at"] = replyLock.At,
             }),
-            AgentStatusChangedEvent status => ("agent.status", new Dictionary<string, object?>(3)
+            AgentStatusChangedEvent status => ("agent.status", new Dictionary<string, object?>(3, StringComparer.Ordinal)
             {
                 ["agent"] = status.Agent.Value,
                 ["status"] = Token(status.Status),
                 ["at"] = status.At,
             }),
-            ConversationAssignedEvent assigned => ("conversation.assigned", new Dictionary<string, object?>(4)
+            ConversationAssignedEvent assigned => ("conversation.assigned", new Dictionary<string, object?>(4, StringComparer.Ordinal)
             {
                 ["conversation"] = assigned.Conversation.Value,
                 ["agent"] = assigned.Agent.Value,
                 ["revision"] = assigned.Revision,
                 ["at"] = assigned.At,
             }),
-            QueueChangedEvent queue => ("queue.changed", new Dictionary<string, object?>(4)
+            QueueChangedEvent queue => ("queue.changed", new Dictionary<string, object?>(4, StringComparer.Ordinal)
             {
                 ["conversation"] = queue.Conversation.Value,
                 ["inbox"] = queue.Inbox.Value,
                 ["change"] = Token(queue.Change),
                 ["at"] = queue.At,
             }),
-            TypingEvent typing => ("typing", Actor(typing.Actor, new Dictionary<string, object?>(5)
+            TypingEvent typing => ("typing", Actor(typing.Actor, new Dictionary<string, object?>(5, StringComparer.Ordinal)
             {
                 ["conversation"] = typing.Conversation.Value,
                 ["typing"] = typing.Typing,
                 ["at"] = typing.At,
             })),
-            ReadReceiptEvent read => ("read", Actor(read.Actor, new Dictionary<string, object?>(5)
+            ReadReceiptEvent read => ("read", Actor(read.Actor, new Dictionary<string, object?>(5, StringComparer.Ordinal)
             {
                 ["conversation"] = read.Conversation.Value,
                 ["upToSequence"] = read.UpToSequence,
                 ["at"] = read.At,
             })),
             VisitorMessageEvent message => ("message", BuildVisitorMessage(message)),
-            VisitorSessionEndedEvent ended => ("session.ended", new Dictionary<string, object?>(2)
+            VisitorSessionEndedEvent ended => ("session.ended", new Dictionary<string, object?>(2, StringComparer.Ordinal)
             {
                 ["reason"] = Token(ended.Reason),
                 ["at"] = ended.At,
@@ -88,7 +88,7 @@ public static class RealtimeWireFormat
         for (var i = 0; i < changed.Events.Count; i++)
         {
             var summary = changed.Events[i];
-            events[i] = new Dictionary<string, object?>(4)
+            events[i] = new Dictionary<string, object?>(4, StringComparer.Ordinal)
             {
                 ["sequence"] = summary.Sequence,
                 ["kind"] = Token(summary.Kind),
@@ -96,7 +96,7 @@ public static class RealtimeWireFormat
                 ["direction"] = summary.Direction is { } direction ? Token(direction) : null,
             };
         }
-        return new Dictionary<string, object?>(8)
+        return new Dictionary<string, object?>(8, StringComparer.Ordinal)
         {
             ["conversation"] = changed.Conversation.Value,
             ["inbox"] = changed.Inbox.Value,
@@ -114,7 +114,7 @@ public static class RealtimeWireFormat
         var attachments = message.Attachments.Count == 0
             ? Array.Empty<IReadOnlyDictionary<string, object?>>()
             : BuildAttachments(message.Attachments);
-        return new Dictionary<string, object?>(8)
+        return new Dictionary<string, object?>(8, StringComparer.Ordinal)
         {
             ["conversation"] = message.Conversation.Value,
             ["message"] = message.Message.Value,
@@ -138,7 +138,7 @@ public static class RealtimeWireFormat
     }
 
     /// <summary>The client shape of an attachment reference.</summary>
-    public static IReadOnlyDictionary<string, object?> Attachment(AttachmentRef attachment) => new Dictionary<string, object?>(4)
+    public static IReadOnlyDictionary<string, object?> Attachment(AttachmentRef attachment) => new Dictionary<string, object?>(4, StringComparer.Ordinal)
     {
         ["storageRef"] = attachment.StorageRef,
         ["fileName"] = attachment.FileName,

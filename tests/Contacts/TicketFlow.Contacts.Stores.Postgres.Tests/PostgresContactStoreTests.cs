@@ -147,7 +147,7 @@ public sealed class PostgresContactStoreTests
         {
             var identities = new List<ContactIdentity> { ContactStoreContract.Claimed(ContactStoreContract.Email($"user{index:D3}@example.com")) };
             StringAssert.StartsWith(ContactStoreContract.Describe(await ContactStoreContract.CreateAsync(database.Store, index % 2 == 0 ? scope : TestScopes.Create(workspaceId: "noise"),
-                ContactStoreContract.NewContact($"c{index:D3}", $"Name {index:D3}", identities, index % 10 == 0 ? ["vip"] : null))), "applied:");
+                ContactStoreContract.NewContact($"c{index:D3}", $"Name {index:D3}", identities, index % 10 == 0 ? ["vip"] : null))), "applied:", StringComparison.Ordinal);
         }
         await database.ScalarAsync("ANALYZE");
         await using var connection = await database.Primary.OpenConnectionAsync();
@@ -168,17 +168,17 @@ public sealed class PostgresContactStoreTests
         var cursor = new ContactSearchCursor("name 050", new ContactId("c050"));
         var filter = new OrFilter(new HasLabelFilter(new LabelId("vip")), new NotFilter(new ScopeFilter(TestScopes.Create(workspaceId: "noise"))));
         var namePlan = await ExplainAsync(PostgresContactStore.SearchCommand(scope, ContactSearch.ByName("name", 20).WithAfter(cursor), filter, 1000));
-        StringAssert.Contains(namePlan, "tf_contacts_name");
-        StringAssert.Contains(namePlan, "Limit");
+        StringAssert.Contains(namePlan, "tf_contacts_name", StringComparison.Ordinal);
+        StringAssert.Contains(namePlan, "Limit", StringComparison.Ordinal);
         var identityPlan = await ExplainAsync(PostgresContactStore.SearchCommand(scope,
             ContactSearch.ByIdentity(ContactIdentityKind.Email, "user", limit: 20).WithAfter(new ContactSearchCursor("user050@example.com", new ContactId("c050"))), filter, 1000));
-        StringAssert.Contains(identityPlan, "tf_contact_identities_search");
+        StringAssert.Contains(identityPlan, "tf_contact_identities_search", StringComparison.Ordinal);
         var lookupPlan = await ExplainAsync(PostgresContactStore.FindByIdentityCommand(scope, ContactStoreContract.Email("user010@example.com")));
-        StringAssert.Contains(lookupPlan, "tf_contact_identities_");
-        Assert.DoesNotContain("Seq Scan", lookupPlan);
+        StringAssert.Contains(lookupPlan, "tf_contact_identities_", StringComparison.Ordinal);
+        Assert.DoesNotContain("Seq Scan", lookupPlan, StringComparison.Ordinal);
         var changesPlan = await ExplainAsync(PostgresContactStore.ReadChangesCommand(scope, 50, 100));
-        StringAssert.Contains(changesPlan, "tf_contact_changes_pkey");
-        Assert.DoesNotContain("Seq Scan", namePlan + identityPlan + changesPlan);
+        StringAssert.Contains(changesPlan, "tf_contact_changes_pkey", StringComparison.Ordinal);
+        Assert.DoesNotContain("Seq Scan", namePlan + identityPlan + changesPlan, StringComparison.Ordinal);
     }
 
     [TestMethod]

@@ -68,7 +68,7 @@ internal sealed class FakeChatTransport : IChatTransport
 internal sealed class Senders : IEnvelopeFlowSenderDirectory
 {
     public ValueTask<EnvelopeFlowEmailSender?> GetEmailSenderAsync(TicketScope scope, string configurationId, CancellationToken cancellationToken = default) =>
-        ValueTask.FromResult<EnvelopeFlowEmailSender?>(configurationId == "cfg-email" ? new EnvelopeFlowEmailSender("support@acme.example", "Acme Support") : null);
+        ValueTask.FromResult<EnvelopeFlowEmailSender?>(string.Equals(configurationId, "cfg-email", StringComparison.Ordinal) ? new EnvelopeFlowEmailSender("support@acme.example", "Acme Support") : null);
 
     public ValueTask<EnvelopeFlowSmsSender?> GetSmsSenderAsync(TicketScope scope, string configurationId, CancellationToken cancellationToken = default) =>
         ValueTask.FromResult<EnvelopeFlowSmsSender?>(new EnvelopeFlowSmsSender(From: "+19995550000"));

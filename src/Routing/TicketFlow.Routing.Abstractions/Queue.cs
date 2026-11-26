@@ -14,7 +14,7 @@ public sealed record RoutingQueueSnapshot
         IEnumerable<KeyValuePair<string, string>> accessAttributes, DateTimeOffset waitingSince, long conversationRevision)
     {
         if (conversation == default || inbox == default || contact == default || team == default(TeamId))
-            throw new ArgumentException("Conversation, inbox and contact identifiers are required; the team must be initialized when supplied.");
+            throw new ArgumentException("Conversation, inbox and contact identifiers are required; the team must be initialized when supplied.", conversation == default ? nameof(conversation) : inbox == default ? nameof(inbox) : contact == default ? nameof(contact) : nameof(team));
         ArgumentOutOfRangeException.ThrowIfLessThan(conversationRevision, 1);
         Conversation = conversation;
         Inbox = inbox;
@@ -165,7 +165,7 @@ public sealed record RoutingQueueQuery
     public RoutingQueueQuery(InboxId? inbox = null, TeamId? team = null, int limit = 25, RoutingQueueCursor? after = null)
     {
         if (inbox == default(InboxId) || team == default(TeamId))
-            throw new ArgumentException("Criteria must be initialized when supplied.");
+            throw new ArgumentException("Criteria must be initialized when supplied.", inbox == default(InboxId) ? nameof(inbox) : nameof(team));
         if (limit is < 1 or > MaximumLimit)
             throw new ArgumentOutOfRangeException(nameof(limit), $"Limits are 1-{MaximumLimit}.");
         Inbox = inbox;

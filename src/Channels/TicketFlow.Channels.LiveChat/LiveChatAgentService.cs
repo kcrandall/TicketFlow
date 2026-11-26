@@ -80,7 +80,7 @@ public sealed class LiveChatAgentService(IConversationStore conversations, ICont
             answers = [];
         else
         {
-            var policyList = policiesTask!.Result;
+            var policyList = await policiesTask!.ConfigureAwait(false);
             HashSet<FieldPath>? policyFields = null;
             for (var i = 0; i < policyList.Count; i++)
             {
@@ -90,7 +90,7 @@ public sealed class LiveChatAgentService(IConversationStore conversations, ICont
                     policyFields.Add(policyList[i].Policy.Field);
                 }
             }
-            var widget = widgetTask!.Result?.Widget;
+            var widget = (await widgetTask!.ConfigureAwait(false))?.Widget;
             Dictionary<string, LiveChatPrechatField>? fieldByKey = null;
             if (widget is not null && widget.PrechatFields.Count > 0)
             {

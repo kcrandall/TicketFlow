@@ -252,6 +252,6 @@ public sealed partial class EnvelopeFlowChatChannel : IEnvelopeFlowChannel
         };
     }
 
-    [GeneratedRegex(@"^\d+\.\d+\z")]
+    [GeneratedRegex(@"^\d+\.\d+\z", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 1000)]
     private static partial Regex SlackTs();
 }

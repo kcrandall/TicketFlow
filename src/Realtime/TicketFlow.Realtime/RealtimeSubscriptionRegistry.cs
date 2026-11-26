@@ -20,7 +20,7 @@ namespace TicketFlow.Realtime;
 /// removed when it is revoked. A delivered <see cref="VisitorSessionEndedEvent"/> disconnects (and, when supported, closes) each
 /// connection of that session. Payloads are never logged.
 /// </summary>
-public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisposable
+public sealed partial class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisposable
 {
     private const int MaximumCachedConversations = 4096;
 
@@ -210,7 +210,7 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
             catch (Exception error)
             {
                 // Fail closed: a publication that cannot be authorized is not delivered.
-                logger.LogWarning("Realtime fan-out failed ({Error}); the event was not delivered.", error.GetType().Name);
+                LogFanOutFailed(logger, error.GetType().Name);
             }
             finally
             {
@@ -496,7 +496,11 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
                     }
                     catch (Exception error)
                     {
-                        logger.LogDebug("A realtime connection send failed ({Error}).", error.GetType().Name);
+                        if (logger.IsEnabled(LogLevel.Debug))
+                        {
+                            var errorType = error.GetType().Name;
+                            LogConnectionSendFailed(logger, errorType);
+                        }
                     }
                     finally
                     {
@@ -536,9 +540,22 @@ public sealed class RealtimeSubscriptionRegistry : IRealtimeSubscriptions, IDisp
         }
         catch (Exception error)
         {
-            logger.LogDebug("Closing a realtime connection failed ({Error}).", error.GetType().Name);
+            if (logger.IsEnabled(LogLevel.Debug))
+            {
+                var errorType = error.GetType().Name;
+                LogConnectionCloseFailed(logger, errorType);
+            }
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Realtime fan-out failed ({Error}); the event was not delivered.")]
+    private static partial void LogFanOutFailed(ILogger logger, string error);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "A realtime connection send failed ({Error}).")]
+    private static partial void LogConnectionSendFailed(ILogger logger, string error);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Closing a realtime connection failed ({Error}).")]
+    private static partial void LogConnectionCloseFailed(ILogger logger, string error);
 
     private void RemoveFromTopic(object key, string connectionId)
     {

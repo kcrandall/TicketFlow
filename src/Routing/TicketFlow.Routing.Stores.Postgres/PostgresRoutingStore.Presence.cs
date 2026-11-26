@@ -94,8 +94,8 @@ public sealed partial class PostgresRoutingStore
             changed = reader.GetBoolean(1);
             if (!exceeded)
             {
-                since = Instant(reader.GetFieldValue<DateTimeOffset>(2));
-                expiresAt = Instant(reader.GetFieldValue<DateTimeOffset>(3));
+                since = Instant(await reader.GetFieldValueAsync<DateTimeOffset>(2, cancellationToken).ConfigureAwait(false));
+                expiresAt = Instant(await reader.GetFieldValueAsync<DateTimeOffset>(3, cancellationToken).ConfigureAwait(false));
             }
         }
         if (exceeded)
@@ -164,8 +164,8 @@ public sealed partial class PostgresRoutingStore
                 AddInterval(insert, "duration", duration);
                 await using var reader = await insert.ExecuteReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
                 if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                    return new ReplyLockAcquired(new ReplyLock(conversation, holder, reader.GetInt64(0), Instant(reader.GetFieldValue<DateTimeOffset>(1)),
-                        Instant(reader.GetFieldValue<DateTimeOffset>(2))), false);
+                    return new ReplyLockAcquired(new ReplyLock(conversation, holder, reader.GetInt64(0), Instant(await reader.GetFieldValueAsync<DateTimeOffset>(1, cancellationToken).ConfigureAwait(false)),
+                        Instant(await reader.GetFieldValueAsync<DateTimeOffset>(2, cancellationToken).ConfigureAwait(false))), false);
             }
             await using (var update = new NpgsqlCommand(UpdateOrReadLockSql, connection))
             {

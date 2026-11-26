@@ -19,7 +19,7 @@ namespace TicketFlow.Channels.LiveChat;
 /// through <see cref="IInboundChannelPipeline"/> as <see cref="ChannelsOptions.WorkerPrincipal"/> with a verified <c>ExternalUser</c>
 /// identity (after identification) or a claimed <c>WidgetVisitor</c> identity, threaded by the visitor id.
 /// </summary>
-public sealed class LiveChatVisitorService : ILiveChatVisitorService
+public sealed partial class LiveChatVisitorService : ILiveChatVisitorService
 {
     private readonly IChannelEndpointStore endpoints;
     private readonly ILiveChatWidgetStore widgets;
@@ -216,7 +216,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         }
         if (session.Session.Identity is { } existing)
         {
-            if (existing.Namespace != identity.Namespace || existing.Value != identity.Value)
+            if (!string.Equals(existing.Namespace, identity.Namespace, StringComparison.Ordinal) || !string.Equals(existing.Value, identity.Value, StringComparison.Ordinal))
                 return Refused<VisitorSessionContext>(LiveChatRefusal.Invalid, "The session is already verified as another identity; start a new session.");
             return Value(new VisitorSessionContext(session, context.RotationRecommended));
         }
@@ -252,10 +252,10 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
             switch (await linking.LinkAccountAsync(channelOptions.ResolveWorker(session.Scope), request, cancellationToken).ConfigureAwait(false))
             {
                 case ContactRefused { Reason: ContactRefusal.Forbidden }:
-                    logger.LogWarning("The channel worker principal was refused while linking a verified visitor contact; grant contact:link and contact:merge to enable it.");
+                    LogVisitorLinkWorkerForbidden(logger);
                     break;
                 case ContactLinkConflict conflict:
-                    logger.LogInformation("A verified visitor contact was not linked ({Reason}).", conflict.Reason);
+                    LogVisitorLinkConflict(logger, conflict.Reason);
                     break;
                 case ContactLinked:
                 case ContactMergedInto:
@@ -266,7 +266,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
-            logger.LogWarning("Linking a verified visitor contact failed ({Error}).", error.GetType().Name);
+            LogVisitorLinkFailed(logger, error.GetType().Name);
         }
     }
 
@@ -613,7 +613,7 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
             }
             catch (Exception error) when (error is TimeZoneNotFoundException or InvalidTimeZoneException)
             {
-                logger.LogWarning("The business calendar of inbox {Inbox} uses an unknown time zone; the widget is treated as online.", inbox.Inbox.Id);
+                LogUnknownCalendarTimeZone(logger, inbox.Inbox.Id);
             }
         }
         return new LiveChatWidgetState(widget.ConfigurationId, widget.ThemeRef, widget.PrechatFields, widget.GreetingMessage ?? inbox.Inbox.GreetingMessage, online,
@@ -653,15 +653,33 @@ public sealed class LiveChatVisitorService : ILiveChatVisitorService
         catch (Exception error) when (!cancellationToken.IsCancellationRequested)
         {
             // Realtime is a hint layer: the stored message and cursors are the source of truth.
-            logger.LogWarning("A live-chat realtime publication failed ({Error}).", error.GetType().Name);
+            LogRealtimePublishFailed(logger, error.GetType().Name);
         }
     }
 
     private TicketResult<VisitorMessageAccepted, LiveChatRefused> WorkerRefused()
     {
-        logger.LogWarning("The channel worker principal was refused while recording a live-chat message; check its grants.");
+        LogWorkerRefused(logger);
         return Refused<VisitorMessageAccepted>(LiveChatRefusal.Unavailable);
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "The channel worker principal was refused while linking a verified visitor contact; grant contact:link and contact:merge to enable it.")]
+    private static partial void LogVisitorLinkWorkerForbidden(ILogger logger);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "A verified visitor contact was not linked ({Reason}).")]
+    private static partial void LogVisitorLinkConflict(ILogger logger, ContactLinkConflictReason reason);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Linking a verified visitor contact failed ({Error}).")]
+    private static partial void LogVisitorLinkFailed(ILogger logger, string error);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "The business calendar of inbox {Inbox} uses an unknown time zone; the widget is treated as online.")]
+    private static partial void LogUnknownCalendarTimeZone(ILogger logger, InboxId inbox);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "A live-chat realtime publication failed ({Error}).")]
+    private static partial void LogRealtimePublishFailed(ILogger logger, string error);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "The channel worker principal was refused while recording a live-chat message; check its grants.")]
+    private static partial void LogWorkerRefused(ILogger logger);
 
     private static bool IsIdentityValue(string @namespace, string? value) =>
         value is not null && ContactIdentityAddress.Normalize(ContactIdentityKind.ExternalUser, value, @namespace) is { Value: ContactIdentityAddress };

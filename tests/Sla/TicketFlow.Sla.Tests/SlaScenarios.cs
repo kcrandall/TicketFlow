@@ -56,9 +56,9 @@ internal static class SlaScenarios
             var events = await fixture.SlaEventsWithActorsAsync(id);
             Assert.IsTrue(events.All(item => item.Actor == SlaFixture.Worker));
             var kinds = events.Select(item => item.Event.Kind).ToList();
-            Assert.AreEqual(1, kinds.Count(kind => kind == SlaEventCodec.AppliedKind), $"{id}: {string.Join(",", kinds)}");
-            Assert.AreEqual(1, kinds.Count(kind => kind == SlaEventCodec.WarningKind), $"{id}: {string.Join(",", kinds)}");
-            Assert.AreEqual(1, kinds.Count(kind => kind == SlaEventCodec.BreachedKind), $"{id}: {string.Join(",", kinds)}");
+            Assert.AreEqual(1, kinds.Count(kind => string.Equals(kind, SlaEventCodec.AppliedKind, StringComparison.Ordinal)), $"{id}: {string.Join(",", kinds)}");
+            Assert.AreEqual(1, kinds.Count(kind => string.Equals(kind, SlaEventCodec.WarningKind, StringComparison.Ordinal)), $"{id}: {string.Join(",", kinds)}");
+            Assert.AreEqual(1, kinds.Count(kind => string.Equals(kind, SlaEventCodec.BreachedKind, StringComparison.Ordinal)), $"{id}: {string.Join(",", kinds)}");
             Assert.AreEqual(events.Count, events.Select(item => item.Event.Key).Distinct().Count());
             Assert.AreEqual(0, (await fixture.Get<ISlaTrackerStore>().GetAsync(fixture.Scope, new ConversationId(id)))!.Tracker.Pending.Count);
         }

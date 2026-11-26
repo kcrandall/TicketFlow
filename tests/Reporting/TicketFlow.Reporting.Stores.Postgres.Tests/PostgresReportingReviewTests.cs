@@ -60,7 +60,7 @@ public sealed class PostgresReportingReviewTests
             var scope = other == 0 ? target : NewScope();
             var facts = Enumerable.Range(0, 400).Select(index => Count(index % 2 == 0 ? ReportMetric.MessageSent : ReportMetric.MessageReceived, Day.AddMinutes(index * 7), $"c{other}",
                 Dimensions(agent: $"u{index % 5}", labels: index % 40 == 0 ? ["vip"] : []))).ToList();
-            Assert.StartsWith("applied:1:", W(await database.Store.ApplyAsync(scope, new ReportProjection(State($"c{other}"), facts), null)));
+            Assert.StartsWith("applied:1:", W(await database.Store.ApplyAsync(scope, new ReportProjection(State($"c{other}"), facts), null)), StringComparison.Ordinal);
         }
         await ScalarAsync(database.Primary, "ANALYZE tf_report_rollups; ANALYZE tf_report_facts");
 
@@ -80,9 +80,9 @@ public sealed class PostgresReportingReviewTests
         var rollupPlan = await PlanAsync(Whole(Day, Day.AddDays(3), ReportDimension.Agent, histograms: true, metrics: [ReportMetric.MessageSent, ReportMetric.MessageReceived]));
         Assert.IsTrue(rollupPlan.Contains("tf_report_rollups_query_v2", StringComparison.Ordinal) || rollupPlan.Contains("tf_report_rollups_scope_cell", StringComparison.Ordinal), rollupPlan);
         var labelPlan = await PlanAsync(Whole(Day, Day.AddDays(3), ReportDimension.Label, metrics: [ReportMetric.MessageSent]));
-        StringAssert.Contains(labelPlan, "tf_report_facts_labelled", labelPlan);
+        StringAssert.Contains(labelPlan, "tf_report_facts_labelled", StringComparison.Ordinal, labelPlan);
         var labelFilterPlan = await PlanAsync(Whole(Day, Day.AddDays(3), filter: new ReportFilter(label: new LabelId("vip")), metrics: [ReportMetric.MessageSent]));
-        StringAssert.Contains(labelFilterPlan, "tf_report_facts_labelled", labelFilterPlan);
+        StringAssert.Contains(labelFilterPlan, "tf_report_facts_labelled", StringComparison.Ordinal, labelFilterPlan);
     }
 
     [TestMethod]
@@ -135,7 +135,7 @@ public sealed class PostgresReportingReviewTests
             var count = 0;
             while (!applies.IsCompleted || count < 3)
             {
-                Assert.StartsWith("rebuilt:", B(await database.Competing.RebuildRollupsAsync(scope, Day, Day.AddDays(1))));
+                Assert.StartsWith("rebuilt:", B(await database.Competing.RebuildRollupsAsync(scope, Day, Day.AddDays(1))), StringComparison.Ordinal);
                 count++;
             }
         });

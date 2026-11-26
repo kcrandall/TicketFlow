@@ -19,7 +19,7 @@ public sealed record ArticleTranslation
     public ArticleTranslation(HelpCenterLocale locale, string title, HelpCenterSlug slug, string body, string? excerpt = null, IEnumerable<string>? tags = null)
     {
         if (!locale.IsInitialized || !slug.IsInitialized)
-            throw new ArgumentException("Translation locale and slug are required.");
+            throw new ArgumentException("Translation locale and slug are required.", !locale.IsInitialized ? nameof(locale) : nameof(slug));
         ArgumentNullException.ThrowIfNull(body);
         if (!HelpCenterText.IsMultiline(body, MaximumBodyLength))
             throw new ArgumentException($"Bodies must contain at most {MaximumBodyLength} characters, no control characters other than line breaks and tabs, and well-formed Unicode.", nameof(body));
@@ -52,8 +52,8 @@ public sealed record ArticleTranslation
     public IReadOnlyList<string> Tags { get; }
 
     public bool Equals(ArticleTranslation? other) =>
-        other is not null && Locale == other.Locale && Title == other.Title && Slug == other.Slug && Body == other.Body
-        && Excerpt == other.Excerpt && Tags.SequenceEqual(other.Tags);
+        other is not null && Locale == other.Locale && string.Equals(Title, other.Title, StringComparison.Ordinal) && Slug == other.Slug && string.Equals(Body, other.Body, StringComparison.Ordinal)
+        && string.Equals(Excerpt, other.Excerpt, StringComparison.Ordinal) && Tags.SequenceEqual(other.Tags, StringComparer.Ordinal);
 
     public override int GetHashCode() => HashCode.Combine(Locale, Title, Slug, Body.Length, Excerpt, Tags.Count);
 
@@ -69,7 +69,7 @@ public sealed record Article
     public Article(ArticleId id, PortalId portal, IEnumerable<ArticleTranslation> translations, CollectionId? collection = null, int position = 0)
     {
         if (!id.IsInitialized || !portal.IsInitialized || collection is { IsInitialized: false })
-            throw new ArgumentException("Article, portal and collection identifiers must be initialized.");
+            throw new ArgumentException("Article, portal and collection identifiers must be initialized.", !id.IsInitialized ? nameof(id) : !portal.IsInitialized ? nameof(portal) : nameof(collection));
         ArgumentOutOfRangeException.ThrowIfNegative(position);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(position, HelpCenterLimits.MaximumPosition);
         Id = id;

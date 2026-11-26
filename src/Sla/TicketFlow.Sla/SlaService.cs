@@ -152,8 +152,8 @@ public sealed class SlaService : ISlaService
             if (token.Length > 2048)
                 return false;
             var parts = Encoding.UTF8.GetString(Base64Url.DecodeFromChars(token)).Split('|', 4);
-            if (parts.Length != 4 || parts[0] != "v1" || parts[1] != fingerprint
-                || !long.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out var ticks))
+            if (parts.Length != 4 || !string.Equals(parts[0], "v1", StringComparison.Ordinal) || !string.Equals(parts[1], fingerprint
+, StringComparison.Ordinal) || !long.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out var ticks))
                 return false;
             cursor = new SlaRiskCursor(new DateTimeOffset(ticks, TimeSpan.Zero), new ConversationId(parts[3]));
             return true;

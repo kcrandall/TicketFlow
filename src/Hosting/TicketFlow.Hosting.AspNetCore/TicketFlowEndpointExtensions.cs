@@ -48,7 +48,7 @@ public static class TicketFlowEndpointExtensions
         builder.Services.Configure<TicketFlowEndpointOptions>(options => options.OpenApiDocumentName = documentName);
         builder.Services.AddOpenApi(documentName, options =>
         {
-            options.ShouldInclude = description => description.GroupName == documentName;
+            options.ShouldInclude = description => string.Equals(description.GroupName, documentName, StringComparison.Ordinal);
             options.AddDocumentTransformer((document, _, _) =>
             {
                 document.Info.Title = "TicketFlow API";

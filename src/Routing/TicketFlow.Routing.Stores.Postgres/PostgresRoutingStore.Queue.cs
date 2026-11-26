@@ -169,7 +169,7 @@ public sealed partial class PostgresRoutingStore
         var claims = new List<RoutingQueueClaim>(Math.Min(limit, 32));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            claims.Add(new RoutingQueueClaim(ReadScope(reader, 15), ReadQueue(reader, 0), reader.GetInt64(20), Instant(reader.GetFieldValue<DateTimeOffset>(21))));
+            claims.Add(new RoutingQueueClaim(ReadScope(reader, 15), ReadQueue(reader, 0), reader.GetInt64(20), Instant(await reader.GetFieldValueAsync<DateTimeOffset>(21, cancellationToken).ConfigureAwait(false))));
         if (claims.Count > 1)
             claims.Sort(static (a, b) =>
             {

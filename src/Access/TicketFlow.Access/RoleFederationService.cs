@@ -74,7 +74,7 @@ public sealed class RoleFederationService : IRoleFederationService
 
         var requiredPermission = GetRequiredAdminPermission(mapping.Scope);
         var resourceId = mappingId.IsInitialized ? mappingId.Value : null;
-        var targetResource = TargetForAudit(actor.Scope, mapping.Scope, resourceId);
+        var targetResource = TargetForAudit(actor.Scope, mapping.Partition, mapping.Scope, resourceId);
 
         if (!mappingId.IsInitialized)
             return await RefuseAsync<StoredRoleFederationMapping>(actor, AccessAuditKind.RoleFederationMappingCreated, requiredPermission, targetResource, mapping.RoleId,
@@ -90,16 +90,23 @@ public sealed class RoleFederationService : IRoleFederationService
                 TicketFailure.Invalid("Expected version cannot be negative."), cancellationToken).ConfigureAwait(false);
 
         var existing = await mappingStore.FindAsync(mapping.Partition, mappingId, cancellationToken).ConfigureAwait(false);
-        var auditKind = existing is null ? AccessAuditKind.RoleFederationMappingCreated : AccessAuditKind.RoleFederationMappingUpdated;
 
         // Authorize existing mapping scope BEFORE evaluating expectedVersion or role validation to prevent cross-scope version/existence oracles.
+        // Never copy metadata from an unauthorized existing mapping into the actor's audit log.
         if (existing is not null)
         {
             var existingRequiredPermission = GetRequiredAdminPermission(existing.Mapping.Scope);
             var (existingScopeFailure, _) = await AuthorizeScopeManagementAsync(actor, existing.Mapping.Partition, existing.Mapping.Scope, existingRequiredPermission, context, cancellationToken).ConfigureAwait(false);
             if (existingScopeFailure is not null)
-                return await RefuseAsync<StoredRoleFederationMapping>(actor, auditKind, existingRequiredPermission, targetResource, existing.Mapping.RoleId, existingScopeFailure, cancellationToken).ConfigureAwait(false);
+                return await RefuseAsync<StoredRoleFederationMapping>(actor, AccessAuditKind.RoleFederationMappingCreated, requiredPermission, targetResource, mapping.RoleId,
+                    AccessFailureSanitizer.ToOpaqueNotFound(existingScopeFailure), cancellationToken).ConfigureAwait(false);
         }
+
+        if (expectedVersion is > 0 && existing is null)
+            return await RefuseAsync<StoredRoleFederationMapping>(actor, AccessAuditKind.RoleFederationMappingCreated, requiredPermission, targetResource, mapping.RoleId,
+                TicketFailure.NotFound, cancellationToken).ConfigureAwait(false);
+
+        var auditKind = existing is null ? AccessAuditKind.RoleFederationMappingCreated : AccessAuditKind.RoleFederationMappingUpdated;
 
         if (expectedVersion is { } expectedUpsert)
         {
@@ -156,27 +163,27 @@ public sealed class RoleFederationService : IRoleFederationService
         if (baseFailure is not null)
             return await RefuseAsync<RoleFederationMappingId>(actor, AccessAuditKind.RoleFederationMappingDeleted, AccessPermissions.AccessManage, fallbackResource, roleId: null, baseFailure, cancellationToken).ConfigureAwait(false);
 
+        if (expectedVersion is < 0)
+            return await RefuseAsync<RoleFederationMappingId>(actor, AccessAuditKind.RoleFederationMappingDeleted, AccessPermissions.AccessManage, fallbackResource, roleId: null,
+                TicketFailure.Invalid("Expected version cannot be negative."), cancellationToken).ConfigureAwait(false);
+
         var partition = AccessPartition.From(actor.Scope);
         var existing = await mappingStore.FindAsync(partition, mappingId, cancellationToken).ConfigureAwait(false);
         if (existing is null)
             return await RefuseAsync<RoleFederationMappingId>(actor, AccessAuditKind.RoleFederationMappingDeleted, AccessPermissions.AccessManage, fallbackResource, roleId: null, TicketFailure.NotFound, cancellationToken).ConfigureAwait(false);
 
         var requiredPermission = GetRequiredAdminPermission(existing.Mapping.Scope);
-        var targetResource = TargetForAudit(actor.Scope, existing.Mapping.Scope, mappingId.Value);
         var (scopeFailure, _) = await AuthorizeScopeManagementAsync(actor, existing.Mapping.Partition, existing.Mapping.Scope, requiredPermission, context, cancellationToken).ConfigureAwait(false);
         if (scopeFailure is not null)
-            return await RefuseAsync<RoleFederationMappingId>(actor, AccessAuditKind.RoleFederationMappingDeleted, requiredPermission, targetResource, existing.Mapping.RoleId, scopeFailure, cancellationToken).ConfigureAwait(false);
+            return await RefuseAsync<RoleFederationMappingId>(actor, AccessAuditKind.RoleFederationMappingDeleted, AccessPermissions.AccessManage, fallbackResource, roleId: null,
+                AccessFailureSanitizer.ToOpaqueNotFound(scopeFailure), cancellationToken).ConfigureAwait(false);
 
-        if (expectedVersion is { } expectedDelete)
-        {
-            if (expectedDelete < 0)
-                return await RefuseAsync<RoleFederationMappingId>(actor, AccessAuditKind.RoleFederationMappingDeleted, requiredPermission, targetResource, existing.Mapping.RoleId,
-                    TicketFailure.Invalid("Expected version cannot be negative."), cancellationToken).ConfigureAwait(false);
-            if (existing.Version != expectedDelete)
-                return await RefuseAsync<RoleFederationMappingId>(actor, AccessAuditKind.RoleFederationMappingDeleted, requiredPermission, targetResource, existing.Mapping.RoleId,
-                    TicketFailure.Conflict(existing.Version, [$"Role federation mapping '{mappingId.Value}' is at version {existing.Version}, expected {expectedDelete}."], code: "concurrency-conflict"),
-                    cancellationToken).ConfigureAwait(false);
-        }
+        var targetResource = TargetForAudit(actor.Scope, existing.Mapping.Partition, existing.Mapping.Scope, mappingId.Value);
+
+        if (expectedVersion is { } expectedDelete && existing.Version != expectedDelete)
+            return await RefuseAsync<RoleFederationMappingId>(actor, AccessAuditKind.RoleFederationMappingDeleted, requiredPermission, targetResource, existing.Mapping.RoleId,
+                TicketFailure.Conflict(existing.Version, [$"Role federation mapping '{mappingId.Value}' is at version {existing.Version}, expected {expectedDelete}."], code: "concurrency-conflict"),
+                cancellationToken).ConfigureAwait(false);
 
         var existingRole = await FindRoleAsync(actor.Scope, existing.Mapping.RoleId, existing.Mapping.Scope, cancellationToken).ConfigureAwait(false);
         if (existingRole is not null)
@@ -451,12 +458,15 @@ public sealed class RoleFederationService : IRoleFederationService
     private static Permission GetRequiredAdminPermission(GrantScope scope) =>
         scope is TenantGrantScope ? AccessPermissions.AccessManageTenant : AccessPermissions.AccessManage;
 
-    private static AccessResource TargetForAudit(TicketScope actorScope, GrantScope grantScope, string? resourceId) => grantScope switch
-    {
-        TeamGrantScope team when team.Workspace == actorScope.WorkspaceId => new(actorScope, resourceId: resourceId, team: team.Team),
-        InboxGrantScope inbox when inbox.Workspace == actorScope.WorkspaceId => new(actorScope, resourceId: resourceId, inbox: inbox.Inbox),
-        _ => new(actorScope, resourceId: resourceId),
-    };
+    private static AccessResource TargetForAudit(TicketScope actorScope, AccessPartition targetPartition, GrantScope grantScope, string? resourceId) =>
+        targetPartition == AccessPartition.From(actorScope)
+            ? grantScope switch
+            {
+                TeamGrantScope team when team.Workspace == actorScope.WorkspaceId => new(actorScope, resourceId: resourceId, team: team.Team),
+                InboxGrantScope inbox when inbox.Workspace == actorScope.WorkspaceId => new(actorScope, resourceId: resourceId, inbox: inbox.Inbox),
+                _ => new(actorScope, resourceId: resourceId),
+            }
+            : new(actorScope, resourceId: resourceId);
 
     private static string FormatActorId(PrincipalRef actor)
     {

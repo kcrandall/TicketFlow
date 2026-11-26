@@ -306,13 +306,10 @@ public sealed class AccessTools(TicketFlowToolContext context)
         {
             var id = new GrantId(grantId);
             if (context.Services.GetService<IAccessGrantStore>() is { } grantStore
-                && await grantStore.GetAsync(AccessPartition.From(principal.Scope), id, cancellationToken) is { } existing)
-            {
-                if (await Administrator.CheckCanRevokeAsync(principal, [existing.Grant], cancellationToken) is TicketFailure)
-                    return TicketFlowToolError.Forbidden();
-                if (existing.Grant.Kind != GrantKind.BreakGlass)
-                    return TicketFlowToolError.Invalid(["The specified grant is not a break-glass grant; use access_revoke_grant instead."]);
-            }
+                && await grantStore.GetAsync(AccessPartition.From(principal.Scope), id, cancellationToken) is { } existing
+                && await Administrator.CheckCanRevokeAsync(principal, [existing.Grant], cancellationToken) is AccessCheckPassed
+                && existing.Grant.Kind != GrantKind.BreakGlass)
+                return TicketFlowToolError.Invalid(["The specified grant is not a break-glass grant; use access_revoke_grant instead."]);
             return Map(await Administrator.RevokeGrantAsync(principal, id, expectedRevision, cancellationToken), Grant, "The break-glass grant");
         }, cancellationToken);
 
@@ -574,7 +571,7 @@ public sealed class AccessTools(TicketFlowToolContext context)
 
     private static TicketFlowToolError Refused(TicketFailure refused, string notFoundWhat) => refused.Kind switch
     {
-        TicketFailureKind.Forbidden => TicketFlowToolError.Forbidden() with { Errors = refused.Errors.Count > 0 ? refused.Errors : null },
+        TicketFailureKind.Forbidden => TicketFlowToolError.Forbidden(),
         TicketFailureKind.Invalid => TicketFlowToolError.Invalid(refused.Errors),
         TicketFailureKind.NotFound => TicketFlowToolError.NotFound(notFoundWhat),
         TicketFailureKind.Conflict => TicketFlowToolError.Conflict(refused.CurrentRevision) with { Errors = refused.Errors.Count > 0 ? refused.Errors : null },

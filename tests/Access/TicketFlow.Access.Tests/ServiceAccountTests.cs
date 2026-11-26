@@ -239,23 +239,24 @@ public sealed partial class ServiceAccountTests
             Assert.AreEqual("reserved-client-id", failure.Code);
         }
 
-        // Pre-existing grant outside requested SA scope -> Conflict
+        // Pre-existing grant outside requested SA scope -> uniform non-enumerating Conflict
         var outOfScopeClient = new ApiClientId("pre-tenant-bot");
         await fixture.GrantAsync(outOfScopeClient, BuiltInRoles.Viewer, TenantGrantScope.Instance);
         var outOfScopeCreate = await service.CreateServiceAccountAsync(owner, new ServiceAccount(outOfScopeClient, fixture.Partition, fixture.Workspace, "Bot"));
         Assert.IsTrue(outOfScopeCreate.TryGetValue(out TicketFailure outOfScopeFailure));
         Assert.AreEqual(TicketFailureKind.Conflict, outOfScopeFailure.Kind);
-        Assert.AreEqual("existing-grants-conflict", outOfScopeFailure.Code);
+        Assert.AreEqual("service-account-conflict", outOfScopeFailure.Code);
+        Assert.IsNull(outOfScopeFailure.CurrentRevision);
 
-        // Pre-existing Deny grant -> Conflict
+        // Pre-existing Deny grant -> uniform Conflict
         var deniedClient = new ApiClientId("pre-denied-bot");
         await fixture.GrantAsync(deniedClient, BuiltInRoles.Viewer, fixture.Workspace, GrantEffect.Deny);
         var deniedCreate = await service.CreateServiceAccountAsync(owner, new ServiceAccount(deniedClient, fixture.Partition, fixture.Workspace, "Denied Bot"));
         Assert.IsTrue(deniedCreate.TryGetValue(out TicketFailure denyFailure));
         Assert.AreEqual(TicketFailureKind.Conflict, denyFailure.Kind);
-        Assert.AreEqual("existing-grants-conflict", denyFailure.Code);
+        Assert.AreEqual("service-account-conflict", denyFailure.Code);
 
-        // Pre-existing Allow grant conferring permissions actor lacks -> Conflict
+        // Pre-existing Allow grant conferring permissions actor lacks -> uniform Conflict
         var wsAdmin = fixture.User("ws-admin");
         await fixture.GrantAsync(wsAdmin.UserId, BuiltInRoles.Admin, fixture.Workspace);
         var highPrivClient = new ApiClientId("pre-owner-bot");
@@ -263,7 +264,17 @@ public sealed partial class ServiceAccountTests
         var escCreate = await service.CreateServiceAccountAsync(wsAdmin, new ServiceAccount(highPrivClient, fixture.Partition, fixture.Workspace, "High Priv Bot"));
         Assert.IsTrue(escCreate.TryGetValue(out TicketFailure escFailure));
         Assert.AreEqual(TicketFailureKind.Conflict, escFailure.Kind);
-        Assert.AreEqual("existing-grants-conflict", escFailure.Code);
+        Assert.AreEqual("service-account-conflict", escFailure.Code);
+
+        // Pre-existing unresolvable role grant -> uniform Conflict without echoing role name
+        var ghostRoleClient = new ApiClientId("pre-ghost-role-bot");
+        await fixture.SeedAsync(new AccessGrant(new GrantId("g-ghost-role"), fixture.Partition, ghostRoleClient, new RoleId("secret-deleted-role"), fixture.Workspace));
+        var ghostCreate = await service.CreateServiceAccountAsync(wsAdmin, new ServiceAccount(ghostRoleClient, fixture.Partition, fixture.Workspace, "Ghost Role Bot"));
+        Assert.IsTrue(ghostCreate.TryGetValue(out TicketFailure ghostFailure));
+        Assert.AreEqual(TicketFailureKind.Conflict, ghostFailure.Kind);
+        Assert.AreEqual("service-account-conflict", ghostFailure.Code);
+        Assert.IsFalse(ghostFailure.Errors.Any(e => e.Contains("secret-deleted-role", StringComparison.Ordinal)),
+            "CreateServiceAccountAsync must not echo unresolvable role names.");
     }
 
     [TestMethod]
@@ -283,11 +294,13 @@ public sealed partial class ServiceAccountTests
         Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(botId, fixture.Partition, fixture.Workspace, "High Priv SA"))).IsSuccess);
         await fixture.GrantAsync(botId, BuiltInRoles.Owner, fixture.Workspace);
 
-        // wsAdmin cannot issue an API key for a SA holding permissions wsAdmin lacks
+        // wsAdmin cannot issue an API key for a SA holding permissions wsAdmin lacks, and individual unheld permission names are not leaked
         var issueEsc = await service.IssueApiKeyAsync(wsAdmin, new ApiKeyCreateRequest(botId, "hijack"));
         Assert.IsTrue(issueEsc.TryGetValue(out TicketFailure issueFailure));
         Assert.AreEqual(TicketFailureKind.Forbidden, issueFailure.Kind);
         Assert.AreEqual("privilege-escalation", issueFailure.Code);
+        Assert.IsFalse(issueFailure.Errors.Any(e => e.Contains("workspace:manage", StringComparison.Ordinal) || e.Contains("access:manage-tenant", StringComparison.Ordinal)),
+            "CheckActorCanConferClientGrantsAsync must not leak individual unheld permission names.");
 
         // wsAdmin CAN disable a compromised SA, but CANNOT re-enable it (anti-escalation)
         Assert.IsTrue((await service.SetServiceAccountEnabledAsync(wsAdmin, botId, isEnabled: false, reason: "incident")).IsSuccess);
@@ -296,24 +309,25 @@ public sealed partial class ServiceAccountTests
         Assert.AreEqual(TicketFailureKind.Forbidden, enableFailure.Kind);
         Assert.AreEqual("privilege-escalation", enableFailure.Code);
 
-        // Delete refuses when SA has an active grant outside SA scope
+        // Delete refuses with uniform sanitized Forbidden when SA has an active grant outside SA scope or unrevocable deny grant
         var crossScopeBot = new ApiClientId("cross-scope-sa");
         Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(crossScopeBot, fixture.Partition, fixture.Workspace, "Cross Scope SA"))).IsSuccess);
         await fixture.GrantAsync(crossScopeBot, BuiltInRoles.Viewer, TenantGrantScope.Instance);
         var deleteCross = await service.DeleteServiceAccountAsync(wsAdmin, crossScopeBot);
         Assert.IsTrue(deleteCross.TryGetValue(out TicketFailure crossFailure));
         Assert.AreEqual(TicketFailureKind.Forbidden, crossFailure.Kind);
-        Assert.AreEqual("out-of-scope", crossFailure.Code);
+        Assert.AreEqual("forbidden", crossFailure.Code);
         Assert.IsNotEmpty(await fixture.Grants.ListAllForSubjectAsync(fixture.Partition, crossScopeBot, fixture.Scope.WorkspaceId));
 
-        // Delete refuses when SA has an active Deny grant whose permissions actor cannot confer/revoke
+        // Delete refuses with identical sanitized Forbidden when SA has an active Deny grant whose permissions actor cannot confer/revoke
         var denyBot = new ApiClientId("deny-protected-sa");
         Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(denyBot, fixture.Partition, fixture.Workspace, "Deny Protected SA"))).IsSuccess);
         await fixture.GrantAsync(denyBot, BuiltInRoles.Owner, fixture.Workspace, GrantEffect.Deny);
         var deleteDeny = await service.DeleteServiceAccountAsync(wsAdmin, denyBot);
         Assert.IsTrue(deleteDeny.TryGetValue(out TicketFailure denyDelFailure));
         Assert.AreEqual(TicketFailureKind.Forbidden, denyDelFailure.Kind);
-        Assert.AreEqual("privilege-escalation", denyDelFailure.Code);
+        Assert.AreEqual("forbidden", denyDelFailure.Code);
+        CollectionAssert.AreEqual(crossFailure.Errors.ToArray(), denyDelFailure.Errors.ToArray());
 
         // Owner CAN delete and grant revocations are audited
         var auditBefore = fixture.Audit.Snapshot().Count;
@@ -422,7 +436,7 @@ public sealed partial class ServiceAccountTests
         var conflictCreate = await service.CreateServiceAccountAsync(owner, new ServiceAccount(orphanClient, fixture.Partition, fixture.Workspace, "Orphan Bot"));
         Assert.IsTrue(conflictCreate.TryGetValue(out TicketFailure conflictFailure));
         Assert.AreEqual(TicketFailureKind.Conflict, conflictFailure.Kind);
-        Assert.AreEqual("existing-keys-conflict", conflictFailure.Code);
+        Assert.AreEqual("service-account-conflict", conflictFailure.Code);
 
         // Once the orphaned key is revoked, creation succeeds
         Assert.AreEqual(1, await keyStore.RevokeAllForClientAsync(fixture.Partition, orphanClient, "system:cleanup", "cleanup"));
@@ -502,7 +516,7 @@ public sealed partial class ServiceAccountTests
     }
 
     [TestMethod]
-    public async Task CreateServiceAccountDoesNotLeakCrossWorkspaceOrTenantVersion()
+    public async Task CrossScopeAndUnauthorizedServiceAccountOperationsAreOpaqueAndDoNotExfiltrateAuditMetadata()
     {
         using var fixture = AccessFixture.Create();
         using var scope = fixture.Provider.CreateScope();
@@ -516,19 +530,138 @@ public sealed partial class ServiceAccountTests
         var otherWs = new WorkspaceId("ws-other");
         var otherOwner = new UserPrincipal(fixture.Partition.InWorkspace(otherWs), new UserId("owner"));
         var otherClient = new ApiClientId("sa-other-ws-secret");
-        Assert.IsTrue((await service.CreateServiceAccountAsync(otherOwner, new ServiceAccount(otherClient, fixture.Partition, new WorkspaceGrantScope(otherWs), "Other WS"))).IsSuccess);
+        Assert.IsTrue((await service.CreateServiceAccountAsync(otherOwner, new ServiceAccount(otherClient, fixture.Partition, new TeamGrantScope(otherWs, new TeamId("other-team")), "Other WS"))).IsSuccess);
         Assert.IsTrue((await service.UpdateServiceAccountAsync(otherOwner, otherClient, "Other WS v2", expectedVersion: 1)).IsSuccess);
+        var otherKeyRes = await service.IssueApiKeyAsync(otherOwner, new ApiKeyCreateRequest(otherClient, "k-other"));
+        Assert.IsTrue(otherKeyRes.TryGetValue(out TicketValue<AccessChangeApplied<IssuedApiKey>> otherKey));
 
         var tenantClient = new ApiClientId("sa-tenant-secret");
         Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(tenantClient, fixture.Partition, TenantGrantScope.Instance, "Tenant SA"))).IsSuccess);
+        var tenantKeyRes = await service.IssueApiKeyAsync(owner, new ApiKeyCreateRequest(tenantClient, "k-tenant"));
+        Assert.IsTrue(tenantKeyRes.TryGetValue(out TicketValue<AccessChangeApplied<IssuedApiKey>> tenantKey));
 
-        foreach (var probeId in new[] { otherClient, tenantClient })
+        var sameWsClient = new ApiClientId("sa-same-ws");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(wsAdmin, new ServiceAccount(sameWsClient, fixture.Partition, fixture.Workspace, "Same WS"))).IsSuccess);
+
+        // 1. CreateServiceAccountAsync collapses same-scope, other-workspace, and tenant existing accounts into identical uniform Conflict without leaking version or scope in audit.
+        var createAuditBefore = fixture.Audit.Snapshot().Count;
+        foreach (var probeId in new[] { otherClient, tenantClient, sameWsClient })
         {
             var attempt = await service.CreateServiceAccountAsync(wsAdmin, new ServiceAccount(probeId, fixture.Partition, fixture.Workspace, "Probe"));
             Assert.IsTrue(attempt.TryGetValue(out TicketFailure failure));
-            Assert.AreEqual(TicketFailureKind.Forbidden, failure.Kind, $"CreateServiceAccountAsync leaked cross-scope version for {probeId}.");
+            Assert.AreEqual(TicketFailureKind.Conflict, failure.Kind, $"CreateServiceAccountAsync leaked cross-scope state for {probeId}.");
+            Assert.AreEqual("service-account-conflict", failure.Code);
             Assert.IsNull(failure.CurrentRevision);
         }
+        var createAudits = fixture.Audit.Snapshot().Skip(createAuditBefore).ToList();
+        Assert.HasCount(3, createAudits);
+        foreach (var entry in createAudits)
+        {
+            Assert.AreEqual(AccessPermissions.AccessManage, entry.Permission);
+            Assert.IsNull(entry.TeamId);
+            Assert.IsNull(entry.InboxId);
+            Assert.IsNull(entry.DenialReason);
+        }
+
+        // 2. Single-ID lookup/update/enable/delete/issue-key/revoke-key return opaque NotFound for cross-workspace & unauthorized tenant records and never leak scope metadata into audit logs.
+        var missingClient = new ApiClientId("sa-missing");
+        var missingKey = ApiKeyId.NewId();
+
+        Assert.AreEqual(TicketFailureKind.NotFound, ((TicketFailure)(await service.GetServiceAccountAsync(wsAdmin, otherClient)).Value!).Kind);
+        Assert.AreEqual(TicketFailureKind.NotFound, ((TicketFailure)(await service.GetServiceAccountAsync(wsAdmin, missingClient)).Value!).Kind);
+        Assert.AreEqual(TicketFailureKind.NotFound, ((TicketFailure)(await service.ListApiKeysAsync(wsAdmin, otherClient)).Value!).Kind);
+        Assert.AreEqual(TicketFailureKind.NotFound, ((TicketFailure)(await service.ListApiKeysAsync(wsAdmin, missingClient)).Value!).Kind);
+
+        var opAuditBefore = fixture.Audit.Snapshot().Count;
+        foreach (var probeId in new[] { otherClient, tenantClient, missingClient })
+        {
+            Assert.AreEqual(TicketFailureKind.NotFound, ((TicketFailure)(await service.UpdateServiceAccountAsync(wsAdmin, probeId, "New Name", expectedVersion: 1)).Value!).Kind);
+            Assert.AreEqual(TicketFailureKind.NotFound, ((TicketFailure)(await service.SetServiceAccountEnabledAsync(wsAdmin, probeId, false, expectedVersion: 1)).Value!).Kind);
+            Assert.AreEqual(TicketFailureKind.NotFound, ((TicketFailure)(await service.DeleteServiceAccountAsync(wsAdmin, probeId, expectedVersion: 1)).Value!).Kind);
+            Assert.AreEqual(TicketFailureKind.NotFound, ((TicketFailure)(await service.IssueApiKeyAsync(wsAdmin, new ApiKeyCreateRequest(probeId, "probe"))).Value!).Kind);
+        }
+        foreach (var probeKey in new[] { otherKey.Value.Value.Key.Id, tenantKey.Value.Value.Key.Id, missingKey })
+            Assert.AreEqual(TicketFailureKind.NotFound, ((TicketFailure)(await service.RevokeApiKeyAsync(wsAdmin, probeKey, expectedVersion: 1)).Value!).Kind);
+
+        var opAudits = fixture.Audit.Snapshot().Skip(opAuditBefore).ToList();
+        Assert.HasCount(15, opAudits);
+        foreach (var entry in opAudits)
+        {
+            Assert.AreEqual(AccessAuditOutcome.Denied, entry.Outcome);
+            Assert.AreEqual(AccessPermissions.AccessManage, entry.Permission, $"Audit leaked permission '{entry.Permission}' for {entry.Kind} {entry.ResourceId}.");
+            Assert.IsNull(entry.TeamId);
+            Assert.IsNull(entry.InboxId);
+            Assert.IsNull(entry.DenialReason, $"Audit leaked DenialReason '{entry.DenialReason}' for {entry.Kind} {entry.ResourceId}.");
+        }
+    }
+
+    [TestMethod]
+    public async Task AccessManageTenantOnlyPrincipalCannotDeleteServiceAccountWithActiveNonTenantBreakGlassGrant()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<IServiceAccountService>();
+
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        // Tenant-only manager: holds tenant Owner MINUS access:manage in actor's workspace (only access:manage-tenant remains active).
+        var tenantOnlyAdmin = fixture.User("tenant-only-admin");
+        await fixture.GrantAsync(tenantOnlyAdmin.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        var denyManageRole = await fixture.CustomRoleAsync("deny-access-manage-only", AccessPermissions.AccessManage);
+        await fixture.GrantAsync(tenantOnlyAdmin.UserId, denyManageRole, fixture.Workspace, GrantEffect.Deny);
+
+        // Confirm IAccessAdministrator refuses revoking a workspace break-glass grant by tenantOnlyAdmin.
+        var tenantSa = new ApiClientId("sa-tenant-with-bg");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(tenantSa, fixture.Partition, TenantGrantScope.Instance, "Tenant SA"))).IsSuccess);
+        var now = fixture.Clock.GetUtcNow();
+        var bgGrantSameWs = new AccessGrant(
+            new GrantId("g-sa-bg-same-ws"),
+            fixture.Partition,
+            tenantSa,
+            BuiltInRoles.Supervisor.Id,
+            fixture.Workspace,
+            GrantEffect.Allow,
+            validFrom: now,
+            validUntil: now.AddHours(1),
+            justification: "Emergency incident break-glass on service account",
+            kind: GrantKind.BreakGlass);
+        await fixture.SeedAsync(bgGrantSameWs);
+
+        Assert.AreEqual("refused:NotFound", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(tenantOnlyAdmin, bgGrantSameWs.Id, 1)));
+
+        // DeleteServiceAccountAsync MUST also refuse deleting tenantSa and MUST NOT cascade-revoke the active break-glass grant!
+        var deleteSameWs = await service.DeleteServiceAccountAsync(tenantOnlyAdmin, tenantSa);
+        Assert.IsTrue(deleteSameWs.TryGetValue(out TicketFailure sameWsFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, sameWsFailure.Kind);
+        Assert.IsNotNull(await fixture.Grants.GetAsync(fixture.Partition, bgGrantSameWs.Id), "Active break-glass grant must not be cascade-revoked.");
+
+        // Same protection for a tenant-scoped SA holding an active non-tenant break-glass grant in ANOTHER workspace.
+        var tenantSaOtherWs = new ApiClientId("sa-tenant-with-other-ws-bg");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(tenantSaOtherWs, fixture.Partition, TenantGrantScope.Instance, "Tenant SA Other WS"))).IsSuccess);
+        var bgGrantOtherWs = new AccessGrant(
+            new GrantId("g-sa-bg-other-ws"),
+            fixture.Partition,
+            tenantSaOtherWs,
+            BuiltInRoles.Supervisor.Id,
+            new WorkspaceGrantScope(new WorkspaceId("ws-other")),
+            GrantEffect.Allow,
+            validFrom: now,
+            validUntil: now.AddHours(1),
+            justification: "Emergency incident break-glass in other workspace",
+            kind: GrantKind.BreakGlass);
+        await fixture.SeedAsync(bgGrantOtherWs);
+
+        var deleteOtherWs = await service.DeleteServiceAccountAsync(tenantOnlyAdmin, tenantSaOtherWs);
+        Assert.IsTrue(deleteOtherWs.TryGetValue(out TicketFailure otherWsFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, otherWsFailure.Kind);
+        Assert.IsNotNull(await fixture.Grants.GetAsync(fixture.Partition, bgGrantOtherWs.Id), "Active cross-workspace break-glass grant must not be cascade-revoked.");
+
+        // Full tenant owner (holding both access:manage and access:manage-tenant) CAN delete both service accounts.
+        Assert.IsTrue((await service.DeleteServiceAccountAsync(owner, tenantSa)).IsSuccess);
+        Assert.IsNull(await fixture.Grants.GetAsync(fixture.Partition, bgGrantSameWs.Id));
+        Assert.IsTrue((await service.DeleteServiceAccountAsync(owner, tenantSaOtherWs)).IsSuccess);
+        Assert.IsNull(await fixture.Grants.GetAsync(fixture.Partition, bgGrantOtherWs.Id));
     }
 
     private sealed class CancellingOnDeleteServiceAccountStore(IServiceAccountStore inner, CancellationTokenSource cts) : IServiceAccountStore

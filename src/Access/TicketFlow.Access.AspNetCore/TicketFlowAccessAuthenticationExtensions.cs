@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -174,6 +175,9 @@ public static class TicketFlowAccessAuthenticationExtensions
                 if (scope is null)
                     return Results.BadRequest(new { error = "TicketFlow scope could not be resolved." });
 
+                if (!VerifyScopeClaims(httpContext.User, scope))
+                    return Results.Unauthorized();
+
                 var services = httpContext.RequestServices;
                 var hostResolver = services.GetService<ITicketFlowPrincipalResolver>();
                 var accessResolver = services.GetService<IAccessPrincipalResolver>();
@@ -209,6 +213,14 @@ public static class TicketFlowAccessAuthenticationExtensions
                 if (principal is null || principal.Scope != scope)
                     return Results.Unauthorized();
 
+                if (principal is ApiClientPrincipal apiClient
+                    && services.GetService<IServiceAccountStore>() is { } serviceAccounts)
+                {
+                    var stored = await serviceAccounts.FindAsync(AccessPartition.From(scope), apiClient.ClientId, httpContext.RequestAborted).ConfigureAwait(false);
+                    if (stored is not null && (!stored.IsEnabled || !stored.Account.AppliesTo(scope)))
+                        return Results.Unauthorized();
+                }
+
                 var result = await roleFederationService
                     .GetRoleCatalogAsync(principal, httpContext.RequestAborted)
                     .ConfigureAwait(false);
@@ -226,5 +238,29 @@ public static class TicketFlowAccessAuthenticationExtensions
                     },
                 };
             });
+    }
+
+    private static bool VerifyScopeClaims(ClaimsPrincipal principal, TicketScope scope)
+    {
+        foreach (var claim in principal.Claims)
+        {
+            var expected = claim.Type switch
+            {
+                TicketFlowClaimsScopeResolver.TenantClaimType => scope.TenantId,
+                TicketFlowClaimsScopeResolver.ProjectClaimType => scope.ProjectId,
+                TicketFlowClaimsScopeResolver.EnvironmentClaimType or TicketFlowClaimsScopeResolver.LegacyEnvironmentClaimType => scope.EnvironmentId,
+                TicketFlowClaimsScopeResolver.AppClaimType or TicketFlowClaimsScopeResolver.LegacyAppClaimType => scope.AppId,
+                TicketFlowClaimsScopeResolver.WorkspaceClaimType or TicketFlowClaimsScopeResolver.LegacyWorkspaceClaimType => scope.WorkspaceId.Value,
+                _ => null,
+            };
+            if (expected is null)
+                continue;
+
+            var trimmed = claim.Value?.Trim();
+            if (string.IsNullOrEmpty(trimmed) || !string.Equals(trimmed, expected, StringComparison.Ordinal))
+                return false;
+        }
+
+        return true;
     }
 }

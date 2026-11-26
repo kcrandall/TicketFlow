@@ -721,6 +721,106 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
             Assert.AreEqual(TicketFlow.UI.Blazor.Infrastructure.UiSessionState.NoPrincipal, session.State);
         }
 
+        // 3c. Disabled or out-of-scope service account fails closed to NoPrincipal, custom host resolver enforces VerifyScopeClaims, and duplicate conflicting scope claims fail closed.
+        var saSessionServices = new ServiceCollection();
+        saSessionServices.AddTicketFlow()
+            .AddAccessControl()
+            .AddInMemoryAccessStores()
+            .AddTicketFlowEndpoints(o => o.Partition = partition)
+            .AddTicketFlowBlazorUI(o => o.Workspace = workspace);
+        saSessionServices.AddScoped<ITicketFlowPrincipalResolver, FlexibleHostResolver>();
+
+        await using (var provider = saSessionServices.BuildServiceProvider())
+        {
+            var saStore = provider.GetRequiredService<IServiceAccountStore>();
+            var disabledClient = new ApiClientId("sa-disabled-ui");
+            await saStore.CreateAsync(new ServiceAccount(disabledClient, partition, new WorkspaceGrantScope(workspace), "Disabled UI SA"), "system:test");
+            await saStore.SetEnabledAsync(partition, disabledClient, isEnabled: false, "system:test", "revoked");
+
+            var otherWsClient = new ApiClientId("sa-other-ws-ui");
+            await saStore.CreateAsync(new ServiceAccount(otherWsClient, partition, new WorkspaceGrantScope(new WorkspaceId("ws-other")), "Other WS UI SA"), "system:test");
+
+            var enabledClient = new ApiClientId("sa-enabled-ui");
+            await saStore.CreateAsync(new ServiceAccount(enabledClient, partition, new WorkspaceGrantScope(workspace), "Enabled UI SA"), "system:test");
+
+            using var serviceScope = provider.CreateScope();
+
+            // Disabled service account -> NoPrincipal
+            var disabledHttp = new Microsoft.AspNetCore.Http.DefaultHttpContext
+            {
+                RequestServices = serviceScope.ServiceProvider,
+                User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+                [
+                    new System.Security.Claims.Claim("client_id", disabledClient.Value),
+                ], "ExternalIdentity")),
+            };
+            Assert.AreEqual(TicketFlow.UI.Blazor.Infrastructure.UiSessionState.NoPrincipal,
+                (await TicketFlow.UI.Blazor.Infrastructure.TicketFlowUISession.ResolvePrincipalAsync(disabledHttp)).State);
+
+            // Out-of-scope service account -> NoPrincipal
+            var otherWsHttp = new Microsoft.AspNetCore.Http.DefaultHttpContext
+            {
+                RequestServices = serviceScope.ServiceProvider,
+                User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+                [
+                    new System.Security.Claims.Claim("client_id", otherWsClient.Value),
+                ], "ExternalIdentity")),
+            };
+            Assert.AreEqual(TicketFlow.UI.Blazor.Infrastructure.UiSessionState.NoPrincipal,
+                (await TicketFlow.UI.Blazor.Infrastructure.TicketFlowUISession.ResolvePrincipalAsync(otherWsHttp)).State);
+
+            // Enabled in-scope service account -> Ready
+            var enabledHttp = new Microsoft.AspNetCore.Http.DefaultHttpContext
+            {
+                RequestServices = serviceScope.ServiceProvider,
+                User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+                [
+                    new System.Security.Claims.Claim("client_id", enabledClient.Value),
+                ], "ExternalIdentity")),
+            };
+            Assert.AreEqual(TicketFlow.UI.Blazor.Infrastructure.UiSessionState.Ready,
+                (await TicketFlow.UI.Blazor.Infrastructure.TicketFlowUISession.ResolvePrincipalAsync(enabledHttp)).State);
+
+            // Custom host resolver MUST still fail closed when scope claims conflict with resolvedScope!
+            var mismatchedClaimHttp = new Microsoft.AspNetCore.Http.DefaultHttpContext
+            {
+                RequestServices = serviceScope.ServiceProvider,
+                User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+                [
+                    new System.Security.Claims.Claim("sub", "staff-ada"),
+                    new System.Security.Claims.Claim("workspace_id", "ws-other"),
+                ], "ExternalIdentity")),
+            };
+            Assert.AreEqual(TicketFlow.UI.Blazor.Infrastructure.UiSessionState.NoPrincipal,
+                (await TicketFlow.UI.Blazor.Infrastructure.TicketFlowUISession.ResolvePrincipalAsync(mismatchedClaimHttp)).State);
+        }
+
+        // Duplicate conflicting scope claims in PartitionFromClaims (no ITicketFlowPartitionResolver) -> NoPrincipal
+        var claimPartitionServices = new ServiceCollection();
+        claimPartitionServices.AddTicketFlow()
+            .AddAccessControl()
+            .AddInMemoryAccessStores()
+            .AddTicketFlowBlazorUI(o => o.Workspace = workspace);
+        await using (var provider = claimPartitionServices.BuildServiceProvider())
+        using (var serviceScope = provider.CreateScope())
+        {
+            var conflictingHttp = new Microsoft.AspNetCore.Http.DefaultHttpContext
+            {
+                RequestServices = serviceScope.ServiceProvider,
+                User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+                [
+                    new System.Security.Claims.Claim("sub", "alice"),
+                    new System.Security.Claims.Claim("tenant_id", "t1"),
+                    new System.Security.Claims.Claim("tenant_id", "t2"),
+                    new System.Security.Claims.Claim("project_id", "p1"),
+                    new System.Security.Claims.Claim("environment_id", "prod"),
+                    new System.Security.Claims.Claim("app_id", "app1"),
+                ], "ExternalIdentity")),
+            };
+            Assert.AreEqual(TicketFlow.UI.Blazor.Infrastructure.UiSessionState.NoPrincipal,
+                (await TicketFlow.UI.Blazor.Infrastructure.TicketFlowUISession.ResolvePrincipalAsync(conflictingHttp)).State);
+        }
+
         // 4. SampleSeeder does NOT seed hardcoded demo API keys outside Development
         await using (var prodApp = SampleHostApp.Build(["--environment", "Production"], builder =>
         {
@@ -756,6 +856,18 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
     {
         public ValueTask<PrincipalRef?> ResolveAsync(Microsoft.AspNetCore.Http.HttpContext httpContext, TicketScope scope, CancellationToken cancellationToken = default) =>
             ValueTask.FromResult<PrincipalRef?>(new UserPrincipal(new TicketScope("other-t", "other-p", "prod", "other-a", new WorkspaceId("other-ws")), new UserId("wrong-scope-user")));
+    }
+
+    private sealed class FlexibleHostResolver : ITicketFlowPrincipalResolver
+    {
+        public ValueTask<PrincipalRef?> ResolveAsync(Microsoft.AspNetCore.Http.HttpContext httpContext, TicketScope scope, CancellationToken cancellationToken = default)
+        {
+            if (httpContext.User.FindFirst("client_id")?.Value is { Length: > 0 } clientId)
+                return ValueTask.FromResult<PrincipalRef?>(new ApiClientPrincipal(scope, new ApiClientId(clientId)));
+            if (httpContext.User.FindFirst("sub")?.Value is { Length: > 0 } sub)
+                return ValueTask.FromResult<PrincipalRef?>(new UserPrincipal(scope, new UserId(sub)));
+            return ValueTask.FromResult<PrincipalRef?>(null);
+        }
     }
 
     private static async Task<WebApplication> StartSampleHostAsync()

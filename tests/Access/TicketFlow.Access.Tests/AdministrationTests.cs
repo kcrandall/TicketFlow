@@ -72,7 +72,7 @@ public sealed class AdministrationTests
         var refused = (TicketFailure)(await fixture.Admin.CreateGrantAsync(workspaceOwner, tenantViewer)).Value!;
         Assert.AreEqual(TicketFailureKind.Forbidden, refused.Kind);
         Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(owner, tenantViewer)));
-        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(workspaceOwner, tenantViewer.Id, 1)));
+        Assert.AreEqual("refused:NotFound", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(workspaceOwner, tenantViewer.Id, 1)));
         // Workspace-level management by the workspace Owner is unaffected.
         Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(workspaceOwner,
             new AccessGrant(new GrantId("ws-viewer"), fixture.Partition, new UserId("x"), BuiltInRoles.Viewer.Id, fixture.Workspace))));
@@ -162,48 +162,80 @@ public sealed class AdministrationTests
     }
 
     [TestMethod]
-    public async Task CrossWorkspaceAndUnauthorizedGrantMutationsReturnUniformForbiddenBeforeFencingOrBreakGlassChecks()
+    public async Task CrossWorkspaceAndUnauthorizedGrantMutationsReturnOpaqueNotFoundWithoutExfiltratingAuditMetadata()
     {
         var (fixture, owner, admin, agent) = await CreateAsync();
         using var _ = fixture;
         var otherWorkspace = new WorkspaceId("ws-other");
         var now = fixture.Clock.GetUtcNow();
 
-        var otherStd = new AccessGrant(new GrantId("g-other-std"), fixture.Partition, new UserId("bob"), BuiltInRoles.Viewer.Id, new WorkspaceGrantScope(otherWorkspace));
+        var otherStd = new AccessGrant(new GrantId("g-other-std"), fixture.Partition, new UserId("bob"), BuiltInRoles.Viewer.Id,
+            new TeamGrantScope(otherWorkspace, new TeamId("secret-team")), justification: "SECRET-OTHER-WS-JUSTIFICATION");
         await fixture.SeedAsync(otherStd);
         Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await fixture.Grants.UpdateAsync(
-            new AccessGrant(otherStd.Id, fixture.Partition, new UserId("bob"), BuiltInRoles.Agent.Id, new WorkspaceGrantScope(otherWorkspace)), 1)).Value);
+            new AccessGrant(otherStd.Id, fixture.Partition, new UserId("bob"), BuiltInRoles.Agent.Id,
+                new TeamGrantScope(otherWorkspace, new TeamId("secret-team")), justification: "SECRET-OTHER-WS-JUSTIFICATION"), 1)).Value);
 
-        var otherBg = new AccessGrant(new GrantId("g-other-bg"), fixture.Partition, new UserId("bob"), BuiltInRoles.Supervisor.Id, new WorkspaceGrantScope(otherWorkspace),
-            validFrom: now, validUntil: now.AddHours(1), justification: "Incident 999 cross-ws", kind: GrantKind.BreakGlass);
+        var otherBg = new AccessGrant(new GrantId("g-other-bg"), fixture.Partition, new UserId("bob"), BuiltInRoles.Supervisor.Id,
+            new InboxGrantScope(otherWorkspace, new InboxId("secret-inbox")),
+            validFrom: now, validUntil: now.AddHours(1), justification: "Incident 999 SECRET-BG-CROSS-WS", kind: GrantKind.BreakGlass);
         await fixture.SeedAsync(otherBg);
 
-        var tenantGrant = new AccessGrant(new GrantId("g-tenant-only"), fixture.Partition, new UserId("carol"), BuiltInRoles.Viewer.Id, TenantGrantScope.Instance);
+        var tenantGrant = new AccessGrant(new GrantId("g-tenant-only"), fixture.Partition, new UserId("carol"), BuiltInRoles.Owner.Id,
+            TenantGrantScope.Instance, justification: "SECRET-TENANT-JUSTIFICATION");
         await fixture.SeedAsync(tenantGrant);
 
-        // Workspace-A admin probing workspace-B and tenant grants with wrong or matching revisions must always receive uniform Forbidden (never Conflict/Invalid).
-        foreach (var probeId in new[] { otherStd.Id, otherBg.Id, tenantGrant.Id })
+        var missingId = new GrantId("g-truly-missing");
+        var auditBefore = fixture.Audit.Snapshot().Count;
+
+        // Workspace-A admin probing workspace-B, tenant, and missing grants must receive identical opaque NotFound (never Forbidden/Conflict/Invalid).
+        foreach (var probeId in new[] { otherStd.Id, otherBg.Id, tenantGrant.Id, missingId })
         {
             foreach (var rev in new[] { 1L, 2L, 999L })
             {
                 var upd = (TicketFailure)(await fixture.Admin.UpdateGrantAsync(admin,
                     new AccessGrant(probeId, fixture.Partition, new UserId("x"), BuiltInRoles.Viewer.Id, fixture.Workspace), rev)).Value!;
-                Assert.AreEqual(TicketFailureKind.Forbidden, upd.Kind, $"UpdateGrantAsync leaked oracle for {probeId} rev {rev}: {upd.Kind}");
+                Assert.AreEqual(TicketFailureKind.NotFound, upd.Kind, $"UpdateGrantAsync leaked oracle for {probeId} rev {rev}: {upd.Kind}");
                 Assert.IsNull(upd.CurrentRevision);
 
                 var revRes = (TicketFailure)(await fixture.Admin.RevokeGrantAsync(admin, probeId, rev)).Value!;
-                Assert.AreEqual(TicketFailureKind.Forbidden, revRes.Kind, $"RevokeGrantAsync leaked oracle for {probeId} rev {rev}: {revRes.Kind}");
+                Assert.AreEqual(TicketFailureKind.NotFound, revRes.Kind, $"RevokeGrantAsync leaked oracle for {probeId} rev {rev}: {revRes.Kind}");
                 Assert.IsNull(revRes.CurrentRevision);
             }
         }
 
-        // Batch RevokeGrantsAsync must also return uniform Forbidden without revision oracle for cross-workspace/tenant grants.
-        var batch = await fixture.Admin.RevokeGrantsAsync(admin, [(otherStd.Id, 999L), (otherBg.Id, 999L), (tenantGrant.Id, 999L)]);
+        // Audit events recorded in workspace A for cross-scope / unauthorized revoke attempts must NOT leak RoleId, Justification, TeamId, InboxId, or DenialReason.
+        var revokeAudits = fixture.Audit.Snapshot().Skip(auditBefore).Where(e => e.Kind == AccessAuditKind.GrantRevoked).ToList();
+        Assert.HasCount(12, revokeAudits);
+        foreach (var entry in revokeAudits)
+        {
+            Assert.AreEqual(AccessAuditOutcome.Denied, entry.Outcome);
+            Assert.AreEqual(AccessPermissions.AccessManage, entry.Permission);
+            Assert.IsNull(entry.RoleId, $"Audit leaked foreign RoleId '{entry.RoleId}' for grant {entry.GrantId}.");
+            Assert.IsNull(entry.Justification, $"Audit leaked foreign Justification '{entry.Justification}' for grant {entry.GrantId}.");
+            Assert.IsNull(entry.TeamId, $"Audit leaked foreign TeamId '{entry.TeamId}' for grant {entry.GrantId}.");
+            Assert.IsNull(entry.InboxId, $"Audit leaked foreign InboxId '{entry.InboxId}' for grant {entry.GrantId}.");
+            Assert.IsNull(entry.DenialReason, $"Audit leaked DenialReason '{entry.DenialReason}' for grant {entry.GrantId}.");
+        }
+
+        // Batch RevokeGrantsAsync must also return opaque NotFound without revision oracle or audit metadata exfiltration.
+        var batchAuditBefore = fixture.Audit.Snapshot().Count;
+        var batch = await fixture.Admin.RevokeGrantsAsync(admin, [(otherStd.Id, 999L), (otherBg.Id, 999L), (tenantGrant.Id, 999L), (missingId, 999L)]);
         foreach (var item in batch)
         {
             var failure = (TicketFailure)item.Value!;
-            Assert.AreEqual(TicketFailureKind.Forbidden, failure.Kind);
+            Assert.AreEqual(TicketFailureKind.NotFound, failure.Kind);
             Assert.IsNull(failure.CurrentRevision);
+        }
+        var batchAudits = fixture.Audit.Snapshot().Skip(batchAuditBefore).ToList();
+        Assert.HasCount(4, batchAudits);
+        foreach (var entry in batchAudits)
+        {
+            Assert.IsNull(entry.RoleId);
+            Assert.IsNull(entry.Justification);
+            Assert.IsNull(entry.TeamId);
+            Assert.IsNull(entry.InboxId);
+            Assert.IsNull(entry.DenialReason);
         }
 
         // Unauthorized agent receives Forbidden for both existing and nonexistent grants (no existence oracle).

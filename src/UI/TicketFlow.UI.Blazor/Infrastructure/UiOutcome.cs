@@ -57,7 +57,7 @@ public sealed record UiOutcome(UiOutcomeKind Kind, string Title, IReadOnlyList<s
             "service-account-disabled" => "Service account is disabled",
             "already-revoked" => "API key is already revoked",
             "role-in-use" => "Role is still in use",
-            "existing-grants-conflict" => "Existing grants conflict with this service account",
+            "existing-grants-conflict" or "service-account-conflict" => "Service account identifier conflicts with existing state",
             _ => "The request conflicts with existing state",
         };
         var messages = failure.Errors.Count > 0 ? failure.Errors : ["Review the current state and try again."];

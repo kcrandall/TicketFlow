@@ -823,11 +823,101 @@ public sealed class ExternalIdentityAndHybridAuthTests
         Assert.AreEqual(DefaultScope, inherited);
     }
 
+    [TestMethod]
+    public async Task RoleCatalogEndpointEnforcesScopeClaimsAndServiceAccountStateForCustomHostResolvers()
+    {
+        const string proxySecret = "catalog-host-resolver-secret";
+        var partition = AccessPartition.From(DefaultScope);
+        await using var app = await CreateTestAppAsync(
+            services =>
+            {
+                services.AddScoped<TicketFlow.Hosting.AspNetCore.ITicketFlowPrincipalResolver, ClaimEchoHostPrincipalResolver>();
+                services.AddTicketFlowExternalIdentityAuthentication(options =>
+                {
+                    options.UseIdentityFlowDefaults(sharedSecret: proxySecret);
+                });
+            },
+            mapRoleCatalog: true,
+            resolveRoleCatalogScope: _ => ValueTask.FromResult<TicketScope?>(DefaultScope));
+
+        var grants = app.Services.GetRequiredService<IAccessGrantStore>();
+        var saStore = app.Services.GetRequiredService<IServiceAccountStore>();
+        await grants.CreateAsync(new AccessGrant(new GrantId("g-admin-u"), partition, new UserId("admin-user"), BuiltInRoles.Owner.Id, TenantGrantScope.Instance));
+
+        var disabledClient = new ApiClientId("sa-disabled-cat");
+        await saStore.CreateAsync(new ServiceAccount(disabledClient, partition, TenantGrantScope.Instance, "Disabled Cat SA"), "system:test");
+        await saStore.SetEnabledAsync(partition, disabledClient, isEnabled: false, "system:test", "disabled");
+        await grants.CreateAsync(new AccessGrant(new GrantId("g-disabled-sa"), partition, disabledClient, BuiltInRoles.Owner.Id, TenantGrantScope.Instance));
+
+        var otherWsClient = new ApiClientId("sa-other-ws-cat");
+        await saStore.CreateAsync(new ServiceAccount(otherWsClient, partition, new WorkspaceGrantScope(new WorkspaceId("ws-other")), "Other WS Cat SA"), "system:test");
+        await grants.CreateAsync(new AccessGrant(new GrantId("g-other-ws-sa"), partition, otherWsClient, BuiltInRoles.Owner.Id, TenantGrantScope.Instance));
+
+        var enabledClient = new ApiClientId("sa-enabled-cat");
+        await saStore.CreateAsync(new ServiceAccount(enabledClient, partition, new WorkspaceGrantScope(DefaultScope.WorkspaceId), "Enabled Cat SA"), "system:test");
+        await grants.CreateAsync(new AccessGrant(new GrantId("g-enabled-sa"), partition, enabledClient, BuiltInRoles.Owner.Id, new WorkspaceGrantScope(DefaultScope.WorkspaceId)));
+
+        using var client = app.GetTestClient();
+
+        // 1. Mismatched workspace claim is rejected BEFORE delegating to custom host resolver -> 401
+        using (var mismatched = new HttpRequestMessage(HttpMethod.Get, "/.well-known/ticketflow-roles"))
+        {
+            mismatched.Headers.Add("X-IdentityFlow-Proxy-Secret", proxySecret);
+            mismatched.Headers.Add("X-Auth-Subject", "admin-user");
+            mismatched.Headers.Add("X-Auth-Workspace", "ws-other");
+            using var resp = await client.SendAsync(mismatched);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+        }
+
+        // 2. Disabled service account resolved by host resolver -> 401
+        using (var disabledReq = new HttpRequestMessage(HttpMethod.Get, "/.well-known/ticketflow-roles"))
+        {
+            disabledReq.Headers.Add("X-IdentityFlow-Proxy-Secret", proxySecret);
+            disabledReq.Headers.Add("X-Auth-Client-Id", disabledClient.Value);
+            disabledReq.Headers.Add("X-Auth-Principal-Type", "service_account");
+            using var resp = await client.SendAsync(disabledReq);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+        }
+
+        // 3. Out-of-scope service account resolved by host resolver -> 401
+        using (var otherWsReq = new HttpRequestMessage(HttpMethod.Get, "/.well-known/ticketflow-roles"))
+        {
+            otherWsReq.Headers.Add("X-IdentityFlow-Proxy-Secret", proxySecret);
+            otherWsReq.Headers.Add("X-Auth-Client-Id", otherWsClient.Value);
+            otherWsReq.Headers.Add("X-Auth-Principal-Type", "service_account");
+            using var resp = await client.SendAsync(otherWsReq);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+        }
+
+        // 4. Enabled in-scope service account with matching scope -> 200
+        using (var okReq = new HttpRequestMessage(HttpMethod.Get, "/.well-known/ticketflow-roles"))
+        {
+            okReq.Headers.Add("X-IdentityFlow-Proxy-Secret", proxySecret);
+            okReq.Headers.Add("X-Auth-Client-Id", enabledClient.Value);
+            okReq.Headers.Add("X-Auth-Principal-Type", "service_account");
+            using var resp = await client.SendAsync(okReq);
+            Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+        }
+    }
+
+    private sealed class ClaimEchoHostPrincipalResolver : TicketFlow.Hosting.AspNetCore.ITicketFlowPrincipalResolver
+    {
+        public ValueTask<PrincipalRef?> ResolveAsync(HttpContext httpContext, TicketScope scope, CancellationToken cancellationToken = default)
+        {
+            if (httpContext.User.FindFirst("client_id")?.Value is { Length: > 0 } clientId)
+                return ValueTask.FromResult<PrincipalRef?>(new ApiClientPrincipal(scope, new ApiClientId(clientId)));
+            if (httpContext.User.FindFirst("sub")?.Value is { Length: > 0 } sub)
+                return ValueTask.FromResult<PrincipalRef?>(new UserPrincipal(scope, new UserId(sub)));
+            return ValueTask.FromResult<PrincipalRef?>(null);
+        }
+    }
+
     private static async Task<WebApplication> CreateTestAppAsync(
         Action<IServiceCollection> configureAuth,
         Action<AccessControlOptions>? configureAccess = null,
         string? remoteIpHeader = null,
-        bool mapRoleCatalog = false)
+        bool mapRoleCatalog = false,
+        Func<HttpContext, ValueTask<TicketScope?>>? resolveRoleCatalogScope = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -893,7 +983,7 @@ public sealed class ExternalIdentityAndHybridAuthTests
         });
 
         if (mapRoleCatalog)
-            app.MapTicketFlowRoleCatalogEndpoint(defaultScope: DefaultScope);
+            app.MapTicketFlowRoleCatalogEndpoint(resolveScope: resolveRoleCatalogScope, defaultScope: DefaultScope);
 
         await app.StartAsync().ConfigureAwait(false);
         return app;

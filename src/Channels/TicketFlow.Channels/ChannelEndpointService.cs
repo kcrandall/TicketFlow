@@ -6,8 +6,8 @@ using TicketFlow.Workspaces;
 namespace TicketFlow.Channels;
 
 /// <summary>
-/// Default <see cref="IChannelEndpointService"/>. Existence and revision fences are checked before authorization decisions on stored
-/// endpoints; creates authorize the target inbox first. Endpoint addresses are never echoed in errors.
+/// Default <see cref="IChannelEndpointService"/>. Authorization on stored endpoints is evaluated before revision fencing so
+/// unauthorized callers cannot probe revision numbers; creates authorize the target inbox first. Endpoint addresses are never echoed in errors.
 /// </summary>
 public sealed class ChannelEndpointService(
     IChannelEndpointStore endpoints,
@@ -55,11 +55,11 @@ public sealed class ChannelEndpointService(
         var stored = await endpoints.GetAsync(scope, endpoint.Kind, endpoint.ConfigurationId, cancellationToken).ConfigureAwait(false);
         if (stored is null)
             return TicketFailure.NotFound;
-        if (stored.Revision != expectedRevision)
-            return TicketFailure.Conflict(stored.Revision);
         if (!await PermittedAsync(actor, ChannelPermissions.Manage, stored.Endpoint.Inbox, cancellationToken).ConfigureAwait(false)
             || (endpoint.Inbox != stored.Endpoint.Inbox && !await PermittedAsync(actor, ChannelPermissions.Manage, endpoint.Inbox, cancellationToken).ConfigureAwait(false)))
             return TicketFailure.Forbidden;
+        if (stored.Revision != expectedRevision)
+            return TicketFailure.Conflict(stored.Revision);
         if (await ValidateInboxAsync(scope, endpoint, cancellationToken).ConfigureAwait(false) is { } invalid)
             return invalid;
         if (!string.Equals(endpoint.Address, stored.Endpoint.Address, StringComparison.Ordinal) && !await ownership.MayBindAsync(actor, scope, endpoint, cancellationToken).ConfigureAwait(false))
@@ -73,10 +73,10 @@ public sealed class ChannelEndpointService(
         var stored = await endpoints.GetAsync(scope, kind, configurationId, cancellationToken).ConfigureAwait(false);
         if (stored is null)
             return TicketFailure.NotFound;
-        if (stored.Revision != expectedRevision)
-            return TicketFailure.Conflict(stored.Revision);
         if (!await PermittedAsync(actor, ChannelPermissions.Manage, stored.Endpoint.Inbox, cancellationToken).ConfigureAwait(false))
             return TicketFailure.Forbidden;
+        if (stored.Revision != expectedRevision)
+            return TicketFailure.Conflict(stored.Revision);
         return Map(await endpoints.DeleteAsync(scope, kind, configurationId, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 

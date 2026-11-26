@@ -217,8 +217,8 @@ public sealed class GrantTests
 
         Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(admin, Grant("a2", BuiltInRoles.Agent), 1)));
         Assert.AreEqual("refused:Conflict:2", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(admin, Grant("a2", BuiltInRoles.Viewer), 1)));
-        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(admin, new GrantId("a5"), 1)));
-        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(admin, Grant("a5", BuiltInRoles.Viewer), 1)));
+        Assert.AreEqual("refused:NotFound", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(admin, new GrantId("a5"), 1)));
+        Assert.AreEqual("refused:NotFound", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(admin, Grant("a5", BuiltInRoles.Viewer), 1)));
         Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(owner, new GrantId("a5"), 1)));
         Assert.AreEqual("refused:NotFound", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(owner, new GrantId("a5"), 1)));
 

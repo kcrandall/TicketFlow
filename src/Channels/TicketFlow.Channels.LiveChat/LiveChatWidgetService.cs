@@ -5,7 +5,7 @@ using TicketFlow.Workspaces;
 
 namespace TicketFlow.Channels.LiveChat;
 
-/// <summary>Default <see cref="ILiveChatWidgetService"/>. Existence and revision fences are checked before authorization decisions on stored records.</summary>
+/// <summary>Default <see cref="ILiveChatWidgetService"/>. Authorization on stored records is evaluated before revision fencing.</summary>
 public sealed class LiveChatWidgetService(ILiveChatWidgetStore widgets, IInboxStore inboxes, IAccessEvaluator evaluator, IOptions<LiveChatOptions> options) : ILiveChatWidgetService
 {
     private readonly ILiveChatWidgetStore widgets = widgets ?? throw new ArgumentNullException(nameof(widgets));
@@ -43,11 +43,11 @@ public sealed class LiveChatWidgetService(ILiveChatWidgetStore widgets, IInboxSt
         var current = await widgets.GetAsync(actor.Scope, widget.ConfigurationId, cancellationToken).ConfigureAwait(false);
         if (current is null)
             return LiveChatRefused.Of(LiveChatRefusal.NotFound);
-        if (current.Revision != expectedRevision)
-            return new LiveChatRefused(LiveChatRefusal.Conflict, [$"Current revision is {current.Revision}."]);
         if (!await PermittedAsync(actor, LiveChatPermissions.Manage, current.Widget.Inbox, cancellationToken).ConfigureAwait(false)
             || (widget.Inbox != current.Widget.Inbox && !await PermittedAsync(actor, LiveChatPermissions.Manage, widget.Inbox, cancellationToken).ConfigureAwait(false)))
             return LiveChatRefused.Of(LiveChatRefusal.Forbidden);
+        if (current.Revision != expectedRevision)
+            return new LiveChatRefused(LiveChatRefusal.Conflict, [$"Current revision is {current.Revision}."]);
         if (await BindingErrorAsync(actor.Scope, widget, cancellationToken).ConfigureAwait(false) is { } error)
             return LiveChatRefused.Of(LiveChatRefusal.Invalid, error);
         return Map(await widgets.UpdateAsync(actor.Scope, widget, expectedRevision, cancellationToken).ConfigureAwait(false));
@@ -60,10 +60,10 @@ public sealed class LiveChatWidgetService(ILiveChatWidgetStore widgets, IInboxSt
         var current = await widgets.GetAsync(actor.Scope, configurationId, cancellationToken).ConfigureAwait(false);
         if (current is null)
             return LiveChatRefused.Of(LiveChatRefusal.NotFound);
-        if (current.Revision != expectedRevision)
-            return new LiveChatRefused(LiveChatRefusal.Conflict, [$"Current revision is {current.Revision}."]);
         if (!await PermittedAsync(actor, LiveChatPermissions.Manage, current.Widget.Inbox, cancellationToken).ConfigureAwait(false))
             return LiveChatRefused.Of(LiveChatRefusal.Forbidden);
+        if (current.Revision != expectedRevision)
+            return new LiveChatRefused(LiveChatRefusal.Conflict, [$"Current revision is {current.Revision}."]);
         return Map(await widgets.DeleteAsync(actor.Scope, configurationId, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 

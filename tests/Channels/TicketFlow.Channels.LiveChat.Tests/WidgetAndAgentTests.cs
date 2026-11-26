@@ -30,9 +30,13 @@ public sealed class WidgetAndAgentTests
         var changed = new LiveChatWidget("cfg-chat", new InboxId("chat-inbox"), ["https://new.example"]);
         Assert.AreEqual(LiveChatRefusal.Conflict, Refusal(await host.Widgets.UpdateAsync(host.Host.Owner, changed, 7)));
         Assert.AreEqual(LiveChatRefusal.Forbidden, Refusal(await host.Widgets.UpdateAsync(host.Host.Agent, changed, 1)));
+        Assert.AreEqual(LiveChatRefusal.Forbidden, Refusal(await host.Widgets.UpdateAsync(host.Host.Agent, changed, 999)),
+            "Unauthorized caller with wrong revision must receive Forbidden before revision fencing.");
         Assert.AreEqual(2, Value(await host.Widgets.UpdateAsync(host.Host.Owner, changed, 1)).Revision);
         Assert.AreEqual(LiveChatRefusal.OriginNotAllowed, Refusal(await host.Visitors.StartSessionAsync(host.Partition, WidgetKey, Origin)), "Origin changes apply immediately.");
         Assert.AreEqual(LiveChatRefusal.Forbidden, Refusal(await host.Widgets.DeleteAsync(host.Host.Agent, "cfg-chat", 2)));
+        Assert.AreEqual(LiveChatRefusal.Forbidden, Refusal(await host.Widgets.DeleteAsync(host.Host.Agent, "cfg-chat", 999)),
+            "Unauthorized caller deleting with wrong revision must receive Forbidden before revision fencing.");
         Value(await host.Widgets.DeleteAsync(host.Host.Owner, "cfg-chat", 2));
         Assert.AreEqual(LiveChatRefusal.NotFound, Refusal(await host.Visitors.StartSessionAsync(host.Partition, WidgetKey, "https://new.example")));
     }

@@ -136,6 +136,29 @@ public sealed class ReviewRegressionTests
     }
 
     [TestMethod]
+    public async Task EndpointUpdateAndDeleteAuthorizeBeforeCheckingRevisionFence()
+    {
+        await using var host = await HostAsync(EmailChannel());
+        var kind = new ChannelKind("email");
+        var stored = ChannelHost.Is<TicketValue<StoredChannelEndpoint>>((await host.Endpoints.GetAsync(host.Owner, kind, "cfg-email")).Value).Value;
+        Assert.AreEqual(1, stored.Revision);
+
+        // Unauthorized caller with wrong expectedRevision MUST receive Forbidden, never Conflict with current revision.
+        var updateFailure = ChannelHost.Is<TicketFailure>((await host.Endpoints.UpdateAsync(host.Agent, stored.Endpoint, expectedRevision: 999)).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, updateFailure.Kind);
+        Assert.IsNull(updateFailure.CurrentRevision);
+
+        var deleteFailure = ChannelHost.Is<TicketFailure>((await host.Endpoints.DeleteAsync(host.Agent, kind, "cfg-email", expectedRevision: 999)).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, deleteFailure.Kind);
+        Assert.IsNull(deleteFailure.CurrentRevision);
+
+        // Authorized caller with wrong expectedRevision still receives Conflict with current revision.
+        var ownerConflict = ChannelHost.Is<TicketFailure>((await host.Endpoints.UpdateAsync(host.Owner, stored.Endpoint, expectedRevision: 999)).Value);
+        Assert.AreEqual(TicketFailureKind.Conflict, ownerConflict.Kind);
+        Assert.AreEqual(1L, ownerConflict.CurrentRevision);
+    }
+
+    [TestMethod]
     public void WorkerPrincipalResolutionLivesInTheAbstractions()
     {
         Assert.AreEqual("TicketFlow.Channels.Abstractions", typeof(IChannelWorkerPrincipalResolver).Assembly.GetName().Name);

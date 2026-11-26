@@ -248,9 +248,18 @@ public sealed class TicketFlowUISession
         if (partition is null)
             return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, null, null, none, theme);
         var resolvedScope = partition.InWorkspace(id);
+        if (!VerifyScopeClaims(http.User, resolvedScope))
+            return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, resolvedScope, null, none, theme);
         var resolvedPrincipal = await ResolvePrincipalAsync(http, resolvedScope, ticketFlowResolver, accessResolver).ConfigureAwait(false);
         if (resolvedPrincipal is null || resolvedPrincipal.Scope != resolvedScope)
             return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, resolvedScope, null, none, theme);
+        if (resolvedPrincipal is ApiClientPrincipal client
+            && services.GetService<IServiceAccountStore>() is { } serviceAccounts)
+        {
+            var stored = await serviceAccounts.FindAsync(AccessPartition.From(resolvedScope), client.ClientId, http.RequestAborted).ConfigureAwait(false);
+            if (stored is not null && (!stored.IsEnabled || !stored.Account.AppliesTo(resolvedScope)))
+                return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, resolvedScope, null, none, theme);
+        }
         return new TicketFlowUISession(http, options, UiSessionState.Ready, resolvedScope, resolvedPrincipal, none, theme);
     }
 
@@ -315,22 +324,85 @@ public sealed class TicketFlowUISession
         && string.Equals(identity.AuthenticationType, "ApiKey", StringComparison.Ordinal)
         && user.HasClaim(static c => string.Equals(c.Type, "api_key_id", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(c.Value));
 
+    private static bool VerifyScopeClaims(ClaimsPrincipal principal, TicketScope scope)
+    {
+        foreach (var claim in principal.Claims)
+        {
+            var expected = claim.Type switch
+            {
+                "tenant_id" => scope.TenantId,
+                "project_id" => scope.ProjectId,
+                "environment_id" or "environment" => scope.EnvironmentId,
+                "app_id" or "app_name" => scope.AppId,
+                "workspace_id" or "workspace" => scope.WorkspaceId.Value,
+                _ => null,
+            };
+            if (expected is null)
+                continue;
+
+            var trimmed = claim.Value?.Trim();
+            if (string.IsNullOrEmpty(trimmed) || !string.Equals(trimmed, expected, StringComparison.Ordinal))
+                return false;
+        }
+
+        return true;
+    }
+
     private static AccessPartition? PartitionFromClaims(ClaimsPrincipal user)
     {
-        var tenant = user.FindFirstValue("tenant_id");
-        var project = user.FindFirstValue("project_id");
-        var environment = user.FindFirstValue("environment_id") ?? user.FindFirstValue("environment");
-        var app = user.FindFirstValue("app_id") ?? user.FindFirstValue("app_name");
-        if (string.IsNullOrWhiteSpace(tenant) || string.IsNullOrWhiteSpace(project) || string.IsNullOrWhiteSpace(environment) || string.IsNullOrWhiteSpace(app))
+        if (!TryResolveScopeClaim(user, "tenant_id", legacyType: null, out var tenant)
+            || !TryResolveScopeClaim(user, "project_id", legacyType: null, out var project)
+            || !TryResolveScopeClaim(user, "environment_id", "environment", out var environment)
+            || !TryResolveScopeClaim(user, "app_id", "app_name", out var app))
+            return null;
+        if (tenant is null || project is null || environment is null || app is null)
             return null;
         try
         {
-            return new AccessPartition(tenant.Trim(), project.Trim(), environment.Trim(), app.Trim());
+            return new AccessPartition(tenant, project, environment, app);
         }
         catch (ArgumentException)
         {
             return null;
         }
+    }
+
+    private static bool TryResolveScopeClaim(ClaimsPrincipal user, string primaryType, string? legacyType, out string? value)
+    {
+        value = null;
+        foreach (var claim in user.Claims)
+        {
+            if (!string.Equals(claim.Type, primaryType, StringComparison.Ordinal)
+                && (legacyType is null || !string.Equals(claim.Type, legacyType, StringComparison.Ordinal)))
+                continue;
+
+            var trimmed = claim.Value?.Trim();
+            if (!IsValidScopeToken(trimmed))
+            {
+                value = null;
+                return false;
+            }
+
+            if (value is null)
+                value = trimmed;
+            else if (!string.Equals(value, trimmed, StringComparison.Ordinal))
+            {
+                value = null;
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsValidScopeToken(string? value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length > TicketScope.MaximumIdentifierLength)
+            return false;
+        for (var i = 0; i < value.Length; i++)
+            if (char.IsControl(value[i]))
+                return false;
+        return true;
     }
 
     /// <summary>Resolves the session of <paramref name="http"/>: authentication state, scope, principal, permission snapshot and theme.</summary>

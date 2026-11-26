@@ -398,7 +398,7 @@ public sealed class RoleFederationTests
         await fixture.GrantAsync(saClient, BuiltInRoles.Supervisor, fixture.Workspace);
         var saEsc = await serviceAccounts.CreateServiceAccountAsync(hybridAdmin, new ServiceAccount(saClient, fixture.Partition, fixture.Workspace, "SA"));
         Assert.IsTrue(saEsc.TryGetValue(out TicketFailure saEscFailure));
-        Assert.AreEqual("existing-grants-conflict", saEscFailure.Code);
+        Assert.AreEqual("service-account-conflict", saEscFailure.Code);
 
         // Federated-only Owner (no local grants) still cannot administer when AllowAdministrativeRoles == false
         var fedOnlyOwner = new UserPrincipal(fixture.Scope, new UserId("fed-only-owner"), externalRoles: ["idp-owner"], identityProvider: "identityflow");
@@ -424,7 +424,7 @@ public sealed class RoleFederationTests
 
         var staleNew = await federation.UpsertMappingAsync(owner, id, mapping, expectedVersion: 5);
         Assert.IsTrue(staleNew.TryGetValue(out TicketFailure staleNewFailure));
-        Assert.AreEqual(TicketFailureKind.Conflict, staleNewFailure.Kind);
+        Assert.AreEqual(TicketFailureKind.NotFound, staleNewFailure.Kind);
 
         Assert.IsTrue((await federation.UpsertMappingAsync(owner, id, mapping, expectedVersion: 0)).IsSuccess);
 
@@ -440,7 +440,7 @@ public sealed class RoleFederationTests
     }
 
     [TestMethod]
-    public async Task UpsertMappingDoesNotLeakCrossWorkspaceOrTenantVersion()
+    public async Task UpsertAndDeleteMappingReturnOpaqueNotFoundWithoutCrossScopeAuditLeak()
     {
         using var fixture = AccessFixture.Create();
         using var scope = fixture.Provider.CreateScope();
@@ -455,24 +455,76 @@ public sealed class RoleFederationTests
         var otherOwner = new UserPrincipal(fixture.Partition.InWorkspace(otherWs), new UserId("owner"));
         var otherId = new RoleFederationMappingId("map-other-ws");
         Assert.IsTrue((await federation.UpsertMappingAsync(otherOwner, otherId,
-            new RoleFederationMapping("okta", "other-agents", BuiltInRoles.Agent.Id, fixture.Partition, new WorkspaceGrantScope(otherWs)))).IsSuccess);
+            new RoleFederationMapping("okta", "other-agents", BuiltInRoles.Owner.Id, fixture.Partition, new TeamGrantScope(otherWs, new TeamId("secret-other-team"))))).IsSuccess);
         Assert.IsTrue((await federation.UpsertMappingAsync(otherOwner, otherId,
-            new RoleFederationMapping("okta", "other-agents", BuiltInRoles.Viewer.Id, fixture.Partition, new WorkspaceGrantScope(otherWs)), expectedVersion: 1)).IsSuccess);
+            new RoleFederationMapping("okta", "other-agents", BuiltInRoles.Supervisor.Id, fixture.Partition, new TeamGrantScope(otherWs, new TeamId("secret-other-team"))), expectedVersion: 1)).IsSuccess);
 
         var tenantId = new RoleFederationMappingId("map-tenant");
         Assert.IsTrue((await federation.UpsertMappingAsync(owner, tenantId,
-            new RoleFederationMapping("okta", "tenant-viewers", BuiltInRoles.Viewer.Id, fixture.Partition, TenantGrantScope.Instance))).IsSuccess);
+            new RoleFederationMapping("okta", "tenant-owners", BuiltInRoles.Owner.Id, fixture.Partition, TenantGrantScope.Instance))).IsSuccess);
 
-        foreach (var targetId in new[] { otherId, tenantId })
+        var missingId = new RoleFederationMappingId("map-truly-missing");
+        var auditBefore = fixture.Audit.Snapshot().Count;
+
+        // Upsert with expectedVersion > 0 must return identical NotFound for missing, cross-workspace, and tenant mappings.
+        foreach (var targetId in new[] { otherId, tenantId, missingId })
         {
-            foreach (var version in new long?[] { 0, 1, 99 })
+            foreach (var version in new long?[] { 1, 99 })
             {
                 var attempt = await federation.UpsertMappingAsync(wsAdmin, targetId,
                     new RoleFederationMapping("okta", "probe", BuiltInRoles.Viewer.Id, fixture.Partition, fixture.Workspace), expectedVersion: version);
                 Assert.IsTrue(attempt.TryGetValue(out TicketFailure failure));
-                Assert.AreEqual(TicketFailureKind.Forbidden, failure.Kind, $"UpsertMappingAsync leaked cross-scope oracle for {targetId} version {version}.");
+                Assert.AreEqual(TicketFailureKind.NotFound, failure.Kind, $"UpsertMappingAsync leaked cross-scope oracle for {targetId} version {version}.");
                 Assert.IsNull(failure.CurrentRevision);
             }
+        }
+
+        // Upsert with expectedVersion = 0 or null against cross-workspace or tenant mappings also returns opaque NotFound.
+        foreach (var targetId in new[] { otherId, tenantId })
+        {
+            foreach (var version in new long?[] { null, 0 })
+            {
+                var attempt = await federation.UpsertMappingAsync(wsAdmin, targetId,
+                    new RoleFederationMapping("okta", "probe", BuiltInRoles.Viewer.Id, fixture.Partition, fixture.Workspace), expectedVersion: version);
+                Assert.IsTrue(attempt.TryGetValue(out TicketFailure failure));
+                Assert.AreEqual(TicketFailureKind.NotFound, failure.Kind);
+                Assert.IsNull(failure.CurrentRevision);
+            }
+        }
+
+        // Upsert audit events must NOT contain existing mapping's RoleId (owner/supervisor), Updated kind, AccessManageTenant, TeamId, or DenialReason.
+        var upsertAudits = fixture.Audit.Snapshot().Skip(auditBefore).ToList();
+        Assert.HasCount(10, upsertAudits);
+        foreach (var entry in upsertAudits)
+        {
+            Assert.AreEqual(AccessAuditKind.RoleFederationMappingCreated, entry.Kind);
+            Assert.AreEqual(AccessPermissions.AccessManage, entry.Permission);
+            Assert.AreEqual(BuiltInRoles.Viewer.Id, entry.RoleId);
+            Assert.IsNull(entry.TeamId);
+            Assert.IsNull(entry.InboxId);
+            Assert.IsNull(entry.DenialReason);
+        }
+
+        // DeleteMappingAsync must return identical opaque NotFound and zero foreign audit metadata for missing, cross-workspace, and tenant mappings.
+        var deleteAuditBefore = fixture.Audit.Snapshot().Count;
+        foreach (var targetId in new[] { otherId, tenantId, missingId })
+        {
+            var attempt = await federation.DeleteMappingAsync(wsAdmin, targetId, expectedVersion: 1);
+            Assert.IsTrue(attempt.TryGetValue(out TicketFailure failure));
+            Assert.AreEqual(TicketFailureKind.NotFound, failure.Kind, $"DeleteMappingAsync leaked oracle for {targetId}.");
+            Assert.IsNull(failure.CurrentRevision);
+        }
+
+        var deleteAudits = fixture.Audit.Snapshot().Skip(deleteAuditBefore).ToList();
+        Assert.HasCount(3, deleteAudits);
+        foreach (var entry in deleteAudits)
+        {
+            Assert.AreEqual(AccessAuditKind.RoleFederationMappingDeleted, entry.Kind);
+            Assert.AreEqual(AccessPermissions.AccessManage, entry.Permission);
+            Assert.IsNull(entry.RoleId);
+            Assert.IsNull(entry.TeamId);
+            Assert.IsNull(entry.InboxId);
+            Assert.IsNull(entry.DenialReason);
         }
     }
 }

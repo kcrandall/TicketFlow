@@ -139,13 +139,12 @@ public sealed class AccessAdministrator : IAccessAdministrator
             if (existing is not null)
             {
                 (refusal, context) = await AuthorizeTargetWithContextAsync(actor, existing.Grant, context, cancellationToken).ConfigureAwait(false);
-                if (refusal is null)
-                {
-                    if (Fence(existing.Revision, expectedRevision) is { } fenced)
-                        refusal = fenced;
-                    else if (existing.Grant.Kind == GrantKind.BreakGlass)
-                        refusal = new(TicketFailureKind.Invalid, ["Break-glass grants cannot be modified; revoke them instead."]);
-                }
+                if (refusal is not null)
+                    refusal = SanitizeExistingTargetRefusal(refusal);
+                else if (Fence(existing.Revision, expectedRevision) is { } fenced)
+                    refusal = fenced;
+                else if (existing.Grant.Kind == GrantKind.BreakGlass)
+                    refusal = new(TicketFailureKind.Invalid, ["Break-glass grants cannot be modified; revoke them instead."]);
             }
             else
                 refusal = Fence(null, expectedRevision);
@@ -170,9 +169,14 @@ public sealed class AccessAdministrator : IAccessAdministrator
             var existing = await grants.GetAsync(partition, grant, cancellationToken).ConfigureAwait(false);
             if (existing is not null)
             {
-                change = GrantChange(AccessAuditKind.GrantRevoked, actor, existing.Grant);
                 (refusal, context) = await AuthorizeTargetWithContextAsync(actor, existing.Grant, context, cancellationToken).ConfigureAwait(false);
-                refusal ??= Fence(existing.Revision, expectedRevision);
+                if (refusal is not null)
+                    refusal = SanitizeExistingTargetRefusal(refusal);
+                else
+                {
+                    change = GrantChange(AccessAuditKind.GrantRevoked, actor, existing.Grant);
+                    refusal = Fence(existing.Revision, expectedRevision);
+                }
             }
             else
                 refusal = Fence(null, expectedRevision);
@@ -211,9 +215,14 @@ public sealed class AccessAdministrator : IAccessAdministrator
                 existing = await this.grants.GetAsync(partition, grantId, cancellationToken).ConfigureAwait(false);
                 if (existing is not null)
                 {
-                    change = GrantChange(AccessAuditKind.GrantRevoked, actor, existing.Grant);
                     (refusal, context) = await AuthorizeTargetWithContextAsync(actor, existing.Grant, context, cancellationToken).ConfigureAwait(false);
-                    refusal ??= Fence(existing.Revision, expectedRevision);
+                    if (refusal is not null)
+                        refusal = SanitizeExistingTargetRefusal(refusal);
+                    else
+                    {
+                        change = GrantChange(AccessAuditKind.GrantRevoked, actor, existing.Grant);
+                        refusal = Fence(existing.Revision, expectedRevision);
+                    }
                 }
                 else
                     refusal = Fence(null, expectedRevision);
@@ -242,9 +251,16 @@ public sealed class AccessAdministrator : IAccessAdministrator
                 else
                 {
                     var current = await this.grants.GetAsync(partition, existing.Grant.Id, cancellationToken).ConfigureAwait(false);
-                    var miss = current is null
-                        ? new Refusal(TicketFailureKind.NotFound, ["The record does not exist."])
-                        : new Refusal(TicketFailureKind.Conflict, ["The record changed concurrently."], CurrentRevision: current.Revision);
+                    Refusal miss;
+                    if (current is null)
+                        miss = OpaqueNotFoundRefusal;
+                    else
+                    {
+                        var (currentRefusal, _) = await AuthorizeTargetWithContextAsync(actor, current.Grant, context, cancellationToken).ConfigureAwait(false);
+                        miss = currentRefusal is not null
+                            ? SanitizeExistingTargetRefusal(currentRefusal)
+                            : new Refusal(TicketFailureKind.Conflict, ["The record changed concurrently."], CurrentRevision: current.Revision);
+                    }
                     results[index] = await RefuseAsync<StoredAccessGrant>(change, miss, cancellationToken).ConfigureAwait(false);
                 }
             }
@@ -538,10 +554,17 @@ public sealed class AccessAdministrator : IAccessAdministrator
 
     private sealed record Refusal(TicketFailureKind Reason, IReadOnlyList<string> Errors, AccessDenialReason? Denial = null, long? CurrentRevision = null, string? Code = null);
 
+    private static readonly Refusal OpaqueNotFoundRefusal = new(TicketFailureKind.NotFound, ["The record does not exist."]);
+
+    private static Refusal SanitizeExistingTargetRefusal(Refusal refusal) =>
+        refusal.Reason == TicketFailureKind.Forbidden || string.Equals(refusal.Code, "out-of-scope", StringComparison.Ordinal)
+            ? OpaqueNotFoundRefusal
+            : refusal;
+
     /// <summary>Refuses before any authorization decision is based on a record that is missing or at another revision.</summary>
     private static Refusal? Fence(long? currentRevision, long expectedRevision) => currentRevision switch
     {
-        null => new(TicketFailureKind.NotFound, ["The record does not exist."]),
+        null => OpaqueNotFoundRefusal,
         { } current when current != expectedRevision => new(TicketFailureKind.Conflict, ["The record changed concurrently."], CurrentRevision: current),
         _ => null,
     };
@@ -566,7 +589,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
 
     private static Change GrantChange(AccessAuditKind kind, PrincipalRef actor, AccessGrant grant) =>
         new(kind, actor, Grant: grant.Id, Role: grant.Role,
-            Resource: grant.Workspace == actor.Scope.WorkspaceId ? AccessEngine.Target(actor.Scope, grant.Scope) : null,
+            Resource: InActorScope(actor, grant) && grant.Workspace == actor.Scope.WorkspaceId ? AccessEngine.Target(actor.Scope, grant.Scope) : null,
             Justification: grant.Justification);
 
     private static Refusal? ValidateRevision(long expectedRevision) =>

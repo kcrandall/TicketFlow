@@ -337,29 +337,131 @@ public sealed class AccessToolTests
     }
 
     [TestMethod]
-    public async Task RevokeBreakGlassReturnsUniformForbiddenForCrossWorkspaceGrants()
+    public async Task SingleIdAccessToolsReturnOpaqueNotFoundForCrossWorkspaceAndTenantRecordsAndHideForbiddenDetails()
     {
         await using var host = await McpTestHost.CreateAsync(features: false);
         var otherWorkspace = new WorkspaceId("ws-other");
+        var partition = AccessPartition.From(host.Scope);
+        string otherKeyId;
+        string tenantKeyId;
         await using (var scope = host.Services.CreateAsyncScope())
         {
             var grants = scope.ServiceProvider.GetRequiredService<IAccessGrantStore>();
-            var partition = AccessPartition.From(host.Scope);
+            var saStore = scope.ServiceProvider.GetRequiredService<IServiceAccountStore>();
+            var apiKeys = scope.ServiceProvider.GetRequiredService<IApiKeyStore>();
+            var mappings = scope.ServiceProvider.GetRequiredService<IRoleFederationMappingStore>();
             var now = DateTimeOffset.UtcNow;
+
             await grants.CreateAsync(new AccessGrant(new GrantId("other-std"), partition, new UserId("bob"), BuiltInRoles.Viewer.Id, new WorkspaceGrantScope(otherWorkspace)));
             await grants.CreateAsync(new AccessGrant(new GrantId("other-bg"), partition, new UserId("bob"), BuiltInRoles.Supervisor.Id, new WorkspaceGrantScope(otherWorkspace),
                 validFrom: now, validUntil: now.AddHours(1), justification: "Cross-workspace incident 42", kind: GrantKind.BreakGlass));
             await grants.CreateAsync(new AccessGrant(new GrantId("tenant-std"), partition, new UserId("bob"), BuiltInRoles.Viewer.Id, TenantGrantScope.Instance));
+
+            await saStore.CreateAsync(new ServiceAccount(new ApiClientId("sa-other-ws"), partition, new WorkspaceGrantScope(otherWorkspace), "Other WS SA"), "system:seed");
+            await saStore.CreateAsync(new ServiceAccount(new ApiClientId("sa-tenant"), partition, TenantGrantScope.Instance, "Tenant SA"), "system:seed");
+
+            var otherKey = ApiKeyId.NewId();
+            var tenantKey = ApiKeyId.NewId();
+            otherKeyId = otherKey.Value;
+            tenantKeyId = tenantKey.Value;
+            await apiKeys.CreateAsync(otherKey, partition, new ApiClientId("sa-other-ws"), "k-other", "tf_sa_11111111", new string('a', 64), "system:seed");
+            await apiKeys.CreateAsync(tenantKey, partition, new ApiClientId("sa-tenant"), "k-tenant", "tf_sa_22222222", new string('b', 64), "system:seed");
+
+            await mappings.UpsertAsync(new RoleFederationMappingId("map-other-ws"),
+                new RoleFederationMapping("okta", "other-group", BuiltInRoles.Viewer.Id, partition, new WorkspaceGrantScope(otherWorkspace)), isEnabled: true, "system:seed");
+            await mappings.UpsertAsync(new RoleFederationMappingId("map-tenant"),
+                new RoleFederationMapping("okta", "tenant-group", BuiltInRoles.Viewer.Id, partition, TenantGrantScope.Instance), isEnabled: true, "system:seed");
         }
 
-        foreach (var id in new[] { "other-std", "other-bg", "tenant-std" })
+        // 1. Grant revocation tools return identical "not-found" for cross-workspace, tenant, and missing grants.
+        foreach (var id in new[] { "other-std", "other-bg", "tenant-std", "missing-grant" })
         {
-            var (failed, body) = await host.CallAsync("access_revoke_break_glass", new()
+            var (bgFailed, bgBody) = await host.CallAsync("access_revoke_break_glass", new()
             {
                 ["grantId"] = id, ["expectedRevision"] = 999L,
             }, user: "owner");
-            Assert.IsTrue(failed);
-            Assert.AreEqual("forbidden", McpTestHost.Code(body), $"access_revoke_break_glass leaked oracle for {id}: {body.GetRawText()}");
+            Assert.IsTrue(bgFailed);
+            Assert.AreEqual("not-found", McpTestHost.Code(bgBody), $"access_revoke_break_glass leaked oracle for {id}: {bgBody.GetRawText()}");
+
+            var (revFailed, revBody) = await host.CallAsync("access_revoke_grant", new()
+            {
+                ["grantId"] = id, ["expectedRevision"] = 999L,
+            }, user: "owner");
+            Assert.IsTrue(revFailed);
+            Assert.AreEqual("not-found", McpTestHost.Code(revBody), $"access_revoke_grant leaked oracle for {id}: {revBody.GetRawText()}");
         }
+
+        // 2. Service account & API key single-ID tools return identical "not-found" for cross-workspace, unauthorized tenant, and missing IDs.
+        foreach (var clientId in new[] { "sa-other-ws", "sa-tenant", "sa-missing" })
+        {
+            var (enFailed, enBody) = await host.CallAsync("access_set_service_account_enabled", new()
+            {
+                ["clientId"] = clientId, ["isEnabled"] = false,
+            }, user: "owner");
+            Assert.IsTrue(enFailed);
+            Assert.AreEqual("not-found", McpTestHost.Code(enBody), $"access_set_service_account_enabled leaked oracle for {clientId}: {enBody.GetRawText()}");
+
+            var (delFailed, delBody) = await host.CallAsync("access_delete_service_account", new()
+            {
+                ["clientId"] = clientId,
+            }, user: "owner");
+            Assert.IsTrue(delFailed);
+            Assert.AreEqual("not-found", McpTestHost.Code(delBody), $"access_delete_service_account leaked oracle for {clientId}: {delBody.GetRawText()}");
+
+            var (issueFailed, issueBody) = await host.CallAsync("access_issue_api_key", new()
+            {
+                ["clientId"] = clientId, ["name"] = "probe",
+            }, user: "owner");
+            Assert.IsTrue(issueFailed);
+            Assert.AreEqual("not-found", McpTestHost.Code(issueBody), $"access_issue_api_key leaked oracle for {clientId}: {issueBody.GetRawText()}");
+        }
+
+        foreach (var clientId in new[] { "sa-other-ws", "sa-missing" })
+        {
+            var (listFailed, listBody) = await host.CallAsync("access_list_api_keys", new()
+            {
+                ["clientId"] = clientId,
+            }, user: "owner");
+            Assert.IsTrue(listFailed);
+            Assert.AreEqual("not-found", McpTestHost.Code(listBody), $"access_list_api_keys leaked oracle for {clientId}: {listBody.GetRawText()}");
+        }
+
+        foreach (var keyId in new[] { otherKeyId, tenantKeyId, ApiKeyId.NewId().Value })
+        {
+            var (rkFailed, rkBody) = await host.CallAsync("access_revoke_api_key", new()
+            {
+                ["keyId"] = keyId,
+            }, user: "owner");
+            Assert.IsTrue(rkFailed);
+            Assert.AreEqual("not-found", McpTestHost.Code(rkBody), $"access_revoke_api_key leaked oracle for {keyId}: {rkBody.GetRawText()}");
+        }
+
+        // 3. Role federation single-ID tools return identical "not-found" for cross-workspace, tenant, and missing IDs (including expectedVersion > 0).
+        foreach (var mappingId in new[] { "map-other-ws", "map-tenant", "map-missing" })
+        {
+            var (upFailed, upBody) = await host.CallAsync("access_upsert_federation_mapping", new()
+            {
+                ["mappingId"] = mappingId, ["provider"] = "okta", ["externalRole"] = "probe", ["role"] = "viewer", ["expectedVersion"] = 1L,
+            }, user: "owner");
+            Assert.IsTrue(upFailed);
+            Assert.AreEqual("not-found", McpTestHost.Code(upBody), $"access_upsert_federation_mapping leaked oracle for {mappingId}: {upBody.GetRawText()}");
+
+            var (delFailed, delBody) = await host.CallAsync("access_delete_federation_mapping", new()
+            {
+                ["mappingId"] = mappingId, ["expectedVersion"] = 1L,
+            }, user: "owner");
+            Assert.IsTrue(delFailed);
+            Assert.AreEqual("not-found", McpTestHost.Code(delBody), $"access_delete_federation_mapping leaked oracle for {mappingId}: {delBody.GetRawText()}");
+        }
+
+        // 4. Forbidden responses from AccessTools never leak internal permission/scope-tier details in errors.
+        var (tenantCreateFailed, tenantCreateBody) = await host.CallAsync("access_create_service_account", new()
+        {
+            ["clientId"] = "sa-tenant-denied", ["displayName"] = "Denied", ["scope"] = "tenant",
+        }, user: "owner");
+        Assert.IsTrue(tenantCreateFailed);
+        Assert.AreEqual("forbidden", McpTestHost.Code(tenantCreateBody));
+        Assert.IsFalse(tenantCreateBody.GetProperty("error").TryGetProperty("errors", out _),
+            $"Forbidden MCP response must not expose internal error details: {tenantCreateBody.GetRawText()}");
     }
 }

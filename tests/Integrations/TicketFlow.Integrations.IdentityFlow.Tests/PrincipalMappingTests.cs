@@ -79,6 +79,11 @@ public sealed class PrincipalMappingTests
         Assert.IsNull(IdentityFlowClaimsMapper.Map(null, options));
         Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("email", "someone@example.com")), options));
         Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("sub", Subject), ("sub", Guid.NewGuid().ToString())), options), "Conflicting subjects are ambiguous.");
+        Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("sub", Subject), ("sub", Guid.NewGuid().ToString()), (ClaimTypes.NameIdentifier, Subject)), options), "Ambiguous sub must not fall back to NameIdentifier.");
+        Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("sub", Subject), (ClaimTypes.NameIdentifier, Guid.NewGuid().ToString())), options), "Distinct sub and NameIdentifier must be rejected.");
+        Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("identityflow:client_id", "client-a"), ("client_id", "client-b")), options), "Distinct identityflow:client_id and client_id must be rejected.");
+        Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("sub", Subject), ("identityflow_auth_method", "ApiKey"), ("identityflow_auth_method", "PersonalAccessToken")), options), "Ambiguous auth method must be rejected.");
+        Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("sub", Subject), ("identityflow:session_id", "s1"), ("identityflow:session_id", "s2")), options), "Ambiguous session id must be rejected.");
         Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("identityflow_auth_method", "ApiKey")), options));
         options.RequiredScopes.Add("ticketflow");
         Assert.IsNull(IdentityFlowClaimsMapper.Map(Authenticated(("sub", Subject), ("scope", "openid profile")), options));
@@ -187,6 +192,48 @@ public sealed class PrincipalMappingTests
             new Claim("api_key_id", "key-456"),
         ], authenticationType: "ApiKey"));
         Assert.IsNull(IdentityFlowClaimsMapper.Map(reservedKey, options));
+    }
+
+    [TestMethod]
+    public async Task ResolverPropagatesExternalRolesAndIdentityProviderForUsersClientsAndRealtime()
+    {
+        var scope = TestScopes.Create();
+        var staff = new FakeStaff();
+        var resolver = new IdentityFlowPrincipalResolver(
+            new FakeTeams(),
+            Options.Create(new IdentityFlowPrincipalOptions()),
+            staff);
+
+        var userClaims = Authenticated(
+            ("sub", Subject),
+            ("role", "idf:support-agents, idf:billing"),
+            ("idp", "identityflow"));
+        var resolvedUser = Assert.IsInstanceOfType<UserPrincipal>(await resolver.ResolveAsync(userClaims, scope));
+        Assert.AreEqual(new UserId("agent-ada"), resolvedUser.UserId);
+        Assert.IsTrue(resolvedUser.Teams.Contains(new TeamId("tier1")));
+        Assert.IsTrue(resolvedUser.ExternalRoles.Contains("idf:support-agents"));
+        Assert.IsTrue(resolvedUser.ExternalRoles.Contains("idf:billing"));
+        Assert.AreEqual("identityflow", resolvedUser.IdentityProvider);
+
+        var clientClaims = Authenticated(
+            ("identityflow:client_id", "sync-bot"),
+            ("roles", "idf:automation"),
+            ("identityflow:provider", "okta"));
+        var resolvedClient = Assert.IsInstanceOfType<ApiClientPrincipal>(await resolver.ResolveAsync(clientClaims, scope));
+        Assert.AreEqual(new ApiClientId("idf:sync-bot"), resolvedClient.ClientId);
+        Assert.IsTrue(resolvedClient.ExternalRoles.Contains("idf:automation"));
+        Assert.AreEqual("okta", resolvedClient.IdentityProvider);
+
+        // SignalR realtime resolver inherits ExternalRoles and IdentityProvider via IdentityFlowPrincipalResolver
+        IRealtimePrincipalResolver realtime = new IdentityFlowRealtimePrincipalResolver(
+            resolver,
+            new FixedPartition(AccessPartition.From(scope)),
+            Options.Create(new IdentityFlowPrincipalOptions()));
+        var http = new DefaultHttpContext();
+        http.Request.QueryString = new QueryString("?workspace=workspace");
+        var realtimePrincipal = Assert.IsInstanceOfType<UserPrincipal>(await realtime.ResolveAsync(userClaims, http));
+        Assert.IsTrue(realtimePrincipal.ExternalRoles.Contains("idf:support-agents"));
+        Assert.AreEqual("identityflow", realtimePrincipal.IdentityProvider);
     }
 
     private static ClaimsPrincipal Authenticated(params (string Type, string Value)[] claims) =>

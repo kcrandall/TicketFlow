@@ -129,14 +129,14 @@ public sealed class ExternalIdentityAuthenticationHandler(
             if (!Request.Headers.TryGetValue(Options.SharedSecretHeader!, out var secretValues) || secretValues.Count == 0)
                 return "Missing upstream trust secret header.";
 
-            var secretResolution = ResolveSingleValue(secretValues);
-            if (secretResolution.IsAmbiguous)
-                return "Multiple distinct upstream trust secret headers are not permitted.";
+            if (secretValues.Count > 1)
+                return "Multiple upstream trust secret headers are not permitted.";
 
-            if (string.IsNullOrEmpty(secretResolution.Value))
+            var providedSecret = secretValues[0];
+            if (string.IsNullOrEmpty(providedSecret))
                 return "Missing upstream trust secret header.";
 
-            if (!FixedTimeHashEquals(Options.SharedSecret!, secretResolution.Value))
+            if (!FixedTimeHashEquals(Options.SharedSecret!, providedSecret))
                 return "Invalid upstream trust secret.";
         }
 

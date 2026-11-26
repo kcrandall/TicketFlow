@@ -119,6 +119,27 @@ public sealed class ServiceAccountService : IServiceAccountService
         if (existingGrantsFailure is not null)
             return await RefuseAsync<StoredServiceAccount>(actor, AccessAuditKind.ServiceAccountCreated, requiredPermission, targetResource, existingGrantsFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
 
+        if (await serviceAccountStore.FindAsync(account.Partition, account.ClientId, cancellationToken).ConfigureAwait(false) is { } existingAccount)
+            return await RefuseAsync<StoredServiceAccount>(
+                actor,
+                AccessAuditKind.ServiceAccountCreated,
+                requiredPermission,
+                targetResource,
+                TicketFailure.Conflict(existingAccount.Version, [$"Service account '{account.ClientId.Value}' already exists."], code: "already-exists"),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        var existingKeys = await apiKeyStore.ListForClientAsync(account.Partition, account.ClientId, includeInactive: false, cancellationToken).ConfigureAwait(false);
+        var now = engine.Now;
+        for (var i = 0; i < existingKeys.Count; i++)
+            if (existingKeys[i].IsActiveAt(now))
+                return await RefuseAsync<StoredServiceAccount>(
+                    actor,
+                    AccessAuditKind.ServiceAccountCreated,
+                    requiredPermission,
+                    targetResource,
+                    TicketFailure.Conflict(null, [$"Cannot create service account '{account.ClientId.Value}' because active API keys already exist for this client."], code: "existing-keys-conflict"),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+
         var createResult = await serviceAccountStore.CreateAsync(account, FormatActorId(actor), cancellationToken).ConfigureAwait(false);
         if (createResult.TryGetValue(out TicketFailure failure))
             return await RefuseAsync<StoredServiceAccount>(actor, AccessAuditKind.ServiceAccountCreated, requiredPermission, targetResource, failure, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -159,6 +180,9 @@ public sealed class ServiceAccountService : IServiceAccountService
         var (scopeFailure, _) = await AuthorizeScopeManagementAsync(actor, existing.Account.Partition, existing.Account.Scope, requiredPermission, context, cancellationToken).ConfigureAwait(false);
         if (scopeFailure is not null)
             return await RefuseAsync<StoredServiceAccount>(actor, AccessAuditKind.ServiceAccountUpdated, requiredPermission, targetResource, scopeFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        if (ValidateExpectedVersion(expectedVersion, existing.Version, $"Service account '{clientId.Value}'") is { } versionFailure)
+            return await RefuseAsync<StoredServiceAccount>(actor, AccessAuditKind.ServiceAccountUpdated, requiredPermission, targetResource, versionFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var updatedAccount = new ServiceAccount(existing.Account.ClientId, existing.Account.Partition, existing.Account.Scope, displayName, description);
         var updateResult = await serviceAccountStore.UpdateAsync(updatedAccount, FormatActorId(actor), expectedVersion ?? existing.Version, cancellationToken).ConfigureAwait(false);
@@ -202,6 +226,9 @@ public sealed class ServiceAccountService : IServiceAccountService
         if (scopeFailure is not null)
             return await RefuseAsync<StoredServiceAccount>(actor, auditKind, requiredPermission, targetResource, scopeFailure, safeReason, cancellationToken).ConfigureAwait(false);
 
+        if (ValidateExpectedVersion(expectedVersion, existing.Version, $"Service account '{clientId.Value}'") is { } versionFailure)
+            return await RefuseAsync<StoredServiceAccount>(actor, auditKind, requiredPermission, targetResource, versionFailure, safeReason, cancellationToken).ConfigureAwait(false);
+
         if (isEnabled)
         {
             var escalationFailure = await CheckActorCanConferClientGrantsAsync(scopeContext!, actor.Scope, partition, clientId, cancellationToken).ConfigureAwait(false);
@@ -244,6 +271,9 @@ public sealed class ServiceAccountService : IServiceAccountService
         if (scopeFailure is not null)
             return await RefuseAsync<ApiClientId>(actor, AccessAuditKind.ServiceAccountDeleted, requiredPermission, targetResource, scopeFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
 
+        if (ValidateExpectedVersion(expectedVersion, existing.Version, $"Service account '{clientId.Value}'") is { } versionFailure)
+            return await RefuseAsync<ApiClientId>(actor, AccessAuditKind.ServiceAccountDeleted, requiredPermission, targetResource, versionFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
+
         var subjectGrants = await grantStore.ListAllForSubjectAsync(partition, clientId, actor.Scope.WorkspaceId, cancellationToken).ConfigureAwait(false);
         var (deletableGrants, grantDeleteFailure) = await ValidateGrantsForDeleteAsync(scopeContext!, actor.Scope, existing, subjectGrants, cancellationToken).ConfigureAwait(false);
         if (grantDeleteFailure is not null)
@@ -253,15 +283,16 @@ public sealed class ServiceAccountService : IServiceAccountService
         if (deleteResult.TryGetValue(out TicketFailure failure))
             return await RefuseAsync<ApiClientId>(actor, AccessAuditKind.ServiceAccountDeleted, requiredPermission, targetResource, failure, cancellationToken: cancellationToken).ConfigureAwait(false);
 
+        // Once DeleteAsync commits, complete key/grant revocation and audit recording with CancellationToken.None so caller disconnects cannot leave orphaned keys or grants.
         var actorId = FormatActorId(actor);
-        await apiKeyStore.RevokeAllForClientAsync(partition, clientId, actorId, "Service account deleted.", cancellationToken).ConfigureAwait(false);
+        await apiKeyStore.RevokeAllForClientAsync(partition, clientId, actorId, "Service account deleted.", CancellationToken.None).ConfigureAwait(false);
 
         if (deletableGrants is { Count: > 0 })
         {
             var batch = new (GrantId Id, long ExpectedRevision)[deletableGrants.Count];
             for (var i = 0; i < deletableGrants.Count; i++)
                 batch[i] = (deletableGrants[i].Grant.Id, deletableGrants[i].Revision);
-            var removed = await grantStore.DeleteManyAsync(partition, batch, cancellationToken).ConfigureAwait(false);
+            var removed = await grantStore.DeleteManyAsync(partition, batch, CancellationToken.None).ConfigureAwait(false);
             for (var i = 0; i < removed.Count; i++)
             {
                 var grant = removed[i].Grant;
@@ -278,11 +309,11 @@ public sealed class ServiceAccountService : IServiceAccountService
                     grant: grant.Id,
                     role: grant.Role,
                     justification: "Service account deleted.");
-                await auditSink.RecordAsync(grantAuditEvent, cancellationToken).ConfigureAwait(false);
+                await auditSink.RecordAsync(grantAuditEvent, CancellationToken.None).ConfigureAwait(false);
             }
         }
 
-        var auditEvent = await RecordAuditAsync(actor, AccessAuditKind.ServiceAccountDeleted, AccessAuditOutcome.Allowed, requiredPermission, targetResource, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var auditEvent = await RecordAuditAsync(actor, AccessAuditKind.ServiceAccountDeleted, AccessAuditOutcome.Allowed, requiredPermission, targetResource, cancellationToken: CancellationToken.None).ConfigureAwait(false);
         return TicketResult.Ok(new AccessChangeApplied<ApiClientId>(clientId, auditEvent.Id));
     }
 
@@ -375,13 +406,13 @@ public sealed class ServiceAccountService : IServiceAccountService
             || currentAccount.CreatedAtUtc != existing.CreatedAtUtc
             || !currentAccount.Account.Scope.Equals(existing.Account.Scope))
         {
-            await apiKeyStore.RevokeAsync(partition, ok.Value.Id, actorId, "Service account changed concurrently during API key issuance.", expectedVersion: ok.Value.Version, cancellationToken).ConfigureAwait(false);
+            await apiKeyStore.RevokeAsync(partition, ok.Value.Id, actorId, "Service account changed concurrently during API key issuance.", expectedVersion: ok.Value.Version, CancellationToken.None).ConfigureAwait(false);
             var toctouFailure = currentAccount is null
                 ? TicketFailure.NotFound
                 : !currentAccount.IsEnabled
                     ? TicketFailure.Conflict(currentAccount.Version, ["Cannot issue an API key because the service account was disabled concurrently."], code: "service-account-disabled")
                     : TicketFailure.Conflict(currentAccount.Version, ["Service account changed concurrently during API key issuance."], code: "concurrency-conflict");
-            return await RefuseAsync<IssuedApiKey>(actor, AccessAuditKind.ApiKeyCreated, requiredPermission, targetResource, toctouFailure, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return await RefuseAsync<IssuedApiKey>(actor, AccessAuditKind.ApiKeyCreated, requiredPermission, targetResource, toctouFailure, cancellationToken: CancellationToken.None).ConfigureAwait(false);
         }
 
         var keyResource = TargetForAudit(actor.Scope, existing.Account.Scope, ok.Value.Id.Value);
@@ -424,7 +455,10 @@ public sealed class ServiceAccountService : IServiceAccountService
         if (scopeFailure is not null)
             return await RefuseAsync<StoredApiKey>(actor, AccessAuditKind.ApiKeyRevoked, requiredPermission, targetResource, scopeFailure, safeReason, cancellationToken).ConfigureAwait(false);
 
-        var revokeResult = await apiKeyStore.RevokeAsync(partition, keyId, FormatActorId(actor), safeReason, expectedVersion, cancellationToken).ConfigureAwait(false);
+        if (ValidateExpectedVersion(expectedVersion, existingKey.Version, $"API key '{keyId.Value}'") is { } versionFailure)
+            return await RefuseAsync<StoredApiKey>(actor, AccessAuditKind.ApiKeyRevoked, requiredPermission, targetResource, versionFailure, safeReason, cancellationToken).ConfigureAwait(false);
+
+        var revokeResult = await apiKeyStore.RevokeAsync(partition, keyId, FormatActorId(actor), safeReason, expectedVersion ?? existingKey.Version, cancellationToken).ConfigureAwait(false);
         if (revokeResult.TryGetValue(out TicketFailure failure))
             return await RefuseAsync<StoredApiKey>(actor, AccessAuditKind.ApiKeyRevoked, requiredPermission, targetResource, failure, safeReason, cancellationToken).ConfigureAwait(false);
 
@@ -883,6 +917,17 @@ public sealed class ServiceAccountService : IServiceAccountService
         };
         var formatted = $"{kind}:{accessActor.Id}";
         return formatted.Length <= TicketScope.MaximumIdentifierLength ? formatted : accessActor.Id;
+    }
+
+    private static TicketFailure? ValidateExpectedVersion(long? expectedVersion, long actualVersion, string label)
+    {
+        if (expectedVersion is not { } expected)
+            return null;
+        if (expected < 0)
+            return TicketFailure.Invalid("Expected version cannot be negative.");
+        if (actualVersion != expected)
+            return TicketFailure.Conflict(actualVersion, [$"{label} is at version {actualVersion}, expected {expected}."], code: "concurrency-conflict");
+        return null;
     }
 
     private static void RequireActor(PrincipalRef actor)

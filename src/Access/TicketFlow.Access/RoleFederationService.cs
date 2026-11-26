@@ -88,6 +88,18 @@ public sealed class RoleFederationService : IRoleFederationService
         var existing = await mappingStore.FindAsync(mapping.Partition, mappingId, cancellationToken).ConfigureAwait(false);
         var auditKind = existing is null ? AccessAuditKind.RoleFederationMappingCreated : AccessAuditKind.RoleFederationMappingUpdated;
 
+        if (expectedVersion is { } expectedUpsert)
+        {
+            if (expectedUpsert < 0)
+                return await RefuseAsync<StoredRoleFederationMapping>(actor, auditKind, requiredPermission, targetResource, mapping.RoleId,
+                    TicketFailure.Invalid("Expected version cannot be negative."), cancellationToken).ConfigureAwait(false);
+            var currentVersion = existing?.Version ?? 0;
+            if (currentVersion != expectedUpsert)
+                return await RefuseAsync<StoredRoleFederationMapping>(actor, auditKind, requiredPermission, targetResource, mapping.RoleId,
+                    TicketFailure.Conflict(existing?.Version, [$"Role federation mapping '{mappingId.Value}' is at version {currentVersion}, expected {expectedUpsert}."], code: "concurrency-conflict"),
+                    cancellationToken).ConfigureAwait(false);
+        }
+
         var (rolePermissions, roleFailure) = await ResolveAndValidateRoleAsync(actor.Scope, mapping.RoleId, mapping.Scope, cancellationToken).ConfigureAwait(false);
         if (roleFailure is not null)
             return await RefuseAsync<StoredRoleFederationMapping>(actor, auditKind, requiredPermission, targetResource, mapping.RoleId, roleFailure, cancellationToken).ConfigureAwait(false);
@@ -148,6 +160,17 @@ public sealed class RoleFederationService : IRoleFederationService
         var (scopeFailure, _) = await AuthorizeScopeManagementAsync(actor, existing.Mapping.Partition, existing.Mapping.Scope, requiredPermission, context, cancellationToken).ConfigureAwait(false);
         if (scopeFailure is not null)
             return await RefuseAsync<RoleFederationMappingId>(actor, AccessAuditKind.RoleFederationMappingDeleted, requiredPermission, targetResource, existing.Mapping.RoleId, scopeFailure, cancellationToken).ConfigureAwait(false);
+
+        if (expectedVersion is { } expectedDelete)
+        {
+            if (expectedDelete < 0)
+                return await RefuseAsync<RoleFederationMappingId>(actor, AccessAuditKind.RoleFederationMappingDeleted, requiredPermission, targetResource, existing.Mapping.RoleId,
+                    TicketFailure.Invalid("Expected version cannot be negative."), cancellationToken).ConfigureAwait(false);
+            if (existing.Version != expectedDelete)
+                return await RefuseAsync<RoleFederationMappingId>(actor, AccessAuditKind.RoleFederationMappingDeleted, requiredPermission, targetResource, existing.Mapping.RoleId,
+                    TicketFailure.Conflict(existing.Version, [$"Role federation mapping '{mappingId.Value}' is at version {existing.Version}, expected {expectedDelete}."], code: "concurrency-conflict"),
+                    cancellationToken).ConfigureAwait(false);
+        }
 
         var existingRole = await FindRoleAsync(actor.Scope, existing.Mapping.RoleId, existing.Mapping.Scope, cancellationToken).ConfigureAwait(false);
         if (existingRole is not null)

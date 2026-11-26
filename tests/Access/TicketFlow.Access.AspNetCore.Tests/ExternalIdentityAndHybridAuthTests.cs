@@ -645,6 +645,184 @@ public sealed class ExternalIdentityAndHybridAuthTests
             ValueTask.FromResult<PrincipalRef?>(null);
     }
 
+    private sealed class WrongScopeHostPrincipalResolver(TicketScope wrongScope) : TicketFlow.Hosting.AspNetCore.ITicketFlowPrincipalResolver
+    {
+        public ValueTask<PrincipalRef?> ResolveAsync(HttpContext httpContext, TicketScope scope, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<PrincipalRef?>(new UserPrincipal(wrongScope, new UserId("admin-user")));
+    }
+
+    [TestMethod]
+    public async Task Wave2SecurityHardeningsForApiKeyScopeClaimsDualCredentialsSharedSecretAndScopeResolver()
+    {
+        // 1. TenantGrantScope API key omits workspace_id claim; WorkspaceGrantScope emits it; conflicting X-Api-Key + Bearer fails closed
+        await using (var app = await CreateTestAppAsync(services =>
+        {
+            services.AddTicketFlowApiKeyAuthentication(apiKey => apiKey.DefaultScope = DefaultScope, setAsDefault: true);
+        }))
+        {
+            var partition = AccessPartition.From(DefaultScope);
+            var owner = new UserPrincipal(DefaultScope, new UserId("owner"));
+            await app.Services.GetRequiredService<IAccessGrantStore>().CreateAsync(
+                new AccessGrant(new GrantId("g-o"), partition, owner.UserId, BuiltInRoles.Owner.Id, TenantGrantScope.Instance));
+
+            string tenantKey;
+            string wsKey;
+            using (var scope = app.Services.CreateScope())
+            {
+                var sa = scope.ServiceProvider.GetRequiredService<IServiceAccountService>();
+                var tenantClient = new ApiClientId("tenant-wide-bot");
+                var wsClient = new ApiClientId("ws-pinned-bot");
+                Assert.IsTrue((await sa.CreateServiceAccountAsync(owner, new ServiceAccount(tenantClient, partition, TenantGrantScope.Instance, "Tenant Bot"))).IsSuccess);
+                Assert.IsTrue((await sa.CreateServiceAccountAsync(owner, new ServiceAccount(wsClient, partition, new WorkspaceGrantScope(DefaultScope.WorkspaceId), "WS Bot"))).IsSuccess);
+
+                Assert.IsTrue((await sa.IssueApiKeyAsync(owner, new ApiKeyCreateRequest(tenantClient, "k-t"))).TryGetValue(out TicketValue<AccessChangeApplied<IssuedApiKey>> tk));
+                Assert.IsTrue((await sa.IssueApiKeyAsync(owner, new ApiKeyCreateRequest(wsClient, "k-w"))).TryGetValue(out TicketValue<AccessChangeApplied<IssuedApiKey>> wk));
+                tenantKey = tk.Value.Value.PlaintextKey;
+                wsKey = wk.Value.Value.PlaintextKey;
+            }
+
+            using var client = app.GetTestClient();
+
+            // Tenant-scoped API key must NOT emit workspace_id claim (retains 4 partition claims)
+            using (var req = new HttpRequestMessage(HttpMethod.Get, "/claims"))
+            {
+                req.Headers.Add("X-Api-Key", tenantKey);
+                using var resp = await client.SendAsync(req);
+                Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+                var claims = await resp.Content.ReadFromJsonAsync<Dictionary<string, string[]>>();
+                Assert.IsNotNull(claims);
+                Assert.IsTrue(claims.ContainsKey(TicketFlowClaimsScopeResolver.TenantClaimType));
+                Assert.IsTrue(claims.ContainsKey(TicketFlowClaimsScopeResolver.ProjectClaimType));
+                Assert.IsTrue(claims.ContainsKey(TicketFlowClaimsScopeResolver.EnvironmentClaimType));
+                Assert.IsTrue(claims.ContainsKey(TicketFlowClaimsScopeResolver.AppClaimType));
+                Assert.IsFalse(claims.ContainsKey(TicketFlowClaimsScopeResolver.WorkspaceClaimType), "TenantGrantScope API keys must omit workspace_id.");
+            }
+
+            // Workspace-scoped API key emits workspace_id
+            using (var req = new HttpRequestMessage(HttpMethod.Get, "/claims"))
+            {
+                req.Headers.Add("X-Api-Key", wsKey);
+                using var resp = await client.SendAsync(req);
+                Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+                var claims = await resp.Content.ReadFromJsonAsync<Dictionary<string, string[]>>();
+                Assert.IsNotNull(claims);
+                Assert.AreEqual(DefaultScope.WorkspaceId.Value, claims[TicketFlowClaimsScopeResolver.WorkspaceClaimType][0]);
+            }
+
+            // Conflicting X-Api-Key and Authorization: Bearer tokens fail closed -> 401
+            using (var conflict = new HttpRequestMessage(HttpMethod.Get, "/whoami"))
+            {
+                conflict.Headers.Add("X-Api-Key", tenantKey);
+                conflict.Headers.Add("Authorization", $"Bearer {wsKey}");
+                using var resp = await client.SendAsync(conflict);
+                Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+            }
+
+            // Matching X-Api-Key and Authorization: Bearer succeeds -> 200
+            using (var matching = new HttpRequestMessage(HttpMethod.Get, "/whoami"))
+            {
+                matching.Headers.Add("X-Api-Key", tenantKey);
+                matching.Headers.Add("Authorization", $"Bearer {tenantKey}");
+                using var resp = await client.SendAsync(matching);
+                Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+            }
+        }
+
+        // 2. RoleCatalog rejects mismatched scope from host resolver BEFORE external claims enrichment
+        const string proxySecret = "scope-order-secret";
+        var wrongScope = new TicketScope("tenant-b", "proj-b", "prod", "support", new WorkspaceId("ws-other"));
+        await using (var app = await CreateTestAppAsync(
+            services =>
+            {
+                services.AddScoped<TicketFlow.Hosting.AspNetCore.ITicketFlowPrincipalResolver>(_ => new WrongScopeHostPrincipalResolver(wrongScope));
+                services.AddTicketFlowExternalIdentityAuthentication(options =>
+                {
+                    options.UseIdentityFlowDefaults(sharedSecret: proxySecret, acceptFederatedRoles: true);
+                });
+            },
+            mapRoleCatalog: true))
+        {
+            await app.Services.GetRequiredService<IAccessGrantStore>().CreateAsync(
+                new AccessGrant(new GrantId("g-adm"), AccessPartition.From(DefaultScope), new UserId("admin-user"), BuiltInRoles.Owner.Id, TenantGrantScope.Instance));
+
+            using var client = app.GetTestClient();
+            using var req = new HttpRequestMessage(HttpMethod.Get, "/.well-known/ticketflow-roles");
+            req.Headers.Add("X-IdentityFlow-Proxy-Secret", proxySecret);
+            req.Headers.Add("X-Auth-Subject", "admin-user");
+            req.Headers.Add("X-Auth-Roles", "idf:owner");
+            using var resp = await client.SendAsync(req);
+            Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+        }
+
+        // 3. SharedSecretHeader accepts secret containing comma verbatim and rejects whitespace/duplicated/comma-repeated values
+        const string commaSecret = "sec,ret-with-comma";
+        await using (var app = await CreateTestAppAsync(services =>
+        {
+            services.AddTicketFlowExternalIdentityAuthentication(options =>
+            {
+                options.UseIdentityFlowDefaults(sharedSecret: commaSecret);
+            });
+        }))
+        {
+            using var client = app.GetTestClient();
+
+            using (var valid = new HttpRequestMessage(HttpMethod.Get, "/whoami"))
+            {
+                valid.Headers.TryAddWithoutValidation("X-IdentityFlow-Proxy-Secret", commaSecret);
+                valid.Headers.Add("X-Auth-Subject", "alice");
+                using var resp = await client.SendAsync(valid);
+                Assert.AreEqual(HttpStatusCode.OK, resp.StatusCode);
+            }
+
+            using (var padded = new HttpRequestMessage(HttpMethod.Get, "/whoami"))
+            {
+                padded.Headers.TryAddWithoutValidation("X-IdentityFlow-Proxy-Secret", $" {commaSecret} ");
+                padded.Headers.Add("X-Auth-Subject", "alice");
+                using var resp = await client.SendAsync(padded);
+                Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+            }
+
+            using (var repeated = new HttpRequestMessage(HttpMethod.Get, "/whoami"))
+            {
+                repeated.Headers.TryAddWithoutValidation("X-IdentityFlow-Proxy-Secret", $"{commaSecret}, {commaSecret}");
+                repeated.Headers.Add("X-Auth-Subject", "alice");
+                using var resp = await client.SendAsync(repeated);
+                Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+            }
+
+            using (var dupLines = new HttpRequestMessage(HttpMethod.Get, "/whoami"))
+            {
+                dupLines.Headers.TryAddWithoutValidation("X-IdentityFlow-Proxy-Secret", commaSecret);
+                dupLines.Headers.TryAddWithoutValidation("X-IdentityFlow-Proxy-Secret", commaSecret);
+                dupLines.Headers.Add("X-Auth-Subject", "alice");
+                using var resp = await client.SendAsync(dupLines);
+                Assert.AreEqual(HttpStatusCode.Unauthorized, resp.StatusCode);
+            }
+        }
+
+        // 4. TicketFlowClaimsScopeResolver.FromPrincipal fails closed on invalid/conflicting claims and blocks cross-ancestor fallback mixing
+        static System.Security.Claims.ClaimsPrincipal MakePrincipal(params (string Type, string Value)[] claims) =>
+            new(new System.Security.Claims.ClaimsIdentity(claims.Select(c => new System.Security.Claims.Claim(c.Type, c.Value)), "Test"));
+
+        Assert.IsNull(TicketFlowClaimsScopeResolver.FromPrincipal(MakePrincipal(("tenant_id", "tenant-a"), ("tenant_id", "tenant-b")), DefaultScope));
+        Assert.IsNull(TicketFlowClaimsScopeResolver.FromPrincipal(MakePrincipal(("environment_id", "prod"), ("environment", "staging")), DefaultScope));
+        Assert.IsNull(TicketFlowClaimsScopeResolver.FromPrincipal(MakePrincipal(("app_id", "support"), ("app_name", "billing")), DefaultScope));
+        Assert.IsNull(TicketFlowClaimsScopeResolver.FromPrincipal(MakePrincipal(("workspace_id", "ws-main"), ("workspace", "ws-other")), DefaultScope));
+        Assert.IsNull(TicketFlowClaimsScopeResolver.FromPrincipal(MakePrincipal(("tenant_id", "tenant-a"), ("tenant_id", "bad\0value")), DefaultScope));
+        Assert.IsNull(TicketFlowClaimsScopeResolver.FromPrincipal(MakePrincipal(("tenant_id", "")), DefaultScope));
+
+        // Cross-ancestor mixing blocked: different tenant_id must NOT inherit project/env/app/workspace from DefaultScope
+        Assert.IsNull(TicketFlowClaimsScopeResolver.FromPrincipal(MakePrincipal(("tenant_id", "tenant-b")), DefaultScope));
+        Assert.IsNull(TicketFlowClaimsScopeResolver.FromPrincipal(MakePrincipal(("tenant_id", "tenant-a"), ("project_id", "proj-b")), DefaultScope));
+        Assert.IsNull(TicketFlowClaimsScopeResolver.FromPrincipal(MakePrincipal(("tenant_id", "tenant-a"), ("project_id", "proj-a"), ("environment_id", "staging"), ("app_id", "support")), DefaultScope));
+
+        // Matching partition claims cleanly inherit fallback workspace
+        var inherited = TicketFlowClaimsScopeResolver.FromPrincipal(
+            MakePrincipal(("tenant_id", "tenant-a"), ("project_id", "proj-a"), ("environment_id", "prod"), ("app_id", "support")),
+            DefaultScope);
+        Assert.AreEqual(DefaultScope, inherited);
+    }
+
     private static async Task<WebApplication> CreateTestAppAsync(
         Action<IServiceCollection> configureAuth,
         Action<AccessControlOptions>? configureAccess = null,
@@ -667,6 +845,16 @@ public sealed class ExternalIdentityAndHybridAuthTests
             });
 
         app.UseAuthentication();
+
+        app.MapGet("/claims", (HttpContext http) =>
+        {
+            if (http.User.Identity?.IsAuthenticated != true)
+                return Results.Unauthorized();
+            var grouped = http.User.Claims
+                .GroupBy(c => c.Type, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.Select(c => c.Value).ToArray(), StringComparer.Ordinal);
+            return Results.Ok(grouped);
+        });
 
         app.MapGet("/whoami", async (HttpContext http, IAccessPrincipalResolver resolver, IAccessEvaluator evaluator) =>
         {

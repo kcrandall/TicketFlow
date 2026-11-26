@@ -1,7 +1,12 @@
 @inherits UiPageBase
 
 <PageHeader Title="Access" Description="Roles bundle permissions; grants give users, teams and API clients a role on the workspace, a team or an inbox. Deny always wins.">
-    <Actions><BbButton Href="@Url("access/roles/new")" Size="ButtonSize.Small"><LucideIcon Name="plus" Size="14" />New role</BbButton></Actions>
+    <Actions>
+        @if (!Denied && Session.Can(AccessPermissions.AccessManage))
+        {
+            <BbButton Href="@Url("access/roles/new")" Size="ButtonSize.Small"><LucideIcon Name="plus" Size="14" />New role</BbButton>
+        }
+    </Actions>
 </PageHeader>
 <AccessTabs Active="roles" />
 

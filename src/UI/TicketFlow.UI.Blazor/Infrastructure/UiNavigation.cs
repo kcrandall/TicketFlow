@@ -55,7 +55,7 @@ public static class UiNavigation
         new("help-center", "Help center", "help-center", "book-open", Operations, typeof(IHelpCenterService), [HelpCenterPermissions.Read, HelpCenterPermissions.Write]),
         new("surveys", "Surveys", "surveys", "smile", Operations, typeof(ISurveyService), [SurveyPermissions.Read, SurveyPermissions.Manage]),
 
-        new("access", "Access", "access", "shield-check", Administration, typeof(IAccessAdministrator), [AccessPermissions.AccessManage]),
+        new("access", "Access", "access", "shield-check", Administration, typeof(IAccessAdministrator), [AccessPermissions.AccessManage, AccessPermissions.AccessManageTenant, AccessPermissions.AccessBreakGlass]),
         new("settings", "Settings", "settings", "settings", Administration, null, []),
     ];
 
@@ -63,9 +63,41 @@ public static class UiNavigation
 
     public static UiSection Section(string key) => ByKey[key];
 
+    /// <summary>The default landing path for <paramref name="section"/> given the viewer's permissions.</summary>
+    public static string SectionPath(TicketFlowUISession session, UiSection section)
+    {
+        if (section.Key == "access" && !session.Can(AccessPermissions.AccessManage))
+        {
+            if (session.Can(AccessPermissions.AccessManageTenant))
+            {
+                if (session.Options.ManageApiKeysInUI && session.Has<IServiceAccountService>())
+                    return "access/service-accounts";
+                if (session.Has<IRoleFederationService>())
+                    return "access/federation";
+            }
+            if (session.Can(AccessPermissions.AccessBreakGlass))
+                return "access/break-glass";
+        }
+        return section.Path;
+    }
+
     /// <summary>Whether the session may open <paramref name="route"/> (the same rule for GET pages and POST actions).</summary>
     public static bool Allows(TicketFlowUISession session, UiRoute route) =>
-        session.State == UiSessionState.Ready && Section(route.Section).IsVisible(session);
+        session.State == UiSessionState.Ready && Section(route.Section).IsVisible(session) && AllowsRoute(session, route);
+
+    private static bool AllowsRoute(TicketFlowUISession session, UiRoute route)
+    {
+        if (route.Section != "access")
+            return true;
+
+        return route.Pattern switch
+        {
+            "access" or "access/roles/{id}" or "access/grants" or "access/field-policies" => session.Can(AccessPermissions.AccessManage),
+            "access/break-glass" => session.CanAny(AccessPermissions.AccessBreakGlass, AccessPermissions.AccessManage),
+            "access/service-accounts" or "access/federation" => session.CanAny(AccessPermissions.AccessManage, AccessPermissions.AccessManageTenant),
+            _ => session.Can(AccessPermissions.AccessManage),
+        };
+    }
 
     /// <summary>The section an action belongs to; actions run only on a page of that section. Null for unknown actions.</summary>
     public static string? ActionSection(string action)

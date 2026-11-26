@@ -35,7 +35,7 @@ public sealed class RoleFederationTests
         var mappingResult = await federation.UpsertMappingAsync(
             owner,
             new RoleFederationMappingId("map-1"),
-            new RoleFederationMapping("identityflow", "team-macros", customRole.Id, fixture.Partition, fixture.Workspace));
+            new RoleFederationMapping("local", "team-macros", customRole.Id, fixture.Partition, fixture.Workspace));
         Assert.IsTrue(mappingResult.IsSuccess);
 
         // Field policy masks contact.email for Agent (only Owner unmasked)
@@ -231,9 +231,19 @@ public sealed class RoleFederationTests
         var teamOnlyNoIdp = new UserPrincipal(fixture.Scope, new UserId("u-team-none"), teams: [new TeamId("support-agents")]);
         Assert.AreEqual("denied:NoMatchingGrant", await fixture.DescribeAsync(teamOnlyNoIdp, AccessPermissions.ConversationReply));
 
-        // Local team membership DOES match provider "local"
+        // Local team membership MUST NOT forge IdP-pinned mapping even when principal's IdentityProvider matches, nor wildcard "*" IdP mapping
+        var teamSameIdp = new UserPrincipal(fixture.Scope, new UserId("u-team-idf"), teams: [new TeamId("support-agents")], identityProvider: "identityflow");
+        Assert.AreEqual("denied:NoMatchingGrant", await fixture.DescribeAsync(teamSameIdp, AccessPermissions.ConversationReply));
+
+        var teamWildcard = new UserPrincipal(fixture.Scope, new UserId("u-team-wild"), teams: [new TeamId("global-viewers")], identityProvider: "identityflow");
+        Assert.AreEqual("denied:NoMatchingGrant", await fixture.DescribeAsync(teamWildcard, AccessPermissions.ConversationRead));
+
+        // Local team membership DOES match provider "local" (even when principal also has an external IdentityProvider)
         var teamLocal = new UserPrincipal(fixture.Scope, new UserId("u-team-local"), teams: [new TeamId("team-local")]);
         Assert.AreEqual("allowed", await fixture.DescribeAsync(teamLocal, AccessPermissions.ConversationRead));
+
+        var teamLocalWithIdp = new UserPrincipal(fixture.Scope, new UserId("u-team-local-idp"), teams: [new TeamId("team-local")], identityProvider: "identityflow");
+        Assert.AreEqual("allowed", await fixture.DescribeAsync(teamLocalWithIdp, AccessPermissions.ConversationRead));
     }
 
     [TestMethod]
@@ -321,5 +331,100 @@ public sealed class RoleFederationTests
         Assert.IsTrue(deniedMap.TryGetValue(out TicketFailure denyFailure));
         Assert.AreEqual(TicketFailureKind.Forbidden, denyFailure.Kind);
         Assert.AreEqual(nameof(AccessDenialReason.ExplicitDeny), denyFailure.Code);
+    }
+
+    [TestMethod]
+    public async Task FederatedOnlyWithoutAdminRolesAlignsAdministrationWithEvaluator()
+    {
+        using var fixture = AccessFixture.Create(options: o =>
+        {
+            o.RoleFederation.Mode = RoleFederationMode.FederatedOnly;
+            o.RoleFederation.AllowAdministrativeRoles = false;
+            o.RoleFederation.StaticMappings["idp-agent"] = BuiltInRoles.Agent.Id;
+            o.RoleFederation.StaticMappings["idp-owner"] = BuiltInRoles.Owner.Id;
+        });
+
+        using var scope = fixture.Provider.CreateScope();
+        var federation = scope.ServiceProvider.GetRequiredService<IRoleFederationService>();
+        var serviceAccounts = scope.ServiceProvider.GetRequiredService<IServiceAccountService>();
+
+        // Local-only Owner (no federated roles): holds admin perms, NOT operational perms (e.g. ConversationRead)
+        var localOnlyAdmin = fixture.User("local-admin-no-fed");
+        await fixture.GrantAsync(localOnlyAdmin.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        Assert.AreEqual("allowed", await fixture.DescribeAsync(localOnlyAdmin, AccessPermissions.AccessManage));
+        Assert.AreEqual("denied:NoMatchingGrant", await fixture.DescribeAsync(localOnlyAdmin, AccessPermissions.ConversationRead));
+
+        // Cannot create a role, grant, or federation mapping conferring ConversationRead (which evaluator denies!)
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(
+            await fixture.Admin.CreateRoleAsync(localOnlyAdmin, new AccessRole(new RoleId("op-role"), "Op", [AccessPermissions.ConversationRead]))));
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(
+            await fixture.Admin.CreateGrantAsync(localOnlyAdmin, new AccessGrant(new GrantId("g-esc"), fixture.Partition, new UserId("bob"), BuiltInRoles.Viewer.Id, fixture.Workspace))));
+        var fedEsc = await federation.UpsertMappingAsync(
+            localOnlyAdmin,
+            new RoleFederationMappingId("map-esc-local"),
+            new RoleFederationMapping("identityflow", "readers", BuiltInRoles.Viewer.Id, fixture.Partition, fixture.Workspace));
+        Assert.IsTrue(fedEsc.TryGetValue(out TicketFailure fedEscFailure));
+        Assert.AreEqual("privilege-escalation", fedEscFailure.Code);
+
+        // Local admin WITH federated Agent role: holds AccessManage locally + Agent operational perms via federation
+        var hybridAdmin = new UserPrincipal(fixture.Scope, new UserId("hybrid-admin"), externalRoles: ["idp-agent"], identityProvider: "identityflow");
+        await fixture.GrantAsync(hybridAdmin.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        // CAN create role/grant/mapping for Agent permissions (e.g. ConversationRead, ConversationReply)
+        Assert.AreEqual("applied", AccessFixture.Describe(
+            await fixture.Admin.CreateRoleAsync(hybridAdmin, new AccessRole(new RoleId("fed-agent-role"), "Fed Agent", [AccessPermissions.ConversationRead, AccessPermissions.ConversationReply]))));
+        Assert.AreEqual("applied", AccessFixture.Describe(
+            await fixture.Admin.CreateGrantAsync(hybridAdmin, new AccessGrant(new GrantId("g-agent-ok"), fixture.Partition, new UserId("bob"), BuiltInRoles.Agent.Id, fixture.Workspace))));
+        Assert.IsTrue((await federation.UpsertMappingAsync(
+            hybridAdmin,
+            new RoleFederationMappingId("map-agent-ok"),
+            new RoleFederationMapping("identityflow", "agents", BuiltInRoles.Agent.Id, fixture.Partition, fixture.Workspace))).IsSuccess);
+
+        // CANNOT confer operational permission outside federated Agent (e.g. ConversationDelete)
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(
+            await fixture.Admin.CreateRoleAsync(hybridAdmin, new AccessRole(new RoleId("too-high"), "Too High", [AccessPermissions.ConversationDelete]))));
+        var saClient = new ApiClientId("sa-high-existing");
+        await fixture.GrantAsync(saClient, BuiltInRoles.Supervisor, fixture.Workspace);
+        var saEsc = await serviceAccounts.CreateServiceAccountAsync(hybridAdmin, new ServiceAccount(saClient, fixture.Partition, fixture.Workspace, "SA"));
+        Assert.IsTrue(saEsc.TryGetValue(out TicketFailure saEscFailure));
+        Assert.AreEqual("existing-grants-conflict", saEscFailure.Code);
+
+        // Federated-only Owner (no local grants) still cannot administer when AllowAdministrativeRoles == false
+        var fedOnlyOwner = new UserPrincipal(fixture.Scope, new UserId("fed-only-owner"), externalRoles: ["idp-owner"], identityProvider: "identityflow");
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(
+            await fixture.Admin.CreateRoleAsync(fedOnlyOwner, new AccessRole(new RoleId("blocked"), "Blocked", [AccessPermissions.ConversationRead]))));
+    }
+
+    [TestMethod]
+    public async Task RoleFederationServiceValidatesExpectedVersionBeforeCas()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var federation = scope.ServiceProvider.GetRequiredService<IRoleFederationService>();
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        var id = new RoleFederationMappingId("map-ver");
+        var mapping = new RoleFederationMapping("identityflow", "agents", BuiltInRoles.Agent.Id, fixture.Partition, fixture.Workspace);
+
+        var negUpsert = await federation.UpsertMappingAsync(owner, id, mapping, expectedVersion: -1);
+        Assert.IsTrue(negUpsert.TryGetValue(out TicketFailure negFailure));
+        Assert.AreEqual(TicketFailureKind.Invalid, negFailure.Kind);
+
+        var staleNew = await federation.UpsertMappingAsync(owner, id, mapping, expectedVersion: 5);
+        Assert.IsTrue(staleNew.TryGetValue(out TicketFailure staleNewFailure));
+        Assert.AreEqual(TicketFailureKind.Conflict, staleNewFailure.Kind);
+
+        Assert.IsTrue((await federation.UpsertMappingAsync(owner, id, mapping, expectedVersion: 0)).IsSuccess);
+
+        var staleUpdate = await federation.UpsertMappingAsync(owner, id, mapping, expectedVersion: 2);
+        Assert.IsTrue(staleUpdate.TryGetValue(out TicketFailure staleUpdateFailure));
+        Assert.AreEqual(TicketFailureKind.Conflict, staleUpdateFailure.Kind);
+        Assert.AreEqual(1L, staleUpdateFailure.CurrentRevision);
+
+        var staleDelete = await federation.DeleteMappingAsync(owner, id, expectedVersion: 9);
+        Assert.IsTrue(staleDelete.TryGetValue(out TicketFailure staleDeleteFailure));
+        Assert.AreEqual(TicketFailureKind.Conflict, staleDeleteFailure.Kind);
+        Assert.AreEqual(1L, staleDeleteFailure.CurrentRevision);
     }
 }

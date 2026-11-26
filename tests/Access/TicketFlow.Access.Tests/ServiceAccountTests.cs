@@ -395,6 +395,132 @@ public sealed partial class ServiceAccountTests
         Assert.AreEqual(TicketFailureKind.Forbidden, saScopeFailure.Kind);
     }
 
+    [TestMethod]
+    public async Task CreateServiceAccountRejectsExistingActiveApiKeysAndDeleteCascadeIgnoresPostCommitCancellation()
+    {
+        using var fixture = AccessFixture.Create();
+        var saStore = fixture.Provider.GetRequiredService<IServiceAccountStore>();
+        var keyStore = fixture.Provider.GetRequiredService<IApiKeyStore>();
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        using var scope = fixture.Provider.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<IServiceAccountService>();
+
+        // Orphaned active API key blocks recreating a service account with the same ClientId
+        var orphanClient = new ApiClientId("orphan-key-bot");
+        var keyCreate = await keyStore.CreateAsync(
+            ApiKeyId.NewId(),
+            fixture.Partition,
+            orphanClient,
+            "orphaned",
+            "tf_sa_deadbeef",
+            new string('a', 64),
+            "system:seed");
+        Assert.IsTrue(keyCreate.IsSuccess);
+
+        var conflictCreate = await service.CreateServiceAccountAsync(owner, new ServiceAccount(orphanClient, fixture.Partition, fixture.Workspace, "Orphan Bot"));
+        Assert.IsTrue(conflictCreate.TryGetValue(out TicketFailure conflictFailure));
+        Assert.AreEqual(TicketFailureKind.Conflict, conflictFailure.Kind);
+        Assert.AreEqual("existing-keys-conflict", conflictFailure.Code);
+
+        // Once the orphaned key is revoked, creation succeeds
+        Assert.AreEqual(1, await keyStore.RevokeAllForClientAsync(fixture.Partition, orphanClient, "system:cleanup", "cleanup"));
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(orphanClient, fixture.Partition, fixture.Workspace, "Orphan Bot"))).IsSuccess);
+
+        // Post-delete key/grant cascade completes even if caller's CancellationToken is cancelled right as DeleteAsync commits
+        var cascadeClient = new ApiClientId("cancel-cascade-bot");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(cascadeClient, fixture.Partition, fixture.Workspace, "Cascade Bot"))).IsSuccess);
+        var issuedKey = await service.IssueApiKeyAsync(owner, new ApiKeyCreateRequest(cascadeClient, "k1"));
+        Assert.IsTrue(issuedKey.TryGetValue(out TicketValue<AccessChangeApplied<IssuedApiKey>> issued));
+        await fixture.GrantAsync(cascadeClient, BuiltInRoles.Viewer, fixture.Workspace);
+
+        // Verify PrintMembers redacts PlaintextKey and KeyHashHex
+        var issuedText = issued.Value.Value.ToString();
+        Assert.IsFalse(issuedText.Contains(issued.Value.Value.PlaintextKey, StringComparison.Ordinal));
+        StringAssert.Contains(issuedText, "<redacted>");
+        var secretRecord = new StoredApiKeySecret(issued.Value.Value.Key, new string('f', 64));
+        var secretText = secretRecord.ToString();
+        Assert.IsFalse(secretText.Contains(secretRecord.KeyHashHex, StringComparison.Ordinal));
+        StringAssert.Contains(secretText, "<redacted>");
+
+        using var cts = new CancellationTokenSource();
+        var cancellingStore = new CancellingOnDeleteServiceAccountStore(saStore, cts);
+        var cancelService = new ServiceAccountService(cancellingStore, keyStore, fixture.Grants, fixture.Roles, fixture.Catalog, fixture.Audit, fixture.Clock);
+
+        var deleted = await cancelService.DeleteServiceAccountAsync(owner, cascadeClient, expectedVersion: 1, cts.Token);
+        Assert.IsTrue(deleted.IsSuccess);
+        Assert.IsFalse((await cancelService.AuthenticateApiKeyAsync(issued.Value.Value.PlaintextKey, fixture.Scope)).IsAuthenticated);
+        Assert.IsEmpty(await fixture.Grants.ListAllForSubjectAsync(fixture.Partition, cascadeClient, fixture.Scope.WorkspaceId));
+    }
+
+    [TestMethod]
+    public async Task AccessAdministratorTenantChecksEnforceTenantAllowsOnlyAndStandardGrantsOnly()
+    {
+        using var fixture = AccessFixture.Create();
+        var tenantOwner = fixture.User("tenant-owner");
+        await fixture.GrantAsync(tenantOwner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        var workspaceOwner = fixture.User("workspace-owner");
+        await fixture.GrantAsync(workspaceOwner.UserId, BuiltInRoles.Owner, fixture.Workspace);
+
+        var bgTenantUser = fixture.User("bg-tenant");
+        var bgRole = await fixture.CustomRoleAsync("bg-tenant-role", AccessPermissions.AccessManageTenant);
+        var now = fixture.Clock.GetUtcNow();
+        await fixture.SeedAsync(new AccessGrant(
+            new GrantId("g-bg-tenant"),
+            fixture.Partition,
+            bgTenantUser.UserId,
+            bgRole.Id,
+            fixture.Workspace,
+            GrantEffect.Allow,
+            validFrom: now,
+            validUntil: now.AddHours(1),
+            justification: "Emergency test",
+            kind: GrantKind.BreakGlass));
+
+        var saClient = new ApiClientId("sa-tenant-subject");
+        await fixture.GrantAsync(saClient, BuiltInRoles.Viewer, TenantGrantScope.Instance);
+        await fixture.GrantAsync(saClient, BuiltInRoles.Agent, fixture.Workspace);
+
+        Assert.IsInstanceOfType<AccessCheckPassed>((await fixture.Admin.CheckCanManageTenantAsync(tenantOwner)).Value);
+        Assert.IsInstanceOfType<TicketFailure>((await fixture.Admin.CheckCanManageTenantAsync(workspaceOwner)).Value);
+        Assert.IsInstanceOfType<TicketFailure>((await fixture.Admin.CheckCanManageTenantAsync(bgTenantUser)).Value);
+
+        var listedByTenant = await fixture.Admin.ListTenantGrantsForSubjectsAsync(tenantOwner, [saClient]);
+        Assert.IsTrue(listedByTenant.TryGetValue(out TicketValue<IReadOnlyList<StoredAccessGrant>> ok));
+        Assert.HasCount(1, ok.Value);
+        Assert.IsInstanceOfType<TenantGrantScope>(ok.Value[0].Grant.Scope);
+
+        var listedByWorkspace = await fixture.Admin.ListTenantGrantsForSubjectsAsync(workspaceOwner, [saClient]);
+        Assert.IsTrue(listedByWorkspace.TryGetValue(out TicketFailure wsFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, wsFailure.Kind);
+
+        var listedByBg = await fixture.Admin.ListTenantGrantsForSubjectsAsync(bgTenantUser, [saClient]);
+        Assert.IsTrue(listedByBg.TryGetValue(out TicketFailure bgFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, bgFailure.Kind);
+    }
+
+    private sealed class CancellingOnDeleteServiceAccountStore(IServiceAccountStore inner, CancellationTokenSource cts) : IServiceAccountStore
+    {
+        public ValueTask<StoredServiceAccount?> FindAsync(AccessPartition partition, ApiClientId clientId, CancellationToken cancellationToken = default) =>
+            inner.FindAsync(partition, clientId, cancellationToken);
+        public ValueTask<IReadOnlyList<StoredServiceAccount>> ListForPartitionAsync(AccessPartition partition, bool includeDisabled = true, CancellationToken cancellationToken = default) =>
+            inner.ListForPartitionAsync(partition, includeDisabled, cancellationToken);
+        public ValueTask<TicketResult<StoredServiceAccount>> CreateAsync(ServiceAccount account, string actorPrincipalId, CancellationToken cancellationToken = default) =>
+            inner.CreateAsync(account, actorPrincipalId, cancellationToken);
+        public ValueTask<TicketResult<StoredServiceAccount>> UpdateAsync(ServiceAccount account, string actorPrincipalId, long? expectedVersion = null, CancellationToken cancellationToken = default) =>
+            inner.UpdateAsync(account, actorPrincipalId, expectedVersion, cancellationToken);
+        public ValueTask<TicketResult<StoredServiceAccount>> SetEnabledAsync(AccessPartition partition, ApiClientId clientId, bool isEnabled, string actorPrincipalId, string? reason = null, long? expectedVersion = null, CancellationToken cancellationToken = default) =>
+            inner.SetEnabledAsync(partition, clientId, isEnabled, actorPrincipalId, reason, expectedVersion, cancellationToken);
+        public async ValueTask<TicketResult<bool>> DeleteAsync(AccessPartition partition, ApiClientId clientId, long? expectedVersion = null, CancellationToken cancellationToken = default)
+        {
+            var result = await inner.DeleteAsync(partition, clientId, expectedVersion, cancellationToken).ConfigureAwait(false);
+            cts.Cancel();
+            return result;
+        }
+    }
+
     private sealed class RacingApiKeyStore(IApiKeyStore inner, Func<Task> onAfterCreate) : IApiKeyStore
     {
         public ValueTask<StoredApiKey?> FindByIdAsync(AccessPartition partition, ApiKeyId keyId, CancellationToken cancellationToken = default) =>

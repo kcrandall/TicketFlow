@@ -2,7 +2,7 @@
 
 <PageHeader Title="Theme" Description="Pick a color theme and mode. Your choice is stored in a cookie, so pages render in it from the first byte." />
 
-<TfForm Action="theme.set" Return="@Url("settings/theme")" Class="tf-stack">
+<TfForm Action="theme.set" Return="@Url("settings/theme")" Enhance="false" Class="tf-stack">
     <div class="tf-card">
         <div class="tf-card__header"><div><div class="tf-card__title">Mode</div><div class="tf-card__description">Dark is the default.</div></div></div>
         <div class="tf-card__content tf-mode-cards">

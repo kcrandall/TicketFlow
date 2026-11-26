@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using TicketFlow.Access;
 using TicketFlow.Hosting.AspNetCore;
 using TicketFlow.Identity;
 using TicketFlow.Workspaces;
@@ -27,7 +28,8 @@ public static class IdentityFlowTicketFlowBuilderExtensions
         services.TryAddScoped(provider => new IdentityFlowPrincipalResolver(
             provider.GetRequiredService<ITeamMembershipResolver>(),
             provider.GetRequiredService<Microsoft.Extensions.Options.IOptions<IdentityFlowPrincipalOptions>>(),
-            provider.GetService<IStaffIdentityResolver>()));
+            provider.GetService<IStaffIdentityResolver>(),
+            provider.GetService<Microsoft.Extensions.Options.IOptions<ClaimsPrincipalResolverOptions>>()));
         services.TryAddScoped<ITicketFlowPrincipalResolver>(provider => provider.GetRequiredService<IdentityFlowPrincipalResolver>());
         return builder;
     }

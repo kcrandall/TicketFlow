@@ -674,6 +674,51 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
             var afterRevokeHtml = await GetStringAsync(tempClient, "/support/access/service-accounts");
             Assert.IsFalse(afterRevokeHtml.Contains("TOP-SECRET-TENANT-GRANT", StringComparison.Ordinal),
                 "Revoked tenant-admin must immediately stop seeing tenant grants despite cached sensitive permissions.");
+
+            // Workspace-scoped Owner (NOT tenant-scoped) MUST NOT have CanManageTenant on ServiceAccountsPage or RoleFederationPage
+            var wsOwnerId = new UserId("ws-only-owner");
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-ws-only-owner"), settings.Partition, wsOwnerId, BuiltInRoles.Owner.Id, new WorkspaceGrantScope(settings.Workspace)));
+            using var wsOwnerClient = CreateDevClient(app, "ws-only-owner");
+            var wsSaHtml = await GetStringAsync(wsOwnerClient, "/support/access/service-accounts");
+            Assert.IsFalse(wsSaHtml.Contains("TOP-SECRET-TENANT-GRANT", StringComparison.Ordinal), "Workspace-scoped Owner must not see tenant grants.");
+            Assert.IsFalse(wsSaHtml.Contains("<option value=\"tenant\"", StringComparison.Ordinal), "Workspace-scoped Owner must not see Tenant scope option on ServiceAccountsPage.");
+            var wsFedHtml = await GetStringAsync(wsOwnerClient, "/support/access/federation");
+            Assert.IsFalse(wsFedHtml.Contains("<option value=\"tenant\"", StringComparison.Ordinal), "Workspace-scoped Owner must not see Tenant scope option on RoleFederationPage.");
+
+            // SampleHost /dev/login rejects open-redirect returnUrl payloads containing backslashes or control characters
+            using var anonClient = app.GetTestServer().CreateClient();
+            foreach (var evilReturn in new[] { "/\\evil.com", "/support\\evil", "/support\r\nX-Injected: 1", "/support\tfoo", "/support\x7f" })
+            {
+                using var loginResp = await anonClient.GetAsync($"/dev/login?user=admin&returnUrl={Uri.EscapeDataString(evilReturn)}");
+                Assert.AreEqual(HttpStatusCode.Redirect, loginResp.StatusCode);
+                Assert.AreEqual("/support", loginResp.Headers.Location?.OriginalString, $"Open redirect must fall back to /support for '{evilReturn}'.");
+            }
+        }
+
+        // 3b. Host resolver returning wrong-scope principal MUST be rejected BEFORE external claims enrichment
+        var wrongScopeServices = new ServiceCollection();
+        wrongScopeServices.AddTicketFlow()
+            .AddAccessControl()
+            .AddInMemoryAccessStores()
+            .AddTicketFlowEndpoints(o => o.Partition = partition)
+            .AddTicketFlowBlazorUI(o => o.Workspace = workspace);
+        wrongScopeServices.AddScoped<ITicketFlowPrincipalResolver, WrongScopeResolver>();
+
+        await using (var provider = wrongScopeServices.BuildServiceProvider())
+        using (var serviceScope = provider.CreateScope())
+        {
+            var http = new Microsoft.AspNetCore.Http.DefaultHttpContext
+            {
+                RequestServices = serviceScope.ServiceProvider,
+                User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+                [
+                    new System.Security.Claims.Claim("sub", "wrong-scope-user"),
+                    new System.Security.Claims.Claim("role", "idf:support-agents"),
+                    new System.Security.Claims.Claim("idp", "identityflow"),
+                ], "IdentityFlow.Cookie")),
+            };
+            var session = await TicketFlow.UI.Blazor.Infrastructure.TicketFlowUISession.ResolvePrincipalAsync(http);
+            Assert.AreEqual(TicketFlow.UI.Blazor.Infrastructure.UiSessionState.NoPrincipal, session.State);
         }
 
         // 4. SampleSeeder does NOT seed hardcoded demo API keys outside Development
@@ -705,6 +750,12 @@ public sealed partial class ServiceAccountsAndRoleFederationTests
     {
         public ValueTask<PrincipalRef?> ResolveAsync(Microsoft.AspNetCore.Http.HttpContext httpContext, TicketScope scope, CancellationToken cancellationToken = default) =>
             ValueTask.FromResult<PrincipalRef?>(new UserPrincipal(scope, new UserId("staff-ada"), [new TeamId("tier1")]));
+    }
+
+    private sealed class WrongScopeResolver : ITicketFlowPrincipalResolver
+    {
+        public ValueTask<PrincipalRef?> ResolveAsync(Microsoft.AspNetCore.Http.HttpContext httpContext, TicketScope scope, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<PrincipalRef?>(new UserPrincipal(new TicketScope("other-t", "other-p", "prod", "other-a", new WorkspaceId("other-ws")), new UserId("wrong-scope-user")));
     }
 
     private static async Task<WebApplication> StartSampleHostAsync()

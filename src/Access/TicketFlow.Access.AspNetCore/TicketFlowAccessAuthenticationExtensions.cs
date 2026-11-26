@@ -185,8 +185,9 @@ public static class TicketFlowAccessAuthenticationExtensions
                 if (hasHostResolver)
                 {
                     principal = await hostResolver!.ResolveAsync(httpContext, scope, httpContext.RequestAborted).ConfigureAwait(false);
-                    if (principal is not null
-                        && (principal.ExternalRoles.Count == 0 || principal.IdentityProvider is null)
+                    if (principal is null || principal.Scope != scope)
+                        return Results.Unauthorized();
+                    if ((principal.ExternalRoles.Count == 0 || principal.IdentityProvider is null)
                         && accessResolver is ClaimsPrincipalResolver claimsResolver)
                     {
                         IReadOnlyCollection<string> externalRoles = principal.ExternalRoles.Count > 0 ? principal.ExternalRoles : claimsResolver.ExtractExternalRoles(httpContext.User);
@@ -194,8 +195,8 @@ public static class TicketFlowAccessAuthenticationExtensions
                         if (externalRoles.Count > 0 || identityProvider is not null)
                             principal = principal switch
                             {
-                                UserPrincipal user => new UserPrincipal(scope, user.UserId, user.Teams, externalRoles, identityProvider),
-                                ApiClientPrincipal client => new ApiClientPrincipal(scope, client.ClientId, externalRoles, identityProvider),
+                                UserPrincipal user => new UserPrincipal(user.Scope, user.UserId, user.Teams, externalRoles, identityProvider),
+                                ApiClientPrincipal client => new ApiClientPrincipal(client.Scope, client.ClientId, externalRoles, identityProvider),
                                 _ => principal,
                             };
                     }

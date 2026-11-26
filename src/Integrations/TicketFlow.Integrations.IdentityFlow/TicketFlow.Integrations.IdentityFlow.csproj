@@ -7,6 +7,7 @@
     <PackageReference Include="IdentityFlow.Hosting.AspNetCore.Authentication" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="../../Access/TicketFlow.Access/TicketFlow.Access.csproj" />
     <ProjectReference Include="../../Hosting/TicketFlow.Hosting.AspNetCore/TicketFlow.Hosting.AspNetCore.csproj" />
     <ProjectReference Include="../../Workspaces/TicketFlow.Workspaces.Abstractions/TicketFlow.Workspaces.Abstractions.csproj" />
     <ProjectReference Include="../../Identity/TicketFlow.Identity.Abstractions/TicketFlow.Identity.Abstractions.csproj" />

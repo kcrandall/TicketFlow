@@ -24,48 +24,78 @@ public static class TicketFlowClaimsScopeResolver
 
     public static TicketScope? FromPrincipal(ClaimsPrincipal? principal, TicketScope? fallbackScope = null)
     {
-        var tenantId = FindClaimValue(principal, TenantClaimType) ?? fallbackScope?.TenantId;
-        var projectId = FindClaimValue(principal, ProjectClaimType) ?? fallbackScope?.ProjectId;
-        var environmentId = FindClaimValue(principal, EnvironmentClaimType)
-            ?? FindClaimValue(principal, LegacyEnvironmentClaimType)
-            ?? fallbackScope?.EnvironmentId;
-        var appId = FindClaimValue(principal, AppClaimType)
-            ?? FindClaimValue(principal, LegacyAppClaimType)
-            ?? fallbackScope?.AppId;
-        var workspaceRaw = FindClaimValue(principal, WorkspaceClaimType)
-            ?? FindClaimValue(principal, LegacyWorkspaceClaimType);
-
-        if (string.IsNullOrWhiteSpace(tenantId)
-            || string.IsNullOrWhiteSpace(projectId)
-            || string.IsNullOrWhiteSpace(environmentId)
-            || string.IsNullOrWhiteSpace(appId))
+        if (!TryResolveDimension(principal, TenantClaimType, legacyType: null, out var claimedTenant)
+            || !TryResolveDimension(principal, ProjectClaimType, legacyType: null, out var claimedProject)
+            || !TryResolveDimension(principal, EnvironmentClaimType, LegacyEnvironmentClaimType, out var claimedEnvironment)
+            || !TryResolveDimension(principal, AppClaimType, LegacyAppClaimType, out var claimedApp)
+            || !TryResolveDimension(principal, WorkspaceClaimType, LegacyWorkspaceClaimType, out var claimedWorkspace))
             return null;
 
+        var canInherit = fallbackScope is not null;
+
+        var tenantId = claimedTenant ?? (canInherit ? fallbackScope!.TenantId : null);
+        if (tenantId is null)
+            return null;
+        if (canInherit && !string.Equals(tenantId, fallbackScope!.TenantId, StringComparison.Ordinal))
+            canInherit = false;
+
+        var projectId = claimedProject ?? (canInherit ? fallbackScope!.ProjectId : null);
+        if (projectId is null)
+            return null;
+        if (canInherit && !string.Equals(projectId, fallbackScope!.ProjectId, StringComparison.Ordinal))
+            canInherit = false;
+
+        var environmentId = claimedEnvironment ?? (canInherit ? fallbackScope!.EnvironmentId : null);
+        if (environmentId is null)
+            return null;
+        if (canInherit && !string.Equals(environmentId, fallbackScope!.EnvironmentId, StringComparison.Ordinal))
+            canInherit = false;
+
+        var appId = claimedApp ?? (canInherit ? fallbackScope!.AppId : null);
+        if (appId is null)
+            return null;
+        if (canInherit && !string.Equals(appId, fallbackScope!.AppId, StringComparison.Ordinal))
+            canInherit = false;
+
         WorkspaceId workspaceId;
-        if (workspaceRaw is not null)
-            workspaceId = new WorkspaceId(workspaceRaw);
-        else if (fallbackScope is not null)
-            workspaceId = fallbackScope.WorkspaceId;
+        if (claimedWorkspace is not null)
+            workspaceId = new WorkspaceId(claimedWorkspace);
+        else if (canInherit)
+            workspaceId = fallbackScope!.WorkspaceId;
         else
             return null;
 
         return new TicketScope(tenantId, projectId, environmentId, appId, workspaceId);
     }
 
-    private static string? FindClaimValue(ClaimsPrincipal? principal, string claimType)
+    private static bool TryResolveDimension(ClaimsPrincipal? principal, string primaryType, string? legacyType, out string? value)
     {
+        value = null;
         if (principal is null)
-            return null;
+            return true;
 
         foreach (var claim in principal.Claims)
-            if (string.Equals(claim.Type, claimType, StringComparison.Ordinal)
-                && AccessText.IsValidText(claim.Value, TicketScope.MaximumIdentifierLength))
+        {
+            if (!string.Equals(claim.Type, primaryType, StringComparison.Ordinal)
+                && (legacyType is null || !string.Equals(claim.Type, legacyType, StringComparison.Ordinal)))
+                continue;
+
+            var trimmed = claim.Value?.Trim();
+            if (string.IsNullOrEmpty(trimmed) || !AccessText.IsValidText(trimmed, TicketScope.MaximumIdentifierLength))
             {
-                var trimmed = claim.Value.Trim();
-                if (AccessText.IsValidText(trimmed, TicketScope.MaximumIdentifierLength))
-                    return trimmed;
+                value = null;
+                return false;
             }
 
-        return null;
+            if (value is null)
+                value = trimmed;
+            else if (!string.Equals(value, trimmed, StringComparison.Ordinal))
+            {
+                value = null;
+                return false;
+            }
+        }
+
+        return true;
     }
 }

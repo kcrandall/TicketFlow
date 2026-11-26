@@ -168,10 +168,28 @@ public static class IdentityFlowClaimsMapper
                 hasRequiredScope = HasScope(value, options.RequiredScopes);
         }
 
-        var methodVal = Resolve(method, methodAmbiguous);
-        var subject = Resolve(idfSub, idfSubAmbiguous) ?? Resolve(nameId, nameIdAmbiguous);
-        var resolvedRawClient = Resolve(rawClient, rawClientAmbiguous);
+        if (methodAmbiguous
+            || idfClientAmbiguous
+            || rawClientAmbiguous
+            || sessionIdAmbiguous
+            || idfSubAmbiguous
+            || nameIdAmbiguous
+            || methodIdAmbiguous
+            || apiKeyIdAmbiguous)
+            return null;
+
+        var resolvedIdfSub = Resolve(idfSub, idfSubAmbiguous);
+        var resolvedNameId = Resolve(nameId, nameIdAmbiguous);
+        if (resolvedIdfSub is not null && resolvedNameId is not null && !string.Equals(resolvedIdfSub, resolvedNameId, StringComparison.Ordinal))
+            return null;
+
         var resolvedIdfClient = Resolve(idfClient, idfClientAmbiguous);
+        var resolvedRawClient = Resolve(rawClient, rawClientAmbiguous);
+        if (resolvedIdfClient is not null && resolvedRawClient is not null && !string.Equals(resolvedIdfClient, resolvedRawClient, StringComparison.Ordinal))
+            return null;
+
+        var methodVal = Resolve(method, methodAmbiguous);
+        var subject = resolvedIdfSub ?? resolvedNameId;
 
         // TicketFlow's own service-account API keys (TicketFlowApiKeyAuthenticationHandler) carry AuthenticationType == "ApiKey"
         // and an api_key_id claim; they map to their unprefixed ApiClientId so IServiceAccountStore and ACL grants match across

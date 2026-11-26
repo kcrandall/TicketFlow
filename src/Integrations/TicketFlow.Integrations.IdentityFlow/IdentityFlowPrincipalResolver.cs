@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Options;
+using TicketFlow.Access;
 using TicketFlow.Core;
 using TicketFlow.Hosting.AspNetCore;
 using TicketFlow.Identity;
@@ -13,11 +14,19 @@ namespace TicketFlow.Integrations.IdentityFlow;
 /// through the optional <see cref="IStaffIdentityResolver"/> first (provider <see cref="IdentityFlowPrincipalOptions.StaffIdentityProvider"/>,
 /// the normalized subject); unmapped users fall back to the prefixed subject or are refused per
 /// <see cref="IdentityFlowPrincipalOptions.UnmappedStaff"/>. Users get a <see cref="UserPrincipal"/> with the workspace's current team
-/// snapshot from <see cref="ITeamMembershipResolver"/>; API clients an <see cref="ApiClientPrincipal"/>. Authorization stays with Access.
+/// snapshot from <see cref="ITeamMembershipResolver"/>; API clients an <see cref="ApiClientPrincipal"/>. External role and identity-provider
+/// claims are extracted with <see cref="ClaimsPrincipalResolver"/> so Role Federation works consistently across REST, MCP, SignalR and UI.
+/// Authorization stays with Access.
 /// </summary>
-public sealed class IdentityFlowPrincipalResolver(ITeamMembershipResolver teams, IOptions<IdentityFlowPrincipalOptions> options, IStaffIdentityResolver? staff = null)
+public sealed class IdentityFlowPrincipalResolver(
+    ITeamMembershipResolver teams,
+    IOptions<IdentityFlowPrincipalOptions> options,
+    IStaffIdentityResolver? staff = null,
+    IOptions<ClaimsPrincipalResolverOptions>? claimsOptions = null)
     : ITicketFlowPrincipalResolver
 {
+    private readonly ClaimsPrincipalResolver claimsResolver = new(claimsOptions);
+
     public async ValueTask<PrincipalRef?> ResolveAsync(HttpContext httpContext, TicketScope scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(httpContext);
@@ -48,11 +57,18 @@ public sealed class IdentityFlowPrincipalResolver(ITeamMembershipResolver teams,
                     else if (options.Value.UnmappedStaff == IdentityFlowUnmappedStaff.Refuse)
                         return null;
                 }
-                return await teams.ResolveUserPrincipalAsync(scope, userId, cancellationToken).ConfigureAwait(false);
+                var resolvedUser = await teams.ResolveUserPrincipalAsync(scope, userId, cancellationToken).ConfigureAwait(false);
+                var userRoles = claimsResolver.ExtractExternalRoles(user);
+                var userProvider = claimsResolver.TryGetIdentityProvider(user);
+                return userRoles.Count > 0 || userProvider is not null
+                    ? new UserPrincipal(resolvedUser.Scope, resolvedUser.UserId, resolvedUser.Teams, userRoles, userProvider)
+                    : resolvedUser;
             case { Kind: IdentityFlowPrincipalKind.ApiClient } identity:
                 if (IsTicketFlowApiKey(user) && !VerifyScopeClaims(user, scope))
                     return null;
-                return new ApiClientPrincipal(scope, new ApiClientId(identity.Id));
+                var clientRoles = claimsResolver.ExtractExternalRoles(user);
+                var clientProvider = claimsResolver.TryGetIdentityProvider(user);
+                return new ApiClientPrincipal(scope, new ApiClientId(identity.Id), clientRoles, clientProvider);
             default:
                 return null;
         }

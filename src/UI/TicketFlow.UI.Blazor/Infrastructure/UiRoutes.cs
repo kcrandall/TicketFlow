@@ -72,7 +72,7 @@ public static class UiRoutes
                 if (parts[index][0] == '{')
                 {
                     var value = Uri.UnescapeDataString(segments[index]);
-                    if (value.Length is 0 or > 256)
+                    if (string.IsNullOrWhiteSpace(value) || value.Length > 256 || HasControlChar(value) || !System.Text.Unicode.Utf16.IsValid(value))
                     {
                         matched = false;
                         break;
@@ -89,5 +89,16 @@ public static class UiRoutes
                 return new UiRoute(entry.Pattern, entry.Component, entry.Section, parameters ?? EmptyParameters);
         }
         return null;
+    }
+
+    private static bool HasControlChar(string value)
+    {
+        for (var i = 0; i < value.Length; i++)
+        {
+            var c = value[i];
+            if (c <= '\u001F' || (c >= '\u007F' && c <= '\u009F'))
+                return true;
+        }
+        return false;
     }
 }

@@ -79,7 +79,16 @@ else
     {
         if (Service<IInboxService>() is not { } service || Id is null)
             return;
-        if (await service.GetAsync(Actor, new InboxId(Id), Aborted) is not TicketValue<StoredInbox> found)
+        InboxId id;
+        try
+        {
+            id = new InboxId(Id);
+        }
+        catch (ArgumentException)
+        {
+            return;
+        }
+        if (await service.GetAsync(Actor, id, Aborted) is not TicketValue<StoredInbox> found)
             return;
         inbox = found.Value;
         var optionsTask = InboxFields.LoadOptionsAsync(Session);

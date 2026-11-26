@@ -1,3 +1,4 @@
+using System.Text;
 using TicketFlow.Core;
 
 namespace TicketFlow.Access;
@@ -241,7 +242,13 @@ public sealed record StoredApiKeySecret
     public StoredApiKey Metadata { get; }
     public string KeyHashHex { get; }
 
-    public override string ToString() => "StoredApiKeySecret { <redacted> }";
+    private bool PrintMembers(StringBuilder builder)
+    {
+        builder.Append("Metadata = ");
+        builder.Append(Metadata);
+        builder.Append(", KeyHashHex = <redacted>");
+        return true;
+    }
 }
 
 /// <summary>Returned once when an API key is issued. The plaintext key is never stored or returned again.</summary>
@@ -259,7 +266,13 @@ public sealed record IssuedApiKey
     public StoredApiKey Key { get; }
     public string PlaintextKey { get; }
 
-    public override string ToString() => "IssuedApiKey { <redacted> }";
+    private bool PrintMembers(StringBuilder builder)
+    {
+        builder.Append("Key = ");
+        builder.Append(Key);
+        builder.Append(", PlaintextKey = <redacted>");
+        return true;
+    }
 }
 
 /// <summary>Request to issue a new API key for a service account.</summary>

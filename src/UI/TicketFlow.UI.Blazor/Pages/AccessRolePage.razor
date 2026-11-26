@@ -29,7 +29,7 @@ else
                     @foreach (var definition in group)
                     {
                         <label class="tf-check" title="@definition.Description">
-                            <input type="checkbox" name="permission" value="@definition.Permission.Value" checked="@(role?.Permissions.Contains(definition.Permission) == true)" disabled="@builtIn" />
+                            <input type="checkbox" name="permission" value="@definition.Permission.Value" checked="@(role?.Includes(definition.Permission) == true)" disabled="@builtIn" />
                             <span class="tf-mono">@definition.Permission.Value</span>
                             @if (definition.IsSensitive)
                             {

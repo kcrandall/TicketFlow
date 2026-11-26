@@ -24,13 +24,13 @@ internal static class RoleFederationSupport
 
     private static bool MatchesMappingProvider(string mappingProvider, string? principalProvider, bool matchedByTeamOnly)
     {
+        if (matchedByTeamOnly)
+            return string.Equals(mappingProvider, "local", StringComparison.OrdinalIgnoreCase);
+
         if (string.Equals(mappingProvider, "*", StringComparison.Ordinal))
             return true;
 
-        if (principalProvider is not null && string.Equals(mappingProvider, principalProvider, StringComparison.OrdinalIgnoreCase))
-            return true;
-
-        return matchedByTeamOnly && string.Equals(mappingProvider, "local", StringComparison.OrdinalIgnoreCase);
+        return principalProvider is not null && string.Equals(mappingProvider, principalProvider, StringComparison.OrdinalIgnoreCase);
     }
 
     public static async Task<IReadOnlyList<ResolvedGrant>> ResolveFederatedGrantsAsync(
@@ -41,12 +41,9 @@ internal static class RoleFederationSupport
         IAccessRoleStore roleStore,
         IPermissionCatalog catalog,
         Dictionary<RoleId, AccessRole>? existingCustomRoles,
-        bool forAdministration,
         CancellationToken cancellationToken)
     {
         if (options.Mode == RoleFederationMode.Disabled)
-            return [];
-        if (forAdministration && !options.AllowAdministrativeRoles)
             return [];
 
         GrantSubject? subject = principal switch
@@ -101,11 +98,13 @@ internal static class RoleFederationSupport
 
                 var externalRole = stored.Mapping.ExternalRole;
                 var inExternalRoles = principal.ExternalRoles.Contains(externalRole);
-                var inTeamTokens = !inExternalRoles && teamTokens is not null && teamTokens.Contains(externalRole);
+                var inTeamTokens = teamTokens is not null && teamTokens.Contains(externalRole);
                 if (!inExternalRoles && !inTeamTokens)
                     continue;
 
-                if (!MatchesMappingProvider(stored.Mapping.Provider, principal.IdentityProvider, matchedByTeamOnly: inTeamTokens))
+                var providerMatched = (inExternalRoles && MatchesMappingProvider(stored.Mapping.Provider, principal.IdentityProvider, matchedByTeamOnly: false))
+                    || (inTeamTokens && MatchesMappingProvider(stored.Mapping.Provider, principal.IdentityProvider, matchedByTeamOnly: true));
+                if (!providerMatched)
                     continue;
 
                 AddMatch(stored.Mapping.RoleId, stored.Mapping.Scope);

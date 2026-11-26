@@ -8,16 +8,21 @@
     {
         get
         {
-            var tabs = new List<TabLinks.Tab>(6)
+            var canManage = Session is null || Session.Can(AccessPermissions.AccessManage);
+            var canManageTenant = Session is null || Session.Can(AccessPermissions.AccessManageTenant);
+            var canBreakGlass = Session is null || Session.Can(AccessPermissions.AccessBreakGlass);
+            var tabs = new List<TabLinks.Tab>(6);
+            if (canManage)
             {
-                new("Roles", TabUrl("access"), Active == "roles"),
-                new("Grants", TabUrl("access/grants"), Active == "grants"),
-                new("Field policies", TabUrl("access/field-policies"), Active == "fields"),
-                new("Break-glass", TabUrl("access/break-glass"), Active == "break-glass"),
-            };
-            if (Session is null || (Session.Options.ManageApiKeysInUI && Session.Has<IServiceAccountService>()))
+                tabs.Add(new("Roles", TabUrl("access"), Active == "roles"));
+                tabs.Add(new("Grants", TabUrl("access/grants"), Active == "grants"));
+                tabs.Add(new("Field policies", TabUrl("access/field-policies"), Active == "fields"));
+            }
+            if (canBreakGlass || canManage)
+                tabs.Add(new("Break-glass", TabUrl("access/break-glass"), Active == "break-glass"));
+            if ((canManage || canManageTenant) && (Session is null || (Session.Options.ManageApiKeysInUI && Session.Has<IServiceAccountService>())))
                 tabs.Add(new("Service Accounts", TabUrl("access/service-accounts"), Active == "service-accounts"));
-            if (Session is null || Session.Has<IRoleFederationService>())
+            if ((canManage || canManageTenant) && (Session is null || Session.Has<IRoleFederationService>()))
                 tabs.Add(new("Role Federation", TabUrl("access/federation"), Active == "federation"));
             return tabs;
         }

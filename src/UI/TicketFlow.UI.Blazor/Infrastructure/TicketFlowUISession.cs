@@ -270,10 +270,10 @@ public sealed class TicketFlowUISession
         if (hasConfiguredHostResolver)
         {
             var principal = await ticketFlowResolver!.ResolveAsync(http, scope, http.RequestAborted).ConfigureAwait(false);
-            if (principal is null)
+            if (principal is null || principal.Scope != scope)
                 return null;
 
-            return EnrichExternalClaims(http, scope, principal, accessResolver);
+            return EnrichExternalClaims(http, principal, accessResolver);
         }
 
         if (accessResolver is not null)
@@ -284,7 +284,6 @@ public sealed class TicketFlowUISession
 
     private static PrincipalRef EnrichExternalClaims(
         HttpContext http,
-        TicketScope scope,
         PrincipalRef principal,
         IAccessPrincipalResolver? accessResolver)
     {
@@ -305,8 +304,8 @@ public sealed class TicketFlowUISession
 
         return principal switch
         {
-            UserPrincipal user => new UserPrincipal(scope, user.UserId, user.Teams, externalRoles, identityProvider),
-            ApiClientPrincipal client => new ApiClientPrincipal(scope, client.ClientId, externalRoles, identityProvider),
+            UserPrincipal user => new UserPrincipal(user.Scope, user.UserId, user.Teams, externalRoles, identityProvider),
+            ApiClientPrincipal client => new ApiClientPrincipal(client.Scope, client.ClientId, externalRoles, identityProvider),
             _ => principal,
         };
     }

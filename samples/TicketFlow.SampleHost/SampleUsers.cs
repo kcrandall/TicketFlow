@@ -42,7 +42,7 @@ internal static class DevelopmentLogin
     {
         app.MapGet("/dev/login", (HttpContext http, string? user, string? returnUrl) =>
         {
-            var target = returnUrl is { Length: > 0 } && returnUrl.StartsWith('/') && !returnUrl.StartsWith("//", StringComparison.Ordinal) ? returnUrl : "/support";
+            var target = SafeReturnUrl(returnUrl);
             if (user is not null && SampleUsers.Find(user) is not null)
             {
                 http.Response.Cookies.Append(DevelopmentAuthenticationHandler.CookieName, user, new CookieOptions { HttpOnly = true, SameSite = SameSiteMode.Lax, Path = "/" });
@@ -63,6 +63,19 @@ internal static class DevelopmentLogin
             http.Response.Cookies.Delete(DevelopmentAuthenticationHandler.CookieName, new CookieOptions { Path = "/" });
             return Results.Redirect("/dev/login");
         }).ExcludeFromDescription();
+    }
+
+    internal static string SafeReturnUrl(string? returnUrl)
+    {
+        if (string.IsNullOrEmpty(returnUrl) || returnUrl[0] != '/' || returnUrl.StartsWith("//", StringComparison.Ordinal))
+            return "/support";
+        for (var i = 0; i < returnUrl.Length; i++)
+        {
+            var c = returnUrl[i];
+            if (c < 0x20 || c == 0x7f || c == '\\')
+                return "/support";
+        }
+        return returnUrl;
     }
 }
 

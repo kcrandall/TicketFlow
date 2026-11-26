@@ -40,6 +40,8 @@
     {
         if (HttpContext is null)
             throw new InvalidOperationException("TicketFlowUI renders with static server-side rendering only.");
+        if (!HttpContext.Response.HasStarted)
+            HttpContext.Response.Headers.CacheControl = "no-store";
         session = await TicketFlowUISession.ResolveAsync(HttpContext);
         session.Path = (Path ?? string.Empty).Trim('/');
         session.Flash = UiFlash.Take(HttpContext, session.Options);

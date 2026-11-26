@@ -264,8 +264,7 @@
     private readonly Dictionary<string, string> roleNames = new(StringComparer.Ordinal);
     private RoleFederationOptions? federationOptions;
     private string? catalogJson;
-
-    private bool CanManageTenant => Session.Can(AccessPermissions.AccessManageTenant);
+    private bool CanManageTenant;
 
     private string? CreateFormValue(string field, string? fallback = null) =>
         string.Equals(Session.FormValue("_action", null), "access.federation.create", StringComparison.OrdinalIgnoreCase)
@@ -316,9 +315,10 @@
         var catalogTask = federationService.GetRoleCatalogAsync(Actor, Aborted).AsTask();
         var admin = Service<IAccessAdministrator>();
         var rolesTask = admin?.ListRolesAsync(Actor, Aborted);
+        var tenantCheckTask = admin?.CheckCanManageTenantAsync(Actor, Aborted);
 
-        if (rolesTask is not null)
-            await Task.WhenAll(workspaceTask, mappingsTask, catalogTask, rolesTask);
+        if (rolesTask is not null && tenantCheckTask is not null)
+            await Task.WhenAll(workspaceTask, mappingsTask, catalogTask, rolesTask, tenantCheckTask);
         else
             await Task.WhenAll(workspaceTask, mappingsTask, catalogTask);
 
@@ -334,6 +334,9 @@
                 Denied = true;
                 return;
         }
+
+        if (tenantCheckTask is not null)
+            CanManageTenant = tenantCheckTask.Result.Value is AccessCheckPassed;
 
         if (catalogTask.Result is TicketValue<FederatedRoleCatalog> catalogSuccess)
         {

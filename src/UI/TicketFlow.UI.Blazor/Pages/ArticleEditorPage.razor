@@ -115,7 +115,19 @@ else
     {
         if (Service<IHelpCenterService>() is not { } service || Id is null)
             return;
-        var articleTask = Id != "new" ? service.GetArticleAsync(Actor, new ArticleId(Id), Aborted) : null;
+        ArticleId? articleId = null;
+        if (Id != "new")
+        {
+            try
+            {
+                articleId = new ArticleId(Id);
+            }
+            catch (ArgumentException)
+            {
+                return;
+            }
+        }
+        var articleTask = articleId is { } id ? service.GetArticleAsync(Actor, id, Aborted) : null;
         var portalsTask = service.ListPortalsAsync(Actor, Aborted);
         if (articleTask is not null)
             await Task.WhenAll(articleTask, portalsTask);

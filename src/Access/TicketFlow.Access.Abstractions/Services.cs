@@ -144,6 +144,21 @@ public interface IAccessAdministrator
 
     /// <summary>Read-only, unaudited listing of the actor's workspace field policies; requires <c>access:manage</c> (standard grants).</summary>
     Task<TicketResult<IReadOnlyList<StoredAccessFieldPolicy>>> ListFieldPoliciesAsync(PrincipalRef actor, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Read-only, unaudited check that <paramref name="actor"/> holds tenant administration authority (<c>access:manage-tenant</c>
+    /// from a tenant-scoped standard grant, never break-glass or workspace-scoped).
+    /// </summary>
+    Task<AccessCheckResult> CheckCanManageTenantAsync(PrincipalRef actor, CancellationToken cancellationToken = default) =>
+        Task.FromResult<AccessCheckResult>(new TicketFailure(TicketFailureKind.Forbidden, ["The actor is not authorized."]));
+
+    /// <summary>
+    /// Read-only, unaudited listing of tenant-scoped grants for <paramref name="subjects"/> (at most
+    /// <see cref="AccessLimits.MaximumSubjectsPerQuery"/>) in the actor's partition, ordered by grant identifier (ordinal);
+    /// requires <c>access:manage-tenant</c> from a tenant-scoped standard grant.
+    /// </summary>
+    Task<TicketResult<IReadOnlyList<StoredAccessGrant>>> ListTenantGrantsForSubjectsAsync(PrincipalRef actor, IReadOnlyCollection<GrantSubject> subjects, CancellationToken cancellationToken = default) =>
+        Task.FromResult<TicketResult<IReadOnlyList<StoredAccessGrant>>>(new TicketFailure(TicketFailureKind.Forbidden, ["The actor is not authorized."]));
 }
 
 /// <summary>A role as listed: built-in roles have no revision.</summary>

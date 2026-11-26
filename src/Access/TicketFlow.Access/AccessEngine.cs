@@ -186,8 +186,7 @@ internal sealed class AccessEngine(
         var now = time.GetUtcNow();
         var partition = AccessPartition.From(scope);
         var stored = await grants.ListForSubjectsAsync(partition, scope.WorkspaceId, subjects, cancellationToken).ConfigureAwait(false);
-        var ignoreLocalAllows = options.RoleFederation.Mode == RoleFederationMode.FederatedOnly
-            && (!forAdministration || options.RoleFederation.AllowAdministrativeRoles);
+        var ignoreLocalAllows = options.RoleFederation.Mode == RoleFederationMode.FederatedOnly;
         var preserveLocalAdminOnly = ignoreLocalAllows && !options.RoleFederation.AllowAdministrativeRoles;
         var valid = new List<AccessGrant>(stored.Count);
         RoleId? singleCustomRole = null;
@@ -254,8 +253,7 @@ internal sealed class AccessEngine(
             resolved.Add(new(grant, role));
         }
 
-        if (options.RoleFederation.Mode != RoleFederationMode.Disabled
-            && (!forAdministration || options.RoleFederation.AllowAdministrativeRoles))
+        if (options.RoleFederation.Mode != RoleFederationMode.Disabled)
         {
             var federated = await RoleFederationSupport.ResolveFederatedGrantsAsync(
                 principal,
@@ -265,7 +263,6 @@ internal sealed class AccessEngine(
                 roles,
                 Catalog,
                 custom,
-                forAdministration,
                 cancellationToken).ConfigureAwait(false);
             if (federated.Count > 0)
                 resolved.AddRange(federated);

@@ -153,6 +153,16 @@ public static class AccessStoreContract
         // Same identifier text, different subject kind, never matches.
         Assert.IsEmpty(await competing.ListForSubjectsAsync(partition, scope.WorkspaceId, [(GrantSubject)new TeamId("ada")]));
 
+        // ListAllForSubjectAsync returns grants across all workspaces and tenant scope in ordinal grant_id order.
+        CollectionAssert.AreEqual(
+            new[] { "g-break-glass", "g-elsewhere", "g-tenant", "g-workspace" },
+            (await competing.ListAllForSubjectAsync(partition, user, scope.WorkspaceId)).Select(entry => entry.Grant.Id.Value).ToArray());
+        CollectionAssert.AreEqual(
+            new[] { "g-foreign-inbox", "g-inbox" },
+            (await competing.ListAllForSubjectAsync(partition, client, scope.WorkspaceId)).Select(entry => entry.Grant.Id.Value).ToArray());
+        Assert.IsEmpty(await competing.ListAllForSubjectAsync(partition, new TeamId("ada"), scope.WorkspaceId));
+        Assert.IsEmpty(await competing.ListAllForSubjectAsync(AccessPartition.From(TestScopes.Create(tenantId: "other")), user, scope.WorkspaceId));
+
         foreach (var other in TestScopes.LevelVariants(scope).Skip(1).Take(4))
         {
             var otherPartition = AccessPartition.From(other);

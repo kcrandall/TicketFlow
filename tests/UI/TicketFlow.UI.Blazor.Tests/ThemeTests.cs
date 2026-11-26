@@ -96,4 +96,19 @@ public sealed class ThemeTests
         StringAssert.Contains(http.Response.Headers.SetCookie.ToString(), "tf-theme=violet.light");
         StringAssert.Contains(http.Response.Headers.SetCookie.ToString(), "samesite=lax");
     }
+
+    [TestMethod]
+    public void ThemeSwitchFormsDisableEnhancedNavigationForFullDocumentUpdate()
+    {
+        using var context = UiTestSupport.Context();
+        var session = UiTestSupport.Session(context, []);
+
+        var shell = context.Render<TicketFlowShell>(parameters => parameters.AddCascadingValue(session));
+        var headerThemeForm = shell.Find("header form");
+        Assert.IsFalse(headerThemeForm.HasAttribute("data-enhance"), "Theme toggle form must perform a full reload so <html> theme attributes update.");
+
+        var settingsPage = context.Render<TicketFlow.UI.Blazor.Pages.ThemeSettingsPage>(parameters => parameters.AddCascadingValue(session));
+        var settingsThemeForm = settingsPage.Find("form");
+        Assert.IsFalse(settingsThemeForm.HasAttribute("data-enhance"), "Theme settings form must perform a full reload so <html> theme attributes update.");
+    }
 }

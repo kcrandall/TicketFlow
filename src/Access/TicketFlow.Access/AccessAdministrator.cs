@@ -484,6 +484,37 @@ public sealed class AccessAdministrator : IAccessAdministrator
         return new TicketValue<IReadOnlyList<StoredAccessFieldPolicy>>(await policies.ListAsync(actor.Scope, cancellationToken).ConfigureAwait(false));
     }
 
+    public async Task<AccessCheckResult> CheckCanManageTenantAsync(PrincipalRef actor, CancellationToken cancellationToken = default)
+    {
+        RequireActor(actor);
+        var (saDenial, _) = await engine.CheckServiceAccountForGrantScopeAsync(actor, actor.Scope, TenantGrantScope.Instance, cancellationToken).ConfigureAwait(false);
+        if (saDenial is { } saReason)
+            return Refused(["The actor is not authorized."], saReason);
+        var refusal = await AuthorizeAsync(actor, AccessPermissions.AccessManageTenant, new AccessResource(actor.Scope), cancellationToken, tenantAllowsOnly: true).ConfigureAwait(false);
+        return refusal is null ? AccessCheckPassed.Instance : new TicketFailure(refusal.Reason, refusal.Errors);
+    }
+
+    public async Task<TicketResult<IReadOnlyList<StoredAccessGrant>>> ListTenantGrantsForSubjectsAsync(PrincipalRef actor, IReadOnlyCollection<GrantSubject> subjects, CancellationToken cancellationToken = default)
+    {
+        RequireActor(actor);
+        ArgumentNullException.ThrowIfNull(subjects);
+        if (subjects.Count > AccessLimits.MaximumSubjectsPerQuery)
+            throw new ArgumentException($"At most {AccessLimits.MaximumSubjectsPerQuery} subjects can be queried.", nameof(subjects));
+        var (saDenial, _) = await engine.CheckServiceAccountForGrantScopeAsync(actor, actor.Scope, TenantGrantScope.Instance, cancellationToken).ConfigureAwait(false);
+        if (saDenial is not null)
+            return new TicketFailure(TicketFailureKind.Forbidden, ["The actor is not authorized."]);
+        if (await AuthorizeAsync(actor, AccessPermissions.AccessManageTenant, new AccessResource(actor.Scope), cancellationToken, tenantAllowsOnly: true).ConfigureAwait(false) is { } refusal)
+            return new TicketFailure(refusal.Reason, refusal.Errors);
+        if (subjects.Count == 0)
+            return new TicketValue<IReadOnlyList<StoredAccessGrant>>([]);
+        var listed = await grants.ListForSubjectsAsync(AccessPartition.From(actor.Scope), actor.Scope.WorkspaceId, subjects, cancellationToken).ConfigureAwait(false);
+        var tenantGrants = new List<StoredAccessGrant>();
+        for (var i = 0; i < listed.Count; i++)
+            if (listed[i].Grant.Scope is TenantGrantScope)
+                tenantGrants.Add(listed[i]);
+        return new TicketValue<IReadOnlyList<StoredAccessGrant>>(tenantGrants);
+    }
+
     private static TicketFailure Refused(IReadOnlyList<string> errors, AccessDenialReason reason) =>
         new(TicketFailureKind.Forbidden, errors);
 

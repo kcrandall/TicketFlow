@@ -4,35 +4,39 @@
 <PageHeader Title="Access" Description="Break-glass gives you a time-limited elevated role in an emergency. Activation and every decision that uses it are audited." />
 <AccessTabs Active="break-glass" />
 
+<AccessGate Denied="Denied">
 <div class="tf-grid tf-grid--wide-narrow">
-    <div class="tf-card">
-        <div class="tf-card__header"><div><div class="tf-card__title">Activate break-glass</div><div class="tf-card__description">Requires <span class="tf-code">access:break-glass</span>. Roles with administrative permissions are not allowed.</div></div></div>
-        <div class="tf-card__content">
-            <TfForm Action="access.breakglass" Class="tf-form">
-                <div class="tf-form-grid">
-                    <div class="tf-field"><label class="tf-label" for="tf-b-role">Role</label>
-                        <select id="tf-b-role" name="role" class="tf-select">@foreach (var role in roles) { <option value="@role.Id.Value">@role.Name</option> }</select></div>
-                    <div class="tf-field"><label class="tf-label" for="tf-b-duration">Duration</label>
-                        <select id="tf-b-duration" name="minutes" class="tf-select"><option value="30">30 minutes</option><option value="60" selected>1 hour</option><option value="120">2 hours</option><option value="240">4 hours</option></select></div>
-                    <div class="tf-field"><label class="tf-label" for="tf-b-scope">Scope</label>
-                        <select id="tf-b-scope" name="scope" class="tf-select">
-                            <option value="workspace">Whole workspace</option>
-                            @foreach (var team in Teams) { <option value="team:@team.Id.Value">Team · @team.Name</option> }
-                            @foreach (var inbox in Inboxes) { <option value="inbox:@inbox.Inbox.Id.Value">Inbox · @inbox.Inbox.Name</option> }
-                        </select></div>
-                    <div class="tf-field tf-field--full"><label class="tf-label" for="tf-b-why">Justification</label><textarea id="tf-b-why" name="justification" class="tf-textarea" required minlength="10" maxlength="1024" placeholder="Incident INC-2291: customer data needed to restore bookings">@Session.FormValue("justification", null)</textarea></div>
-                </div>
-                <div class="tf-form-actions"><BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Destructive"><LucideIcon Name="siren" Size="14" />Activate</BbButton></div>
-            </TfForm>
+    @if (canActivate)
+    {
+        <div class="tf-card">
+            <div class="tf-card__header"><div><div class="tf-card__title">Activate break-glass</div><div class="tf-card__description">Requires <span class="tf-code">access:break-glass</span>. Roles with administrative permissions are not allowed.</div></div></div>
+            <div class="tf-card__content">
+                <TfForm Action="access.breakglass" Class="tf-form">
+                    <div class="tf-form-grid">
+                        <div class="tf-field"><label class="tf-label" for="tf-b-role">Role</label>
+                            <select id="tf-b-role" name="role" class="tf-select">@foreach (var role in roles) { <option value="@role.Id.Value">@role.Name</option> }</select></div>
+                        <div class="tf-field"><label class="tf-label" for="tf-b-duration">Duration</label>
+                            <select id="tf-b-duration" name="minutes" class="tf-select"><option value="30">30 minutes</option><option value="60" selected>1 hour</option><option value="120">2 hours</option><option value="240">4 hours</option></select></div>
+                        <div class="tf-field"><label class="tf-label" for="tf-b-scope">Scope</label>
+                            <select id="tf-b-scope" name="scope" class="tf-select">
+                                <option value="workspace">Whole workspace</option>
+                                @foreach (var team in Teams) { <option value="team:@team.Id.Value">Team · @team.Name</option> }
+                                @foreach (var inbox in Inboxes) { <option value="inbox:@inbox.Inbox.Id.Value">Inbox · @inbox.Inbox.Name</option> }
+                            </select></div>
+                        <div class="tf-field tf-field--full"><label class="tf-label" for="tf-b-why">Justification</label><textarea id="tf-b-why" name="justification" class="tf-textarea" required minlength="10" maxlength="1024" placeholder="Incident INC-2291: customer data needed to restore bookings">@Session.FormValue("justification", null)</textarea></div>
+                    </div>
+                    <div class="tf-form-actions"><BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Destructive"><LucideIcon Name="siren" Size="14" />Activate</BbButton></div>
+                </TfForm>
+            </div>
         </div>
-    </div>
+    }
     <div class="tf-card">
         <div class="tf-card__header"><div class="tf-card__title">Active elevations</div></div>
         <div class="tf-card__content tf-stack tf-stack--sm">
             @foreach (var grant in active)
             {
                 <div class="tf-row tf-row--between">
-                    <span>@(grant.Grant.Subject.Value is UserId user ? Session.UserName(user) : "—") · @grant.Grant.Role.Value</span>
+                    <span>@SubjectLabel(grant.Grant.Subject) · @grant.Grant.Role.Value</span>
                     <span class="tf-badge tf-badge--warning">until @UiFormat.Short(grant.Grant.ValidUntil)</span>
                 </div>
             }
@@ -43,20 +47,43 @@
         </div>
     </div>
 </div>
+</AccessGate>
 
 @code {
     private List<AccessRole> roles = [];
     private readonly List<StoredAccessGrant> active = [];
+    private bool canActivate;
+
+    private static bool IsEligibleBreakGlassRole(AccessRole role) =>
+        !role.IncludesAllPermissions
+        && !role.Includes(AccessPermissions.AccessManage)
+        && !role.Includes(AccessPermissions.AccessManageTenant)
+        && !role.Includes(AccessPermissions.AccessBreakGlass);
+
+    private string SubjectLabel(GrantSubject subject) => subject.Value switch
+    {
+        UserId user => Session.UserName(user),
+        ApiClientId client => client.Value,
+        TeamId team => TeamName(team),
+        _ => "—",
+    };
 
     protected override async Task OnInitializedAsync()
     {
+        canActivate = Session.Can(AccessPermissions.AccessBreakGlass);
+        var canManage = Session.Can(AccessPermissions.AccessManage);
+        if (!canActivate && !canManage)
+        {
+            Denied = true;
+            return;
+        }
         await LoadWorkspaceAsync();
-        roles = [.. BuiltInRoles.All.Where(role => !role.Permissions.Contains(AccessPermissions.AccessManage) && !role.Permissions.Contains(AccessPermissions.AccessBreakGlass))];
+        roles = [.. BuiltInRoles.All.Where(IsEligibleBreakGlassRole)];
         // Activation is decided by the administrator (access:break-glass); listings below need access:manage and are optional here.
         if (Service<IAccessAdministrator>() is { } administrator)
         {
             if (await administrator.ListRolesAsync(Actor, Aborted) is TicketValue<IReadOnlyList<AccessRoleListing>> custom)
-                roles.AddRange(custom.Value.Where(item => item.Revision is not null).Select(item => item.Role).Where(role => !role.Permissions.Contains(AccessPermissions.AccessManage)));
+                roles.AddRange(custom.Value.Where(item => item.Revision is not null).Select(item => item.Role).Where(IsEligibleBreakGlassRole));
             if (await administrator.ListGrantsAsync(Actor, new WorkspaceGrantScope(Session.Scope.WorkspaceId), AccessLimits.MaximumTargetPage, null, Aborted) is TicketValue<IReadOnlyList<StoredAccessGrant>> listed)
                 active.AddRange(listed.Value.Where(grant => grant.Grant.Kind == GrantKind.BreakGlass && grant.Grant.ValidUntil > Now));
         }

@@ -95,8 +95,9 @@ public sealed class TicketFlowApiKeyAuthenticationHandler(
             new(TicketFlowClaimsScopeResolver.ProjectClaimType, targetScope.ProjectId),
             new(TicketFlowClaimsScopeResolver.EnvironmentClaimType, targetScope.EnvironmentId),
             new(TicketFlowClaimsScopeResolver.AppClaimType, targetScope.AppId),
-            new(TicketFlowClaimsScopeResolver.WorkspaceClaimType, targetScope.WorkspaceId.Value),
         };
+        if (account.Workspace is { } pinnedWorkspace)
+            claims.Add(new(TicketFlowClaimsScopeResolver.WorkspaceClaimType, pinnedWorkspace.Value));
 
         var identity = new ClaimsIdentity(claims, Scheme.Name, ClaimTypes.Name, "role");
         var principal = new ClaimsPrincipal(identity);
@@ -157,15 +158,16 @@ public sealed class TicketFlowApiKeyAuthenticationHandler(
 
     private static (string? RawKey, string? Error) ExtractApiKey(HttpRequest request, string? headerName, bool allowBearerToken)
     {
+        string? headerKey = null;
         if (!string.IsNullOrWhiteSpace(headerName) && request.Headers.TryGetValue(headerName, out var apiKeyValues))
         {
             var apiKeyResolution = ResolveSingleValue(apiKeyValues, splitCommas: true);
             if (apiKeyResolution.IsAmbiguous)
                 return (null, "Multiple distinct API key headers are not permitted.");
-            if (apiKeyResolution.Value is not null)
-                return (apiKeyResolution.Value, null);
+            headerKey = apiKeyResolution.Value;
         }
 
+        string? bearerKey = null;
         if (allowBearerToken && request.Headers.TryGetValue(AuthorizationHeaderName, out var authValues))
         {
             var authResolution = ResolveSingleValue(authValues, splitCommas: false);
@@ -177,15 +179,19 @@ public sealed class TicketFlowApiKeyAuthenticationHandler(
                 if (authHeader.StartsWith(BearerPrefix, StringComparison.OrdinalIgnoreCase))
                 {
                     var token = authHeader[BearerPrefix.Length..].Trim();
-                    return token.Length > 0 ? (token, null) : (null, "API key is empty.");
+                    if (token.Length == 0)
+                        return (null, "API key is empty.");
+                    bearerKey = token;
                 }
-
-                if (string.Equals(authHeader, "Bearer", StringComparison.OrdinalIgnoreCase))
+                else if (string.Equals(authHeader, "Bearer", StringComparison.OrdinalIgnoreCase))
                     return (null, "API key is empty.");
             }
         }
 
-        return (null, null);
+        if (headerKey is not null && bearerKey is not null && !string.Equals(headerKey, bearerKey, StringComparison.Ordinal))
+            return (null, "Conflicting API key credentials supplied in header and Authorization.");
+
+        return (headerKey ?? bearerKey, null);
     }
 
     private static (string? Value, bool IsAmbiguous) ResolveSingleValue(StringValues values, bool splitCommas)

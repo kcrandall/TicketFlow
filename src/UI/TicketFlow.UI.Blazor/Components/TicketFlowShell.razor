@@ -27,7 +27,7 @@
                                     <li>
                                         @if (section.IsPermitted(Session))
                                         {
-                                            <a class="tf-nav__link @(active ? "is-active" : null)" href="@Session.Url(section.Path)" aria-current="@(active ? "page" : null)">
+                                            <a class="tf-nav__link @(active ? "is-active" : null)" href="@Session.Url(UiNavigation.SectionPath(Session, section))" aria-current="@(active ? "page" : null)">
                                                 <LucideIcon Name="@section.Icon" Size="16" />
                                                 <span>@section.Title</span>
                                             </a>
@@ -84,7 +84,7 @@
                 @if (Route is not null && Route.Section != "dashboard")
                 {
                     <LucideIcon Name="chevron-right" Size="14" />
-                    <a href="@Session.Url(UiNavigation.Section(Route.Section).Path)">@UiNavigation.Section(Route.Section).Title</a>
+                    <a href="@Session.Url(UiNavigation.SectionPath(Session, UiNavigation.Section(Route.Section)))">@UiNavigation.Section(Route.Section).Title</a>
                 }
                 @if (Route?.Parameters.ContainsKey("Id") == true || Route?.Pattern.Count(character => character == '/') > 0)
                 {
@@ -93,7 +93,7 @@
                 }
             </nav>
             <div class="tf-header__actions">
-                <TfForm Action="theme.set" Class="tf-inline-form">
+                <TfForm Action="theme.set" Enhance="false" Class="tf-inline-form">
                     <input type="hidden" name="theme" value="@Session.Theme.Theme" />
                     <input type="hidden" name="mode" value="@(Session.Theme.Mode == TicketFlowThemeMode.Dark ? "light" : "dark")" />
                     <button type="submit" class="tf-icon-button" title="@(Session.Theme.Mode == TicketFlowThemeMode.Dark ? "Switch to light mode" : "Switch to dark mode")">

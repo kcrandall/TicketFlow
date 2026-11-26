@@ -126,7 +126,19 @@ else
     {
         if (Service<IAutomationRuleService>() is not { } service || Id is null)
             return;
-        var ruleTask = Id != "new" ? service.GetAsync(Actor, new AutomationRuleId(Id), Aborted) : null;
+        AutomationRuleId? ruleId = null;
+        if (Id != "new")
+        {
+            try
+            {
+                ruleId = new AutomationRuleId(Id);
+            }
+            catch (ArgumentException)
+            {
+                return;
+            }
+        }
+        var ruleTask = ruleId is { } id ? service.GetAsync(Actor, id, Aborted) : null;
         var listTask = Service<IConversationService>()?.ListAsync(Actor, new ConversationListQuery(limit: 15), null, Aborted);
         if (ruleTask is not null && listTask is not null)
             await Task.WhenAll(ruleTask, listTask);

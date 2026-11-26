@@ -26,6 +26,13 @@ public sealed partial class PostgresAccessStore
         ORDER BY g.grant_id COLLATE "C"
         """;
 
+    private const string ListAllForSubjectSql = $"""
+        SELECT {GrantColumns} FROM tf_access_grants
+        WHERE subject_key=tf_key_v1(@tenant, @project, @environment, @app, @subject_kind::text, @subject_id)
+          AND {ScopeWhere} AND subject_kind=@subject_kind AND subject_id=@subject_id
+        ORDER BY grant_id COLLATE "C"
+        """;
+
     private const string ListForTargetSql = $"""
         SELECT {GrantColumns} FROM tf_access_grants
         WHERE target_key=tf_key_v1(@tenant, @project, @environment, @app, @workspace, @scope_level::text, coalesce(@team, @inbox, ''))
@@ -78,6 +85,21 @@ public sealed partial class PostgresAccessStore
         AddText(command, "workspace", workspace.Value);
         command.Parameters.Add(new NpgsqlParameter<short[]>("kinds", NpgsqlDbType.Array | NpgsqlDbType.Smallint) { TypedValue = kinds });
         AddTextArray(command, "ids", ids);
+        var grants = new List<StoredAccessGrant>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            grants.Add(ReadGrant(reader, partition));
+        return grants;
+    }
+
+    public async Task<IReadOnlyList<StoredAccessGrant>> ListAllForSubjectAsync(AccessPartition partition, GrantSubject subject, WorkspaceId fallbackWorkspace, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        var (kind, id) = EncodeSubject(subject);
+        await using var command = source.CreateCommand(ListAllForSubjectSql);
+        AddPartition(command, partition);
+        AddShort(command, "subject_kind", kind);
+        AddText(command, "subject_id", id);
         var grants = new List<StoredAccessGrant>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))

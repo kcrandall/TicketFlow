@@ -101,6 +101,8 @@ public sealed class ModelAndCodecTests
         Assert.ThrowsExactly<FormatException>(() => ConversationJsonCodec.DeserializeEvent("""{"v":1,"k":"priority","prev":1,"cur":99}"""));
         Assert.ThrowsExactly<FormatException>(() => ConversationJsonCodec.DeserializeEvent("""{"v":1,"k":"note","id":"n","body":"\u0007","att":[]}"""));
         Assert.ThrowsExactly<FormatException>(() => ConversationJsonCodec.DeserializeAttributes("""{"v":1,"a":{"plan":{"t":"blob","v":"x"}}}"""));
+        Assert.ThrowsExactly<FormatException>(() => ConversationJsonCodec.DeserializeAttributes("""{"v":1,"a":{"score":{"t":"number","v":"1e100"}}}"""));
+        Assert.ThrowsExactly<FormatException>(() => ConversationJsonCodec.DeserializeAttributes("""{"v":1,"a":{"score":{"t":"number","v":"999999999999999999999999999999999999"}}}"""));
         Assert.ThrowsExactly<FormatException>(() => ConversationJsonCodec.DeserializeRedirects("""{"v":1,"r":[{"m":"00000000-0000-0000-0000-000000000000","p":"a"}]}"""));
     }
 

@@ -292,6 +292,26 @@ public sealed partial class PostgresAccessStore
         return removed;
     }
 
+    public async Task<bool> HasLiveDenyForRoleAsync(AccessPartition partition, WorkspaceId workspace, RoleId role, DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        if (workspace == default)
+            throw new ArgumentException("A workspace identifier is required.", nameof(workspace));
+        if (!role.IsInitialized)
+            throw new ArgumentException("A role identifier is required.", nameof(role));
+        await using var command = source.CreateCommand($"""
+            SELECT EXISTS (
+                SELECT 1 FROM tf_access_grants
+                WHERE {WorkspaceWhere} AND role_id=@role AND effect=2
+                  AND (valid_until IS NULL OR valid_until > @now))
+            """);
+        AddPartition(command, partition);
+        AddText(command, "workspace", workspace.Value);
+        AddText(command, "role", role.Value);
+        AddInstant(command, "now", now);
+        return (bool)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+    }
+
     private static void RequireGrantId(GrantId id)
     {
         if (!id.IsInitialized)

@@ -69,8 +69,12 @@ public static class AssistJsonCodec
             throw new FormatException("Unsupported assist settings version.");
         var models = new Dictionary<AssistFeature, string>();
         foreach (var property in Object(root.GetProperty("models")).EnumerateObject())
-            models[Feature(int.Parse(property.Name, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture))] = property.Value.GetString()
+        {
+            if (!int.TryParse(property.Name, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var featureNumber))
+                throw new FormatException("Unknown assist feature.");
+            models[Feature(featureNumber)] = property.Value.GetString()
                 ?? throw new FormatException("Model identifiers are strings.");
+        }
         return new AssistSettings(root.GetProperty("enabled").GetBoolean(), root.GetProperty("daily").GetInt64(), root.GetProperty("rpm").GetInt32(), models);
     }
 

@@ -83,6 +83,19 @@ public sealed class AutomationModelTests
     }
 
     [TestMethod]
+    public void CodecsRejectOverflowingDurationsAndNumericAttributes()
+    {
+        const string elapsedOverflow = """{"v":1,"name":"R","enabled":true,"priority":1,"stop":false,"auto":false,"trigger":{"t":"message-received"},"cond":{"op":"elapsed","since":"created","cmp":"at-least","seconds":922337203686},"actions":[{"a":"set-priority","priority":"low"}]}""";
+        const string elapsedNegativeOverflow = """{"v":1,"name":"R","enabled":true,"priority":1,"stop":false,"auto":false,"trigger":{"t":"message-received"},"cond":{"op":"elapsed","since":"created","cmp":"at-least","seconds":-922337203686},"actions":[{"a":"set-priority","priority":"low"}]}""";
+        const string snoozeOverflow = """{"v":1,"name":"R","enabled":true,"priority":1,"stop":false,"auto":false,"trigger":{"t":"message-received"},"actions":[{"a":"snooze","seconds":922337203686}]}""";
+        const string scientificOverflow = """{"v":1,"name":"R","enabled":true,"priority":1,"stop":false,"auto":false,"trigger":{"t":"message-received"},"actions":[{"a":"set-attribute","key":"score","value":{"t":"number","v":"1e100"}}]}""";
+        const string decimalOverflow = """{"v":1,"name":"R","enabled":true,"priority":1,"stop":false,"auto":false,"trigger":{"t":"message-received"},"actions":[{"a":"set-attribute","key":"score","value":{"t":"number","v":"999999999999999999999999999999999999"}}]}""";
+
+        foreach (var payload in new[] { elapsedOverflow, elapsedNegativeOverflow, snoozeOverflow, scientificOverflow, decimalOverflow })
+            Assert.ThrowsExactly<FormatException>(() => AutomationCodec.DeserializeRule(new AutomationRuleId("r"), payload), payload);
+    }
+
+    [TestMethod]
     public void ModelIsBounded()
     {
         AutomationCondition deep = new StatusIsCondition(ConversationStatusKind.Open);

@@ -256,6 +256,29 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
         }
     }
 
+    public Task<bool> HasLiveDenyForRoleAsync(AccessPartition partition, WorkspaceId workspace, RoleId role, DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        if (workspace == default)
+            throw new ArgumentException("A workspace identifier is required.", nameof(workspace));
+        if (!role.IsInitialized)
+            throw new ArgumentException("A role identifier is required.", nameof(role));
+        lock (gate)
+        {
+            foreach (var stored in grants.Values)
+            {
+                var grant = stored.Grant;
+                if (grant.Partition == partition
+                    && grant.Workspace == workspace
+                    && grant.Effect == GrantEffect.Deny
+                    && grant.Role == role
+                    && (grant.ValidUntil is not { } until || until > now))
+                    return Task.FromResult(true);
+            }
+            return Task.FromResult(false);
+        }
+    }
+
     private void IndexGrant(AccessGrant grant)
     {
         var subjectKey = (grant.Partition, grant.Subject);

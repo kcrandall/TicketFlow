@@ -206,4 +206,47 @@ public sealed class ReviewRegressionTests
         Assert.AreEqual("ok", Describe(await fixture.Teams.DeleteAsync(owner, restricted, 2)));
         Assert.AreEqual(2L, Value(await fixture.Teams.RemoveMemberAsync(owner, conditioned, new UserId("carl"), 1)).Revision);
     }
+
+    [TestMethod]
+    public async Task ConditionalLiveDenyGrantsBlockTeamGrantPolicyMemberRemoval()
+    {
+        using var fixture = Create();
+        var now = fixture.Clock.GetUtcNow();
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner);
+
+        var teamAssignee = new TeamId("cond-assignee");
+        var teamPrincipal = new TeamId("cond-team");
+        var teamWindow = new TeamId("cond-window");
+        var teamUserDeny = new TeamId("cond-user-deny");
+        var admin = fixture.User("admin", teamAssignee.Value, teamPrincipal.Value, teamWindow.Value, teamUserDeny.Value);
+        await fixture.GrantAsync(admin.UserId, BuiltInRoles.Admin);
+
+        var offWindow = new TimeWindowCondition(
+            TimeOnly.FromTimeSpan(now.AddHours(2).UtcDateTime.TimeOfDay),
+            TimeOnly.FromTimeSpan(now.AddHours(4).UtcDateTime.TimeOfDay));
+        Assert.IsFalse(offWindow.Contains(now));
+
+        foreach (var teamId in new[] { teamAssignee, teamPrincipal, teamWindow, teamUserDeny })
+            Value(await fixture.Teams.CreateAsync(owner, new Team(teamId, teamId.Value, null, [admin.UserId])));
+
+        await fixture.GrantAsync(teamAssignee, BuiltInRoles.Agent, effect: GrantEffect.Deny, condition: new AssigneeIsSelfCondition());
+        await fixture.GrantAsync(teamPrincipal, BuiltInRoles.Agent, effect: GrantEffect.Deny, condition: new TeamInPrincipalTeamsCondition());
+        await fixture.GrantAsync(teamWindow, BuiltInRoles.Agent, effect: GrantEffect.Deny, condition: offWindow);
+        await fixture.GrantAsync(admin.UserId, BuiltInRoles.Agent, effect: GrantEffect.Deny,
+            condition: new AndCondition(new TeamInPrincipalTeamsCondition(), offWindow));
+
+        // Admin cannot remove themselves from any team to lift conditional live Deny grants (assignee, principal-teams, or off-window time-window).
+        foreach (var teamId in new[] { teamAssignee, teamPrincipal, teamWindow, teamUserDeny })
+        {
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.RemoveMemberAsync(admin, teamId, admin.UserId, 1)), teamId.Value);
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.UpdateAsync(admin, new Team(teamId, teamId.Value, null, []), 1)), teamId.Value);
+        }
+        foreach (var teamId in new[] { teamAssignee, teamPrincipal, teamWindow })
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.DeleteAsync(admin, teamId, 1)), teamId.Value);
+
+        // Unrestricted owner can remove admin from all of these teams.
+        foreach (var teamId in new[] { teamAssignee, teamPrincipal, teamWindow, teamUserDeny })
+            Assert.AreEqual(2L, Value(await fixture.Teams.RemoveMemberAsync(owner, teamId, admin.UserId, 1)).Revision, teamId.Value);
+    }
 }

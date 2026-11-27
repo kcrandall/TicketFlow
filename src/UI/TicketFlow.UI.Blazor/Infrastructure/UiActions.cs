@@ -82,10 +82,15 @@ public static partial class UiActions
         {
             return UiOutcome.Invalid(error.Message);
         }
-        catch (Exception error) when (error is ArgumentException or FormatException or System.Text.Json.JsonException)
+        catch (Exception error) when (error is ArgumentException or FormatException or System.Text.Json.JsonException or OverflowException)
         {
             // Domain constructors and codecs validate input; their messages describe the rule, not the submitted value.
-            return UiOutcome.Invalid(error is System.Text.Json.JsonException ? "The definition is not valid JSON for this record type." : FirstLine(error.Message));
+            return UiOutcome.Invalid(error switch
+            {
+                System.Text.Json.JsonException => "The definition is not valid JSON for this record type.",
+                OverflowException => "A numeric value is out of range.",
+                _ => FirstLine(error.Message),
+            });
         }
     }
 

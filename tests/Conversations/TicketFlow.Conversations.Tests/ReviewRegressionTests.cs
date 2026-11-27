@@ -374,6 +374,9 @@ public sealed class ReviewRegressionTests
 
         public Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> DeleteAsync(AccessPartition partition, GrantId id, long expectedRevision, CancellationToken cancellationToken = default) =>
             inner.DeleteAsync(partition, id, expectedRevision, cancellationToken);
+
+        public Task<bool> HasLiveDenyForRoleAsync(AccessPartition partition, WorkspaceId workspace, RoleId role, DateTimeOffset now, CancellationToken cancellationToken = default) =>
+            inner.HasLiveDenyForRoleAsync(partition, workspace, role, now, cancellationToken);
     }
 
     private sealed class CountingPolicyStore(IAccessFieldPolicyStore inner) : IAccessFieldPolicyStore

@@ -510,6 +510,76 @@ public sealed partial class SmokeTests
         }
     }
 
+    [TestMethod]
+    public async Task AutomationRuleSaveRejectsOverflowingSecondsAndNumericAttributes()
+    {
+        var client = Client("admin");
+        var (token, cookie, _) = await FormAsync(client, "/support/automation");
+        const string elapsedOverflow = """{"v":1,"name":"Overflow","enabled":true,"priority":1,"stop":false,"auto":false,"trigger":{"t":"message-received"},"cond":{"op":"elapsed","since":"created","cmp":"at-least","seconds":922337203686},"actions":[{"a":"set-priority","priority":"low"}]}""";
+        const string decimalOverflow = """{"v":1,"name":"Overflow","enabled":true,"priority":1,"stop":false,"auto":false,"trigger":{"t":"message-received"},"actions":[{"a":"set-attribute","key":"score","value":{"t":"number","v":"1e100"}}]}""";
+
+        foreach (var definition in new[] { elapsedOverflow, decimalOverflow })
+        {
+            var response = await PostAsync(client, "/support/automation", cookie, new Dictionary<string, string>
+            {
+                ["__RequestVerificationToken"] = token,
+                ["_action"] = "automation.rule.save",
+                ["newid"] = "overflow-rule",
+                ["definition"] = definition,
+            });
+            Assert.AreEqual(HttpStatusCode.UnprocessableEntity, response.StatusCode, definition);
+        }
+    }
+
+    [TestMethod]
+    public async Task SettingsSavePreservesUncheckedFeatureTogglesAsFalse()
+    {
+        StoredWorkspaceSettings original;
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var settings = scope.ServiceProvider.GetRequiredService<SampleSettings>();
+            var store = scope.ServiceProvider.GetRequiredService<IWorkspaceSettingsStore>();
+            original = (await store.GetAsync(settings.Scope))!;
+            var seeded = new WorkspaceSettings(original.Settings.Name, original.Settings.DefaultLocale, original.Settings.TimeZoneId,
+                new Dictionary<string, bool>(StringComparer.Ordinal) { ["assist"] = true, ["surveys"] = true });
+            Assert.IsInstanceOfType<StoreApplied<StoredWorkspaceSettings>>((await store.UpdateAsync(settings.Scope, seeded, original.Revision)).Value);
+        }
+
+        try
+        {
+            var client = Client("admin");
+            var (token, cookie, revision) = await FormAsync(client, "/support/settings");
+            var posted = await PostAsync(client, "/support/settings", cookie, new Dictionary<string, string>
+            {
+                ["__RequestVerificationToken"] = token,
+                ["_action"] = "settings.save",
+                ["_return"] = "/support/settings",
+                ["_revision"] = revision,
+                ["name"] = original.Settings.Name,
+                ["locale"] = original.Settings.DefaultLocale,
+                ["timezone"] = original.Settings.TimeZoneId,
+                ["toggle"] = "assist",
+            });
+            Assert.AreEqual(HttpStatusCode.Redirect, posted.StatusCode);
+
+            await using var verifyScope = app.Services.CreateAsyncScope();
+            var settings = verifyScope.ServiceProvider.GetRequiredService<SampleSettings>();
+            var store = verifyScope.ServiceProvider.GetRequiredService<IWorkspaceSettingsStore>();
+            var updated = (await store.GetAsync(settings.Scope))!;
+            Assert.IsTrue(updated.Settings.FeatureToggles.TryGetValue("assist", out var assistEnabled) && assistEnabled);
+            Assert.IsTrue(updated.Settings.FeatureToggles.TryGetValue("surveys", out var surveysEnabled) && !surveysEnabled,
+                "Unchecking a feature toggle must persist it as false rather than deleting its key.");
+        }
+        finally
+        {
+            await using var restoreScope = app.Services.CreateAsyncScope();
+            var settings = restoreScope.ServiceProvider.GetRequiredService<SampleSettings>();
+            var store = restoreScope.ServiceProvider.GetRequiredService<IWorkspaceSettingsStore>();
+            var current = (await store.GetAsync(settings.Scope))!;
+            await store.UpdateAsync(settings.Scope, original.Settings, current.Revision);
+        }
+    }
+
     private static async Task<(string Token, string Cookie, string Revision)> FormAsync(HttpClient client, string path)
     {
         var response = await client.GetAsync(path);

@@ -50,15 +50,127 @@ public sealed class AdministrationTests
         var settings = new AccessRole(new RoleId("settings"), "Settings", [AccessPermissions.WorkspaceManage, AccessPermissions.ConversationRead]);
         Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(owner, settings)));
         await fixture.GrantAsync(new UserId("bob"), settings);
-        await fixture.GrantAsync(new UserId("mallory"), settings, effect: GrantEffect.Deny);
+        var malloryDeny = await fixture.GrantAsync(new UserId("mallory"), settings, effect: GrantEffect.Deny);
 
         var narrowed = new AccessRole(settings.Id, "Settings", [AccessPermissions.ConversationRead]);
         Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(admin, narrowed, 1)));
         Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(admin, settings.Id, 1)));
         Assert.AreEqual("refused:Conflict:1", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(owner, settings)));
+        // A custom role referenced by a live Deny grant cannot be narrowed or deleted until the Deny grant is revoked or expired.
+        var narrowRefused = (TicketFailure)(await fixture.Admin.UpdateRoleAsync(owner, narrowed, 1)).Value!;
+        Assert.AreEqual(TicketFailureKind.Conflict, narrowRefused.Kind);
+        Assert.AreEqual("role-in-use", narrowRefused.Code);
+        var deleteRefused = (TicketFailure)(await fixture.Admin.DeleteRoleAsync(owner, settings.Id, 1)).Value!;
+        Assert.AreEqual(TicketFailureKind.Conflict, deleteRefused.Kind);
+        Assert.AreEqual("role-in-use", deleteRefused.Code);
+
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(owner, malloryDeny.Id, 1)));
         Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(owner, narrowed, 1)));
         Assert.AreEqual("refused:Conflict:2", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(owner, settings.Id, 1)));
         Assert.AreEqual("refused:NotFound", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(owner, new AccessRole(new RoleId("ghost"), "x", []), 1)));
+    }
+
+    [TestMethod]
+    public async Task CustomRoleReferencedByScopedLiveDenyGrantCannotBeShrunkOrDeleted()
+    {
+        var (fixture, owner, admin, _) = await CreateAsync();
+        using var _ = fixture;
+        var teamScope = new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("billing"));
+        var inboxScope = new InboxGrantScope(fixture.Scope.WorkspaceId, new InboxId("vip"));
+
+        var teamDenyRole = new AccessRole(new RoleId("team-deny-role"), "Team Deny Role", [AccessPermissions.ConversationDelete, AccessPermissions.ConversationRead]);
+        var inboxDenyRole = new AccessRole(new RoleId("inbox-deny-role"), "Inbox Deny Role", [AccessPermissions.ConversationDelete, AccessPermissions.ConversationRead]);
+        var expiredDenyRole = new AccessRole(new RoleId("expired-deny-role"), "Expired Deny Role", [AccessPermissions.ConversationDelete, AccessPermissions.ConversationRead]);
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(owner, teamDenyRole)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(owner, inboxDenyRole)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(owner, expiredDenyRole)));
+
+        await fixture.GrantAsync(admin.UserId, teamDenyRole, teamScope, GrantEffect.Deny);
+        await fixture.GrantAsync(admin.UserId, inboxDenyRole, inboxScope, GrantEffect.Deny);
+        var now = fixture.Clock.GetUtcNow();
+        await fixture.SeedAsync(new AccessGrant(new GrantId("expired-team-deny"), fixture.Partition, admin.UserId, expiredDenyRole.Id, teamScope, GrantEffect.Deny,
+            validFrom: now.AddDays(-2), validUntil: now.AddMinutes(-5)));
+
+        // Actor restricted by a live TeamGrantScope Deny grant referencing R cannot neutralize it via UpdateRoleAsync (removing permissions) or DeleteRoleAsync (+ CreateRoleAsync).
+        var shrunkTeam = new AccessRole(teamDenyRole.Id, teamDenyRole.Name, [AccessPermissions.ConversationRead]);
+        var teamUpdateRefusal = (TicketFailure)(await fixture.Admin.UpdateRoleAsync(admin, shrunkTeam, 1)).Value!;
+        Assert.AreEqual(TicketFailureKind.Conflict, teamUpdateRefusal.Kind);
+        Assert.AreEqual("role-in-use", teamUpdateRefusal.Code);
+        var teamDeleteRefusal = (TicketFailure)(await fixture.Admin.DeleteRoleAsync(admin, teamDenyRole.Id, 1)).Value!;
+        Assert.AreEqual(TicketFailureKind.Conflict, teamDeleteRefusal.Kind);
+        Assert.AreEqual("role-in-use", teamDeleteRefusal.Code);
+
+        // Renaming or widening the role without removing any permissions is still allowed.
+        var widenedTeam = new AccessRole(teamDenyRole.Id, "Renamed Team Deny Role", [AccessPermissions.ConversationDelete, AccessPermissions.ConversationRead, AccessPermissions.ContactRead]);
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(admin, widenedTeam, 1)));
+        Assert.AreEqual("denied:ExplicitDeny", await fixture.DescribeAsync(admin, AccessPermissions.ConversationDelete, fixture.Resource(team: "billing")));
+
+        // Actor restricted by a live InboxGrantScope Deny grant referencing R2 also cannot neutralize it via UpdateRoleAsync or DeleteRoleAsync.
+        var shrunkInbox = new AccessRole(inboxDenyRole.Id, inboxDenyRole.Name, []);
+        var inboxUpdateRefusal = (TicketFailure)(await fixture.Admin.UpdateRoleAsync(admin, shrunkInbox, 1)).Value!;
+        Assert.AreEqual(TicketFailureKind.Conflict, inboxUpdateRefusal.Kind);
+        Assert.AreEqual("role-in-use", inboxUpdateRefusal.Code);
+        var inboxDeleteRefusal = (TicketFailure)(await fixture.Admin.DeleteRoleAsync(admin, inboxDenyRole.Id, 1)).Value!;
+        Assert.AreEqual(TicketFailureKind.Conflict, inboxDeleteRefusal.Kind);
+        Assert.AreEqual("role-in-use", inboxDeleteRefusal.Code);
+        Assert.AreEqual("denied:ExplicitDeny", await fixture.DescribeAsync(admin, AccessPermissions.ConversationDelete, fixture.Resource(inbox: "vip")));
+
+        // Expired Deny grants do not block shrinking or deleting a custom role.
+        var shrunkExpired = new AccessRole(expiredDenyRole.Id, expiredDenyRole.Name, [AccessPermissions.ConversationRead]);
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(admin, shrunkExpired, 1)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(admin, expiredDenyRole.Id, 2)));
+    }
+
+    [TestMethod]
+    public async Task ConditionalLiveDenyGrantsFailClosedDuringAdministrativeAntiEscalation()
+    {
+        var (fixture, owner, _, _) = await CreateAsync();
+        using var _ = fixture;
+        var now = fixture.Clock.GetUtcNow();
+        var admin = fixture.User("cond-admin", "ops");
+        await fixture.GrantAsync(admin.UserId, BuiltInRoles.Admin);
+
+        var offWindow = new TimeWindowCondition(
+            TimeOnly.FromTimeSpan(now.AddHours(2).UtcDateTime.TimeOfDay),
+            TimeOnly.FromTimeSpan(now.AddHours(4).UtcDateTime.TimeOfDay));
+        Assert.IsFalse(offWindow.Contains(now));
+
+        var denyAssignee = new AccessGrant(new GrantId("deny-assignee"), fixture.Partition, admin.UserId, BuiltInRoles.Agent.Id, fixture.Workspace, GrantEffect.Deny,
+            condition: new AssigneeIsSelfCondition());
+        var denyTeam = new AccessGrant(new GrantId("deny-team"), fixture.Partition, admin.UserId, BuiltInRoles.Agent.Id, fixture.Workspace, GrantEffect.Deny,
+            condition: new TeamInPrincipalTeamsCondition());
+        var denyWindow = new AccessGrant(new GrantId("deny-window"), fixture.Partition, admin.UserId, BuiltInRoles.Agent.Id, fixture.Workspace, GrantEffect.Deny,
+            condition: offWindow);
+        foreach (var grant in new[] { denyAssignee, denyTeam, denyWindow })
+            await fixture.SeedAsync(grant);
+
+        // Normal runtime authorization on concrete resources still evaluates conditions accurately (not broken by conservative admin mode).
+        Assert.AreEqual("allowed", await fixture.DescribeAsync(admin, AccessPermissions.ConversationReply, fixture.Resource()),
+            "Concrete unassigned, no-team resource outside the time window remains allowed at runtime.");
+        Assert.AreEqual("denied:ExplicitDeny", await fixture.DescribeAsync(admin, AccessPermissions.ConversationReply, fixture.Resource(assignee: admin.UserId.Value)));
+        Assert.AreEqual("denied:ExplicitDeny", await fixture.DescribeAsync(admin, AccessPermissions.ConversationReply, fixture.Resource(team: "ops")));
+
+        // Administrative anti-escalation fails closed: admin cannot revoke, weaken, or pass CheckCanRevokeAsync for any of the conditional live Deny grants.
+        foreach (var grant in new[] { denyAssignee, denyTeam, denyWindow })
+        {
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(admin, grant.Id, 1)), grant.Id.Value);
+            var toAllow = new AccessGrant(grant.Id, fixture.Partition, admin.UserId, BuiltInRoles.Viewer.Id, fixture.Workspace, GrantEffect.Allow);
+            var shortened = new AccessGrant(grant.Id, fixture.Partition, admin.UserId, BuiltInRoles.Agent.Id, fixture.Workspace, GrantEffect.Deny,
+                condition: grant.Condition, validUntil: now.AddSeconds(5));
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(admin, toAllow, 1)), grant.Id.Value);
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(admin, shortened, 1)), grant.Id.Value);
+            Assert.IsInstanceOfType<TicketFailure>((await fixture.Admin.CheckCanRevokeAsync(admin, [grant])).Value, grant.Id.Value);
+            Assert.IsNotNull(await fixture.Grants.GetAsync(fixture.Partition, grant.Id), grant.Id.Value);
+        }
+
+        // Unrestricted owner can still update and revoke all three conditional live Deny grants.
+        foreach (var grant in new[] { denyAssignee, denyTeam, denyWindow })
+        {
+            var shortened = new AccessGrant(grant.Id, fixture.Partition, admin.UserId, BuiltInRoles.Agent.Id, fixture.Workspace, GrantEffect.Deny,
+                condition: grant.Condition, validUntil: now.AddHours(1));
+            Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(owner, shortened, 1)), grant.Id.Value);
+            Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(owner, grant.Id, 2)), grant.Id.Value);
+        }
     }
 
     [TestMethod]

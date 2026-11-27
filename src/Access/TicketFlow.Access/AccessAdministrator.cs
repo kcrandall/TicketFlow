@@ -73,6 +73,12 @@ public sealed class AccessAdministrator : IAccessAdministrator
             var existing = await roles.GetAsync(actor.Scope, role.Id, cancellationToken).ConfigureAwait(false);
             refusal = Fence(existing?.Revision, expectedRevision)
                 ?? RequireHeld(context!, existing!.Role.Permissions.Concat(role.Permissions), workspace, tenantAllowsOnly: false);
+            if (refusal is null
+                && ((existing!.Role.IncludesAllPermissions && !role.IncludesAllPermissions) || !existing.Role.Permissions.IsSubsetOf(role.Permissions))
+                && await grants.HasLiveDenyForRoleAsync(AccessPartition.From(actor.Scope), actor.Scope.WorkspaceId, role.Id, engine.Now, cancellationToken).ConfigureAwait(false))
+                refusal = new Refusal(TicketFailureKind.Conflict,
+                    [$"Cannot remove permissions from custom role '{role.Id.Value}' while referenced by an active Deny grant."],
+                    Code: "role-in-use");
         }
         if (refusal is not null)
             return await RefuseAsync<StoredAccessRole>(change, refusal, cancellationToken).ConfigureAwait(false);
@@ -95,6 +101,11 @@ public sealed class AccessAdministrator : IAccessAdministrator
             refusal = Fence(existing?.Revision, expectedRevision)
                 ?? RequireHeld(context!, existing!.Role.Permissions, workspace, tenantAllowsOnly: false);
         }
+        if (refusal is null
+            && await grants.HasLiveDenyForRoleAsync(AccessPartition.From(actor.Scope), actor.Scope.WorkspaceId, role, engine.Now, cancellationToken).ConfigureAwait(false))
+            refusal = new Refusal(TicketFailureKind.Conflict,
+                [$"Cannot delete custom role '{role.Value}' while referenced by an active Deny grant."],
+                Code: "role-in-use");
         if (refusal is null && roleFederationMappings is not null)
         {
             var mappings = await roleFederationMappings.ListForPartitionAsync(AccessPartition.From(actor.Scope), includeDisabled: true, cancellationToken).ConfigureAwait(false);
@@ -430,12 +441,12 @@ public sealed class AccessAdministrator : IAccessAdministrator
         {
             var key = (permission, target, tenantOnly);
             if (!cache.TryGetValue(key, out var allowed))
-                cache[key] = allowed = AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly).Allowed;
+                cache[key] = allowed = AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, conservativeConditions: true).Allowed;
             if (!allowed)
                 missing.Add(permission.Value);
             return;
         }
-        if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly).Allowed)
+        if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, conservativeConditions: true).Allowed)
             missing.Add(permission.Value);
     }
 
@@ -648,7 +659,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
             if (checkedPerms is not null && !checkedPerms.Add(permission))
                 continue;
             checkedPerms ??= [permission];
-            if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly).Allowed)
+            if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly, conservativeConditions: true).Allowed)
                 (missing ??= []).Add(permission);
         }
         if (missing is null)

@@ -134,4 +134,12 @@ public sealed class OutcomeTests
         var (minStart, minEnd) = UiFormat.Range(null, null, DateTimeOffset.MinValue);
         Assert.IsTrue(minStart < minEnd);
     }
+
+    [TestMethod]
+    public async Task UiActionsRunAsyncCatchesOverflowExceptionAsInvalidOutcome()
+    {
+        var result = await UiActions.RunAsync(_ => throw new OverflowException("TimeSpan overflow"), context: null!);
+        Assert.AreEqual(UiOutcomeKind.Invalid, result.Outcome.Kind);
+        CollectionAssert.AreEqual(new[] { "A numeric value is out of range." }, result.Outcome.Messages.ToArray());
+    }
 }

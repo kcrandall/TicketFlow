@@ -320,7 +320,13 @@ internal sealed class AccessEngine(
     }
 
     /// <summary>Allocation-free variant of point evaluation for callers that only need Allowed/Denial/UsedBreakGlass.</summary>
-    public static SimplePointResult EvaluateSimple(AccessContext context, Permission permission, AccessResource resource, bool includeBreakGlass, bool tenantAllowsOnly = false)
+    public static SimplePointResult EvaluateSimple(
+        AccessContext context,
+        Permission permission,
+        AccessResource resource,
+        bool includeBreakGlass,
+        bool tenantAllowsOnly = false,
+        bool conservativeConditions = false)
     {
         if (resource.Scope != context.Scope)
             return SimplePointResult.Deny(AccessDenialReason.ScopeMismatch);
@@ -338,7 +344,7 @@ internal sealed class AccessEngine(
             switch (grant.Effect)
             {
                 case GrantEffect.Deny:
-                    if ((candidate.Role is null || candidate.Includes(permission)) && Evaluate(grant.Condition, context, resource) != false)
+                    if ((candidate.Role is null || candidate.Includes(permission)) && Evaluate(grant.Condition, context, resource, conservativeConditions) != false)
                         return SimplePointResult.Deny(AccessDenialReason.ExplicitDeny);
                     break;
                 case GrantEffect.Allow:
@@ -346,10 +352,10 @@ internal sealed class AccessEngine(
                         break;
                     if (grant.Kind == GrantKind.BreakGlass)
                     {
-                        if (!hasBreakGlass && !hasStandard && candidate.Includes(permission) && Evaluate(grant.Condition, context, resource) == true)
+                        if (!hasBreakGlass && !hasStandard && candidate.Includes(permission) && Evaluate(grant.Condition, context, resource, conservativeConditions) == true)
                             hasBreakGlass = true;
                     }
-                    else if (!hasStandard && candidate.Includes(permission) && Evaluate(grant.Condition, context, resource) == true)
+                    else if (!hasStandard && candidate.Includes(permission) && Evaluate(grant.Condition, context, resource, conservativeConditions) == true)
                         hasStandard = true;
                     break;
             }
@@ -367,27 +373,32 @@ internal sealed class AccessEngine(
         InboxGrantScope inbox => inbox.Workspace == resource.Scope.WorkspaceId && resource.InboxId == inbox.Inbox,
     };
 
-    /// <summary>Kleene evaluation of a grant condition; <see langword="null"/> means unknown.</summary>
-    public static bool? Evaluate(AccessCondition? condition, AccessContext context, AccessResource resource) => condition switch
+    /// <summary>
+    /// Kleene evaluation of a grant condition; <see langword="null"/> means unknown. When <paramref name="conservativeConditions"/>
+    /// is <see langword="true"/> (abstract administrative targets), resource-instance and schedule predicates
+    /// (<see cref="AssigneeIsSelfCondition"/>, <see cref="TeamInPrincipalTeamsCondition"/> and <see cref="TimeWindowCondition"/>)
+    /// evaluate to <see langword="null"/> so conditional denies fail closed and conditional allows cannot satisfy unconditional checks.
+    /// </summary>
+    public static bool? Evaluate(AccessCondition? condition, AccessContext context, AccessResource resource, bool conservativeConditions = false) => condition switch
     {
         null => true,
-        AndCondition and => EvaluateAnd(and.Operands, context, resource),
-        OrCondition or => EvaluateOr(or.Operands, context, resource),
-        NotCondition not => !Evaluate(not.Operand, context, resource),
-        AssigneeIsSelfCondition => context.User is { } user ? resource.AssigneeId == user.UserId : null,
-        TeamInPrincipalTeamsCondition => context.User is { } user ? resource.TeamId is { } team && user.Teams.Contains(team) : null,
+        AndCondition and => EvaluateAnd(and.Operands, context, resource, conservativeConditions),
+        OrCondition or => EvaluateOr(or.Operands, context, resource, conservativeConditions),
+        NotCondition not => !Evaluate(not.Operand, context, resource, conservativeConditions),
+        AssigneeIsSelfCondition => conservativeConditions ? null : context.User is { } user ? resource.AssigneeId == user.UserId : null,
+        TeamInPrincipalTeamsCondition => conservativeConditions ? null : context.User is { } user ? resource.TeamId is { } team && user.Teams.Contains(team) : null,
         AttributeEqualsCondition equals => resource.Attributes.TryGetValue(equals.Key, out var value) ? string.Equals(value, equals.Value, global::System.StringComparison.Ordinal) : null,
         AttributeInCondition @in => resource.Attributes.TryGetValue(@in.Key, out var value) ? @in.ContainsValue(value) : null,
         HasLabelCondition label => resource.Labels?.Contains(label.Label),
-        TimeWindowCondition window => window.Contains(context.Now),
+        TimeWindowCondition window => conservativeConditions ? null : window.Contains(context.Now),
     };
 
-    private static bool? EvaluateAnd(IReadOnlyList<AccessCondition> operands, AccessContext context, AccessResource resource)
+    private static bool? EvaluateAnd(IReadOnlyList<AccessCondition> operands, AccessContext context, AccessResource resource, bool conservativeConditions)
     {
         var unknown = false;
         for (var i = 0; i < operands.Count; i++)
         {
-            var value = Evaluate(operands[i], context, resource);
+            var value = Evaluate(operands[i], context, resource, conservativeConditions);
             if (value == false)
                 return false;
             unknown |= value is null;
@@ -395,12 +406,12 @@ internal sealed class AccessEngine(
         return unknown ? null : true;
     }
 
-    private static bool? EvaluateOr(IReadOnlyList<AccessCondition> operands, AccessContext context, AccessResource resource)
+    private static bool? EvaluateOr(IReadOnlyList<AccessCondition> operands, AccessContext context, AccessResource resource, bool conservativeConditions)
     {
         var unknown = false;
         for (var i = 0; i < operands.Count; i++)
         {
-            var value = Evaluate(operands[i], context, resource);
+            var value = Evaluate(operands[i], context, resource, conservativeConditions);
             if (value == true)
                 return true;
             unknown |= value is null;

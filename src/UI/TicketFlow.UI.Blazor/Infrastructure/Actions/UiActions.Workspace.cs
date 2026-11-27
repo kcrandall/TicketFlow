@@ -54,8 +54,20 @@ public static partial class UiActions
 
         handlers["settings.save"] = context => WithAsync<IWorkspaceSettingsService>(context, async settings =>
         {
-            var value = new WorkspaceSettings(context.Require("name", "Name"), context.Require("locale", "Default locale"), context.Require("timezone", "Time zone"),
-                context.All("toggle").Select(toggle => new KeyValuePair<string, bool>(toggle, true)));
+            var checkedToggles = new HashSet<string>(context.All("toggle"), StringComparer.Ordinal);
+            var toggles = new Dictionary<string, bool>(StringComparer.Ordinal);
+            if (context.Revision is not null)
+            {
+                var current = await settings.GetAsync(context.Actor, context.Aborted);
+                if (current is TicketValue<StoredWorkspaceSettings> existing)
+                    foreach (var key in existing.Value.Settings.FeatureToggles.Keys)
+                        toggles[key] = checkedToggles.Contains(key);
+                else if (current is TicketFailure failure && failure.Kind != TicketFailureKind.NotFound)
+                    return UiOutcome.FromFailure(failure);
+            }
+            foreach (var toggle in checkedToggles)
+                toggles[toggle] = true;
+            var value = new WorkspaceSettings(context.Require("name", "Name"), context.Require("locale", "Default locale"), context.Require("timezone", "Time zone"), toggles);
             var result = context.Revision is { } revision
                 ? await settings.UpdateAsync(context.Actor, value, revision, context.Aborted)
                 : await settings.CreateAsync(context.Actor, value, context.Aborted);

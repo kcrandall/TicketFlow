@@ -101,7 +101,7 @@ public sealed partial class TicketFlowToolContext
         {
             result = await RunCoreAsync(workspace, body, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception error) when (error is ArgumentException or FormatException or JsonException && !cancellationToken.IsCancellationRequested)
+        catch (Exception error) when (error is ArgumentException or FormatException or JsonException or OverflowException && !cancellationToken.IsCancellationRequested)
         {
             result = Fail(TicketFlowToolError.Invalid([SafeMessage(error)]));
         }

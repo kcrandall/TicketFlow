@@ -828,7 +828,7 @@ public sealed class ServiceAccountService : IServiceAccountService
             for (var i = 0; i < defs.Count; i++)
             {
                 var permission = defs[i].Permission;
-                if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly).Allowed)
+                if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, conservativeConditions: true).Allowed)
                 {
                     allHeld = false;
                     if (missing is null)
@@ -840,7 +840,7 @@ public sealed class ServiceAccountService : IServiceAccountService
         }
 
         foreach (var permission in role.Permissions)
-            if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly).Allowed)
+            if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, conservativeConditions: true).Allowed)
             {
                 allHeld = false;
                 if (missing is null)
@@ -855,7 +855,7 @@ public sealed class ServiceAccountService : IServiceAccountService
     {
         var defs = engine.Catalog.Definitions;
         for (var i = 0; i < defs.Count; i++)
-            if (!AccessEngine.EvaluateSimple(context, defs[i].Permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly).Allowed)
+            if (!AccessEngine.EvaluateSimple(context, defs[i].Permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, conservativeConditions: true).Allowed)
                 return false;
         return true;
     }

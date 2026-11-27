@@ -181,6 +181,8 @@ public sealed class ModelAndCodecTests
     [DataRow("{\"v\":1,\"a\":{\"Bad Key\":{\"t\":\"text\",\"v\":\"x\"}}}")]
     [DataRow("{\"v\":1,\"a\":{\"k\":{\"t\":\"blob\",\"v\":\"x\"}}}")]
     [DataRow("{\"v\":1,\"a\":{\"k\":{\"t\":\"number\",\"v\":\"1e5\"}}}")]
+    [DataRow("{\"v\":1,\"a\":{\"k\":{\"t\":\"number\",\"v\":\"1e100\"}}}")]
+    [DataRow("{\"v\":1,\"a\":{\"k\":{\"t\":\"number\",\"v\":\"999999999999999999999999999999999999\"}}}")]
     [DataRow("{\"v\":1,\"a\":{\"k\":{\"t\":\"date\",\"v\":\"2026-13-01\"}}}")]
     [DataRow("not json")]
     public void CodecRejectsUnknownOrInvalidPayloads(string json) =>

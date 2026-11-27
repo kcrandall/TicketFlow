@@ -52,6 +52,7 @@ public sealed class ModelAndCompositionTests
         Assert.ThrowsExactly<FormatException>(() => AssistJsonCodec.DecodeSettings("""{"v":2,"enabled":false,"daily":1,"rpm":1,"models":{}}"""));
         Assert.ThrowsExactly<FormatException>(() => AssistJsonCodec.DecodeSettings("""{"v":1,"enabled":false,"daily":1,"rpm":1,"models":{},"x":1}"""));
         Assert.ThrowsExactly<FormatException>(() => AssistJsonCodec.DecodeSettings("""{"v":1,"enabled":false,"daily":1,"rpm":1,"models":{"99":"m"}}"""));
+        Assert.ThrowsExactly<FormatException>(() => AssistJsonCodec.DecodeSettings("""{"v":1,"enabled":false,"daily":1,"rpm":1,"models":{"999999999999999999999":"m"}}"""));
 
         var payload = new AssistTimelinePayload(AssistFeature.ReplyDraft, "claude-sonnet-5-5", Guid.Parse("01890000-0000-7000-8000-000000000001"), new AssistUsage(1, 2, 3, 4), [new ArticleId("a1")]);
         var encoded = AssistJsonCodec.EncodeTimelinePayload(payload);

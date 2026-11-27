@@ -35,4 +35,7 @@ internal sealed class FixedGrantStore(params AccessGrant[] grants) : IAccessGran
     public Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> UpdateAsync(AccessGrant grant, long expectedRevision, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
     public Task<StoreWriteResult<StoredAccessGrant, AccessWriteRejection>> DeleteAsync(AccessPartition partition, GrantId id, long expectedRevision, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+    public Task<bool> HasLiveDenyForRoleAsync(AccessPartition partition, WorkspaceId workspace, RoleId role, DateTimeOffset now, CancellationToken cancellationToken = default) =>
+        Task.FromResult(grants.Any(grant => grant.Partition == partition && grant.Workspace == workspace && grant.Effect == GrantEffect.Deny && grant.Role == role && (grant.ValidUntil is not { } until || until > now)));
 }

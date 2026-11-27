@@ -312,7 +312,7 @@ public sealed class RoleFederationService : IRoleFederationService
         for (var i = 0; i < permissions.Count; i++)
         {
             var permission = permissions[i];
-            if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly).Allowed)
+            if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, conservativeConditions: true).Allowed)
                 (missing ??= []).Add(permission);
         }
 

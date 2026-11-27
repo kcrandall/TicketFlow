@@ -163,6 +163,12 @@ public static class AccessStoreContract
         Assert.IsEmpty(await competing.ListAllForSubjectAsync(partition, new TeamId("ada"), scope.WorkspaceId));
         Assert.IsEmpty(await competing.ListAllForSubjectAsync(AccessPartition.From(TestScopes.Create(tenantId: "other")), user, scope.WorkspaceId));
 
+        // HasLiveDenyForRoleAsync detects active denies across workspace, team and inbox scopes and ignores allows, other workspaces and expired denies.
+        Assert.IsTrue(await competing.HasLiveDenyForRoleAsync(partition, scope.WorkspaceId, BuiltInRoles.Agent.Id, TestClock.DefaultStart));
+        Assert.IsFalse(await competing.HasLiveDenyForRoleAsync(partition, scope.WorkspaceId, BuiltInRoles.Viewer.Id, TestClock.DefaultStart));
+        Assert.IsFalse(await competing.HasLiveDenyForRoleAsync(partition, new WorkspaceId("elsewhere"), BuiltInRoles.Agent.Id, TestClock.DefaultStart));
+        Assert.IsFalse(await competing.HasLiveDenyForRoleAsync(AccessPartition.From(TestScopes.Create(tenantId: "other")), scope.WorkspaceId, BuiltInRoles.Agent.Id, TestClock.DefaultStart));
+
         foreach (var other in TestScopes.LevelVariants(scope).Skip(1).Take(4))
         {
             var otherPartition = AccessPartition.From(other);

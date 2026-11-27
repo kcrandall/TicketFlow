@@ -107,6 +107,31 @@ public sealed class ToolTests
     }
 
     [TestMethod]
+    public async Task OverflowingInputsAndOverflowExceptionsMapToInvalidMcpErrors()
+    {
+        await using var host = await McpTestHost.CreateAsync();
+        const string elapsedOverflow = """{"v":1,"name":"R","enabled":true,"priority":1,"stop":false,"auto":false,"trigger":{"t":"message-received"},"cond":{"op":"elapsed","since":"created","cmp":"at-least","seconds":922337203686},"actions":[{"a":"set-priority","priority":"low"}]}""";
+        const string snoozeOverflow = """{"v":1,"name":"R","enabled":true,"priority":1,"stop":false,"auto":false,"trigger":{"t":"message-received"},"actions":[{"a":"snooze","seconds":922337203686}]}""";
+        const string scientificOverflow = """{"v":1,"name":"R","enabled":true,"priority":1,"stop":false,"auto":false,"trigger":{"t":"message-received"},"actions":[{"a":"set-attribute","key":"score","value":{"t":"number","v":"1e100"}}]}""";
+        const string decimalOverflow = """{"v":1,"name":"R","enabled":true,"priority":1,"stop":false,"auto":false,"trigger":{"t":"message-received"},"actions":[{"a":"set-attribute","key":"score","value":{"t":"number","v":"999999999999999999999999999999999999"}}]}""";
+
+        foreach (var definition in new[] { elapsedOverflow, snoozeOverflow, scientificOverflow, decimalOverflow })
+        {
+            var (isError, content) = await host.CallAsync("automation_create_rule", new() { ["ruleId"] = "overflow-rule", ["definitionJson"] = definition }, user: "owner");
+            Assert.IsTrue(isError, definition);
+            Assert.AreEqual("invalid", McpTestHost.Code(content), definition);
+        }
+
+        // TicketFlowToolContext.RunAsync also catches raw OverflowException directly and returns a clean invalid error.
+        await using var scope = host.Services.CreateAsyncScope();
+        var descriptor = TicketFlowToolCatalog.Tools[0];
+        var context = new TicketFlowToolContext(scope.ServiceProvider, user: null, descriptor);
+        var overflowResult = await context.RunAsync(host.Scope.WorkspaceId.Value, _ => throw new OverflowException("Numeric overflow"), CancellationToken.None);
+        Assert.IsTrue(overflowResult.IsError);
+        Assert.AreEqual("invalid", McpTestHost.Code(overflowResult.StructuredContent!.Value));
+    }
+
+    [TestMethod]
     public async Task FeatureToolsetsWithoutServicesAreUnavailable()
     {
         await using var host = await McpTestHost.CreateAsync(assist: false);

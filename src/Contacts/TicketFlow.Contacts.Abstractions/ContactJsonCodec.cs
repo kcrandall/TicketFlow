@@ -343,7 +343,9 @@ public static class ContactJsonCodec
         if (type.ValueEquals("text"u8))
             return new TextAttributeValue(String(value));
         if (type.ValueEquals("number"u8))
-            return new NumberAttributeValue(decimal.Parse(String(value), NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture));
+            return decimal.TryParse(String(value), NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var number)
+                ? new NumberAttributeValue(number)
+                : throw new FormatException("Invalid decimal value.");
         if (type.ValueEquals("bool"u8))
             return new BooleanAttributeValue(value.GetBoolean());
         if (type.ValueEquals("date"u8))

@@ -403,7 +403,7 @@ public static class AutomationCodec
             case "elapsed":
                 AutomationJson.RequireProperties(element, "op", "since", "cmp", "seconds");
                 return new ElapsedCondition(element.RequiredKebab<ConversationTimestamp>("since"),
-                    element.RequiredKebab<ElapsedComparison>("cmp"), TimeSpan.FromSeconds(element.RequiredLong("seconds")));
+                    element.RequiredKebab<ElapsedComparison>("cmp"), ReadSeconds(element, "seconds"));
             default:
                 throw new FormatException("Unknown condition operator.");
         }
@@ -530,7 +530,7 @@ public static class AutomationCodec
                 return new SetStatusAction(AutomationJson.Status(element.GetProperty("status")));
             case "snooze":
                 AutomationJson.RequireProperties(element, "a", "seconds");
-                return new SnoozeAction(TimeSpan.FromSeconds(element.RequiredLong("seconds")));
+                return new SnoozeAction(ReadSeconds(element, "seconds"));
             case "set-attribute":
                 AutomationJson.RequireProperties(element, "a", "key", "value");
                 return new SetAttributeAction(element.RequiredString("key"),
@@ -584,6 +584,16 @@ public static class AutomationCodec
         writer.WriteEndObject();
     }
 
+    private const long MaximumTimeSpanSeconds = long.MaxValue / TimeSpan.TicksPerSecond;
+
+    private static TimeSpan ReadSeconds(JsonElement element, string name)
+    {
+        var seconds = element.RequiredLong(name);
+        if (seconds is < -MaximumTimeSpanSeconds or > MaximumTimeSpanSeconds)
+            throw new FormatException("Duration in seconds is out of range.");
+        return TimeSpan.FromSeconds(seconds);
+    }
+
     private static ConversationAttributeValue ReadAttributeValue(JsonElement element)
     {
         AutomationJson.RequireProperties(element, "t", "v");
@@ -591,7 +601,9 @@ public static class AutomationCodec
         return element.RequiredString("t") switch
         {
             "text" => new ConversationTextValue(value.RequiredString()),
-            "number" => new ConversationNumberValue(decimal.Parse(value.RequiredString(), NumberStyles.Number, CultureInfo.InvariantCulture)),
+            "number" => decimal.TryParse(value.RequiredString(), NumberStyles.Number, CultureInfo.InvariantCulture, out var number)
+                ? new ConversationNumberValue(number)
+                : throw new FormatException("Invalid decimal value."),
             "boolean" => new ConversationBooleanValue(value.RequiredBool()),
             "date" => new ConversationDateValue(DateOnly.ParseExact(value.RequiredString(), "yyyy-MM-dd", CultureInfo.InvariantCulture)),
             "list" => new ConversationListValue(AutomationJson.Strings(value)),

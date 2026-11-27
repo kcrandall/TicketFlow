@@ -815,7 +815,9 @@ public static class ConversationJsonCodec
         if (type.ValueEquals("text"u8))
             return new ConversationTextValue(String(value));
         if (type.ValueEquals("number"u8))
-            return new ConversationNumberValue(decimal.Parse(String(value), NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture));
+            return decimal.TryParse(String(value), NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var number)
+                ? new ConversationNumberValue(number)
+                : throw new FormatException("Invalid decimal value.");
         if (type.ValueEquals("bool"u8))
             return new ConversationBooleanValue(value.GetBoolean());
         if (type.ValueEquals("date"u8))

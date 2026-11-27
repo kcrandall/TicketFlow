@@ -64,13 +64,13 @@ public sealed class SurveyService : ISurveyService
         var existing = await store.GetSurveyAsync(actor.Scope, survey.Id, cancellationToken).ConfigureAwait(false);
         if (existing is null)
             return NotFound;
+        if (existing.Survey.Inbox != survey.Inbox
+            && await AuthorizeAsync(actor, SurveyPermissions.Manage, SurveyResources.Survey(actor.Scope, existing.Survey), cancellationToken).ConfigureAwait(false) is { } refusedOld)
+            return refusedOld;
         if (existing.Revision != expectedRevision)
             return Conflict(existing.Revision);
         if (existing.Survey.Kind != survey.Kind)
             return Invalid("A survey's kind cannot change; create a new survey instead.");
-        if (existing.Survey.Inbox != survey.Inbox
-            && await AuthorizeAsync(actor, SurveyPermissions.Manage, SurveyResources.Survey(actor.Scope, existing.Survey), cancellationToken).ConfigureAwait(false) is { } refusedOld)
-            return refusedOld;
         return Map(await store.UpdateSurveyAsync(actor.Scope, survey, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 

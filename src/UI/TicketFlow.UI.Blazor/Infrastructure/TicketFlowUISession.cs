@@ -248,18 +248,17 @@ public sealed class TicketFlowUISession
         if (partition is null)
             return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, null, null, none, theme);
         var resolvedScope = partition.InWorkspace(id);
-        if (!VerifyScopeClaims(http.User, resolvedScope))
+        if (!AccessPrincipalGuard.VerifyScopeClaims(http.User, resolvedScope))
             return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, resolvedScope, null, none, theme);
         var resolvedPrincipal = await ResolvePrincipalAsync(http, resolvedScope, ticketFlowResolver, accessResolver).ConfigureAwait(false);
         if (resolvedPrincipal is null || resolvedPrincipal.Scope != resolvedScope)
             return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, resolvedScope, null, none, theme);
-        if (resolvedPrincipal is ApiClientPrincipal client
-            && services.GetService<IServiceAccountStore>() is { } serviceAccounts)
-        {
-            var stored = await serviceAccounts.FindAsync(AccessPartition.From(resolvedScope), client.ClientId, http.RequestAborted).ConfigureAwait(false);
-            if (stored is not null && (!stored.IsEnabled || !stored.Account.AppliesTo(resolvedScope)))
-                return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, resolvedScope, null, none, theme);
-        }
+        if (!await AccessPrincipalGuard.IsServiceAccountActiveForScopeAsync(
+                resolvedPrincipal,
+                resolvedScope,
+                services.GetService<IServiceAccountStore>(),
+                http.RequestAborted).ConfigureAwait(false))
+            return new TicketFlowUISession(http, options, UiSessionState.NoPrincipal, resolvedScope, null, none, theme);
         return new TicketFlowUISession(http, options, UiSessionState.Ready, resolvedScope, resolvedPrincipal, none, theme);
     }
 
@@ -323,30 +322,6 @@ public sealed class TicketFlowUISession
         user.Identity is { IsAuthenticated: true } identity
         && string.Equals(identity.AuthenticationType, "ApiKey", StringComparison.Ordinal)
         && user.HasClaim(static c => string.Equals(c.Type, "api_key_id", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(c.Value));
-
-    private static bool VerifyScopeClaims(ClaimsPrincipal principal, TicketScope scope)
-    {
-        foreach (var claim in principal.Claims)
-        {
-            var expected = claim.Type switch
-            {
-                "tenant_id" => scope.TenantId,
-                "project_id" => scope.ProjectId,
-                "environment_id" or "environment" => scope.EnvironmentId,
-                "app_id" or "app_name" => scope.AppId,
-                "workspace_id" or "workspace" => scope.WorkspaceId.Value,
-                _ => null,
-            };
-            if (expected is null)
-                continue;
-
-            var trimmed = claim.Value?.Trim();
-            if (string.IsNullOrEmpty(trimmed) || !string.Equals(trimmed, expected, StringComparison.Ordinal))
-                return false;
-        }
-
-        return true;
-    }
 
     private static AccessPartition? PartitionFromClaims(ClaimsPrincipal user)
     {

@@ -58,13 +58,15 @@ public sealed class MacroService(IMacroStore macros, IAccessEvaluator evaluator,
         var scope = AutomationGuards.RequireActor(actor);
         ArgumentNullException.ThrowIfNull(macro);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
+        if (!await CanManageAsync(actor, macro, cancellationToken).ConfigureAwait(false))
+            return TicketFailure.Forbidden;
         var current = await macros.GetAsync(scope, macro.Id, cancellationToken).ConfigureAwait(false);
         if (current is null || !Visible(actor, current.Macro))
             return TicketFailure.NotFound;
+        if (!await CanManageAsync(actor, current.Macro, cancellationToken).ConfigureAwait(false))
+            return TicketFailure.Forbidden;
         if (current.Revision != expectedRevision)
             return TicketFailure.Conflict(current.Revision);
-        if (!await CanManageAsync(actor, current.Macro, cancellationToken).ConfigureAwait(false) || !await CanManageAsync(actor, macro, cancellationToken).ConfigureAwait(false))
-            return TicketFailure.Forbidden;
         return AutomationGuards.Map(await macros.UpdateAsync(scope, macro, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
@@ -75,11 +77,16 @@ public sealed class MacroService(IMacroStore macros, IAccessEvaluator evaluator,
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
         var current = await macros.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
         if (current is null || !Visible(actor, current.Macro))
+        {
+            if (!await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.MacroRun, cancellationToken).ConfigureAwait(false)
+                && !await AutomationGuards.PermittedAsync(evaluator, actor, AutomationPermissions.MacroManage, cancellationToken).ConfigureAwait(false))
+                return TicketFailure.Forbidden;
             return TicketFailure.NotFound;
-        if (current.Revision != expectedRevision)
-            return TicketFailure.Conflict(current.Revision);
+        }
         if (!await CanManageAsync(actor, current.Macro, cancellationToken).ConfigureAwait(false))
             return TicketFailure.Forbidden;
+        if (current.Revision != expectedRevision)
+            return TicketFailure.Conflict(current.Revision);
         return AutomationGuards.Map(await macros.DeleteAsync(scope, id, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 

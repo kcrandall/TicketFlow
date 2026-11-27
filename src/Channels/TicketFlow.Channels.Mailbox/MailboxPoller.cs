@@ -47,11 +47,18 @@ public sealed class MailboxMimeNormalizer(IMailboxAttachmentStore attachmentStor
             if (isSeen is not null && await isSeen(messageId, cancellationToken).ConfigureAwait(false))
                 return (messageId, null, null, AlreadySeen: true);
 
+            // Skip bounces and automated replies BEFORE uploading attachments so mail loops never create conversations or orphan blobs.
+            if (config.SuppressAutoReplies && TryDetectHeaderAutoReplyOrBounce(mime) is { } autoSkipReason)
+                return (messageId, null, autoSkipReason, AlreadySeen: false);
+
             // Extract and validate sender & message metadata BEFORE uploading attachments so invalid/poison messages never orphan blobs.
-            var senderBox = mime.ReplyTo.Mailboxes.FirstOrDefault(m => !string.IsNullOrWhiteSpace(m.Address))
-                ?? mime.From.Mailboxes.FirstOrDefault(m => !string.IsNullOrWhiteSpace(m.Address));
+            // Resolve sender identity exclusively from From (never Reply-To) so callers cannot spoof another contact's identity.
+            var senderBox = mime.From.Mailboxes.FirstOrDefault(m => !string.IsNullOrWhiteSpace(m.Address));
             if (senderBox is null)
                 return (messageId, null, "missing-sender", AlreadySeen: false);
+
+            if (config.SuppressAutoReplies && IsBounceSender(senderBox.Address))
+                return (messageId, null, "bounce", AlreadySeen: false);
 
             var sender = new ChannelSenderEvidence(ContactIdentityKind.Email, senderBox.Address.Trim(), verified: false);
 
@@ -150,6 +157,85 @@ public sealed class MailboxMimeNormalizer(IMailboxAttachmentStore attachmentStor
 
     /// <summary>Normalizes a RFC 5322 Message-Id (strips surrounding angle brackets, trims whitespace and enforces channel text rules).</summary>
     public static string? NormalizeMessageId(string? raw) => ChannelText.NormalizeReference(raw);
+
+    private static string? TryDetectHeaderAutoReplyOrBounce(MimeMessage mime)
+    {
+        if (IsBounceContentType(mime.Body))
+            return "bounce";
+
+        foreach (var header in mime.Headers)
+        {
+            if (header.Id == HeaderId.ReturnPath || string.Equals(header.Field, "Return-Path", StringComparison.OrdinalIgnoreCase))
+            {
+                var value = header.Value.AsSpan().Trim();
+                if (value.IsEmpty || (value.Length >= 2 && value[0] == '<' && value[^1] == '>' && value[1..^1].Trim().IsEmpty))
+                    return "bounce";
+            }
+            else if (string.Equals(header.Field, "Auto-Submitted", StringComparison.OrdinalIgnoreCase))
+            {
+                var value = header.Value.AsSpan();
+                var semicolon = value.IndexOf(';');
+                if (semicolon >= 0)
+                    value = value[..semicolon];
+                value = value.Trim();
+                if (!value.IsEmpty && !value.Equals("no", StringComparison.OrdinalIgnoreCase))
+                    return "auto-submitted";
+            }
+            else if (string.Equals(header.Field, "Precedence", StringComparison.OrdinalIgnoreCase))
+            {
+                var value = header.Value.AsSpan().Trim();
+                if (value.Equals("bulk", StringComparison.OrdinalIgnoreCase)
+                    || value.Equals("junk", StringComparison.OrdinalIgnoreCase)
+                    || value.Equals("list", StringComparison.OrdinalIgnoreCase)
+                    || value.Equals("auto_reply", StringComparison.OrdinalIgnoreCase)
+                    || value.Equals("auto-reply", StringComparison.OrdinalIgnoreCase))
+                    return "auto-submitted";
+            }
+            else if (string.Equals(header.Field, "X-Auto-Response-Suppress", StringComparison.OrdinalIgnoreCase))
+            {
+                var remaining = header.Value.AsSpan();
+                while (!remaining.IsEmpty)
+                {
+                    var comma = remaining.IndexOf(',');
+                    var token = (comma >= 0 ? remaining[..comma] : remaining).Trim();
+                    if (token.Equals("All", StringComparison.OrdinalIgnoreCase)
+                        || token.Equals("OOF", StringComparison.OrdinalIgnoreCase)
+                        || token.Equals("AutoReply", StringComparison.OrdinalIgnoreCase))
+                        return "auto-submitted";
+                    if (comma < 0)
+                        break;
+                    remaining = remaining[(comma + 1)..];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsBounceContentType(MimeEntity? body)
+    {
+        if (body is null)
+            return false;
+        if (body.ContentType is { } contentType
+            && (contentType.IsMimeType("multipart", "report") || contentType.IsMimeType("message", "delivery-status")))
+            return true;
+        if (body is Multipart multipart)
+        {
+            for (var i = 0; i < multipart.Count; i++)
+                if (multipart[i].ContentType is { } partType && partType.IsMimeType("message", "delivery-status"))
+                    return true;
+        }
+        return false;
+    }
+
+    private static bool IsBounceSender(string address)
+    {
+        var span = address.AsSpan().Trim();
+        var at = span.IndexOf('@');
+        var local = at >= 0 ? span[..at] : span;
+        return local.Equals("mailer-daemon", StringComparison.OrdinalIgnoreCase)
+            || local.Equals("postmaster", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static string? SanitizeHeaderText(string? raw, int maxChars)
     {

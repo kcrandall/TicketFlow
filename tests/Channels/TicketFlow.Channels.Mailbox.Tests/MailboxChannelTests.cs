@@ -273,6 +273,108 @@ public sealed class MailboxChannelTests
         Assert.AreEqual("ok-4@customer.example.com", pipeline.Received[1].ExternalMessageId);
     }
 
+    [TestMethod]
+    public async Task SenderIdentityAlwaysUsesFromAndIgnoresReplyToSpoofing()
+    {
+        var attachments = new InMemoryMailboxAttachmentStore();
+        var normalizer = new MailboxMimeNormalizer(attachments);
+        var config = new MailboxEndpointConfig(Scope, "imap-support", "imap.example.com");
+
+        var spoofedRaw = Encoding.UTF8.GetBytes(
+            "From: \"Attacker\" <attacker@evil.com>\r\n" +
+            "Reply-To: \"Victim\" <victim@customer.com>\r\n" +
+            "To: support@acme.example.com\r\n" +
+            "Message-ID: <spoof-1@evil.com>\r\n" +
+            "Subject: Spoofed reply\r\n" +
+            "Content-Type: text/plain; charset=utf-8\r\n" +
+            "\r\n" +
+            "Injected body\r\n");
+
+        var (messageId, message, skipReason) = await normalizer.NormalizeAsync(config, 1, 1, spoofedRaw, Now);
+        Assert.AreEqual("spoof-1@evil.com", messageId);
+        Assert.IsNull(skipReason);
+        Assert.IsNotNull(message);
+        Assert.AreEqual("attacker@evil.com", message.Sender.Value, "Sender must come strictly from From, never Reply-To.");
+        Assert.AreEqual("Attacker", message.SenderDisplayName);
+
+        // Missing From with only Reply-To must be skipped as missing-sender
+        var replyToOnlyRaw = Encoding.UTF8.GetBytes(
+            "Reply-To: victim@customer.com\r\n" +
+            "To: support@acme.example.com\r\n" +
+            "Message-ID: <no-from@evil.com>\r\n" +
+            "Subject: Missing From\r\n" +
+            "Content-Type: text/plain\r\n" +
+            "\r\n" +
+            "Body\r\n");
+
+        var (_, missingFromMsg, missingFromSkip) = await normalizer.NormalizeAsync(config, 1, 2, replyToOnlyRaw, Now);
+        Assert.IsNull(missingFromMsg);
+        Assert.AreEqual("missing-sender", missingFromSkip);
+    }
+
+    [TestMethod]
+    public async Task AutoRepliesAndBouncesAreSuppressedByDefaultWithoutUploadingAttachments()
+    {
+        var attachments = new CountingAttachmentStore();
+        var normalizer = new MailboxMimeNormalizer(attachments);
+        var config = new MailboxEndpointConfig(Scope, "imap-support", "imap.example.com");
+
+        static byte[] RawWithAttachment(string headers, string contentType = "multipart/mixed; boundary=\"b\"") => Encoding.UTF8.GetBytes(
+            headers +
+            "To: support@acme.example.com\r\n" +
+            "Subject: Test\r\n" +
+            "MIME-Version: 1.0\r\n" +
+            $"Content-Type: {contentType}\r\n" +
+            "\r\n" +
+            "--b\r\n" +
+            "Content-Type: text/plain\r\n\r\n" +
+            "Automated text\r\n" +
+            "--b\r\n" +
+            "Content-Type: application/octet-stream\r\n" +
+            "Content-Disposition: attachment; filename=\"report.bin\"\r\n\r\n" +
+            "PAYLOAD\r\n" +
+            "--b--\r\n");
+
+        var cases = new (string ExpectedReason, byte[] Raw)[]
+        {
+            ("auto-submitted", RawWithAttachment("From: ooo@customer.com\r\nAuto-Submitted: auto-replied\r\n")),
+            ("auto-submitted", RawWithAttachment("From: sys@customer.com\r\nAuto-Submitted: auto-generated; owner=list\r\n")),
+            ("auto-submitted", RawWithAttachment("From: news@customer.com\r\nPrecedence: bulk\r\n")),
+            ("auto-submitted", RawWithAttachment("From: news@customer.com\r\nPrecedence: junk\r\n")),
+            ("auto-submitted", RawWithAttachment("From: list@customer.com\r\nPrecedence: list\r\n")),
+            ("auto-submitted", RawWithAttachment("From: ooo@customer.com\r\nPrecedence: auto_reply\r\n")),
+            ("auto-submitted", RawWithAttachment("From: exch@customer.com\r\nX-Auto-Response-Suppress: DR, OOF, AutoReply\r\n")),
+            ("auto-submitted", RawWithAttachment("From: exch@customer.com\r\nX-Auto-Response-Suppress: All\r\n")),
+            ("bounce", RawWithAttachment("From: relay@mx.example.com\r\nReturn-Path: <>\r\n")),
+            ("bounce", RawWithAttachment("From: MAILER-DAEMON@mx.example.com\r\n")),
+            ("bounce", RawWithAttachment("From: Postmaster@mx.example.com\r\n")),
+            ("bounce", RawWithAttachment("From: relay@mx.example.com\r\n", "multipart/report; report-type=delivery-status; boundary=\"b\"")),
+            ("bounce", Encoding.UTF8.GetBytes("From: relay@mx.example.com\r\nTo: support@acme.example.com\r\nSubject: DSN\r\nContent-Type: message/delivery-status\r\n\r\nReporting-MTA: dns; mx.example.com\r\n")),
+        };
+
+        for (var i = 0; i < cases.Length; i++)
+        {
+            var (expectedReason, raw) = cases[i];
+            var (_, msg, skip) = await normalizer.NormalizeAsync(config, 1, (uint)(i + 1), raw, Now);
+            Assert.IsNull(msg, $"Case {i} should have been skipped.");
+            Assert.AreEqual(expectedReason, skip, $"Unexpected skip reason for case {i}.");
+        }
+        Assert.AreEqual(0, attachments.UploadCount, "Skipped bounces and auto-replies must never upload attachments.");
+
+        // Auto-Submitted: no and non-empty Return-Path are normal human mail and must NOT be skipped.
+        var normalHuman = RawWithAttachment("From: ada@customer.com\r\nReturn-Path: <ada@customer.com>\r\nAuto-Submitted: no\r\n");
+        var (_, humanMsg, humanSkip) = await normalizer.NormalizeAsync(config, 1, 100, normalHuman, Now);
+        Assert.IsNull(humanSkip);
+        Assert.IsNotNull(humanMsg);
+        Assert.AreEqual(1, attachments.UploadCount);
+
+        // Opting out via suppressAutoReplies: false allows normalizing auto-submitted mail.
+        var disabledConfig = new MailboxEndpointConfig(Scope, "imap-support", "imap.example.com", suppressAutoReplies: false);
+        var (_, allowedAuto, allowedSkip) = await normalizer.NormalizeAsync(disabledConfig, 1, 101, cases[0].Raw, Now);
+        Assert.IsNull(allowedSkip);
+        Assert.IsNotNull(allowedAuto);
+    }
+
     private sealed class CountingAttachmentStore : IMailboxAttachmentStore
     {
         private readonly InMemoryMailboxAttachmentStore inner = new();

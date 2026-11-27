@@ -40,12 +40,17 @@ public sealed class TicketFlowActor
         var (resolved, status, code) = await TicketFlowScopes.ResolveAsync(context).ConfigureAwait(false);
         if (resolved is null)
             return new TicketFlowActor(null, null, status == StatusCodes.Status404NotFound ? StatusCodes.Status401Unauthorized : status, code);
+        if (!AccessPrincipalGuard.VerifyScopeClaims(context.User, resolved))
+            return new TicketFlowActor(null, null, StatusCodes.Status401Unauthorized, "scope-mismatch");
         var resolver = context.RequestServices.GetRequiredService<ITicketFlowPrincipalResolver>();
         var resolvedPrincipal = await resolver.ResolveAsync(context, resolved, context.RequestAborted).ConfigureAwait(false);
         if (resolvedPrincipal is not { } value)
             return new TicketFlowActor(null, null, StatusCodes.Status401Unauthorized, "unauthenticated");
         if (value.Scope != resolved)
             return new TicketFlowActor(null, null, StatusCodes.Status401Unauthorized, "scope-mismatch");
+        var serviceAccounts = context.RequestServices.GetService<IServiceAccountStore>();
+        if (!await AccessPrincipalGuard.IsServiceAccountActiveForScopeAsync(value, resolved, serviceAccounts, context.RequestAborted).ConfigureAwait(false))
+            return new TicketFlowActor(null, null, StatusCodes.Status401Unauthorized, "unauthenticated");
         return new TicketFlowActor(resolved, value, 0, null);
     }
 }

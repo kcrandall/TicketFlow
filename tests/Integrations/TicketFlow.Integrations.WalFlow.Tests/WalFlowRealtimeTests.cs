@@ -165,6 +165,35 @@ public sealed partial class WalFlowRealtimeTests
     }
 
     [TestMethod]
+    public async Task PostgresRealtimeBackplaneDisposeIsIdempotentAndCancelledStartDoesNotFakeReadiness()
+    {
+        await using var unreachable = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=postgres;Username=postgres;Timeout=1");
+        var opts = Options.Create(new WalFlowRealtimeOptions { PostgresNotifyChannel = "tf_rt_unit", ReconnectDelay = TimeSpan.FromSeconds(5) });
+        var backplane = new PostgresRealtimeBackplane(unreachable, opts);
+
+        // Already-cancelled StartAsync throws without leaving false-ready state
+        using (var preCancelled = new CancellationTokenSource())
+        {
+            await preCancelled.CancelAsync();
+            await Assert.ThrowsAsync<OperationCanceledException>(() => backplane.StartAsync(preCancelled.Token));
+        }
+
+        // First StartAsync cancelled while connecting must NOT make second StartAsync return false-ready
+        using (var ct1 = new CancellationTokenSource(TimeSpan.FromMilliseconds(50)))
+            await Assert.ThrowsAsync<OperationCanceledException>(() => backplane.StartAsync(ct1.Token));
+
+        using (var ct2 = new CancellationTokenSource(TimeSpan.FromMilliseconds(50)))
+            await Assert.ThrowsAsync<OperationCanceledException>(() => backplane.StartAsync(ct2.Token));
+
+        // Double / concurrent DisposeAsync is idempotent (never throws ObjectDisposedException)
+        await Task.WhenAll(backplane.DisposeAsync().AsTask(), backplane.DisposeAsync().AsTask());
+        await backplane.DisposeAsync();
+
+        // StartAsync after DisposeAsync throws ObjectDisposedException
+        await Assert.ThrowsExactlyAsync<ObjectDisposedException>(() => backplane.StartAsync());
+    }
+
+    [TestMethod]
     public async Task LogicalReplicationSlotFeedsWalFlowRealtimeSink()
     {
         await using var db = await PostgresTestDatabase.CreateAsync("tf_walflow_wal_", async storage => storage);

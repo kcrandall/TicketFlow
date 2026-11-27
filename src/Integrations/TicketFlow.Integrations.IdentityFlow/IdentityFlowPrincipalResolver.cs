@@ -37,7 +37,7 @@ public sealed class IdentityFlowPrincipalResolver(
     public async ValueTask<PrincipalRef?> ResolveAsync(ClaimsPrincipal user, TicketScope scope, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scope);
-        if (!VerifyScopeClaims(user, scope))
+        if (user is null || !AccessPrincipalGuard.VerifyScopeClaims(user, scope))
             return null;
         switch (IdentityFlowClaimsMapper.Map(user, options.Value))
         {
@@ -72,29 +72,5 @@ public sealed class IdentityFlowPrincipalResolver(
             default:
                 return null;
         }
-    }
-
-    private static bool VerifyScopeClaims(ClaimsPrincipal? user, TicketScope scope)
-    {
-        if (user is null)
-            return false;
-        foreach (var claim in user.Claims)
-        {
-            var expected = claim.Type switch
-            {
-                "tenant_id" => scope.TenantId,
-                "project_id" => scope.ProjectId,
-                "environment_id" or "environment" => scope.EnvironmentId,
-                "app_id" or "app_name" => scope.AppId,
-                "workspace_id" or "workspace" => scope.WorkspaceId.Value,
-                _ => null,
-            };
-            if (expected is null)
-                continue;
-            var trimmed = claim.Value?.Trim();
-            if (string.IsNullOrEmpty(trimmed) || !string.Equals(trimmed, expected, StringComparison.Ordinal))
-                return false;
-        }
-        return true;
     }
 }

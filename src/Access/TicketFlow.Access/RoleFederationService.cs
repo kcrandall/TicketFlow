@@ -389,15 +389,6 @@ public sealed class RoleFederationService : IRoleFederationService
         if (standard.Denial == AccessDenialReason.ExplicitDeny)
             return (new TicketFailure(TicketFailureKind.Forbidden, [$"The actor is explicitly denied '{requiredPermission}' on the target scope."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
 
-        if (!tenantOnly && standard.Denial == AccessDenialReason.NoMatchingGrant)
-        {
-            var tenantAdmin = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, targetResource, includeBreakGlass: false, tenantAllowsOnly: true);
-            if (tenantAdmin.Allowed)
-                return (null, context);
-            if (tenantAdmin.Denial == AccessDenialReason.ExplicitDeny)
-                return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is explicitly denied tenant administrative permission on the target scope."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
-        }
-
         var withBreakGlass = AccessEngine.EvaluateSimple(context, requiredPermission, targetResource, includeBreakGlass: true, tenantAllowsOnly: tenantOnly);
         if (withBreakGlass.Allowed)
             return (new TicketFailure(TicketFailureKind.Forbidden, ["Break-glass elevation cannot be used for role federation administration."], Code: "break-glass-not-allowed"), context);

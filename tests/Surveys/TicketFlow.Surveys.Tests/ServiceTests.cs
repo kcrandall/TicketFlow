@@ -25,6 +25,7 @@ public sealed class ServiceTests
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.GetSurveyAsync(inboxManager, new SurveyId("workspace"))));
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UpdateSurveyAsync(inboxManager, SampleSurvey("inbox", inbox: "i9"), 1)), "Moving to an inbox the actor cannot manage.");
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UpdateSurveyAsync(inboxManager, SampleSurvey("workspace", SurveyKind.Nps, inbox: "i0"), 1)), "Moving from the workspace needs workspace manage.");
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UpdateSurveyAsync(inboxManager, SampleSurvey("workspace", SurveyKind.Csat, inbox: "i0"), 99)), "Unauthorized source survey must return Forbidden before revision or kind checks.");
         Assert.AreEqual("refused:Invalid", Describe(await fixture.Service.UpdateSurveyAsync(manager, SampleSurvey("inbox", SurveyKind.Nps, inbox: "i0"), 1)));
         Assert.AreEqual("refused:Conflict:1", Describe(await fixture.Service.UpdateSurveyAsync(manager, SampleSurvey("inbox", inbox: "i0", enabled: false), 5)));
         Value(await fixture.Service.UpdateSurveyAsync(inboxManager, SampleSurvey("inbox", inbox: "i0", enabled: false), 1));

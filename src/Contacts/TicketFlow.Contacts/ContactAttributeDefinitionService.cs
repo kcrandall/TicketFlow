@@ -3,7 +3,7 @@ using TicketFlow.Core;
 
 namespace TicketFlow.Contacts;
 
-/// <summary>Default <see cref="IContactAttributeDefinitionService"/>: fenced before authorization, authorized through Access.</summary>
+/// <summary>Default <see cref="IContactAttributeDefinitionService"/>: authorized through Access before fencing.</summary>
 public sealed class ContactAttributeDefinitionService(IContactAttributeDefinitionStore store, IAccessEvaluator evaluator) : IContactAttributeDefinitionService
 {
     private readonly IContactAttributeDefinitionStore store = store ?? throw new ArgumentNullException(nameof(store));
@@ -31,13 +31,13 @@ public sealed class ContactAttributeDefinitionService(IContactAttributeDefinitio
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(definition);
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
+        if (!await PermittedAsync(actor, ContactPermissions.ManageAttributes, cancellationToken).ConfigureAwait(false))
+            return ContactRefused.Forbidden;
         var existing = await store.GetAsync(scope, definition.Key, cancellationToken).ConfigureAwait(false);
         if (existing is null)
             return ContactRefused.NotFound;
         if (existing.Revision != expectedRevision)
             return new ContactRefused(ContactRefusal.Conflict, [], existing.Revision);
-        if (!await PermittedAsync(actor, ContactPermissions.ManageAttributes, cancellationToken).ConfigureAwait(false))
-            return ContactRefused.Forbidden;
         return Map(await store.UpdateAsync(scope, definition, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 
@@ -46,13 +46,13 @@ public sealed class ContactAttributeDefinitionService(IContactAttributeDefinitio
         var scope = RequireActor(actor);
         ContactAttributeDefinition.RequireKey(key, nameof(key));
         ArgumentOutOfRangeException.ThrowIfLessThan(expectedRevision, 1);
+        if (!await PermittedAsync(actor, ContactPermissions.ManageAttributes, cancellationToken).ConfigureAwait(false))
+            return ContactRefused.Forbidden;
         var existing = await store.GetAsync(scope, key, cancellationToken).ConfigureAwait(false);
         if (existing is null)
             return ContactRefused.NotFound;
         if (existing.Revision != expectedRevision)
             return new ContactRefused(ContactRefusal.Conflict, [], existing.Revision);
-        if (!await PermittedAsync(actor, ContactPermissions.ManageAttributes, cancellationToken).ConfigureAwait(false))
-            return ContactRefused.Forbidden;
         return Map(await store.DeleteAsync(scope, key, expectedRevision, cancellationToken).ConfigureAwait(false));
     }
 

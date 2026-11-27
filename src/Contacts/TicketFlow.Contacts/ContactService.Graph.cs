@@ -224,16 +224,20 @@ public sealed partial class ContactService
         if (request.Target == request.Source)
             return ContactRefused.Invalid("A contact cannot be merged into itself.");
         var loaded = await store.GetManyAsync(scope, [request.Target, request.Source], cancellationToken).ConfigureAwait(false);
-        if (!loaded.TryGetValue(request.Target, out var target) || !loaded.TryGetValue(request.Source, out var source))
+        var hasTarget = loaded.TryGetValue(request.Target, out var target);
+        var hasSource = loaded.TryGetValue(request.Source, out var source);
+        if (!hasTarget && !hasSource)
             return ContactRefused.NotFound;
-        if (target.Revision != request.ExpectedTargetRevision)
-            return new ContactRefused(ContactRefusal.Conflict, ["The target revision changed."], target.Revision);
-        if (source.Revision != request.ExpectedSourceRevision)
-            return new ContactRefused(ContactRefusal.Conflict, ["The source revision changed."], source.Revision);
         var decisions = await evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Merge], cancellationToken).ConfigureAwait(false);
-        if (!(await decisions.DecideAsync(ContactPermissions.Merge, ContactAccess.Resource(target), cancellationToken).ConfigureAwait(false)).IsPermitted
-            || !(await decisions.DecideAsync(ContactPermissions.Merge, ContactAccess.Resource(source), cancellationToken).ConfigureAwait(false)).IsPermitted)
+        if ((hasTarget && !(await decisions.DecideAsync(ContactPermissions.Merge, ContactAccess.Resource(target!), cancellationToken).ConfigureAwait(false)).IsPermitted)
+            || (hasSource && !(await decisions.DecideAsync(ContactPermissions.Merge, ContactAccess.Resource(source!), cancellationToken).ConfigureAwait(false)).IsPermitted))
             return ContactRefused.Forbidden;
+        if (!hasTarget || !hasSource)
+            return ContactRefused.NotFound;
+        if (target!.Revision != request.ExpectedTargetRevision)
+            return new ContactRefused(ContactRefusal.Conflict, ["The target revision changed."], target.Revision);
+        if (source!.Revision != request.ExpectedSourceRevision)
+            return new ContactRefused(ContactRefusal.Conflict, ["The source revision changed."], source.Revision);
         if (target.Contact.MergedInto is { } targetMerged)
             return new ContactRefused(ContactRefusal.Merged, ["The target was merged."], target.Revision, targetMerged);
         if (source.Contact.MergedInto is { } sourceMerged)

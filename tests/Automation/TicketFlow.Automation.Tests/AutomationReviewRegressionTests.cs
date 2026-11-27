@@ -201,4 +201,30 @@ public sealed class AutomationReviewRegressionTests
         Assert.AreEqual(1, recovered.Fired);
         CollectionAssert.AreEqual(new[] { new LabelId("checked") }, (await fixture.ConversationAsync("c1")).Labels.ToArray());
     }
+
+    [TestMethod]
+    public async Task UnauthorizedCallersCannotProbeMacroExistenceOrRevisions()
+    {
+        using var fixture = await AutomationFixture.CreateAsync();
+        var shared = new Macro(new MacroId("shared-1"), "Shared", MacroVisibility.Shared, null, [new AddLabelsAction(new LabelId("s"))]);
+        Assert.IsInstanceOfType<TicketValue<StoredMacro>>((await fixture.InScopeAsync(s => s.GetRequiredService<IMacroService>().CreateAsync(fixture.Owner, shared))).Value);
+
+        // Agent has macro:run but NOT macro:manage -> stale revision on shared macro must return Forbidden, not Conflict
+        var agentUpdate = await fixture.InScopeAsync(s => s.GetRequiredService<IMacroService>().UpdateAsync(fixture.Agent, shared, expectedRevision: 99));
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>(agentUpdate.Value).Kind);
+
+        var agentDelete = await fixture.InScopeAsync(s => s.GetRequiredService<IMacroService>().DeleteAsync(fixture.Agent, shared.Id, expectedRevision: 99));
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>(agentDelete.Value).Kind);
+
+        // Viewer has neither macro:run nor macro:manage -> both existing and missing macros return Forbidden
+        var viewerDeleteExisting = await fixture.InScopeAsync(s => s.GetRequiredService<IMacroService>().DeleteAsync(fixture.Viewer, shared.Id, expectedRevision: 99));
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>(viewerDeleteExisting.Value).Kind);
+
+        var viewerDeleteMissing = await fixture.InScopeAsync(s => s.GetRequiredService<IMacroService>().DeleteAsync(fixture.Viewer, new MacroId("does-not-exist"), expectedRevision: 99));
+        Assert.AreEqual(TicketFailureKind.Forbidden, Assert.IsInstanceOfType<TicketFailure>(viewerDeleteMissing.Value).Kind);
+
+        // Owner (authorized) with stale revision still receives Conflict
+        var ownerStale = await fixture.InScopeAsync(s => s.GetRequiredService<IMacroService>().UpdateAsync(fixture.Owner, shared, expectedRevision: 99));
+        Assert.AreEqual(TicketFailureKind.Conflict, Assert.IsInstanceOfType<TicketFailure>(ownerStale.Value).Kind);
+    }
 }

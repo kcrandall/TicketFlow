@@ -147,6 +147,56 @@ public sealed class ReviewRegressionTests
     }
 
     [TestMethod]
+    public async Task UnauthorizedCallersCannotProbeContactAttributeOrLinkingRevisions()
+    {
+        using var fixture = await ContactFixture.CreateAsync();
+        var account = new ExternalAccountRef("acme-portal", "u-99");
+        await fixture.CreateAsync("c1", "Alice", identities: [fixture.Verified(account.Address)]);
+        await fixture.CreateAsync("c2", "Bob");
+        await fixture.Definitions.CreateAsync(fixture.Owner, new ContactAttributeDefinition("plan", ContactAttributeType.Text, displayName: "Plan"));
+
+        var now = fixture.Clock.GetUtcNow();
+        var suggestion = new ContactLinkSuggestion(Guid.NewGuid(), new ContactId("c2"), new ContactId("c1"),
+            ContactIdentityAddress.Parse(ContactIdentityKind.Email, "dup@example.com"), evidenceVerified: true,
+            ContactLinkSuggestionStatus.Pending, now, now, AccessActor.From(fixture.Portal));
+        Assert.IsInstanceOfType<StoreApplied<StoredLinkSuggestionWrite>>((await fixture.LinkingStore.CreateSuggestionAsync(fixture.Scope, suggestion)).Value);
+
+        // Crm has Read + Create only (no Update, Delete, Merge, ManageAttributes, Link)
+        Assert.AreEqual("refused:Forbidden", ContactFixture.Describe(
+            await fixture.Contacts.UpdateAsync(fixture.Crm, new ContactId("c1"), expectedRevision: 99, [new SetContactBlocked(true)])));
+        Assert.AreEqual("refused:Forbidden", ContactFixture.Describe(
+            await fixture.Contacts.DeleteAsync(fixture.Crm, new ContactId("c1"), expectedRevision: 99)));
+        Assert.AreEqual("refused:Forbidden", ContactFixture.Describe(
+            await fixture.Contacts.MergeAsync(fixture.Crm, new ContactMergeRequest(new ContactId("c1"), 99, new ContactId("c2"), 99))));
+
+        // ContactAttributeDefinitionService: unauthorized callers get Forbidden for both existing and missing keys (no existence or revision oracle)
+        Assert.AreEqual("refused:Forbidden", ContactFixture.Describe(
+            await fixture.Definitions.UpdateAsync(fixture.Crm, new ContactAttributeDefinition("plan", ContactAttributeType.Text, displayName: "Changed"), expectedRevision: 99)));
+        Assert.AreEqual("refused:Forbidden", ContactFixture.Describe(
+            await fixture.Definitions.UpdateAsync(fixture.Crm, new ContactAttributeDefinition("missing", ContactAttributeType.Text, displayName: "Missing"), expectedRevision: 99)));
+        Assert.AreEqual("refused:Forbidden", ContactFixture.Describe(
+            await fixture.Definitions.DeleteAsync(fixture.Crm, "plan", expectedRevision: 99)));
+        Assert.AreEqual("refused:Forbidden", ContactFixture.Describe(
+            await fixture.Definitions.DeleteAsync(fixture.Crm, "missing", expectedRevision: 99)));
+
+        // ContactLinkingService: UnlinkAccountAsync and LoadPendingAsync (Accept/Reject suggestion)
+        Assert.AreEqual("refused:Forbidden", ContactFixture.Describe(
+            await fixture.Linking.UnlinkAccountAsync(fixture.Crm, new ContactId("c1"), expectedRevision: 99, account)));
+        Assert.AreEqual("refused:Forbidden", ContactFixture.Describe(
+            await fixture.Linking.RejectSuggestionAsync(fixture.Crm, suggestion.Id, expectedRevision: 99)));
+
+        // Authorized callers with stale revisions still receive Conflict
+        Assert.AreEqual("refused:Conflict:1", ContactFixture.Describe(
+            await fixture.Contacts.UpdateAsync(fixture.Owner, new ContactId("c1"), expectedRevision: 99, [new SetContactBlocked(true)])));
+        Assert.AreEqual("refused:Conflict:1", ContactFixture.Describe(
+            await fixture.Definitions.UpdateAsync(fixture.Owner, new ContactAttributeDefinition("plan", ContactAttributeType.Text, displayName: "Changed"), expectedRevision: 99)));
+        Assert.AreEqual("refused:Conflict:1", ContactFixture.Describe(
+            await fixture.Linking.UnlinkAccountAsync(fixture.Owner, new ContactId("c1"), expectedRevision: 99, account)));
+        Assert.AreEqual("refused:Conflict:1", ContactFixture.Describe(
+            await fixture.Linking.RejectSuggestionAsync(fixture.Owner, suggestion.Id, expectedRevision: 99)));
+    }
+
+    [TestMethod]
     public void AddContactsLeavesTimeProviderToAddTicketFlow()
     {
         var services = new ServiceCollection();

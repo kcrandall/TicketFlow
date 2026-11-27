@@ -145,6 +145,26 @@ public sealed class ReviewRegressionTests
     }
 
     [TestMethod]
+    public async Task UnauthorizedCallersCannotProbeConversationRevisionsThroughMutateOrDelete()
+    {
+        using var fixture = await ConversationFixture.CreateAsync();
+        await fixture.StartAsync("c1");
+
+        Assert.AreEqual("refused:Forbidden", ConversationFixture.Describe(
+            await fixture.Conversations.DeleteAsync(fixture.Viewer, C1, expectedRevision: 99)));
+        Assert.AreEqual("refused:Forbidden", ConversationFixture.Describe(
+            await fixture.Conversations.ChangeStatusAsync(fixture.Viewer, C1, ConversationStatus.Closed, expectedRevision: 99)));
+        Assert.AreEqual("refused:Forbidden", ConversationFixture.Describe(
+            await fixture.Conversations.UpdateLabelsAsync(fixture.Viewer, C1, add: [new LabelId("vip")], remove: [], expectedRevision: 99)));
+
+        // Authorized caller with stale revision still observes Conflict.
+        Assert.AreEqual("conflict:1", ConversationFixture.Describe(
+            await fixture.Conversations.DeleteAsync(fixture.Owner, C1, expectedRevision: 99)));
+        Assert.AreEqual("conflict:1", ConversationFixture.Describe(
+            await fixture.Conversations.ChangeStatusAsync(fixture.Agent, C1, ConversationStatus.Closed, expectedRevision: 99)));
+    }
+
+    [TestMethod]
     public async Task DispatcherDeadLettersPoisonEntriesWithoutHandlingThem()
     {
         var clock = TestClock.Create();

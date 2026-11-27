@@ -16,7 +16,7 @@ internal sealed class TicketFlowEndpointFilter : IEndpointFilter
     /// <summary>Header that marks a body-less POST as a deliberate API call (any value).</summary>
     public const string RequestHeader = TicketFlowHttp.RequestHeader;
 
-    public static Func<EndpointFilterFactoryContext, EndpointFilterDelegate, EndpointFilterDelegate> Create(long maximumBodyBytes) =>
+    public static Func<EndpointFilterFactoryContext, EndpointFilterDelegate, EndpointFilterDelegate> Create(long maximumBodyBytes, bool noStore = false) =>
         (factoryContext, next) =>
         {
             var parameters = factoryContext.MethodInfo.GetParameters();
@@ -33,6 +33,8 @@ internal sealed class TicketFlowEndpointFilter : IEndpointFilter
             return async context =>
             {
                 var http = context.HttpContext;
+                if (noStore)
+                    StampNoStore(http.Response);
                 if (http.Request.ContentLength is { } length && length > maximumBodyBytes)
                     return TicketFlowHttp.Problem(StatusCodes.Status413PayloadTooLarge, "payload-too-large");
                 if (actorIndex >= 0 && context.GetArgument<TicketFlowActor?>(actorIndex) is { } actor)
@@ -85,6 +87,18 @@ internal sealed class TicketFlowEndpointFilter : IEndpointFilter
             return TicketFlowHttp.Problem(StatusCodes.Status422UnprocessableEntity, "invalid", [Message(error)]);
         }
     }
+
+    private static void StampNoStore(HttpResponse response) =>
+        response.OnStarting(static state =>
+        {
+            var httpResponse = (HttpResponse)state;
+            if (httpResponse.Headers.CacheControl.Count == 0)
+                httpResponse.Headers.CacheControl = "no-store";
+            if (string.Equals(httpResponse.Headers.CacheControl.ToString(), "no-store", StringComparison.OrdinalIgnoreCase)
+                && httpResponse.Headers.Pragma.Count == 0)
+                httpResponse.Headers.Pragma = "no-cache";
+            return Task.CompletedTask;
+        }, response);
 
     private static bool IsJson(HttpRequest request)
     {

@@ -46,7 +46,8 @@ public sealed record MailboxEndpointConfig
         int maximumMessageBytes = DefaultMaximumMessageBytes,
         int maximumAttachmentBytes = DefaultMaximumAttachmentBytes,
         int maximumAttachments = ConversationMessageLimits.MaximumAttachments,
-        TimeSpan? connectTimeout = null)
+        TimeSpan? connectTimeout = null,
+        bool suppressAutoReplies = true)
     {
         Scope = scope ?? throw new ArgumentNullException(nameof(scope));
         ConfigurationId = TicketScope.RequireIdentifier(configurationId, nameof(configurationId));
@@ -78,6 +79,7 @@ public sealed record MailboxEndpointConfig
         MaximumAttachmentBytes = maximumAttachmentBytes;
         MaximumAttachments = maximumAttachments;
         ConnectTimeout = timeout;
+        SuppressAutoReplies = suppressAutoReplies;
     }
 
     public TicketScope Scope { get; }
@@ -92,6 +94,7 @@ public sealed record MailboxEndpointConfig
     public int MaximumAttachmentBytes { get; }
     public int MaximumAttachments { get; }
     public TimeSpan ConnectTimeout { get; }
+    public bool SuppressAutoReplies { get; }
 
     public override string ToString() => $"MailboxEndpointConfig {{ ConfigurationId = {ConfigurationId}, Host = {Host}, Port = {Port}, Folder = {Folder} }}";
 }

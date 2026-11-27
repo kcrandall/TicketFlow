@@ -20,9 +20,11 @@ public sealed partial class PostgresRealtimeBackplane : IRealtimeBackplane, IAsy
     private readonly WalFlowRealtimeOptions options;
     private readonly ILogger<PostgresRealtimeBackplane>? logger;
     private readonly CancellationTokenSource lifetime = new();
+    private readonly Lock startGate = new();
+    private readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private ImmutableArray<Func<string, CancellationToken, Task>> handlers = [];
     private Task? listenerLoop;
-    private int started;
+    private int disposed;
 
     public PostgresRealtimeBackplane(NpgsqlDataSource source, IOptions<WalFlowRealtimeOptions> options, ILogger<PostgresRealtimeBackplane>? logger = null)
     {
@@ -36,12 +38,15 @@ public sealed partial class PostgresRealtimeBackplane : IRealtimeBackplane, IAsy
     /// <summary>Starts the background <c>LISTEN</c> connection and returns once <c>LISTEN</c> is registered on PostgreSQL.</summary>
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
-        if (Interlocked.CompareExchange(ref started, 1, 0) != 0)
-            return;
-        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        listenerLoop = ListenLoopAsync(ready, lifetime.Token);
-        using var reg = cancellationToken.Register(() => ready.TrySetCanceled(cancellationToken));
-        await ready.Task.ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        Task readyTask;
+        lock (startGate)
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+            listenerLoop ??= ListenLoopAsync(ready, lifetime.Token);
+            readyTask = ready.Task;
+        }
+        await readyTask.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task PublishAsync(string envelopeJson, CancellationToken cancellationToken = default)
@@ -174,18 +179,44 @@ public sealed partial class PostgresRealtimeBackplane : IRealtimeBackplane, IAsy
 
     public async ValueTask DisposeAsync()
     {
-        await lifetime.CancelAsync().ConfigureAwait(false);
-        if (listenerLoop is not null)
+        Task? loop;
+        lock (startGate)
+        {
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
+                return;
+            loop = listenerLoop;
+        }
+
+        try
         {
             try
             {
-                await listenerLoop.ConfigureAwait(false);
+                await lifetime.CancelAsync().ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (AggregateException)
             {
             }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            ready.TrySetCanceled();
+
+            if (loop is not null)
+            {
+                try
+                {
+                    await loop.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
         }
-        lifetime.Dispose();
+        finally
+        {
+            lifetime.Dispose();
+        }
     }
 
     private sealed class Subscription(PostgresRealtimeBackplane backplane, Func<string, CancellationToken, Task> handler) : IDisposable

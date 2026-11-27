@@ -143,8 +143,6 @@ public sealed partial class ContactService : IContactService
         var stored = await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
         if (stored is null)
             return ContactRefused.NotFound;
-        if (stored.Revision != expectedRevision)
-            return new ContactRefused(ContactRefusal.Conflict, [], stored.Revision);
 
         HashSet<FieldPath>? identityFields = null;
         foreach (var edit in editList)
@@ -157,6 +155,8 @@ public sealed partial class ContactService : IContactService
         var storedResource = ContactAccess.Resource(stored);
         if (!(await decisions.DecideAsync(ContactPermissions.Update, storedResource, cancellationToken).ConfigureAwait(false)).IsPermitted)
             return ContactRefused.Forbidden;
+        if (stored.Revision != expectedRevision)
+            return new ContactRefused(ContactRefusal.Conflict, [], stored.Revision);
         if (stored.Contact.MergedInto is { } mergedInto)
             return new ContactRefused(ContactRefusal.Merged, [], stored.Revision, mergedInto);
 
@@ -192,11 +192,11 @@ public sealed partial class ContactService : IContactService
         var stored = await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
         if (stored is null)
             return ContactRefused.NotFound;
-        if (stored.Revision != expectedRevision)
-            return new ContactRefused(ContactRefusal.Conflict, [], stored.Revision);
         var decisions = await evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Delete], cancellationToken).ConfigureAwait(false);
         if (!(await decisions.DecideAsync(ContactPermissions.Delete, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false)).IsPermitted)
             return ContactRefused.Forbidden;
+        if (stored.Revision != expectedRevision)
+            return new ContactRefused(ContactRefusal.Conflict, [], stored.Revision);
 
         // Every tombstone the delete cascades to is authorized too; the store applies the delete only for exactly this set.
         var cascade = new List<ContactId>();

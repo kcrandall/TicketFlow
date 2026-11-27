@@ -89,6 +89,80 @@ public sealed class SignalRReviewTests
         Assert.AreEqual("unauthenticated", Error(await tabC.InvokeAsync<JsonElement>("SendMessage", "c1", "after revoke", null)));
     }
 
+    [TestMethod]
+    public async Task AgentHubEnforcesScopeClaimPinningAndServiceAccountStatus()
+    {
+        TicketScope? capturedScope = null;
+        await using var host = await CreateAsync(
+            configure: options =>
+            {
+                options.ResolvePrincipal = (_, http) =>
+                {
+                    if (http?.Request.Headers["X-Test-Client"].ToString() is { Length: > 0 } clientId)
+                        return ValueTask.FromResult<PrincipalRef?>(new ApiClientPrincipal(capturedScope!, new ApiClientId(clientId)));
+                    return ValueTask.FromResult(http?.Request.Headers["X-Test-User"].ToString() is { Length: > 0 } user
+                        ? (PrincipalRef?)new UserPrincipal(capturedScope!, new UserId(user))
+                        : null);
+                };
+            },
+            onRequest: http =>
+            {
+                if (http.Request.Headers["X-Test-Claim-Workspace"].ToString() is { Length: > 0 } claimedWs)
+                    http.User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+                        [new System.Security.Claims.Claim("workspace_id", claimedWs)], "test"));
+            });
+        capturedScope = host.Scope;
+
+        var saStore = host.Service<IServiceAccountStore>();
+        var grants = host.Service<IAccessGrantStore>();
+        var partition = AccessPartition.From(host.Scope);
+
+        var activeId = new ApiClientId("hub-sa-active");
+        await saStore.CreateAsync(new ServiceAccount(activeId, partition, new WorkspaceGrantScope(host.Scope.WorkspaceId), "Active"), "seed");
+        await grants.CreateAsync(new AccessGrant(new GrantId("g-hub-active"), partition, activeId, BuiltInRoles.Agent.Id, new WorkspaceGrantScope(host.Scope.WorkspaceId)));
+
+        var disabledId = new ApiClientId("hub-sa-disabled");
+        await saStore.CreateAsync(new ServiceAccount(disabledId, partition, new WorkspaceGrantScope(host.Scope.WorkspaceId), "Disabled"), "seed");
+        await saStore.SetEnabledAsync(partition, disabledId, isEnabled: false, actorPrincipalId: "seed", expectedVersion: 1);
+        await grants.CreateAsync(new AccessGrant(new GrantId("g-hub-disabled"), partition, disabledId, BuiltInRoles.Owner.Id, new WorkspaceGrantScope(host.Scope.WorkspaceId)));
+
+        var otherWsId = new ApiClientId("hub-sa-other-ws");
+        await saStore.CreateAsync(new ServiceAccount(otherWsId, partition, new WorkspaceGrantScope(new WorkspaceId("other-ws")), "Other WS"), "seed");
+        await grants.CreateAsync(new AccessGrant(new GrantId("g-hub-other"), partition, otherWsId, BuiltInRoles.Owner.Id, TenantGrantScope.Instance));
+
+        HubConnection ConnectWithHeaders(Action<IDictionary<string, string>> addHeaders) =>
+            new HubConnectionBuilder()
+                .WithUrl(new Uri(host.Server.BaseAddress, AgentPath), options =>
+                {
+                    options.HttpMessageHandlerFactory = _ => host.Server.CreateHandler();
+                    options.Transports = Microsoft.AspNetCore.Http.Connections.HttpTransportType.LongPolling;
+                    options.Headers["Origin"] = Origin;
+                    addHeaders(options.Headers);
+                })
+                .Build();
+
+        // Mismatched workspace_id claim is aborted
+        await using var mismatched = ConnectWithHeaders(h =>
+        {
+            h["X-Test-User"] = "agent";
+            h["X-Test-Claim-Workspace"] = "other-ws";
+        });
+        await AssertClosedAsync(mismatched);
+
+        // Disabled service account is aborted
+        await using var disabled = ConnectWithHeaders(h => h["X-Test-Client"] = "hub-sa-disabled");
+        await AssertClosedAsync(disabled);
+
+        // Out-of-scope workspace service account is aborted
+        await using var otherWs = ConnectWithHeaders(h => h["X-Test-Client"] = "hub-sa-other-ws");
+        await AssertClosedAsync(otherWs);
+
+        // Active in-scope service account connects and can subscribe to queue
+        await using var active = ConnectWithHeaders(h => h["X-Test-Client"] = "hub-sa-active");
+        await active.StartAsync();
+        Ok(await active.InvokeAsync<JsonElement>("Subscribe", "queue", "chat-inbox"));
+    }
+
     private static async Task AssertClosedAsync(HubConnection connection)
     {
         var closed = new TaskCompletionSource();

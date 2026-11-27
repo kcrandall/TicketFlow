@@ -42,7 +42,7 @@ internal sealed class EndpointHost : IAsyncDisposable
     public TestServer Server { get; }
     public TicketScope Scope { get; }
 
-    public static async Task<EndpointHost> CreateAsync(Action<TicketFlowEndpointOptions>? configure = null, Action<IServiceCollection>? services = null)
+    public static async Task<EndpointHost> CreateAsync(Action<TicketFlowEndpointOptions>? configure = null, Action<IServiceCollection>? services = null, Action<Microsoft.AspNetCore.Http.HttpContext>? onRequest = null)
     {
         var scope = TestScopes.Create();
         var builder = WebApplication.CreateBuilder();
@@ -71,6 +71,12 @@ internal sealed class EndpointHost : IAsyncDisposable
             .AddTicketFlowOpenApi();
         services?.Invoke(builder.Services);
         var app = builder.Build();
+        if (onRequest is not null)
+            app.Use(async (context, next) =>
+            {
+                onRequest(context);
+                await next();
+            });
         app.MapTicketFlowEndpoints();
         app.MapTicketFlowOpenApi();
         await app.StartAsync();

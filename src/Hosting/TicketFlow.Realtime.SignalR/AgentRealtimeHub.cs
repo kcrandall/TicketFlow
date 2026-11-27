@@ -1,6 +1,8 @@
 using System.Collections.Frozen;
 using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.DependencyInjection;
+using TicketFlow.Access;
 using TicketFlow.Core;
 
 namespace TicketFlow.Realtime.SignalR;
@@ -11,19 +13,32 @@ namespace TicketFlow.Realtime.SignalR;
 /// are authorized by the realtime registry and agent actions; every delivery is re-authorized per event.
 /// </summary>
 public sealed class AgentRealtimeHub(IRealtimeSubscriptions subscriptions, IRealtimePrincipalResolver principals, IRealtimeAgentActions actions, IHubContext<AgentRealtimeHub> hub,
-    Microsoft.Extensions.Options.IOptions<TicketFlowSignalROptions> options, RealtimeTypingThrottle throttle) : Hub
+    Microsoft.Extensions.Options.IOptions<TicketFlowSignalROptions> options, RealtimeTypingThrottle throttle, IServiceAccountStore? serviceAccounts = null) : Hub
 {
     private const string PrincipalKey = "tf.principal";
 
     public override async Task OnConnectedAsync()
     {
-        if (!OriginAllowed(Context.GetHttpContext()?.Request.Headers.Origin.ToString(), options.Value))
+        var http = Context.GetHttpContext();
+        if (!OriginAllowed(http?.Request.Headers.Origin.ToString(), options.Value))
         {
             Context.Abort();
             return;
         }
-        var principal = await principals.ResolveAsync(Context.User ?? new System.Security.Claims.ClaimsPrincipal(), Context.GetHttpContext(), Context.ConnectionAborted).ConfigureAwait(false);
+        var user = Context.User ?? http?.User;
+        var principal = await principals.ResolveAsync(user ?? new System.Security.Claims.ClaimsPrincipal(), http, Context.ConnectionAborted).ConfigureAwait(false);
         if (principal is not { } resolved)
+        {
+            Context.Abort();
+            return;
+        }
+        if (!AccessPrincipalGuard.VerifyScopeClaims(user, resolved.Scope))
+        {
+            Context.Abort();
+            return;
+        }
+        var accounts = serviceAccounts ?? http?.RequestServices.GetService<IServiceAccountStore>();
+        if (!await AccessPrincipalGuard.IsServiceAccountActiveForScopeAsync(resolved, resolved.Scope, accounts, Context.ConnectionAborted).ConfigureAwait(false))
         {
             Context.Abort();
             return;

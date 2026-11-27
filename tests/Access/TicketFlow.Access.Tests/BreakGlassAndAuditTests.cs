@@ -48,6 +48,26 @@ public sealed class BreakGlassAndAuditTests
     }
 
     [TestMethod]
+    public async Task BreakGlassAuthorizesBeforeLookingUpOrValidatingRole()
+    {
+        var (fixture, _) = await CreateAsync();
+        using var _ = fixture;
+        var agent = fixture.User("agent");
+        await fixture.GrantAsync(agent.UserId, BuiltInRoles.Agent);
+
+        var customSafe = await fixture.CustomRoleAsync("custom-safe", AccessPermissions.ConversationRead);
+        var customMgmt = await fixture.CustomRoleAsync("custom-mgmt", AccessPermissions.AccessManage);
+        var missing = new AccessRole(new RoleId("does-not-exist"), "Missing", []);
+
+        // Unauthorized caller receives identical Forbidden for missing, existing, privileged custom, and built-in management roles.
+        foreach (var probeRole in new[] { missing, customSafe, customMgmt, BuiltInRoles.Owner })
+        {
+            var result = await fixture.Admin.ActivateBreakGlassAsync(Request(fixture, agent, id: "bg-" + probeRole.Id.Value, role: probeRole));
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(result), $"Role '{probeRole.Id}' must not leak existence or privilege before authorization.");
+        }
+    }
+
+    [TestMethod]
     public async Task BreakGlassGrantsAreAuditedOnActivationAndUseAndExpireAutomatically()
     {
         var (fixture, responder) = await CreateAsync();

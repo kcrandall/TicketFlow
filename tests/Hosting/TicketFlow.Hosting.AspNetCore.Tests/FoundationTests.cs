@@ -205,4 +205,103 @@ public sealed class FoundationTests
         };
         Assert.AreNotEqual(HttpStatusCode.BadRequest, (await client.SendAsync(validStructured)).StatusCode);
     }
+
+    [TestMethod]
+    public async Task AuthenticatedEndpointsStampNoStoreWhilePublicPortalRemainsCacheable()
+    {
+        await using var host = await CreateAsync();
+
+        var me = await host.Client().GetAsync($"{Api}/me");
+        Assert.AreEqual(HttpStatusCode.OK, me.StatusCode);
+        Assert.IsTrue(me.Headers.CacheControl?.NoStore == true, "Authenticated /me must set Cache-Control: no-store.");
+        Assert.IsTrue(me.Headers.Pragma.Any(h => string.Equals(h.Name, "no-cache", StringComparison.OrdinalIgnoreCase)), "Authenticated /me must set Pragma: no-cache.");
+
+        var inbox = await host.Client().GetAsync($"{Api}/inboxes/support");
+        Assert.AreEqual(HttpStatusCode.OK, inbox.StatusCode);
+        Assert.IsTrue(inbox.Headers.CacheControl?.NoStore == true);
+        Assert.IsTrue(inbox.Headers.Pragma.Any(h => string.Equals(h.Name, "no-cache", StringComparison.OrdinalIgnoreCase)));
+
+        var unauth = await host.Client(user: null).GetAsync($"{Api}/me");
+        Assert.AreEqual(HttpStatusCode.Unauthorized, unauth.StatusCode);
+        Assert.IsTrue(unauth.Headers.CacheControl?.NoStore == true);
+        Assert.IsTrue(unauth.Headers.Pragma.Any(h => string.Equals(h.Name, "no-cache", StringComparison.OrdinalIgnoreCase)));
+
+        var publicPortal = await host.Client(user: null).GetAsync($"{Public}/portals/missing");
+        Assert.AreEqual(HttpStatusCode.NotFound, publicPortal.StatusCode);
+        Assert.IsFalse(publicPortal.Headers.CacheControl?.NoStore == true, "Public portal group must not force Cache-Control: no-store.");
+    }
+
+    [TestMethod]
+    public async Task ActorBindingEnforcesScopeClaimsAndServiceAccountStatus()
+    {
+        await using var host = await CreateAsync(
+            configure: options =>
+            {
+                options.ResolvePrincipal = (http, target) =>
+                {
+                    if (http.Request.Headers["X-Test-Client"].ToString() is { Length: > 0 } clientId)
+                        return ValueTask.FromResult<TicketFlow.Core.PrincipalRef?>(new TicketFlow.Core.ApiClientPrincipal(target, new TicketFlow.Core.ApiClientId(clientId)));
+                    return ValueTask.FromResult(http.Request.Headers["X-Test-User"].ToString() is { Length: > 0 } user
+                        ? (TicketFlow.Core.PrincipalRef?)new TicketFlow.Core.UserPrincipal(target, new TicketFlow.Core.UserId(user))
+                        : null);
+                };
+            },
+            onRequest: http =>
+            {
+                if (http.Request.Headers["X-Test-Claim-Workspace"].ToString() is { Length: > 0 } claimedWs)
+                    http.User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(
+                        [new System.Security.Claims.Claim("workspace_id", claimedWs)], "test"));
+            });
+
+        using (var scope = host.App.Services.CreateScope())
+        {
+            var saStore = scope.ServiceProvider.GetRequiredService<TicketFlow.Access.IServiceAccountStore>();
+            var grants = scope.ServiceProvider.GetRequiredService<TicketFlow.Access.IAccessGrantStore>();
+            var partition = TicketFlow.Access.AccessPartition.From(host.Scope);
+
+            var activeId = new TicketFlow.Core.ApiClientId("sa-active");
+            await saStore.CreateAsync(new TicketFlow.Access.ServiceAccount(activeId, partition, new TicketFlow.Access.WorkspaceGrantScope(host.Scope.WorkspaceId), "Active"), "seed");
+            await grants.CreateAsync(new TicketFlow.Access.AccessGrant(new TicketFlow.Access.GrantId("g-sa-active"), partition, activeId, TicketFlow.Access.BuiltInRoles.Viewer.Id, new TicketFlow.Access.WorkspaceGrantScope(host.Scope.WorkspaceId)));
+
+            var disabledId = new TicketFlow.Core.ApiClientId("sa-disabled");
+            await saStore.CreateAsync(new TicketFlow.Access.ServiceAccount(disabledId, partition, new TicketFlow.Access.WorkspaceGrantScope(host.Scope.WorkspaceId), "Disabled"), "seed");
+            await saStore.SetEnabledAsync(partition, disabledId, isEnabled: false, actorPrincipalId: "seed", expectedVersion: 1);
+            await grants.CreateAsync(new TicketFlow.Access.AccessGrant(new TicketFlow.Access.GrantId("g-sa-disabled"), partition, disabledId, TicketFlow.Access.BuiltInRoles.Owner.Id, new TicketFlow.Access.WorkspaceGrantScope(host.Scope.WorkspaceId)));
+
+            var otherWsId = new TicketFlow.Core.ApiClientId("sa-other-ws");
+            await saStore.CreateAsync(new TicketFlow.Access.ServiceAccount(otherWsId, partition, new TicketFlow.Access.WorkspaceGrantScope(new TicketFlow.Core.WorkspaceId("other-ws")), "Other WS"), "seed");
+            await grants.CreateAsync(new TicketFlow.Access.AccessGrant(new TicketFlow.Access.GrantId("g-sa-other-ws"), partition, otherWsId, TicketFlow.Access.BuiltInRoles.Owner.Id, TicketFlow.Access.TenantGrantScope.Instance));
+        }
+
+        // Mismatched workspace_id claim is rejected even with custom ResolvePrincipal
+        var mismatchedReq = new HttpRequestMessage(HttpMethod.Get, $"{Api}/me");
+        mismatchedReq.Headers.Add("X-Test-User", "owner");
+        mismatchedReq.Headers.Add("X-Test-Claim-Workspace", "other-ws");
+        var mismatchedResp = await host.Server.CreateClient().SendAsync(mismatchedReq);
+        Assert.AreEqual(HttpStatusCode.Unauthorized, mismatchedResp.StatusCode);
+        Assert.AreEqual("scope-mismatch", (await JsonAsync(mismatchedResp)).GetProperty("code").GetString());
+
+        // Matching workspace_id claim succeeds
+        var matchingReq = new HttpRequestMessage(HttpMethod.Get, $"{Api}/me");
+        matchingReq.Headers.Add("X-Test-User", "owner");
+        matchingReq.Headers.Add("X-Test-Claim-Workspace", host.Scope.WorkspaceId.Value);
+        Assert.AreEqual(HttpStatusCode.OK, (await host.Server.CreateClient().SendAsync(matchingReq)).StatusCode);
+
+        // Active in-scope service account succeeds on /me
+        var activeReq = new HttpRequestMessage(HttpMethod.Get, $"{Api}/me");
+        activeReq.Headers.Add("X-Test-Client", "sa-active");
+        Assert.AreEqual(HttpStatusCode.OK, (await host.Server.CreateClient().SendAsync(activeReq)).StatusCode);
+
+        // Disabled service account is rejected with 401 on /me and /inboxes
+        foreach (var path in new[] { $"{Api}/me", $"{Api}/inboxes" })
+        {
+            var disabledReq = new HttpRequestMessage(HttpMethod.Get, path);
+            disabledReq.Headers.Add("X-Test-Client", "sa-disabled");
+            Assert.AreEqual(HttpStatusCode.Unauthorized, (await host.Server.CreateClient().SendAsync(disabledReq)).StatusCode);
+
+            var otherWsReq = new HttpRequestMessage(HttpMethod.Get, path);
+            otherWsReq.Headers.Add("X-Test-Client", "sa-other-ws");
+            Assert.AreEqual(HttpStatusCode.Unauthorized, (await host.Server.CreateClient().SendAsync(otherWsReq)).StatusCode);
+        }
+    }
 }

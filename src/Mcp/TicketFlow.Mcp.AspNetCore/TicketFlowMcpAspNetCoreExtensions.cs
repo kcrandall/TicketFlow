@@ -70,7 +70,8 @@ internal sealed class HostMcpPrincipalResolver(
     ITicketFlowPartitionResolver partitions,
     ITicketFlowPrincipalResolver? principals = null,
     IAccessPrincipalResolver? accessResolver = null,
-    IOptions<TicketFlowEndpointOptions>? endpointOptions = null)
+    IOptions<TicketFlowEndpointOptions>? endpointOptions = null,
+    IServiceAccountStore? serviceAccounts = null)
     : ITicketFlowMcpPrincipalResolver
 {
     public async ValueTask<PrincipalRef?> ResolveAsync(TicketFlowMcpCaller caller, WorkspaceId workspace, CancellationToken cancellationToken = default)
@@ -82,7 +83,7 @@ internal sealed class HostMcpPrincipalResolver(
         if (await partitions.ResolveAsync(http, cancellationToken).ConfigureAwait(false) is not { } partition)
             return null;
         var scope = partition.InWorkspace(workspace);
-        if (!VerifyScopeClaims(user, scope))
+        if (!AccessPrincipalGuard.VerifyScopeClaims(user, scope))
             return null;
 
         var hasHostResolver = principals is not null
@@ -108,16 +109,22 @@ internal sealed class HostMcpPrincipalResolver(
                         _ => principal,
                     };
             }
-            return principal;
         }
-
-        if (accessResolver is not null)
-        {
+        else if (accessResolver is not null)
             principal = await accessResolver.ResolveAsync(user, scope, cancellationToken).ConfigureAwait(false);
-            return principal is { } value && value.Scope == scope ? value : null;
-        }
+        else
+            return null;
 
-        return null;
+        if (principal is null || principal.Scope != scope)
+            return null;
+
+        var accounts = serviceAccounts
+            ?? caller.Services.GetService<IServiceAccountStore>()
+            ?? http.RequestServices?.GetService<IServiceAccountStore>();
+        if (!await AccessPrincipalGuard.IsServiceAccountActiveForScopeAsync(principal, scope, accounts, cancellationToken).ConfigureAwait(false))
+            return null;
+
+        return principal;
     }
 
     internal static HttpContext For(HttpContext? current, ClaimsPrincipal user, IServiceProvider services)
@@ -135,29 +142,5 @@ internal sealed class HostMcpPrincipalResolver(
                 detached.Request.Headers[header.Key] = header.Value;
         }
         return detached;
-    }
-
-    private static bool VerifyScopeClaims(ClaimsPrincipal principal, TicketScope scope)
-    {
-        foreach (var claim in principal.Claims)
-        {
-            var expected = claim.Type switch
-            {
-                "tenant_id" => scope.TenantId,
-                "project_id" => scope.ProjectId,
-                "environment_id" or "environment" => scope.EnvironmentId,
-                "app_id" or "app_name" => scope.AppId,
-                "workspace_id" or "workspace" => scope.WorkspaceId.Value,
-                _ => null,
-            };
-            if (expected is null)
-                continue;
-
-            var trimmed = claim.Value?.Trim();
-            if (string.IsNullOrEmpty(trimmed) || !string.Equals(trimmed, expected, StringComparison.Ordinal))
-                return false;
-        }
-
-        return true;
     }
 }

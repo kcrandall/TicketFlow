@@ -141,7 +141,7 @@ public static class TicketFlowEndpointExtensions
             .WithTags(tag)
             .WithGroupName(options.OpenApiDocumentName)
             .WithMetadata(new TicketFlowRequestSizeLimit(options.MaximumRequestBodyBytes))
-            .AddEndpointFilterFactory(TicketFlowEndpointFilter.Create(options.MaximumRequestBodyBytes))
+            .AddEndpointFilterFactory(TicketFlowEndpointFilter.Create(options.MaximumRequestBodyBytes, noStore: true))
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
             .ProducesProblem(StatusCodes.Status403Forbidden)

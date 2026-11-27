@@ -35,7 +35,7 @@ public sealed class ClaimsPrincipalResolver : IAccessPrincipalResolver
         if (claimsPrincipal.Identity?.IsAuthenticated != true)
             return ValueTask.FromResult<PrincipalRef?>(null);
 
-        if (!VerifyScopeClaims(claimsPrincipal, scope))
+        if (!AccessPrincipalGuard.VerifyScopeClaims(claimsPrincipal, scope))
             return ValueTask.FromResult<PrincipalRef?>(null);
 
         if (!TryResolveSingleIdentifier(claimsPrincipal, options.SubjectClaimTypes, out var subject))
@@ -175,30 +175,6 @@ public sealed class ClaimsPrincipalResolver : IAccessPrincipalResolver
                 return true;
 
         return false;
-    }
-
-    private static bool VerifyScopeClaims(ClaimsPrincipal principal, TicketScope scope)
-    {
-        foreach (var claim in principal.Claims)
-        {
-            var expected = claim.Type switch
-            {
-                "tenant_id" => scope.TenantId,
-                "project_id" => scope.ProjectId,
-                "environment_id" or "environment" => scope.EnvironmentId,
-                "app_id" or "app_name" => scope.AppId,
-                "workspace_id" or "workspace" => scope.WorkspaceId.Value,
-                _ => null,
-            };
-            if (expected is null)
-                continue;
-
-            var trimmed = claim.Value?.Trim();
-            if (string.IsNullOrEmpty(trimmed) || !string.Equals(trimmed, expected, StringComparison.Ordinal))
-                return false;
-        }
-
-        return true;
     }
 
     private static bool TryResolveSingleIdentifier(ClaimsPrincipal principal, IList<string> claimTypes, out string? value)

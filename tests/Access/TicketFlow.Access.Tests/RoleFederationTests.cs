@@ -527,4 +527,76 @@ public sealed class RoleFederationTests
             Assert.IsNull(entry.DenialReason);
         }
     }
+
+    [TestMethod]
+    public async Task AccessManageTenantOnlyPrincipalCannotManageNonTenantFederationMappings()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var federation = scope.ServiceProvider.GetRequiredService<IRoleFederationService>();
+
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        // Tenant-only manager: holds tenant Owner MINUS access:manage in actor's workspace (only access:manage-tenant remains active).
+        var tenantOnlyAdmin = fixture.User("tenant-only-admin");
+        await fixture.GrantAsync(tenantOnlyAdmin.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        var denyManageRole = await fixture.CustomRoleAsync("deny-access-manage-only", AccessPermissions.AccessManage);
+        await fixture.GrantAsync(tenantOnlyAdmin.UserId, denyManageRole, fixture.Workspace, GrantEffect.Deny);
+
+        // Tenant admin whose access:manage is denied on a specific team/inbox (still passes base workspace admin check).
+        var teamDeniedAdmin = fixture.User("team-denied-admin");
+        await fixture.GrantAsync(teamDeniedAdmin.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        await fixture.GrantAsync(teamDeniedAdmin.UserId, denyManageRole, new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("t1")), GrantEffect.Deny);
+        await fixture.GrantAsync(teamDeniedAdmin.UserId, denyManageRole, new InboxGrantScope(fixture.Scope.WorkspaceId, new InboxId("i1")), GrantEffect.Deny);
+
+        // Seed existing non-tenant mappings as owner
+        var wsMapId = new RoleFederationMappingId("ws-existing");
+        var teamMapId = new RoleFederationMappingId("team-existing");
+        var inboxMapId = new RoleFederationMappingId("inbox-existing");
+        Assert.IsTrue((await federation.UpsertMappingAsync(owner, wsMapId,
+            new RoleFederationMapping("okta", "ws-viewers", BuiltInRoles.Viewer.Id, fixture.Partition, fixture.Workspace))).IsSuccess);
+        Assert.IsTrue((await federation.UpsertMappingAsync(owner, teamMapId,
+            new RoleFederationMapping("okta", "team-viewers", BuiltInRoles.Viewer.Id, fixture.Partition, new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("t1"))))).IsSuccess);
+        Assert.IsTrue((await federation.UpsertMappingAsync(owner, inboxMapId,
+            new RoleFederationMapping("okta", "inbox-viewers", BuiltInRoles.Viewer.Id, fixture.Partition, new InboxGrantScope(fixture.Scope.WorkspaceId, new InboxId("i1"))))).IsSuccess);
+
+        // Tenant-only admin CANNOT create or update workspace, team, or inbox mappings
+        GrantScope[] nonTenantScopes =
+        [
+            fixture.Workspace,
+            new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("t1")),
+            new InboxGrantScope(fixture.Scope.WorkspaceId, new InboxId("i1")),
+        ];
+        foreach (var targetScope in nonTenantScopes)
+        {
+            var upsert = await federation.UpsertMappingAsync(
+                tenantOnlyAdmin,
+                new RoleFederationMappingId("denied-" + targetScope.GetType().Name),
+                new RoleFederationMapping("okta", "grp", BuiltInRoles.Viewer.Id, fixture.Partition, targetScope));
+            Assert.IsTrue(upsert.TryGetValue(out TicketFailure failure));
+            Assert.AreEqual(TicketFailureKind.Forbidden, failure.Kind);
+        }
+
+        // Tenant-only admin CANNOT delete existing non-tenant mappings
+        foreach (var existingId in new[] { wsMapId, teamMapId, inboxMapId })
+        {
+            var del = await federation.DeleteMappingAsync(tenantOnlyAdmin, existingId, expectedVersion: 1);
+            Assert.IsTrue(del.TryGetValue(out TicketFailure failure));
+            Assert.AreEqual(TicketFailureKind.Forbidden, failure.Kind);
+        }
+
+        // Team/inbox-denied tenant admin passes workspace base admin check, yet CANNOT delete team/inbox mappings via access:manage-tenant fallback (opaque NotFound)
+        foreach (var existingId in new[] { teamMapId, inboxMapId })
+        {
+            var del = await federation.DeleteMappingAsync(teamDeniedAdmin, existingId, expectedVersion: 1);
+            Assert.IsTrue(del.TryGetValue(out TicketFailure failure));
+            Assert.AreEqual(TicketFailureKind.NotFound, failure.Kind);
+        }
+
+        // Tenant-only admin CAN still create a tenant-scoped mapping (using access:manage-tenant)
+        var tenantMapId = new RoleFederationMappingId("tenant-ok");
+        Assert.IsTrue((await federation.UpsertMappingAsync(tenantOnlyAdmin, tenantMapId,
+            new RoleFederationMapping("okta", "tenant-viewers", BuiltInRoles.Viewer.Id, fixture.Partition, TenantGrantScope.Instance))).IsSuccess);
+    }
 }

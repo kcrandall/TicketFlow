@@ -403,10 +403,10 @@ public sealed partial class ConversationService : IConversationService
         var stored = await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
         if (stored is null)
             return ConversationNotFound.Instance;
-        if (stored.Revision != expectedRevision)
-            return new ConversationConflict(stored.Revision);
         if (!await PermittedAsync(actor, ConversationPermissions.Delete, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
             return ConversationRefused.Forbidden;
+        if (stored.Revision != expectedRevision)
+            return new ConversationConflict(stored.Revision);
         var change = new ConversationChange(Guid.CreateVersion7(), scope, id, stored.Conversation.Inbox, stored.Revision, ConversationChangeKind.Deleted, [], null, null, Now);
         return await store.DeleteAsync(scope, id, expectedRevision, change, cancellationToken).ConfigureAwait(false) switch
         {
@@ -488,7 +488,7 @@ public sealed partial class ConversationService : IConversationService
     private static ValueTask<Decision> Decided(Decision decision) => ValueTask.FromResult(decision);
 
     /// <summary>
-    /// Read → fence → authorize → decide → (authorize result) → revision-fenced atomic write. Without an expected revision, conflicts
+    /// Read → authorize → fence → decide → (authorize result) → revision-fenced atomic write. Without an expected revision, conflicts
     /// re-run the pipeline on the newer snapshot up to <see cref="ConversationsOptions.MaximumWriteAttempts"/> times.
     /// </summary>
     private async Task<ConversationCommandResult> MutateAsync(PrincipalRef actor, ConversationId id, long? expectedRevision, Permission permission, bool checkResulting,
@@ -504,8 +504,6 @@ public sealed partial class ConversationService : IConversationService
             var stored = await store.GetAsync(scope, id, cancellationToken).ConfigureAwait(false);
             if (stored is null)
                 return ConversationNotFound.Instance;
-            if (expectedRevision is { } expected && stored.Revision != expected)
-                return new ConversationConflict(stored.Revision);
             if (checkResulting)
             {
                 accessContext ??= await evaluator.LoadDecisionContextAsync(actor, scope, [permission], cancellationToken).ConfigureAwait(false);
@@ -514,6 +512,8 @@ public sealed partial class ConversationService : IConversationService
             }
             else if (!await PermittedAsync(actor, permission, ConversationAccess.Resource(stored), cancellationToken).ConfigureAwait(false))
                 return ConversationRefused.Forbidden;
+            if (expectedRevision is { } expected && stored.Revision != expected)
+                return new ConversationConflict(stored.Revision);
             var now = Now;
             var decision = await decide(stored, now).ConfigureAwait(false);
             if (decision.Outcome is { } outcome)

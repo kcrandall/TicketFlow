@@ -97,6 +97,42 @@ public sealed class HostPrincipalResolverTests
         Assert.AreEqual(otherWorkspace, Assert.IsInstanceOfType<ApiClientPrincipal>(tenantInSecond).Scope.WorkspaceId);
     }
 
+    [TestMethod]
+    public async Task RejectsDisabledAndOutOfScopeServiceAccountsAcrossBothResolutionPaths()
+    {
+        var scope = TestScopes.Create();
+        var otherWorkspace = new WorkspaceId("other-ws");
+        var partition = AccessPartition.From(scope);
+        var saStore = new InMemoryServiceAccountStore(TestClock.Create());
+
+        var activeId = new ApiClientId("mcp-sa-active");
+        var disabledId = new ApiClientId("mcp-sa-disabled");
+        var scopedId = new ApiClientId("mcp-sa-scoped");
+        await saStore.CreateAsync(new ServiceAccount(activeId, partition, new WorkspaceGrantScope(scope.WorkspaceId), "Active"), "seed");
+        await saStore.CreateAsync(new ServiceAccount(disabledId, partition, new WorkspaceGrantScope(scope.WorkspaceId), "Disabled"), "seed");
+        await saStore.SetEnabledAsync(partition, disabledId, isEnabled: false, actorPrincipalId: "seed", expectedVersion: 1);
+        await saStore.CreateAsync(new ServiceAccount(scopedId, partition, new WorkspaceGrantScope(otherWorkspace), "Other WS"), "seed");
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IServiceAccountStore>(saStore);
+        await using var provider = services.BuildServiceProvider();
+
+        var accessor = new HttpContextAccessor { HttpContext = new DefaultHttpContext() };
+        var hostResolver = new HostMcpPrincipalResolver(accessor, new FixedPartition(partition, []), new ClientPrincipals([]), serviceAccounts: saStore);
+        var claimsResolver = new HostMcpPrincipalResolver(accessor, new FixedPartition(partition, []), principals: null, accessResolver: new ClaimsPrincipalResolver(), serviceAccounts: saStore);
+
+        static ClaimsPrincipal ClientUser(string id) => new(new ClaimsIdentity(
+            [new Claim("client", id), new Claim("client_id", id), new Claim("principal_type", "service_account")], "test"));
+
+        Assert.IsInstanceOfType<ApiClientPrincipal>(await hostResolver.ResolveAsync(new TicketFlowMcpCaller(ClientUser("mcp-sa-active"), provider), scope.WorkspaceId));
+        Assert.IsNull(await hostResolver.ResolveAsync(new TicketFlowMcpCaller(ClientUser("mcp-sa-disabled"), provider), scope.WorkspaceId));
+        Assert.IsNull(await hostResolver.ResolveAsync(new TicketFlowMcpCaller(ClientUser("mcp-sa-scoped"), provider), scope.WorkspaceId));
+
+        Assert.IsInstanceOfType<ApiClientPrincipal>(await claimsResolver.ResolveAsync(new TicketFlowMcpCaller(ClientUser("mcp-sa-active"), provider), scope.WorkspaceId));
+        Assert.IsNull(await claimsResolver.ResolveAsync(new TicketFlowMcpCaller(ClientUser("mcp-sa-disabled"), provider), scope.WorkspaceId));
+        Assert.IsNull(await claimsResolver.ResolveAsync(new TicketFlowMcpCaller(ClientUser("mcp-sa-scoped"), provider), scope.WorkspaceId));
+    }
+
     private sealed class FixedPartition(AccessPartition partition, List<ClaimsPrincipal> seen) : ITicketFlowPartitionResolver
     {
         public ValueTask<AccessPartition?> ResolveAsync(HttpContext httpContext, CancellationToken cancellationToken = default)

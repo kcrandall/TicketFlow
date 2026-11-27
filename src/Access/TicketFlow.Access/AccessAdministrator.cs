@@ -330,11 +330,6 @@ public sealed class AccessAdministrator : IAccessAdministrator
             errors.Add($"A justification of at least {options.MinimumBreakGlassJustificationLength} characters is required.");
         if (request.Duration <= TimeSpan.Zero || request.Duration > options.MaximumBreakGlassDuration)
             errors.Add("The break-glass duration must be positive and within the configured maximum.");
-        var role = BuiltInRoles.Find(request.Role) ?? (await roles.GetAsync(actor.Scope, request.Role, cancellationToken).ConfigureAwait(false))?.Role;
-        if (role is null)
-            errors.Add("The break-glass role does not exist.");
-        else if (role.IncludesAllPermissions || role.Permissions.Overlaps(ManagementPermissions))
-            errors.Add("Break-glass roles cannot include access-management or break-glass permissions.");
 
         var refusal = errors.Count > 0 ? new Refusal(TicketFailureKind.Invalid, errors) : null;
         if (refusal is null)
@@ -344,6 +339,14 @@ public sealed class AccessAdministrator : IAccessAdministrator
                 refusal = new Refusal(TicketFailureKind.Forbidden, ["The actor is not authorized."], saReason);
         }
         refusal ??= await AuthorizeAsync(actor, AccessPermissions.AccessBreakGlass, target!, cancellationToken).ConfigureAwait(false);
+        if (refusal is null)
+        {
+            var role = BuiltInRoles.Find(request.Role) ?? (await roles.GetAsync(actor.Scope, request.Role, cancellationToken).ConfigureAwait(false))?.Role;
+            if (role is null)
+                refusal = new Refusal(TicketFailureKind.Invalid, ["The break-glass role does not exist."]);
+            else if (role.IncludesAllPermissions || role.Permissions.Overlaps(ManagementPermissions))
+                refusal = new Refusal(TicketFailureKind.Invalid, ["Break-glass roles cannot include access-management or break-glass permissions."]);
+        }
         if (refusal is not null)
             return await RefuseAsync<StoredAccessGrant>(change, refusal, cancellationToken).ConfigureAwait(false);
 

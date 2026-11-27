@@ -206,11 +206,11 @@ public sealed class ContactLinkingService : IContactLinkingService
         var stored = await store.GetAsync(scope, contact, cancellationToken).ConfigureAwait(false);
         if (stored is null)
             return ContactRefused.NotFound;
-        if (stored.Revision != expectedRevision)
-            return new ContactRefused(ContactRefusal.Conflict, [], stored.Revision);
         if (!await PermittedAsync(actor, ContactPermissions.Link, ContactAccess.Resource(stored), cancellationToken).ConfigureAwait(false)
             || !await FieldsVisibleAsync(actor, scope, [account.Address], cancellationToken).ConfigureAwait(false))
             return ContactRefused.Forbidden;
+        if (stored.Revision != expectedRevision)
+            return new ContactRefused(ContactRefusal.Conflict, [], stored.Revision);
         if (stored.Contact.MergedInto is { } mergedInto)
             return new ContactRefused(ContactRefusal.Merged, [], stored.Revision, mergedInto);
         if (!stored.Contact.Identities.Any(identity => identity.Address == account.Address && identity.Verification.IsVerified))
@@ -593,22 +593,31 @@ public sealed class ContactLinkingService : IContactLinkingService
         var stored = await linking.GetSuggestionAsync(scope, id, cancellationToken).ConfigureAwait(false);
         if (stored is null)
             return (null, null, null, ContactRefused.NotFound);
-        if (stored.Revision != expectedRevision)
-            return (null, null, null, new ContactRefused(ContactRefusal.Conflict, [], stored.Revision));
         var loadedTask = store.GetManyAsync(scope, [stored.Suggestion.Candidate, stored.Suggestion.Account], cancellationToken);
         var decisionsTask = evaluator.LoadDecisionContextAsync(actor, scope, [ContactPermissions.Read, ContactPermissions.Link], cancellationToken);
         await Task.WhenAll(loadedTask, decisionsTask).ConfigureAwait(false);
         var loaded = loadedTask.Result;
-        if (!loaded.TryGetValue(stored.Suggestion.Candidate, out var candidate) || !loaded.TryGetValue(stored.Suggestion.Account, out var account))
-            return (null, null, null, ContactRefused.NotFound);
         var decisions = decisionsTask.Result;
-        var candidateResource = ContactAccess.Resource(candidate);
-        var accountResource = ContactAccess.Resource(account);
-        if (!(await decisions.DecideAsync(ContactPermissions.Read, candidateResource, cancellationToken).ConfigureAwait(false)).IsPermitted
-            || !(await decisions.DecideAsync(ContactPermissions.Read, accountResource, cancellationToken).ConfigureAwait(false)).IsPermitted
-            || !(await decisions.DecideAsync(ContactPermissions.Link, candidateResource, cancellationToken).ConfigureAwait(false)).IsPermitted
-            || !(await decisions.DecideAsync(ContactPermissions.Link, accountResource, cancellationToken).ConfigureAwait(false)).IsPermitted)
-            return (null, null, null, ContactRefused.Forbidden);
+        var hasCandidate = loaded.TryGetValue(stored.Suggestion.Candidate, out var candidate);
+        var hasAccount = loaded.TryGetValue(stored.Suggestion.Account, out var account);
+        if (hasCandidate)
+        {
+            var candidateResource = ContactAccess.Resource(candidate!);
+            if (!(await decisions.DecideAsync(ContactPermissions.Read, candidateResource, cancellationToken).ConfigureAwait(false)).IsPermitted
+                || !(await decisions.DecideAsync(ContactPermissions.Link, candidateResource, cancellationToken).ConfigureAwait(false)).IsPermitted)
+                return (null, null, null, ContactRefused.Forbidden);
+        }
+        if (hasAccount)
+        {
+            var accountResource = ContactAccess.Resource(account!);
+            if (!(await decisions.DecideAsync(ContactPermissions.Read, accountResource, cancellationToken).ConfigureAwait(false)).IsPermitted
+                || !(await decisions.DecideAsync(ContactPermissions.Link, accountResource, cancellationToken).ConfigureAwait(false)).IsPermitted)
+                return (null, null, null, ContactRefused.Forbidden);
+        }
+        if (!hasCandidate || !hasAccount)
+            return (null, null, null, ContactRefused.NotFound);
+        if (stored.Revision != expectedRevision)
+            return (null, null, null, new ContactRefused(ContactRefusal.Conflict, [], stored.Revision));
         if (stored.Suggestion.Status != ContactLinkSuggestionStatus.Pending)
             return (null, null, null, ContactRefused.Invalid("The suggestion is not pending."));
         return (stored, candidate, account, null);

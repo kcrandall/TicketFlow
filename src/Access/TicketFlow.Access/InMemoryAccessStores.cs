@@ -146,6 +146,31 @@ public sealed class InMemoryAccessGrantStore : IAccessGrantStore
         }
     }
 
+    public Task<IReadOnlyList<StoredAccessGrant>> ListAllForSubjectsAsync(AccessPartition partition, IReadOnlyCollection<GrantSubject> subjects, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        ArgumentNullException.ThrowIfNull(subjects);
+        if (subjects.Count > AccessLimits.MaximumSubjectsPerQuery)
+            throw new ArgumentException($"At most {AccessLimits.MaximumSubjectsPerQuery} subjects can be queried.", nameof(subjects));
+        lock (gate)
+        {
+            var result = new List<StoredAccessGrant>();
+            HashSet<GrantSubject>? seenSubjects = subjects.Count > 1 ? [] : null;
+            foreach (var subject in subjects)
+            {
+                if (seenSubjects is not null && !seenSubjects.Add(subject))
+                    continue;
+                if (!bySubject.TryGetValue(partition, subject, out var ids))
+                    continue;
+                foreach (var id in ids)
+                    result.Add(grants[partition, id]);
+            }
+            if (result.Count > 1)
+                result.Sort(static (left, right) => string.CompareOrdinal(left.Grant.Id.Value, right.Grant.Id.Value));
+            return Task.FromResult<IReadOnlyList<StoredAccessGrant>>(result);
+        }
+    }
+
     public Task<IReadOnlyList<StoredAccessGrant>> ListForTargetAsync(AccessPartition partition, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(partition);

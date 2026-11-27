@@ -163,6 +163,17 @@ public static class AccessStoreContract
         Assert.IsEmpty(await competing.ListAllForSubjectAsync(partition, new TeamId("ada"), scope.WorkspaceId));
         Assert.IsEmpty(await competing.ListAllForSubjectAsync(AccessPartition.From(TestScopes.Create(tenantId: "other")), user, scope.WorkspaceId));
 
+        // ListAllForSubjectsAsync returns grants for all requested subjects across all workspaces and tenant scope in ordinal grant_id order.
+        CollectionAssert.AreEqual(
+            new[] { "g-break-glass", "g-elsewhere", "g-foreign-team", "g-team", "g-tenant", "g-workspace" },
+            (await competing.ListAllForSubjectsAsync(partition, [user, team, user])).Select(entry => entry.Grant.Id.Value).ToArray());
+        CollectionAssert.AreEqual(
+            new[] { "g-foreign-inbox", "g-inbox" },
+            (await competing.ListAllForSubjectsAsync(partition, [client])).Select(entry => entry.Grant.Id.Value).ToArray());
+        Assert.IsEmpty(await competing.ListAllForSubjectsAsync(partition, []));
+        Assert.IsEmpty(await competing.ListAllForSubjectsAsync(partition, [(GrantSubject)new TeamId("ada")]));
+        Assert.IsEmpty(await competing.ListAllForSubjectsAsync(AccessPartition.From(TestScopes.Create(tenantId: "other")), [user, team, client]));
+
         // HasLiveDenyForRoleAsync detects active denies across workspace, team and inbox scopes and ignores allows, other workspaces and expired denies.
         Assert.IsTrue(await competing.HasLiveDenyForRoleAsync(partition, scope.WorkspaceId, BuiltInRoles.Agent.Id, TestClock.DefaultStart));
         Assert.IsFalse(await competing.HasLiveDenyForRoleAsync(partition, scope.WorkspaceId, BuiltInRoles.Viewer.Id, TestClock.DefaultStart));

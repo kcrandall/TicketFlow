@@ -364,6 +364,12 @@ public sealed class ReviewRegressionTests
             return inner.ListForSubjectsAsync(partition, workspace, subjects, cancellationToken);
         }
 
+        public Task<IReadOnlyList<StoredAccessGrant>> ListAllForSubjectsAsync(AccessPartition partition, IReadOnlyCollection<GrantSubject> subjects, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref loads);
+            return inner.ListAllForSubjectsAsync(partition, subjects, cancellationToken);
+        }
+
         public Task<IReadOnlyList<StoredAccessGrant>> ListForTargetAsync(AccessPartition partition, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default) =>
             inner.ListForTargetAsync(partition, target, limit, after, cancellationToken);
 

@@ -26,6 +26,16 @@ public sealed partial class PostgresAccessStore
         ORDER BY g.grant_id COLLATE "C"
         """;
 
+    private const string ListAllForSubjectsSql = $"""
+        SELECT {AliasedGrantColumns}
+        FROM (SELECT DISTINCT kind, id FROM unnest(@kinds::smallint[], @ids::text[]) AS s(kind, id)) AS w
+        JOIN tf_access_grants g
+          ON g.subject_key = tf_key_v1(@tenant, @project, @environment, @app, w.kind::text, w.id)
+         AND g.subject_kind = w.kind AND g.subject_id = w.id
+        WHERE g.tenant_id=@tenant AND g.project_id=@project AND g.environment_id=@environment AND g.app_id=@app
+        ORDER BY g.grant_id COLLATE "C"
+        """;
+
     private const string ListAllForSubjectSql = $"""
         SELECT {GrantColumns} FROM tf_access_grants
         WHERE subject_key=tf_key_v1(@tenant, @project, @environment, @app, @subject_kind::text, @subject_id)
@@ -83,6 +93,35 @@ public sealed partial class PostgresAccessStore
         await using var command = source.CreateCommand(ListForSubjectsSql);
         AddPartition(command, partition);
         AddText(command, "workspace", workspace.Value);
+        command.Parameters.Add(new NpgsqlParameter<short[]>("kinds", NpgsqlDbType.Array | NpgsqlDbType.Smallint) { TypedValue = kinds });
+        AddTextArray(command, "ids", ids);
+        var grants = new List<StoredAccessGrant>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            grants.Add(ReadGrant(reader, partition));
+        return grants;
+    }
+
+    public async Task<IReadOnlyList<StoredAccessGrant>> ListAllForSubjectsAsync(AccessPartition partition, IReadOnlyCollection<GrantSubject> subjects, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        ArgumentNullException.ThrowIfNull(subjects);
+        if (subjects.Count > AccessLimits.MaximumSubjectsPerQuery)
+            throw new ArgumentException($"At most {AccessLimits.MaximumSubjectsPerQuery} subjects can be queried.", nameof(subjects));
+        if (subjects.Count == 0)
+            return [];
+        var kinds = new short[subjects.Count];
+        var ids = new string[subjects.Count];
+        var index = 0;
+        foreach (var subject in subjects)
+        {
+            var (kind, id) = EncodeSubject(subject);
+            kinds[index] = kind;
+            ids[index] = id;
+            index++;
+        }
+        await using var command = source.CreateCommand(ListAllForSubjectsSql);
+        AddPartition(command, partition);
         command.Parameters.Add(new NpgsqlParameter<short[]>("kinds", NpgsqlDbType.Array | NpgsqlDbType.Smallint) { TypedValue = kinds });
         AddTextArray(command, "ids", ids);
         var grants = new List<StoredAccessGrant>();

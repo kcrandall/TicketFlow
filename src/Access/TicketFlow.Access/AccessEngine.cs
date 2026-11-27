@@ -218,20 +218,40 @@ internal sealed class AccessEngine(
         var subjects = Subjects(principal) ?? throw new InvalidOperationException("The principal cannot hold grants.");
         var now = time.GetUtcNow();
         var partition = AccessPartition.From(scope);
-        var stored = await grants.ListForSubjectsAsync(partition, scope.WorkspaceId, subjects, cancellationToken).ConfigureAwait(false);
+        var stored = forAdministration
+            ? await grants.ListAllForSubjectsAsync(partition, subjects, cancellationToken).ConfigureAwait(false)
+            : await grants.ListForSubjectsAsync(partition, scope.WorkspaceId, subjects, cancellationToken).ConfigureAwait(false);
         var ignoreLocalAllows = options.RoleFederation.Mode == RoleFederationMode.FederatedOnly;
         var preserveLocalAdminOnly = ignoreLocalAllows && !options.RoleFederation.AllowAdministrativeRoles;
         var valid = new List<AccessGrant>(stored.Count);
         RoleId? singleCustomRole = null;
         var multipleCustomRoles = false;
+        Dictionary<WorkspaceId, HashSet<RoleId>>? foreignCustomRolesToResolve = null;
         for (var i = 0; i < stored.Count; i++)
         {
             var grant = stored[i].Grant;
-            // A store returning grants outside the requested partition, workspace or subjects violates its contract; fail closed.
-            if (grant.Partition != partition || (grant.Workspace is { } workspace && workspace != scope.WorkspaceId) || !SubjectMatches(principal, grant.Subject))
+            var isForeignWorkspace = grant.Workspace is { } workspace && workspace != scope.WorkspaceId;
+            // A store returning grants outside the requested partition, workspace (when workspace-scoped) or subjects violates its contract; fail closed.
+            if (grant.Partition != partition || (!forAdministration && isForeignWorkspace) || !SubjectMatches(principal, grant.Subject))
                 throw new InvalidOperationException("The grant store returned a grant outside the requested scope or subjects.");
             if (!grant.IsValidAt(now))
                 continue;
+            if (isForeignWorkspace)
+            {
+                // Cross-workspace grants are only retained for administrative tenant-scope deny containment; foreign Allows never apply.
+                if (grant.Effect != GrantEffect.Deny)
+                    continue;
+                valid.Add(grant);
+                if (!BuiltInRoles.IsBuiltIn(grant.Role))
+                {
+                    foreignCustomRolesToResolve ??= [];
+                    var foreignWorkspace = grant.Workspace!.Value;
+                    if (!foreignCustomRolesToResolve.TryGetValue(foreignWorkspace, out var roleIds))
+                        foreignCustomRolesToResolve[foreignWorkspace] = roleIds = [];
+                    roleIds.Add(grant.Role);
+                }
+                continue;
+            }
             if (ignoreLocalAllows && grant.Effect == GrantEffect.Allow && grant.Kind != GrantKind.BreakGlass && !preserveLocalAdminOnly)
                 continue;
             valid.Add(grant);
@@ -257,16 +277,45 @@ internal sealed class AccessEngine(
         else if (singleCustomRole is { } roleId)
             resolvedSingleCustom = (await roles.GetAsync(scope, roleId, cancellationToken).ConfigureAwait(false))?.Role;
 
+        // Custom roles referenced by cross-workspace Deny grants are resolved in their own workspace so permissions match accurately;
+        // missing custom roles remain null and fail closed during Deny evaluation.
+        Dictionary<(WorkspaceId, RoleId), AccessRole>? foreignCustom = null;
+        if (foreignCustomRolesToResolve is not null)
+        {
+            foreignCustom = [];
+            foreach (var (foreignWorkspace, roleIds) in foreignCustomRolesToResolve)
+            {
+                var foreignScope = partition.InWorkspace(foreignWorkspace);
+                if (roleIds.Count == 1)
+                {
+                    foreach (var foreignRoleId in roleIds)
+                        if ((await roles.GetAsync(foreignScope, foreignRoleId, cancellationToken).ConfigureAwait(false))?.Role is { } foreignRole)
+                            foreignCustom[(foreignWorkspace, foreignRoleId)] = foreignRole;
+                }
+                else
+                {
+                    var list = await roles.ListAsync(foreignScope, cancellationToken).ConfigureAwait(false);
+                    for (var i = 0; i < list.Count; i++)
+                        foreignCustom[(foreignWorkspace, list[i].Role.Id)] = list[i].Role;
+                }
+            }
+        }
+
         var resolved = new List<ResolvedGrant>(valid.Count);
         for (var i = 0; i < valid.Count; i++)
         {
             var grant = valid[i];
-            var role = BuiltInRoles.Find(grant.Role)
-                ?? (grant.Scope is TenantGrantScope
-                    ? null
-                    : custom is not null
-                        ? custom.GetValueOrDefault(grant.Role)
-                        : resolvedSingleCustom is not null && resolvedSingleCustom.Id == grant.Role ? resolvedSingleCustom : null);
+            AccessRole? role;
+            if (BuiltInRoles.Find(grant.Role) is { } builtIn)
+                role = builtIn;
+            else if (grant.Scope is TenantGrantScope)
+                role = null;
+            else if (grant.Workspace is { } grantWorkspace && grantWorkspace != scope.WorkspaceId)
+                role = foreignCustom?.GetValueOrDefault((grantWorkspace, grant.Role));
+            else
+                role = custom is not null
+                    ? custom.GetValueOrDefault(grant.Role)
+                    : resolvedSingleCustom is not null && resolvedSingleCustom.Id == grant.Role ? resolvedSingleCustom : null;
             if (preserveLocalAdminOnly && grant.Effect == GrantEffect.Allow && grant.Kind != GrantKind.BreakGlass)
             {
                 if (role is null)
@@ -307,7 +356,13 @@ internal sealed class AccessEngine(
     }
 
     /// <remarks>With <c>tenantAllowsOnly</c>, only allow grants whose own scope is tenant-wide count (tenant administration authority); denies of every scope still apply.</remarks>
-    public static PointResult Evaluate(AccessContext context, Permission permission, AccessResource resource, bool includeBreakGlass, bool tenantAllowsOnly = false)
+    public static PointResult Evaluate(
+        AccessContext context,
+        Permission permission,
+        AccessResource resource,
+        bool includeBreakGlass,
+        bool tenantAllowsOnly = false,
+        ConditionEvaluationMode conditionMode = ConditionEvaluationMode.Live)
     {
         if (resource.Scope != context.Scope)
             return PointResult.Deny(AccessDenialReason.ScopeMismatch);
@@ -320,18 +375,20 @@ internal sealed class AccessEngine(
             var grant = candidate.Grant;
             if (!includeBreakGlass && grant.Kind == GrantKind.BreakGlass)
                 continue;
-            if (!ScopeMatches(grant.Scope, resource))
-                continue;
             switch (grant.Effect)
             {
                 case GrantEffect.Deny:
-                    if ((candidate.Role is null || candidate.Includes(permission)) && Evaluate(grant.Condition, context, resource) != false)
+                    if (!ScopeMatchesDeny(grant.Scope, resource, tenantAllowsOnly, conditionMode))
+                        break;
+                    if ((candidate.Role is null || candidate.Includes(permission)) && Evaluate(grant.Condition, context, resource, conditionMode) != false)
                         return PointResult.Deny(AccessDenialReason.ExplicitDeny);
                     break;
                 case GrantEffect.Allow:
                     if (tenantAllowsOnly && grant.Scope is not TenantGrantScope)
                         break;
-                    if (candidate.Includes(permission) && Evaluate(grant.Condition, context, resource) == true)
+                    if (!ScopeMatches(grant.Scope, resource))
+                        break;
+                    if (candidate.Includes(permission) && Evaluate(grant.Condition, context, resource, conditionMode) == true)
                     {
                         if (grant.Kind == GrantKind.BreakGlass)
                             (breakGlass ??= []).Add(candidate);
@@ -366,16 +423,18 @@ internal sealed class AccessEngine(
             var grant = candidate.Grant;
             if (!includeBreakGlass && grant.Kind == GrantKind.BreakGlass)
                 continue;
-            if (!ScopeMatches(grant.Scope, resource))
-                continue;
             switch (grant.Effect)
             {
                 case GrantEffect.Deny:
+                    if (!ScopeMatchesDeny(grant.Scope, resource, tenantAllowsOnly, conditionMode))
+                        break;
                     if ((candidate.Role is null || candidate.Includes(permission)) && Evaluate(grant.Condition, context, resource, conditionMode) != false)
                         return SimplePointResult.Deny(AccessDenialReason.ExplicitDeny);
                     break;
                 case GrantEffect.Allow:
                     if (tenantAllowsOnly && grant.Scope is not TenantGrantScope)
+                        break;
+                    if (!ScopeMatches(grant.Scope, resource))
                         break;
                     if (grant.Kind == GrantKind.BreakGlass)
                     {
@@ -399,6 +458,30 @@ internal sealed class AccessEngine(
         TeamGrantScope team => team.Workspace == resource.Scope.WorkspaceId && resource.TeamId == team.Team,
         InboxGrantScope inbox => inbox.Workspace == resource.Scope.WorkspaceId && resource.InboxId == inbox.Inbox,
     };
+
+    /// <summary>
+    /// Scope matching for <see cref="GrantEffect.Deny"/> grants. Under <see cref="ConditionEvaluationMode.Live"/>, only denies covering
+    /// the concrete resource match. On abstract administrative targets (<see cref="ConditionEvaluationMode.ConservativeResources"/> or
+    /// <see cref="ConditionEvaluationMode.ConservativeAll"/>), any deny strictly contained by the target scope also matches: any team or
+    /// inbox deny in the workspace blocks workspace-level targets, and any workspace, team or inbox deny in the partition blocks
+    /// tenant-wide targets.
+    /// </summary>
+    public static bool ScopeMatchesDeny(GrantScope scope, AccessResource resource, bool tenantAllowsOnly, ConditionEvaluationMode conditionMode)
+    {
+        if (conditionMode == ConditionEvaluationMode.Live)
+            return ScopeMatches(scope, resource);
+        if (tenantAllowsOnly)
+            return true;
+        if (resource.TeamId is null && resource.InboxId is null)
+            return scope switch
+            {
+                TenantGrantScope => true,
+                WorkspaceGrantScope workspace => workspace.Workspace == resource.Scope.WorkspaceId,
+                TeamGrantScope team => team.Workspace == resource.Scope.WorkspaceId,
+                InboxGrantScope inbox => inbox.Workspace == resource.Scope.WorkspaceId,
+            };
+        return ScopeMatches(scope, resource);
+    }
 
     /// <summary>
     /// Kleene evaluation of a grant condition; <see langword="null"/> means unknown. Under

@@ -44,6 +44,8 @@ public sealed class InMemoryAccessStoreTests
         Assert.AreEqual("rejected:CapacityExceeded", AccessStoreContract.Describe(full, stored => stored.Revision));
         await Assert.ThrowsExactlyAsync<ArgumentException>(() => grants.ListForSubjectsAsync(partition, scope.WorkspaceId,
             Enumerable.Range(0, AccessLimits.MaximumSubjectsPerQuery + 1).Select(index => (GrantSubject)new Core.UserId($"u{index}")).ToArray()));
+        await Assert.ThrowsExactlyAsync<ArgumentException>(() => grants.ListAllForSubjectsAsync(partition,
+            Enumerable.Range(0, AccessLimits.MaximumSubjectsPerQuery + 1).Select(index => (GrantSubject)new Core.UserId($"u{index}")).ToArray()));
 
         var sink = new InMemoryAccessAuditSink(maximumEvents: 1);
         var auditEvent = new AccessAuditEvent(Guid.NewGuid(), TestClock.DefaultStart, scope, AccessAuditKind.Decision, AccessAuditOutcome.Allowed, new AccessActor(AccessActorKind.User, "u"));

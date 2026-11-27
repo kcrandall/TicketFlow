@@ -27,6 +27,9 @@ internal sealed class FixedGrantStore(params AccessGrant[] grants) : IAccessGran
     public Task<IReadOnlyList<StoredAccessGrant>> ListForSubjectsAsync(AccessPartition partition, WorkspaceId workspace, IReadOnlyCollection<GrantSubject> subjects, CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<StoredAccessGrant>>([.. grants.Select(grant => new StoredAccessGrant(grant, 1))]);
 
+    public Task<IReadOnlyList<StoredAccessGrant>> ListAllForSubjectsAsync(AccessPartition partition, IReadOnlyCollection<GrantSubject> subjects, CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<StoredAccessGrant>>([.. grants.Select(grant => new StoredAccessGrant(grant, 1))]);
+
     public Task<IReadOnlyList<StoredAccessGrant>> ListForTargetAsync(AccessPartition partition, GrantScope target, int limit, GrantId? after = null, CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<StoredAccessGrant>>([.. grants.Where(grant => grant.Scope == target).Select(grant => new StoredAccessGrant(grant, 1))]);
 

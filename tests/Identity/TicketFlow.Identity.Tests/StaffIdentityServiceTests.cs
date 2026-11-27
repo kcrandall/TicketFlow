@@ -39,7 +39,7 @@ public sealed class StaffIdentityServiceTests
         public IStaffIdentityResolver Resolver { get; }
         public InMemoryStaffIdentityStore Store { get; }
 
-        public UserPrincipal User(string id) => new(Scope, new UserId(id));
+        public UserPrincipal User(string id, params string[] teams) => TestPrincipals.User(Scope, id, teams);
 
         public static async Task<Fixture> CreateAsync(Action<AccessControlOptions>? configureAccess = null, Func<TicketScope, UserId, IReadOnlyList<TeamId>>? teamsForUser = null)
         {
@@ -60,9 +60,9 @@ public sealed class StaffIdentityServiceTests
             return fixture;
         }
 
-        public async Task GrantAsync(GrantSubject subject, AccessRole role, GrantScope? scope = null)
+        public async Task GrantAsync(GrantSubject subject, AccessRole role, GrantScope? scope = null, GrantEffect effect = GrantEffect.Allow, AccessCondition? condition = null)
         {
-            var grant = new AccessGrant(new GrantId($"seed-{nextGrant++:D3}"), AccessPartition.From(Scope), subject, role.Id, scope ?? new WorkspaceGrantScope(Scope.WorkspaceId));
+            var grant = new AccessGrant(new GrantId($"seed-{nextGrant++:D3}"), AccessPartition.From(Scope), subject, role.Id, scope ?? new WorkspaceGrantScope(Scope.WorkspaceId), effect, condition);
             Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await Provider.GetRequiredService<IAccessGrantStore>().CreateAsync(grant)).Value);
         }
 
@@ -318,5 +318,68 @@ public sealed class StaffIdentityServiceTests
             "Federated custom role must have staff-identity:manage stripped when AllowAdministrativeRoles is false.");
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UnlinkAsync(fedOwner, Google)));
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UnlinkAsync(fedManager, Google)));
+    }
+
+    [TestMethod]
+    public async Task StaffIdentityManageEvaluatesConditionsConservativelyAndEnforcesSubScopeDenies()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var identityManagerRole = new AccessRole(new RoleId("identity-manager"), "Identity manager", [StaffIdentityPermissions.Manage]);
+        var targetUser = new UserId("target-user");
+        var owner = fixture.User("owner");
+
+        // Seed an existing link so UnlinkAsync can be tested against a live link.
+        var seededLink = new StaffIdentityRef("google", "sub-existing");
+        Assert.AreEqual("applied", Describe(await fixture.Service.LinkAsync(owner, seededLink, targetUser)));
+
+        // 1. Conditional Deny (AssigneeIsSelfCondition / TeamInPrincipalTeamsCondition) blocks LinkAsync, UnlinkAsync, ListAsync, SetProfileAsync.
+        foreach (var (name, condition) in new (string, AccessCondition)[]
+        {
+            ("cond-deny-assignee", new AssigneeIsSelfCondition()),
+            ("cond-deny-team", new TeamInPrincipalTeamsCondition()),
+        })
+        {
+            var actor = fixture.User(name, "ops");
+            await fixture.GrantAsync(actor.UserId, identityManagerRole);
+            await fixture.GrantAsync(actor.UserId, identityManagerRole, effect: GrantEffect.Deny, condition: condition);
+
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.LinkAsync(actor, new StaffIdentityRef("entra", $"sub-{name}"), targetUser)), name);
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UnlinkAsync(actor, seededLink)), name);
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.ListAsync(actor, targetUser)), name);
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.SetProfileAsync(actor, new StaffProfile(targetUser, "Blocked"), null)), name);
+        }
+
+        // 2. Negated conditional Allow (Not(AssigneeIsSelfCondition) / Not(TeamInPrincipalTeamsCondition)) does NOT grant staff-identity:manage.
+        foreach (var (name, condition) in new (string, AccessCondition)[]
+        {
+            ("cond-allow-not-assignee", new NotCondition(new AssigneeIsSelfCondition())),
+            ("cond-allow-not-team", new NotCondition(new TeamInPrincipalTeamsCondition())),
+        })
+        {
+            var actor = fixture.User(name, "ops");
+            await fixture.GrantAsync(actor.UserId, identityManagerRole, condition: condition);
+
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.LinkAsync(actor, new StaffIdentityRef("entra", $"sub-{name}"), targetUser)), name);
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UnlinkAsync(actor, seededLink)), name);
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.ListAsync(actor, targetUser)), name);
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.SetProfileAsync(actor, new StaffProfile(targetUser, "Blocked"), null)), name);
+        }
+
+        // 3. Sub-scope Deny (Inbox / Team) blocks staff-identity:manage on abstract workspace target.
+        foreach (var (name, denyScope) in new (string, GrantScope)[]
+        {
+            ("subscope-deny-inbox", new InboxGrantScope(fixture.Scope.WorkspaceId, new InboxId("vip"))),
+            ("subscope-deny-team", new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("billing"))),
+        })
+        {
+            var actor = fixture.User(name);
+            await fixture.GrantAsync(actor.UserId, identityManagerRole);
+            await fixture.GrantAsync(actor.UserId, identityManagerRole, scope: denyScope, effect: GrantEffect.Deny);
+
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.LinkAsync(actor, new StaffIdentityRef("entra", $"sub-{name}"), targetUser)), name);
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UnlinkAsync(actor, seededLink)), name);
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.ListAsync(actor, targetUser)), name);
+            Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.SetProfileAsync(actor, new StaffProfile(targetUser, "Blocked"), null)), name);
+        }
     }
 }

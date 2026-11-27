@@ -154,4 +154,111 @@ public sealed class ConditionTests
         Assert.ThrowsExactly<FormatException>(() => AccessConditionCodec.Deserialize(new string(' ', AccessConditionCodec.MaximumEncodedBytes + 1)));
         Assert.AreEqual(Nest(AccessCondition.MaximumDepth), AccessConditionCodec.Deserialize(AccessConditionCodec.Serialize(Nest(AccessCondition.MaximumDepth))));
     }
+
+    [TestMethod]
+    public async Task AccessEvaluatorEvaluatesAdministrativePermissionsConservatively()
+    {
+        var staffIdentityManage = new Permission("staff-identity:manage");
+        using var fixture = AccessFixture.Create(services => services.AddTicketFlow().AddAccessPermissions(new PermissionDefinition(staffIdentityManage)));
+        var adminPerms = new[]
+        {
+            AccessPermissions.AccessManage,
+            AccessPermissions.AccessManageTenant,
+            AccessPermissions.AccessBreakGlass,
+            staffIdentityManage,
+        };
+        var allAdminRole = await fixture.CustomRoleAsync("all-admin-ws", AccessPermissions.AccessManage, AccessPermissions.AccessBreakGlass, staffIdentityManage);
+        var target = fixture.Resource();
+
+        // Add a field policy on staff-identity:manage and on ContactRead with AccessManage reveal permission to exercise both MaskAsync/BatchContext.Evaluate and RevealAsync paths.
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessFieldPolicy>>((await fixture.Policies.CreateAsync(fixture.Scope,
+            new AccessFieldPolicy(new FieldPath("staff.email"), [staffIdentityManage], [], AccessPermissions.AccessManage))).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessFieldPolicy>>((await fixture.Policies.CreateAsync(fixture.Scope,
+            new AccessFieldPolicy(new FieldPath("contact.secret"), [AccessPermissions.ContactRead], [], AccessPermissions.AccessManage))).Value);
+
+        // 1. Conditional Deny (AssigneeIsSelfCondition / TeamInPrincipalTeamsCondition) blocks administrative permissions in AuthorizeAsync, BatchContext.DecideAsync, and RevealAsync.
+        foreach (var (name, condition) in new (string, AccessCondition)[]
+        {
+            ("eval-deny-assignee", new AssigneeIsSelfCondition()),
+            ("eval-deny-team", new TeamInPrincipalTeamsCondition()),
+        })
+        {
+            var actor = fixture.User(name, "ops");
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Owner, effect: GrantEffect.Deny, condition: condition);
+
+            var batch = await fixture.Evaluator.LoadDecisionContextAsync(actor, fixture.Scope, adminPerms);
+            foreach (var perm in adminPerms)
+            {
+                Assert.AreEqual("denied:ExplicitDeny", await fixture.DescribeAsync(actor, perm, target), $"{name}:{perm}");
+                Assert.AreEqual("denied:ExplicitDeny", AccessFixture.Describe(await batch.DecideAsync(perm, target)), $"{name}:batch:{perm}");
+            }
+
+            var revealAdminRead = await fixture.Evaluator.RevealAsync(new RevealRequest(actor, target, staffIdentityManage, new FieldPath("staff.email")));
+            Assert.IsTrue(revealAdminRead is RevealRefused { Reason: RevealRefusal.ReadDenied }, name);
+
+            // ContactRead is non-administrative and allowed (Owner), but RevealPermission is AccessManage (administrative), which must fail closed.
+            var revealAdminPerm = await fixture.Evaluator.RevealAsync(new RevealRequest(actor, target, AccessPermissions.ContactRead, new FieldPath("contact.secret")));
+            Assert.IsTrue(revealAdminPerm is RevealRefused { Reason: RevealRefusal.RevealDenied }, name);
+        }
+
+        // 2. Negated conditional Allow (Not(AssigneeIsSelfCondition) / Not(TeamInPrincipalTeamsCondition)) must NOT grant administrative permissions.
+        foreach (var (name, condition) in new (string, AccessCondition)[]
+        {
+            ("eval-allow-not-assignee", new NotCondition(new AssigneeIsSelfCondition())),
+            ("eval-allow-not-team", new NotCondition(new TeamInPrincipalTeamsCondition())),
+        })
+        {
+            var actor = fixture.User(name, "ops");
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance, condition: condition);
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Viewer);
+
+            var batch = await fixture.Evaluator.LoadDecisionContextAsync(actor, fixture.Scope, adminPerms);
+            foreach (var perm in adminPerms)
+            {
+                Assert.AreEqual("denied:NoMatchingGrant", await fixture.DescribeAsync(actor, perm, target), $"{name}:{perm}");
+                Assert.AreEqual("denied:NoMatchingGrant", AccessFixture.Describe(await batch.DecideAsync(perm, target)), $"{name}:batch:{perm}");
+            }
+
+            var revealAdminRead = await fixture.Evaluator.RevealAsync(new RevealRequest(actor, target, staffIdentityManage, new FieldPath("staff.email")));
+            Assert.IsTrue(revealAdminRead is RevealRefused { Reason: RevealRefusal.ReadDenied }, name);
+
+            var revealAdminPerm = await fixture.Evaluator.RevealAsync(new RevealRequest(actor, target, AccessPermissions.ContactRead, new FieldPath("contact.secret")));
+            Assert.IsTrue(revealAdminPerm is RevealRefused { Reason: RevealRefusal.RevealDenied }, name);
+        }
+
+        // 3. Sub-scope Deny (Inbox/Team) blocks workspace-level administrative permissions; cross-workspace Deny blocks AccessManageTenant.
+        foreach (var (name, denyScope) in new (string, GrantScope)[]
+        {
+            ("eval-subscope-inbox", new InboxGrantScope(fixture.Scope.WorkspaceId, new InboxId("vip"))),
+            ("eval-subscope-team", new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("billing"))),
+        })
+        {
+            var actor = fixture.User(name);
+            await fixture.GrantAsync(actor.UserId, allAdminRole);
+            await fixture.GrantAsync(actor.UserId, allAdminRole, denyScope, GrantEffect.Deny);
+
+            var batch = await fixture.Evaluator.LoadDecisionContextAsync(actor, fixture.Scope, [AccessPermissions.AccessManage, AccessPermissions.AccessBreakGlass, staffIdentityManage]);
+            foreach (var perm in new[] { AccessPermissions.AccessManage, AccessPermissions.AccessBreakGlass, staffIdentityManage })
+            {
+                Assert.AreEqual("denied:ExplicitDeny", await fixture.DescribeAsync(actor, perm, target), $"{name}:{perm}");
+                Assert.AreEqual("denied:ExplicitDeny", AccessFixture.Describe(await batch.DecideAsync(perm, target)), $"{name}:batch:{perm}");
+            }
+        }
+
+        var wsB = new WorkspaceId("ws-b");
+        var tenantActor = fixture.User("eval-cross-ws-tenant");
+        await fixture.GrantAsync(tenantActor.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        await fixture.GrantAsync(tenantActor.UserId, BuiltInRoles.Owner, new WorkspaceGrantScope(wsB), GrantEffect.Deny);
+        var tenantBatch = await fixture.Evaluator.LoadDecisionContextAsync(tenantActor, fixture.Scope, [AccessPermissions.AccessManageTenant, AccessPermissions.ConversationRead]);
+        Assert.AreEqual("denied:ExplicitDeny", await fixture.DescribeAsync(tenantActor, AccessPermissions.AccessManageTenant, target));
+        Assert.AreEqual("denied:ExplicitDeny", AccessFixture.Describe(await tenantBatch.DecideAsync(AccessPermissions.AccessManageTenant, target)));
+        // Non-tenant workspace permission in wsA is unaffected by the wsB deny.
+        Assert.AreEqual("allowed", AccessFixture.Describe(await tenantBatch.DecideAsync(AccessPermissions.ConversationRead, target)));
+
+        // 4. Non-administrative permissions still evaluate Live.
+        var agent = fixture.User("eval-live-agent", "ops");
+        await fixture.GrantAsync(agent.UserId, BuiltInRoles.Agent, condition: new NotCondition(new AssigneeIsSelfCondition()));
+        Assert.AreEqual("allowed", await fixture.DescribeAsync(agent, AccessPermissions.ConversationReply, fixture.Resource(assignee: "someone-else")));
+    }
 }

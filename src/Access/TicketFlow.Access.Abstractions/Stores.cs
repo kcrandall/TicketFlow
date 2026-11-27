@@ -66,6 +66,13 @@ public interface IAccessGrantStore
     Task<IReadOnlyList<StoredAccessGrant>> ListForSubjectsAsync(AccessPartition partition, WorkspaceId workspace, IReadOnlyCollection<GrantSubject> subjects, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Grants for any of <paramref name="subjects"/> (at most <see cref="AccessLimits.MaximumSubjectsPerQuery"/>) across every scope in
+    /// <paramref name="partition"/> (tenant-wide and every workspace, team and inbox), ordered by grant identifier (ordinal).
+    /// Validity windows are not filtered by the store.
+    /// </summary>
+    Task<IReadOnlyList<StoredAccessGrant>> ListAllForSubjectsAsync(AccessPartition partition, IReadOnlyCollection<GrantSubject> subjects, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Grants (any subject) whose scope equals <paramref name="target"/> — a workspace, team or inbox scope, never tenant — ordered by
     /// grant identifier (ordinal), after <paramref name="after"/> when supplied, at most <paramref name="limit"/>
     /// (1-<see cref="AccessLimits.MaximumTargetPage"/>). Used to clean up grants when a team or inbox is deleted. Validity windows

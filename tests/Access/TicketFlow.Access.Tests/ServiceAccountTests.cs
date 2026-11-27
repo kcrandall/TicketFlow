@@ -752,6 +752,114 @@ public sealed partial class ServiceAccountTests
         }
     }
 
+    [TestMethod]
+    public async Task SubScopeAndCrossWorkspaceDenyBlockServiceAccountAdministrationAndConferral()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<IServiceAccountService>();
+
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        var noDeleteRole = await fixture.CustomRoleAsync("sa-no-delete", AccessPermissions.ConversationDelete);
+        var noManageRole = await fixture.CustomRoleAsync("sa-no-manage", AccessPermissions.AccessManage);
+        var inboxVip = new InboxGrantScope(fixture.Scope.WorkspaceId, new InboxId("vip"));
+        var teamBilling = new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("billing"));
+
+        // Seed a workspace SA holding Supervisor (includes ConversationDelete) and a pre-granted client ID.
+        var wsSupSa = new ApiClientId("sa-ws-sup");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(wsSupSa, fixture.Partition, fixture.Workspace, "WS Sup SA"))).IsSuccess);
+        await fixture.GrantAsync(wsSupSa, BuiltInRoles.Supervisor, fixture.Workspace);
+        Assert.IsTrue((await service.SetServiceAccountEnabledAsync(owner, wsSupSa, isEnabled: false)).IsSuccess);
+
+        var wsSupActiveSa = new ApiClientId("sa-ws-sup-active");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(wsSupActiveSa, fixture.Partition, fixture.Workspace, "WS Sup Active SA"))).IsSuccess);
+        await fixture.GrantAsync(wsSupActiveSa, BuiltInRoles.Supervisor, fixture.Workspace);
+
+        var orphanWsSup = new ApiClientId("sa-orphan-ws-sup");
+        await fixture.GrantAsync(orphanWsSup, BuiltInRoles.Supervisor, fixture.Workspace);
+
+        // 1. Workspace admin with sub-scope Deny(AccessManage) cannot create or list workspace service accounts.
+        foreach (var (name, denyScope) in new (string, GrantScope)[]
+        {
+            ("sa-inbox-no-manage", inboxVip),
+            ("sa-team-no-manage", teamBilling),
+        })
+        {
+            var actor = fixture.User(name);
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin);
+            await fixture.GrantAsync(actor.UserId, noManageRole, denyScope, GrantEffect.Deny);
+
+            var create = await service.CreateServiceAccountAsync(actor, new ServiceAccount(new ApiClientId($"sa-new-{name}"), fixture.Partition, fixture.Workspace, "New SA"));
+            Assert.IsTrue(create.TryGetValue(out TicketFailure createFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, createFailure.Kind, name);
+
+            var list = await service.ListServiceAccountsAsync(actor);
+            Assert.IsTrue(list.TryGetValue(out TicketFailure listFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, listFailure.Kind, name);
+        }
+
+        // 2. Workspace admin with sub-scope Deny(ConversationDelete) cannot confer Supervisor via SA create, key issuance, or re-enable.
+        foreach (var (name, denyScope) in new (string, GrantScope)[]
+        {
+            ("sa-inbox-no-delete", inboxVip),
+            ("sa-team-no-delete", teamBilling),
+        })
+        {
+            var actor = fixture.User(name);
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin);
+            await fixture.GrantAsync(actor.UserId, noDeleteRole, denyScope, GrantEffect.Deny);
+
+            var issue = await service.IssueApiKeyAsync(actor, new ApiKeyCreateRequest(wsSupActiveSa, "key"));
+            Assert.IsTrue(issue.TryGetValue(out TicketFailure issueFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, issueFailure.Kind, name);
+
+            var enable = await service.SetServiceAccountEnabledAsync(actor, wsSupSa, isEnabled: true);
+            Assert.IsTrue(enable.TryGetValue(out TicketFailure enableFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, enableFailure.Kind, name);
+
+            var createOrphan = await service.CreateServiceAccountAsync(actor, new ServiceAccount(orphanWsSup, fixture.Partition, fixture.Workspace, "Hijack"));
+            Assert.IsTrue(createOrphan.TryGetValue(out TicketFailure orphanFailure), name);
+            Assert.AreEqual(TicketFailureKind.Conflict, orphanFailure.Kind, name);
+        }
+
+        // 3. Tenant admin invoked from wsA with Deny(no-delete, Workspace(wsB)) cannot confer TenantGrantScope Supervisor via SA.
+        var wsB = new WorkspaceId("ws-b");
+        var wsBScope = fixture.Partition.InWorkspace(wsB);
+        var noDeleteInWsB = new AccessRole(new RoleId("no-delete"), "No Delete in wsB", [AccessPermissions.ConversationDelete]);
+        var noManageTenantInWsB = new AccessRole(new RoleId("no-manage-tenant"), "No Manage Tenant in wsB", [AccessPermissions.AccessManageTenant]);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await fixture.Roles.CreateAsync(wsBScope, noDeleteInWsB)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await fixture.Roles.CreateAsync(wsBScope, noManageTenantInWsB)).Value);
+
+        var tenantSupSa = new ApiClientId("sa-tenant-sup");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(tenantSupSa, fixture.Partition, TenantGrantScope.Instance, "Tenant Sup SA"))).IsSuccess);
+        await fixture.GrantAsync(tenantSupSa, BuiltInRoles.Supervisor, TenantGrantScope.Instance);
+
+        var tenantViewerSa = new ApiClientId("sa-tenant-viewer");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(tenantViewerSa, fixture.Partition, TenantGrantScope.Instance, "Tenant Viewer SA"))).IsSuccess);
+        await fixture.GrantAsync(tenantViewerSa, BuiltInRoles.Viewer, TenantGrantScope.Instance);
+
+        var tenantAdmin = fixture.User("sa-tenant-deny-wsb");
+        await fixture.GrantAsync(tenantAdmin.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        await fixture.GrantAsync(tenantAdmin.UserId, noDeleteInWsB, new WorkspaceGrantScope(wsB), GrantEffect.Deny);
+
+        var tenantIssueSup = await service.IssueApiKeyAsync(tenantAdmin, new ApiKeyCreateRequest(tenantSupSa, "escalated"));
+        Assert.IsTrue(tenantIssueSup.TryGetValue(out TicketFailure tenantSupFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, tenantSupFailure.Kind);
+
+        Assert.IsTrue((await service.IssueApiKeyAsync(tenantAdmin, new ApiKeyCreateRequest(tenantViewerSa, "viewer-key"))).IsSuccess);
+
+        // Tenant admin invoked from wsA with Deny(AccessManageTenant, Workspace(wsB)) cannot create a TenantGrantScope SA.
+        var blockedTenantAdmin = fixture.User("sa-tenant-deny-manage-wsb");
+        await fixture.GrantAsync(blockedTenantAdmin.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        await fixture.GrantAsync(blockedTenantAdmin.UserId, noManageTenantInWsB, new WorkspaceGrantScope(wsB), GrantEffect.Deny);
+
+        var createTenantSa = await service.CreateServiceAccountAsync(blockedTenantAdmin, new ServiceAccount(new ApiClientId("sa-t-blocked"), fixture.Partition, TenantGrantScope.Instance, "Blocked"));
+        Assert.IsTrue(createTenantSa.TryGetValue(out TicketFailure blockedFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, blockedFailure.Kind);
+    }
+
     private sealed class RacingApiKeyStore(IApiKeyStore inner, Func<Task> onAfterCreate) : IApiKeyStore
     {
         public ValueTask<StoredApiKey?> FindByIdAsync(AccessPartition partition, ApiKeyId keyId, CancellationToken cancellationToken = default) =>

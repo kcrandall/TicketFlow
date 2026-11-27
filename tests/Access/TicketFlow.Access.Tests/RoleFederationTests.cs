@@ -586,12 +586,21 @@ public sealed class RoleFederationTests
             Assert.AreEqual(TicketFailureKind.Forbidden, failure.Kind);
         }
 
-        // Team/inbox-denied tenant admin passes workspace base admin check, yet CANNOT delete team/inbox mappings via access:manage-tenant fallback (opaque NotFound)
+        // Team/inbox-denied tenant admin is blocked by sub-scope Deny containment on workspace base admin check (Forbidden) and cannot upsert/delete via access:manage-tenant fallback.
         foreach (var existingId in new[] { teamMapId, inboxMapId })
         {
             var del = await federation.DeleteMappingAsync(teamDeniedAdmin, existingId, expectedVersion: 1);
             Assert.IsTrue(del.TryGetValue(out TicketFailure failure));
-            Assert.AreEqual(TicketFailureKind.NotFound, failure.Kind);
+            Assert.AreEqual(TicketFailureKind.Forbidden, failure.Kind);
+        }
+        foreach (var targetScope in nonTenantScopes)
+        {
+            var upsert = await federation.UpsertMappingAsync(
+                teamDeniedAdmin,
+                new RoleFederationMappingId("team-denied-" + targetScope.GetType().Name),
+                new RoleFederationMapping("okta", "grp", BuiltInRoles.Viewer.Id, fixture.Partition, targetScope));
+            Assert.IsTrue(upsert.TryGetValue(out TicketFailure failure));
+            Assert.AreEqual(TicketFailureKind.Forbidden, failure.Kind);
         }
 
         // Tenant-only admin CAN still create a tenant-scoped mapping (using access:manage-tenant)
@@ -666,5 +675,90 @@ public sealed class RoleFederationTests
             Assert.IsTrue(upsert.TryGetValue(out TicketFailure upsertFailure), name);
             Assert.AreEqual(TicketFailureKind.Forbidden, upsertFailure.Kind, name);
         }
+    }
+
+    [TestMethod]
+    public async Task SubScopeAndCrossWorkspaceDenyBlockRoleFederationAdministrationAndConferral()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var federation = scope.ServiceProvider.GetRequiredService<IRoleFederationService>();
+
+        var noDeleteRole = await fixture.CustomRoleAsync("rf-no-delete", AccessPermissions.ConversationDelete);
+        var noManageRole = await fixture.CustomRoleAsync("rf-no-manage", AccessPermissions.AccessManage);
+        var inboxVip = new InboxGrantScope(fixture.Scope.WorkspaceId, new InboxId("vip"));
+        var teamBilling = new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("billing"));
+
+        // 1. Workspace admin with sub-scope Deny(ConversationDelete) cannot create a workspace-scoped mapping conferring Supervisor.
+        foreach (var (name, denyScope) in new (string, GrantScope)[]
+        {
+            ("rf-inbox-no-delete", inboxVip),
+            ("rf-team-no-delete", teamBilling),
+        })
+        {
+            var actor = fixture.User(name);
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin);
+            await fixture.GrantAsync(actor.UserId, noDeleteRole, denyScope, GrantEffect.Deny);
+
+            var supMapping = await federation.UpsertMappingAsync(actor, new RoleFederationMappingId($"m-sup-{name}"),
+                new RoleFederationMapping("okta", "sup-group", BuiltInRoles.Supervisor.Id, fixture.Partition, fixture.Workspace));
+            Assert.IsTrue(supMapping.TryGetValue(out TicketFailure supFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, supFailure.Kind, name);
+
+            var viewerMapping = await federation.UpsertMappingAsync(actor, new RoleFederationMappingId($"m-view-{name}"),
+                new RoleFederationMapping("okta", $"view-group-{name}", BuiltInRoles.Viewer.Id, fixture.Partition, fixture.Workspace));
+            Assert.IsTrue(viewerMapping.IsSuccess, name);
+        }
+
+        // 2. Workspace admin with sub-scope Deny(AccessManage) cannot create workspace-scoped mappings or list/catalog.
+        foreach (var (name, denyScope) in new (string, GrantScope)[]
+        {
+            ("rf-inbox-no-manage", inboxVip),
+            ("rf-team-no-manage", teamBilling),
+        })
+        {
+            var actor = fixture.User(name);
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin);
+            await fixture.GrantAsync(actor.UserId, noManageRole, denyScope, GrantEffect.Deny);
+
+            var upsert = await federation.UpsertMappingAsync(actor, new RoleFederationMappingId($"m-mgr-{name}"),
+                new RoleFederationMapping("okta", "view-group", BuiltInRoles.Viewer.Id, fixture.Partition, fixture.Workspace));
+            Assert.IsTrue(upsert.TryGetValue(out TicketFailure upsertFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, upsertFailure.Kind, name);
+
+            var list = await federation.ListMappingsAsync(actor);
+            Assert.IsTrue(list.TryGetValue(out TicketFailure listFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, listFailure.Kind, name);
+        }
+
+        // 3. Tenant admin invoked from wsA with Deny(no-delete, Workspace(wsB)) cannot create TenantGrantScope mapping for Supervisor.
+        var wsB = new WorkspaceId("ws-b");
+        var wsBScope = fixture.Partition.InWorkspace(wsB);
+        var noDeleteInWsB = new AccessRole(new RoleId("no-delete"), "No Delete in wsB", [AccessPermissions.ConversationDelete]);
+        var noManageTenantInWsB = new AccessRole(new RoleId("no-manage-tenant"), "No Manage Tenant in wsB", [AccessPermissions.AccessManageTenant]);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await fixture.Roles.CreateAsync(wsBScope, noDeleteInWsB)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await fixture.Roles.CreateAsync(wsBScope, noManageTenantInWsB)).Value);
+
+        var tenantAdmin = fixture.User("rf-tenant-deny-wsb");
+        await fixture.GrantAsync(tenantAdmin.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        await fixture.GrantAsync(tenantAdmin.UserId, noDeleteInWsB, new WorkspaceGrantScope(wsB), GrantEffect.Deny);
+
+        var tenantSup = await federation.UpsertMappingAsync(tenantAdmin, new RoleFederationMappingId("m-t-sup"),
+            new RoleFederationMapping("okta", "tenant-sup", BuiltInRoles.Supervisor.Id, fixture.Partition, TenantGrantScope.Instance));
+        Assert.IsTrue(tenantSup.TryGetValue(out TicketFailure tenantSupFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, tenantSupFailure.Kind);
+
+        Assert.IsTrue((await federation.UpsertMappingAsync(tenantAdmin, new RoleFederationMappingId("m-t-view"),
+            new RoleFederationMapping("okta", "tenant-view", BuiltInRoles.Viewer.Id, fixture.Partition, TenantGrantScope.Instance))).IsSuccess);
+
+        // Tenant admin invoked from wsA with Deny(AccessManageTenant, Workspace(wsB)) cannot create any TenantGrantScope mapping.
+        var blockedTenantAdmin = fixture.User("rf-tenant-deny-manage-wsb");
+        await fixture.GrantAsync(blockedTenantAdmin.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        await fixture.GrantAsync(blockedTenantAdmin.UserId, noManageTenantInWsB, new WorkspaceGrantScope(wsB), GrantEffect.Deny);
+
+        var blockedUpsert = await federation.UpsertMappingAsync(blockedTenantAdmin, new RoleFederationMappingId("m-t-blocked"),
+            new RoleFederationMapping("okta", "tenant-view", BuiltInRoles.Viewer.Id, fixture.Partition, TenantGrantScope.Instance));
+        Assert.IsTrue(blockedUpsert.TryGetValue(out TicketFailure blockedFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, blockedFailure.Kind);
     }
 }

@@ -91,34 +91,41 @@ public sealed class AdministrationTests
         await fixture.SeedAsync(new AccessGrant(new GrantId("expired-team-deny"), fixture.Partition, admin.UserId, expiredDenyRole.Id, teamScope, GrantEffect.Deny,
             validFrom: now.AddDays(-2), validUntil: now.AddMinutes(-5)));
 
-        // Actor restricted by a live TeamGrantScope Deny grant referencing R cannot neutralize it via UpdateRoleAsync (removing permissions) or DeleteRoleAsync (+ CreateRoleAsync).
+        // Actor restricted by a live TeamGrantScope or InboxGrantScope Deny grant referencing R is blocked by RequireHeld (Forbidden).
         var shrunkTeam = new AccessRole(teamDenyRole.Id, teamDenyRole.Name, [AccessPermissions.ConversationRead]);
-        var teamUpdateRefusal = (TicketFailure)(await fixture.Admin.UpdateRoleAsync(admin, shrunkTeam, 1)).Value!;
+        var widenedTeam = new AccessRole(teamDenyRole.Id, "Renamed Team Deny Role", [AccessPermissions.ConversationDelete, AccessPermissions.ConversationRead, AccessPermissions.ContactRead]);
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(admin, shrunkTeam, 1)));
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(admin, widenedTeam, 1)));
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(admin, teamDenyRole.Id, 1)));
+
+        // Owner (not subject to the Deny grants) passes RequireHeld, yet HasLiveDenyForRoleAsync still blocks shrinking or deleting R/R2.
+        var teamUpdateRefusal = (TicketFailure)(await fixture.Admin.UpdateRoleAsync(owner, shrunkTeam, 1)).Value!;
         Assert.AreEqual(TicketFailureKind.Conflict, teamUpdateRefusal.Kind);
         Assert.AreEqual("role-in-use", teamUpdateRefusal.Code);
-        var teamDeleteRefusal = (TicketFailure)(await fixture.Admin.DeleteRoleAsync(admin, teamDenyRole.Id, 1)).Value!;
+        var teamDeleteRefusal = (TicketFailure)(await fixture.Admin.DeleteRoleAsync(owner, teamDenyRole.Id, 1)).Value!;
         Assert.AreEqual(TicketFailureKind.Conflict, teamDeleteRefusal.Kind);
         Assert.AreEqual("role-in-use", teamDeleteRefusal.Code);
 
-        // Renaming or widening the role without removing any permissions is still allowed.
-        var widenedTeam = new AccessRole(teamDenyRole.Id, "Renamed Team Deny Role", [AccessPermissions.ConversationDelete, AccessPermissions.ConversationRead, AccessPermissions.ContactRead]);
-        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(admin, widenedTeam, 1)));
+        // Renaming or widening the role without removing any permissions is still allowed for an unblocked actor.
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(owner, widenedTeam, 1)));
         Assert.AreEqual("denied:ExplicitDeny", await fixture.DescribeAsync(admin, AccessPermissions.ConversationDelete, fixture.Resource(team: "billing")));
 
-        // Actor restricted by a live InboxGrantScope Deny grant referencing R2 also cannot neutralize it via UpdateRoleAsync or DeleteRoleAsync.
+        // Actor restricted by a live InboxGrantScope Deny grant referencing R2 is also blocked (Forbidden), and Owner hits Conflict (role-in-use).
         var shrunkInbox = new AccessRole(inboxDenyRole.Id, inboxDenyRole.Name, []);
-        var inboxUpdateRefusal = (TicketFailure)(await fixture.Admin.UpdateRoleAsync(admin, shrunkInbox, 1)).Value!;
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(admin, shrunkInbox, 1)));
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(admin, inboxDenyRole.Id, 1)));
+        var inboxUpdateRefusal = (TicketFailure)(await fixture.Admin.UpdateRoleAsync(owner, shrunkInbox, 1)).Value!;
         Assert.AreEqual(TicketFailureKind.Conflict, inboxUpdateRefusal.Kind);
         Assert.AreEqual("role-in-use", inboxUpdateRefusal.Code);
-        var inboxDeleteRefusal = (TicketFailure)(await fixture.Admin.DeleteRoleAsync(admin, inboxDenyRole.Id, 1)).Value!;
+        var inboxDeleteRefusal = (TicketFailure)(await fixture.Admin.DeleteRoleAsync(owner, inboxDenyRole.Id, 1)).Value!;
         Assert.AreEqual(TicketFailureKind.Conflict, inboxDeleteRefusal.Kind);
         Assert.AreEqual("role-in-use", inboxDeleteRefusal.Code);
         Assert.AreEqual("denied:ExplicitDeny", await fixture.DescribeAsync(admin, AccessPermissions.ConversationDelete, fixture.Resource(inbox: "vip")));
 
-        // Expired Deny grants do not block shrinking or deleting a custom role.
+        // Expired Deny grants do not block shrinking or deleting a custom role (for an actor holding the role's permissions).
         var shrunkExpired = new AccessRole(expiredDenyRole.Id, expiredDenyRole.Name, [AccessPermissions.ConversationRead]);
-        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(admin, shrunkExpired, 1)));
-        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(admin, expiredDenyRole.Id, 2)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(owner, shrunkExpired, 1)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(owner, expiredDenyRole.Id, 2)));
     }
 
     [TestMethod]
@@ -529,5 +536,111 @@ public sealed class AdministrationTests
         fixture.Clock.Advance(TimeSpan.FromHours(2));
         Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)(await fixture.Admin.ListRolesAsync(timedAdmin)).Value!).Kind);
         Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(timedAdmin, newRole)));
+    }
+
+    [TestMethod]
+    public async Task SubScopeDenyBlocksAbstractWorkspaceAdminAndConferral()
+    {
+        var (fixture, _, _, _) = await CreateAsync();
+        using var _ = fixture;
+
+        var noDeleteRole = await fixture.CustomRoleAsync("no-delete", AccessPermissions.ConversationDelete);
+        var noManageRole = await fixture.CustomRoleAsync("no-manage", AccessPermissions.AccessManage);
+        var inboxVip = new InboxGrantScope(fixture.Scope.WorkspaceId, new InboxId("vip"));
+        var teamBilling = new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("billing"));
+        var teamSales = new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("sales"));
+
+        // 1. Sub-scope Deny(ConversationDelete) on Inbox or Team blocks workspace-level RequireHeld / CheckCanConferAsync.
+        foreach (var (name, denyScope) in new (string, GrantScope)[]
+        {
+            ("inbox-no-delete", inboxVip),
+            ("team-no-delete", teamBilling),
+        })
+        {
+            var actor = fixture.User(name);
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin);
+            await fixture.GrantAsync(actor.UserId, noDeleteRole, denyScope, GrantEffect.Deny);
+
+            var wsSupervisorGrant = new AccessGrant(new GrantId($"g-sup-{name}"), fixture.Partition, new UserId("target"), BuiltInRoles.Supervisor.Id, fixture.Workspace);
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(actor, wsSupervisorGrant)), name);
+            Assert.IsInstanceOfType<TicketFailure>((await fixture.Admin.CheckCanConferAsync(actor, [new(wsSupervisorGrant)])).Value, name);
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(actor, new AccessRole(new RoleId($"del-{name}"), "Del", [AccessPermissions.ConversationDelete]))), name);
+
+            // Non-denied permissions can still be conferred at workspace scope.
+            var wsViewerGrant = new AccessGrant(new GrantId($"g-view-{name}"), fixture.Partition, new UserId("target"), BuiltInRoles.Viewer.Id, fixture.Workspace);
+            Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(actor, wsViewerGrant)), name);
+        }
+
+        // Team-denied admin can still confer Supervisor on a disjoint team scope.
+        var billingDeniedAdmin = fixture.User("team-no-delete");
+        var salesSupervisorGrant = new AccessGrant(new GrantId("g-sup-sales"), fixture.Partition, new UserId("target"), BuiltInRoles.Supervisor.Id, teamSales);
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(billingDeniedAdmin, salesSupervisorGrant)));
+
+        // 2. Sub-scope Deny(AccessManage) on Inbox or Team blocks workspace-level AuthorizeWithContextAsync.
+        var existingViewer = new AccessGrant(new GrantId("g-existing-ws"), fixture.Partition, new UserId("bob"), BuiltInRoles.Viewer.Id, fixture.Workspace);
+        await fixture.SeedAsync(existingViewer);
+        foreach (var (name, denyScope) in new (string, GrantScope)[]
+        {
+            ("inbox-no-manage", inboxVip),
+            ("team-no-manage", teamBilling),
+        })
+        {
+            var actor = fixture.User(name);
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin);
+            await fixture.GrantAsync(actor.UserId, noManageRole, denyScope, GrantEffect.Deny);
+
+            var wsViewerGrant = new AccessGrant(new GrantId($"g-mgr-{name}"), fixture.Partition, new UserId("target"), BuiltInRoles.Viewer.Id, fixture.Workspace);
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(actor, wsViewerGrant)), name);
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(actor, new AccessRole(new RoleId($"r-{name}"), "R", [AccessPermissions.ConversationRead]))), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)(await fixture.Admin.ListRolesAsync(actor)).Value!).Kind, name);
+            Assert.IsInstanceOfType<TicketFailure>((await fixture.Admin.CheckCanRevokeAsync(actor, [existingViewer])).Value, name);
+        }
+    }
+
+    [TestMethod]
+    public async Task CrossWorkspaceDenyBlocksTenantWideAdminAndConferralFromAnotherWorkspace()
+    {
+        var (fixture, _, _, _) = await CreateAsync();
+        using var _ = fixture;
+
+        var wsB = new WorkspaceId("ws-b");
+        var wsBScope = fixture.Partition.InWorkspace(wsB);
+        var noDeleteInWsB = new AccessRole(new RoleId("no-delete"), "No Delete in wsB", [AccessPermissions.ConversationDelete]);
+        var noManageTenantInWsB = new AccessRole(new RoleId("no-manage-tenant"), "No Manage Tenant in wsB", [AccessPermissions.AccessManageTenant]);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await fixture.Roles.CreateAsync(wsBScope, noDeleteInWsB)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await fixture.Roles.CreateAsync(wsBScope, noManageTenantInWsB)).Value);
+
+        // 1. Tenant admin in wsA with Deny(no-delete, Workspace/Team/Inbox in wsB) cannot confer TenantGrantScope Supervisor.
+        foreach (var (name, denyScope) in new (string, GrantScope)[]
+        {
+            ("tenant-deny-wsb", new WorkspaceGrantScope(wsB)),
+            ("tenant-deny-wsb-team", new TeamGrantScope(wsB, new TeamId("billing"))),
+            ("tenant-deny-wsb-inbox", new InboxGrantScope(wsB, new InboxId("vip"))),
+        })
+        {
+            var tenantAdmin = fixture.User(name);
+            await fixture.GrantAsync(tenantAdmin.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+            await fixture.GrantAsync(tenantAdmin.UserId, noDeleteInWsB, denyScope, GrantEffect.Deny);
+
+            var tenantSupGrant = new AccessGrant(new GrantId($"g-t-sup-{name}"), fixture.Partition, new UserId("bob"), BuiltInRoles.Supervisor.Id, TenantGrantScope.Instance);
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(tenantAdmin, tenantSupGrant)), name);
+            Assert.IsInstanceOfType<TicketFailure>((await fixture.Admin.CheckCanConferAsync(tenantAdmin, [new(tenantSupGrant)])).Value, name);
+
+            // Non-denied permissions can still be conferred at tenant scope, and wsA-scoped Supervisor is unaffected by wsB deny.
+            var tenantViewerGrant = new AccessGrant(new GrantId($"g-t-view-{name}"), fixture.Partition, new UserId("bob"), BuiltInRoles.Viewer.Id, TenantGrantScope.Instance);
+            Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(tenantAdmin, tenantViewerGrant)), name);
+            var wsASupGrant = new AccessGrant(new GrantId($"g-wsa-sup-{name}"), fixture.Partition, new UserId("bob"), BuiltInRoles.Supervisor.Id, fixture.Workspace);
+            Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(tenantAdmin, wsASupGrant)), name);
+        }
+
+        // 2. Tenant admin in wsA with Deny(AccessManageTenant, Workspace(wsB)) is blocked from all tenant-admin operations.
+        var blockedTenantAdmin = fixture.User("tenant-deny-manage-wsb");
+        await fixture.GrantAsync(blockedTenantAdmin.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        await fixture.GrantAsync(blockedTenantAdmin.UserId, noManageTenantInWsB, new WorkspaceGrantScope(wsB), GrantEffect.Deny);
+
+        Assert.IsInstanceOfType<TicketFailure>((await fixture.Admin.CheckCanManageTenantAsync(blockedTenantAdmin)).Value);
+        Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)(await fixture.Admin.ListTenantGrantsForSubjectsAsync(blockedTenantAdmin, [(GrantSubject)new UserId("bob")])).Value!).Kind);
+        var blockedTenantGrant = new AccessGrant(new GrantId("g-t-blocked"), fixture.Partition, new UserId("bob"), BuiltInRoles.Viewer.Id, TenantGrantScope.Instance);
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(blockedTenantAdmin, blockedTenantGrant)));
     }
 }

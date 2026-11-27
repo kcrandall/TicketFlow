@@ -50,6 +50,28 @@ internal readonly struct SimplePointResult(AccessDenialReason? denial, bool used
     public static SimplePointResult Deny(AccessDenialReason reason) => new(reason, false);
 }
 
+/// <summary>How grant conditions evaluate resource-instance and schedule predicates.</summary>
+internal enum ConditionEvaluationMode
+{
+    /// <summary>Concrete resource evaluation: all predicates evaluate against the resource and clock.</summary>
+    Live = 0,
+
+    /// <summary>
+    /// Abstract administrative target (primary authorization gate): resource-instance predicates
+    /// (<see cref="AssigneeIsSelfCondition"/> and <see cref="TeamInPrincipalTeamsCondition"/>) evaluate to
+    /// <see langword="null"/> so conditional denies fail closed and negated allows cannot match, while
+    /// <see cref="TimeWindowCondition"/> evaluates live against the current clock.
+    /// </summary>
+    ConservativeResources = 1,
+
+    /// <summary>
+    /// Anti-escalation, conferral and deny-lifting checks: resource-instance and schedule predicates
+    /// (<see cref="AssigneeIsSelfCondition"/>, <see cref="TeamInPrincipalTeamsCondition"/> and <see cref="TimeWindowCondition"/>)
+    /// evaluate to <see langword="null"/> so conditional denies fail closed and conditional allows cannot satisfy unconditional checks.
+    /// </summary>
+    ConservativeAll = 2,
+}
+
 /// <summary>
 /// The shared decision core. Rules: the principal's scope must equal the resource scope; only valid grants for the principal's
 /// subjects that are tenant-wide or name the workspace are considered; any applicable deny whose role includes the permission
@@ -132,10 +154,13 @@ internal sealed class AccessEngine(
         InboxGrantScope inbox => candidate is InboxGrantScope c && c.Workspace == inbox.Workspace && c.Inbox == inbox.Inbox,
     };
 
+    internal static readonly Permission StaffIdentityManage = new("staff-identity:manage");
+
     public static bool IsAdministrativePermission(Permission permission) =>
         permission == AccessPermissions.AccessManage
         || permission == AccessPermissions.AccessManageTenant
-        || permission == AccessPermissions.AccessBreakGlass;
+        || permission == AccessPermissions.AccessBreakGlass
+        || permission == StaffIdentityManage;
 
     public static bool RequiresTenantAllowOnly(Permission permission) =>
         permission == AccessPermissions.AccessManageTenant;
@@ -253,6 +278,8 @@ internal sealed class AccessEngine(
                     (adminPermissions ??= []).Add(AccessPermissions.AccessManageTenant);
                 if (role.Includes(AccessPermissions.AccessBreakGlass) && Catalog.Contains(AccessPermissions.AccessBreakGlass))
                     (adminPermissions ??= []).Add(AccessPermissions.AccessBreakGlass);
+                if (role.Includes(StaffIdentityManage) && Catalog.Contains(StaffIdentityManage))
+                    (adminPermissions ??= []).Add(StaffIdentityManage);
                 if (adminPermissions is null)
                     continue;
                 resolved.Add(new(grant, role, adminPermissions, IsRoleStripped: true));
@@ -326,7 +353,7 @@ internal sealed class AccessEngine(
         AccessResource resource,
         bool includeBreakGlass,
         bool tenantAllowsOnly = false,
-        bool conservativeConditions = false)
+        ConditionEvaluationMode conditionMode = ConditionEvaluationMode.Live)
     {
         if (resource.Scope != context.Scope)
             return SimplePointResult.Deny(AccessDenialReason.ScopeMismatch);
@@ -344,7 +371,7 @@ internal sealed class AccessEngine(
             switch (grant.Effect)
             {
                 case GrantEffect.Deny:
-                    if ((candidate.Role is null || candidate.Includes(permission)) && Evaluate(grant.Condition, context, resource, conservativeConditions) != false)
+                    if ((candidate.Role is null || candidate.Includes(permission)) && Evaluate(grant.Condition, context, resource, conditionMode) != false)
                         return SimplePointResult.Deny(AccessDenialReason.ExplicitDeny);
                     break;
                 case GrantEffect.Allow:
@@ -352,10 +379,10 @@ internal sealed class AccessEngine(
                         break;
                     if (grant.Kind == GrantKind.BreakGlass)
                     {
-                        if (!hasBreakGlass && !hasStandard && candidate.Includes(permission) && Evaluate(grant.Condition, context, resource, conservativeConditions) == true)
+                        if (!hasBreakGlass && !hasStandard && candidate.Includes(permission) && Evaluate(grant.Condition, context, resource, conditionMode) == true)
                             hasBreakGlass = true;
                     }
-                    else if (!hasStandard && candidate.Includes(permission) && Evaluate(grant.Condition, context, resource, conservativeConditions) == true)
+                    else if (!hasStandard && candidate.Includes(permission) && Evaluate(grant.Condition, context, resource, conditionMode) == true)
                         hasStandard = true;
                     break;
             }
@@ -374,31 +401,32 @@ internal sealed class AccessEngine(
     };
 
     /// <summary>
-    /// Kleene evaluation of a grant condition; <see langword="null"/> means unknown. When <paramref name="conservativeConditions"/>
-    /// is <see langword="true"/> (abstract administrative targets), resource-instance and schedule predicates
-    /// (<see cref="AssigneeIsSelfCondition"/>, <see cref="TeamInPrincipalTeamsCondition"/> and <see cref="TimeWindowCondition"/>)
-    /// evaluate to <see langword="null"/> so conditional denies fail closed and conditional allows cannot satisfy unconditional checks.
+    /// Kleene evaluation of a grant condition; <see langword="null"/> means unknown. Under
+    /// <see cref="ConditionEvaluationMode.ConservativeResources"/> (abstract administrative targets), resource-instance predicates
+    /// (<see cref="AssigneeIsSelfCondition"/> and <see cref="TeamInPrincipalTeamsCondition"/>) evaluate to <see langword="null"/> so
+    /// conditional denies fail closed and negated allows cannot match, while <see cref="TimeWindowCondition"/> evaluates live. Under
+    /// <see cref="ConditionEvaluationMode.ConservativeAll"/>, <see cref="TimeWindowCondition"/> also evaluates to <see langword="null"/>.
     /// </summary>
-    public static bool? Evaluate(AccessCondition? condition, AccessContext context, AccessResource resource, bool conservativeConditions = false) => condition switch
+    public static bool? Evaluate(AccessCondition? condition, AccessContext context, AccessResource resource, ConditionEvaluationMode conditionMode = ConditionEvaluationMode.Live) => condition switch
     {
         null => true,
-        AndCondition and => EvaluateAnd(and.Operands, context, resource, conservativeConditions),
-        OrCondition or => EvaluateOr(or.Operands, context, resource, conservativeConditions),
-        NotCondition not => !Evaluate(not.Operand, context, resource, conservativeConditions),
-        AssigneeIsSelfCondition => conservativeConditions ? null : context.User is { } user ? resource.AssigneeId == user.UserId : null,
-        TeamInPrincipalTeamsCondition => conservativeConditions ? null : context.User is { } user ? resource.TeamId is { } team && user.Teams.Contains(team) : null,
+        AndCondition and => EvaluateAnd(and.Operands, context, resource, conditionMode),
+        OrCondition or => EvaluateOr(or.Operands, context, resource, conditionMode),
+        NotCondition not => !Evaluate(not.Operand, context, resource, conditionMode),
+        AssigneeIsSelfCondition => conditionMode != ConditionEvaluationMode.Live ? null : context.User is { } user ? resource.AssigneeId == user.UserId : null,
+        TeamInPrincipalTeamsCondition => conditionMode != ConditionEvaluationMode.Live ? null : context.User is { } user ? resource.TeamId is { } team && user.Teams.Contains(team) : null,
         AttributeEqualsCondition equals => resource.Attributes.TryGetValue(equals.Key, out var value) ? string.Equals(value, equals.Value, global::System.StringComparison.Ordinal) : null,
         AttributeInCondition @in => resource.Attributes.TryGetValue(@in.Key, out var value) ? @in.ContainsValue(value) : null,
         HasLabelCondition label => resource.Labels?.Contains(label.Label),
-        TimeWindowCondition window => conservativeConditions ? null : window.Contains(context.Now),
+        TimeWindowCondition window => conditionMode == ConditionEvaluationMode.ConservativeAll ? null : window.Contains(context.Now),
     };
 
-    private static bool? EvaluateAnd(IReadOnlyList<AccessCondition> operands, AccessContext context, AccessResource resource, bool conservativeConditions)
+    private static bool? EvaluateAnd(IReadOnlyList<AccessCondition> operands, AccessContext context, AccessResource resource, ConditionEvaluationMode conditionMode)
     {
         var unknown = false;
         for (var i = 0; i < operands.Count; i++)
         {
-            var value = Evaluate(operands[i], context, resource, conservativeConditions);
+            var value = Evaluate(operands[i], context, resource, conditionMode);
             if (value == false)
                 return false;
             unknown |= value is null;
@@ -406,12 +434,12 @@ internal sealed class AccessEngine(
         return unknown ? null : true;
     }
 
-    private static bool? EvaluateOr(IReadOnlyList<AccessCondition> operands, AccessContext context, AccessResource resource, bool conservativeConditions)
+    private static bool? EvaluateOr(IReadOnlyList<AccessCondition> operands, AccessContext context, AccessResource resource, ConditionEvaluationMode conditionMode)
     {
         var unknown = false;
         for (var i = 0; i < operands.Count; i++)
         {
-            var value = Evaluate(operands[i], context, resource, conservativeConditions);
+            var value = Evaluate(operands[i], context, resource, conditionMode);
             if (value == true)
                 return true;
             unknown |= value is null;

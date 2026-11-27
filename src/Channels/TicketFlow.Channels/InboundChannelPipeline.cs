@@ -289,8 +289,9 @@ public sealed partial class InboundChannelPipeline : IInboundChannelPipeline
     }
 
     /// <summary>
-    /// Records channel state for a recorded message. A replay (a redelivered external id, whose sender fields are not trusted to
-    /// match the original) only creates missing state and never changes an existing recipient.
+    /// Records channel state for a recorded message. A replay (a redelivered external id, whose sender and threading headers are not
+    /// trusted to match the original) only creates missing state, never changes an existing recipient, and never adds untrusted
+    /// <c>References</c> or <c>In-Reply-To</c> entries to <see cref="IChannelThreadStore"/>.
     /// </summary>
     private async Task RecordStateAsync(TicketScope scope, InboxId inbox, ConversationId conversation, MessageId messageId, InboundChannelMessage message,
         DateTimeOffset receivedAt, ChannelRecipient recipient, ContactId? contact, bool replay, CancellationToken cancellationToken)
@@ -314,6 +315,13 @@ public sealed partial class InboundChannelPipeline : IInboundChannelPipeline
             var written = await states.WriteAsync(scope, next, current?.Revision, cancellationToken).ConfigureAwait(false);
             if (written.Value is not StoreConflict)
                 break;
+        }
+
+        if (replay)
+        {
+            if (ownReference is not null)
+                await threads.AddAsync(scope, inbox, conversation, [new ChannelMessageReference(ownReference, MessageDirection.Incoming, messageId)], time.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+            return;
         }
 
         var references = new List<ChannelMessageReference>(Math.Min(message.References.Count + 2, IChannelThreadStore.MaximumReferencesPerCall));

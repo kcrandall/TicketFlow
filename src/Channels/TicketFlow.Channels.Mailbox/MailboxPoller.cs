@@ -278,7 +278,8 @@ public sealed class MailboxMimeNormalizer(IMailboxAttachmentStore attachmentStor
     {
         var lastSlash = name.LastIndexOfAny(['/', '\\']);
         var segment = lastSlash >= 0 ? name[(lastSlash + 1)..] : name;
-        return SanitizeHeaderText(segment, AttachmentRef.MaximumFileNameLength) ?? "attachment.bin";
+        var sanitized = SanitizeHeaderText(segment, AttachmentRef.MaximumFileNameLength);
+        return sanitized is null ? "attachment.bin" : sanitized is "." or ".." ? "attachment" : sanitized;
     }
 
     private static string SanitizeMediaType(string mediaType)

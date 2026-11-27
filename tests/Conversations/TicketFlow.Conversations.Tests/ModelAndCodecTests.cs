@@ -35,6 +35,9 @@ public sealed class ModelAndCodecTests
             new MessageDelivery(MessageDeliveryState.Received, At)));
         Assert.ThrowsExactly<ArgumentException>(() => new MessageDelivery(MessageDeliveryState.Sent, At, "oops"));
         Assert.ThrowsExactly<ArgumentException>(() => new AttachmentRef("ref", "a.bin", "notamediatype", 1));
+        Assert.ThrowsExactly<ArgumentException>(() => new AttachmentRef("ref", ".", "application/octet-stream", 1));
+        Assert.ThrowsExactly<ArgumentException>(() => new AttachmentRef("ref", "..", "application/octet-stream", 1));
+        Assert.ThrowsExactly<ArgumentException>(() => new AttachmentRef("ref", " .. ", "application/octet-stream", 1));
         Assert.IsTrue(MessageDelivery.CanAdvance(MessageDeliveryState.Pending, MessageDeliveryState.Read));
         Assert.IsFalse(MessageDelivery.CanAdvance(MessageDeliveryState.Delivered, MessageDeliveryState.Sent));
         Assert.IsFalse(MessageDelivery.CanAdvance(MessageDeliveryState.Failed, MessageDeliveryState.Delivered));

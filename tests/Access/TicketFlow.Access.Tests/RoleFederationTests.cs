@@ -599,4 +599,72 @@ public sealed class RoleFederationTests
         Assert.IsTrue((await federation.UpsertMappingAsync(tenantOnlyAdmin, tenantMapId,
             new RoleFederationMapping("okta", "tenant-viewers", BuiltInRoles.Viewer.Id, fixture.Partition, TenantGrantScope.Instance))).IsSuccess);
     }
+
+    [TestMethod]
+    public async Task PrimaryRoleFederationAdminGatesEvaluateResourceConditionsConservatively()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var federation = scope.ServiceProvider.GetRequiredService<IRoleFederationService>();
+
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        var existingId = new RoleFederationMappingId("rf-cond-existing");
+        Assert.IsTrue((await federation.UpsertMappingAsync(owner, existingId,
+            new RoleFederationMapping("okta", "viewers", BuiltInRoles.Viewer.Id, fixture.Partition, fixture.Workspace))).IsSuccess);
+
+        // Conditional Deny on AssigneeIsSelfCondition / TeamInPrincipalTeamsCondition must fail closed on base and scope admin gates.
+        foreach (var (name, condition) in new (string, AccessCondition)[]
+        {
+            ("rf-deny-assignee", new AssigneeIsSelfCondition()),
+            ("rf-deny-team", new TeamInPrincipalTeamsCondition()),
+        })
+        {
+            var actor = fixture.User(name, "ops");
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin);
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin, effect: GrantEffect.Deny, condition: condition);
+
+            var list = await federation.ListMappingsAsync(actor);
+            Assert.IsTrue(list.TryGetValue(out TicketFailure listFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, listFailure.Kind, name);
+
+            var catalog = await federation.GetRoleCatalogAsync(actor);
+            Assert.IsTrue(catalog.TryGetValue(out TicketFailure catalogFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, catalogFailure.Kind, name);
+
+            var upsert = await federation.UpsertMappingAsync(actor, new RoleFederationMappingId($"m-{name}"),
+                new RoleFederationMapping("okta", "grp", BuiltInRoles.Viewer.Id, fixture.Partition, fixture.Workspace));
+            Assert.IsTrue(upsert.TryGetValue(out TicketFailure upsertFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, upsertFailure.Kind, name);
+
+            var delete = await federation.DeleteMappingAsync(actor, existingId, expectedVersion: 1);
+            Assert.IsTrue(delete.TryGetValue(out TicketFailure deleteFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, deleteFailure.Kind, name);
+        }
+
+        // Conditional Allow with Not(AssigneeIsSelfCondition) / Not(TeamInPrincipalTeamsCondition) must NOT authorize role federation administration.
+        foreach (var (name, condition) in new (string, AccessCondition)[]
+        {
+            ("rf-allow-not-assignee", new NotCondition(new AssigneeIsSelfCondition())),
+            ("rf-allow-not-team", new NotCondition(new TeamInPrincipalTeamsCondition())),
+        })
+        {
+            var actor = fixture.User(name, "ops");
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin, condition: condition);
+
+            var list = await federation.ListMappingsAsync(actor);
+            Assert.IsTrue(list.TryGetValue(out TicketFailure listFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, listFailure.Kind, name);
+
+            var catalog = await federation.GetRoleCatalogAsync(actor);
+            Assert.IsTrue(catalog.TryGetValue(out TicketFailure catalogFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, catalogFailure.Kind, name);
+
+            var upsert = await federation.UpsertMappingAsync(actor, new RoleFederationMappingId($"m-{name}"),
+                new RoleFederationMapping("okta", "grp", BuiltInRoles.Viewer.Id, fixture.Partition, fixture.Workspace));
+            Assert.IsTrue(upsert.TryGetValue(out TicketFailure upsertFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, upsertFailure.Kind, name);
+        }
+    }
 }

@@ -50,7 +50,7 @@ public sealed class StaffIdentityService(
     {
         var scope = RequireActor(actor);
         ArgumentNullException.ThrowIfNull(identity);
-        if (!await PermittedAsync(actor, StaffIdentityPermissions.Manage, new AccessResource(scope), cancellationToken).ConfigureAwait(false))
+        if (!await PermittedAsync(actor, StaffIdentityPermissions.Manage, new AccessResource(scope), cancellationToken, requireStandardGrant: true).ConfigureAwait(false))
             return TicketFailure.Forbidden;
         var existing = await store.FindAsync(scope, identity, cancellationToken).ConfigureAwait(false);
         if (existing is null)
@@ -131,34 +131,44 @@ public sealed class StaffIdentityService(
     /// </summary>
     private async Task<TicketFailure?> AuthorizeChangeAsync(PrincipalRef actor, TicketScope scope, UserId user, bool checkManage = true, CancellationToken cancellationToken = default)
     {
-        if (checkManage && !await PermittedAsync(actor, StaffIdentityPermissions.Manage, new AccessResource(scope), cancellationToken).ConfigureAwait(false))
+        if (checkManage && !await PermittedAsync(actor, StaffIdentityPermissions.Manage, new AccessResource(scope), cancellationToken, requireStandardGrant: true).ConfigureAwait(false))
             return TicketFailure.Forbidden;
         var userTeams = await teams.GetTeamsAsync(scope, user, cancellationToken).ConfigureAwait(false);
         var subjects = new List<GrantSubject>(userTeams.Count + 1) { user };
         foreach (var team in userTeams)
             subjects.Add(team);
         var held = await grants.ListForSubjectsAsync(AccessPartition.From(scope), scope.WorkspaceId, subjects, cancellationToken).ConfigureAwait(false);
-        if (held.Count == 0)
-            return null;
-        var conferrals = new GrantConferral[held.Count];
-        for (var i = 0; i < held.Count; i++)
-            conferrals[i] = new GrantConferral(held[i].Grant);
-        return await administrator.CheckCanConferAsync(actor, conferrals, cancellationToken).ConfigureAwait(false) switch
+        if (held.Count > 0)
         {
-            AccessCheckPassed => null,
-            TicketFailure => new TicketFailure(TicketFailureKind.Forbidden, ["The user holds grants the actor cannot confer."]),
-        };
+            var conferrals = new GrantConferral[held.Count];
+            for (var i = 0; i < held.Count; i++)
+                conferrals[i] = new GrantConferral(held[i].Grant);
+            if (await administrator.CheckCanConferAsync(actor, conferrals, cancellationToken).ConfigureAwait(false) is TicketFailure)
+                return new TicketFailure(TicketFailureKind.Forbidden, ["The user holds grants the actor cannot confer."]);
+        }
+        if (userTeams.Count > 0
+            && await administrator.CheckCanConferTeamFederatedRolesAsync(actor, user, userTeams, cancellationToken).ConfigureAwait(false) is TicketFailure)
+            return new TicketFailure(TicketFailureKind.Forbidden, ["The user holds grants the actor cannot confer."]);
+        return null;
     }
 
     private async Task<bool> SelfOrManagerAsync(PrincipalRef actor, TicketScope scope, UserId user, CancellationToken cancellationToken) =>
         IsSelf(actor, user)
             ? await PermittedAsync(actor, AccessPermissions.WorkspaceRead, new AccessResource(scope), cancellationToken).ConfigureAwait(false)
-            : await PermittedAsync(actor, StaffIdentityPermissions.Manage, new AccessResource(scope), cancellationToken).ConfigureAwait(false);
+            : await PermittedAsync(actor, StaffIdentityPermissions.Manage, new AccessResource(scope), cancellationToken, requireStandardGrant: true).ConfigureAwait(false);
 
     private static bool IsSelf(PrincipalRef actor, UserId user) => actor is UserPrincipal principal && principal.UserId == user;
 
-    private async Task<bool> PermittedAsync(PrincipalRef actor, Permission permission, AccessResource resource, CancellationToken cancellationToken) =>
-        (await evaluator.AuthorizeAsync(new AccessRequest(actor, permission, resource), cancellationToken).ConfigureAwait(false)).IsPermitted;
+    private async Task<bool> PermittedAsync(PrincipalRef actor, Permission permission, AccessResource resource, CancellationToken cancellationToken, bool requireStandardGrant = false)
+    {
+        var decision = await evaluator.AuthorizeAsync(new AccessRequest(actor, permission, resource), cancellationToken).ConfigureAwait(false);
+        return decision switch
+        {
+            AccessAllowed allowed => !requireStandardGrant || !allowed.UsedBreakGlass,
+            AccessMasked masked => !requireStandardGrant || !masked.UsedBreakGlass,
+            AccessDenied => false,
+        };
+    }
 
     private static StaffProfileView View(StoredStaffProfile stored, bool masked) =>
         new(stored.Profile.User, stored.Profile.DisplayName, stored.Profile.AvatarRef, masked ? null : stored.Profile.NotificationEmail,

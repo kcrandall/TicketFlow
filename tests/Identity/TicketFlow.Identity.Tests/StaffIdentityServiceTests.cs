@@ -41,12 +41,12 @@ public sealed class StaffIdentityServiceTests
 
         public UserPrincipal User(string id) => new(Scope, new UserId(id));
 
-        public static async Task<Fixture> CreateAsync()
+        public static async Task<Fixture> CreateAsync(Action<AccessControlOptions>? configureAccess = null, Func<TicketScope, UserId, IReadOnlyList<TeamId>>? teamsForUser = null)
         {
             var services = new ServiceCollection();
             services.AddSingleton<TimeProvider>(TestClock.Create());
-            services.AddSingleton<ITeamMembershipResolver>(new FixedTeams());
-            services.AddTicketFlow().AddAccessControl().AddInMemoryAccessStores().AddWorkspaces().AddInMemoryWorkspaceStores().AddStaffIdentity().AddInMemoryStaffIdentityStores();
+            services.AddSingleton<ITeamMembershipResolver>(new FixedTeams(teamsForUser));
+            services.AddTicketFlow().AddAccessControl(configureAccess).AddInMemoryAccessStores().AddWorkspaces().AddInMemoryWorkspaceStores().AddStaffIdentity().AddInMemoryStaffIdentityStores();
             var fixture = new Fixture(services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true }), TestScopes.Create());
             await fixture.GrantAsync(new UserId("owner"), BuiltInRoles.Owner);
             await fixture.GrantAsync(new UserId("tenant-owner"), BuiltInRoles.Owner, TenantGrantScope.Instance);
@@ -73,10 +73,12 @@ public sealed class StaffIdentityServiceTests
         }
     }
 
-    private sealed class FixedTeams : ITeamMembershipResolver
+    private sealed class FixedTeams(Func<TicketScope, UserId, IReadOnlyList<TeamId>>? resolve = null) : ITeamMembershipResolver
     {
         public Task<IReadOnlyList<TeamId>> GetTeamsAsync(TicketScope scope, UserId user, CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<TeamId>>(string.Equals(user.Value, "teamed", StringComparison.Ordinal) ? [new TeamId("escalation")] : []);
+            Task.FromResult(resolve is not null
+                ? resolve(scope, user)
+                : string.Equals(user.Value, "teamed", StringComparison.Ordinal) ? [new TeamId("escalation")] : (IReadOnlyList<TeamId>)[]);
     }
 
     private static string Describe<T>(TicketResult<T> result) => result switch
@@ -192,5 +194,129 @@ public sealed class StaffIdentityServiceTests
         Assert.IsNull(masked.NotificationEmail);
         Assert.AreEqual("Ada L.", masked.DisplayName);
         Assert.AreEqual("ada@example.com", Applied(await fixture.Service.GetProfileAsync(agent, new UserId("agent"))).NotificationEmail, "users always see their own email");
+    }
+
+    [TestMethod]
+    public async Task LinkingRejectsTeamFederatedPrivilegeEscalation()
+    {
+        using var fixture = await Fixture.CreateAsync(
+            configureAccess: options =>
+            {
+                options.RoleFederation.Mode = RoleFederationMode.MergeWithLocalGrants;
+                options.RoleFederation.MapTeamsAsExternalRoles = true;
+                options.RoleFederation.AllowDirectRoleIdMatching = true;
+                options.RoleFederation.StaticMappings["static-sup"] = BuiltInRoles.Supervisor.Id;
+            },
+            teamsForUser: (_, user) => user.Value switch
+            {
+                "fed-static" => [new TeamId("static-sup")],
+                "fed-direct" => [new TeamId("supervisor")],
+                "fed-local-ws" => [new TeamId("local-agents")],
+                "fed-local-tenant" => [new TeamId("local-tenant-viewers")],
+                _ => [],
+            });
+
+        var mappings = fixture.Provider.GetRequiredService<IRoleFederationMappingStore>();
+        var partition = AccessPartition.From(fixture.Scope);
+        Assert.IsTrue((await mappings.UpsertAsync(
+            new RoleFederationMappingId("m-local-ws"),
+            new RoleFederationMapping("local", "local-agents", BuiltInRoles.Agent.Id, partition, new WorkspaceGrantScope(fixture.Scope.WorkspaceId)),
+            isEnabled: true,
+            actorPrincipalId: "user:owner")).IsSuccess);
+        Assert.IsTrue((await mappings.UpsertAsync(
+            new RoleFederationMappingId("m-local-tenant"),
+            new RoleFederationMapping("local", "local-tenant-viewers", BuiltInRoles.Viewer.Id, partition, TenantGrantScope.Instance),
+            isEnabled: true,
+            actorPrincipalId: "user:tenant-owner")).IsSuccess);
+
+        var manager = fixture.User("manager");
+        var owner = fixture.User("owner");
+        var tenantOwner = fixture.User("tenant-owner");
+
+        // All four targets have 0 local grants in IAccessGrantStore; their privileges come strictly from team-based role federation.
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.LinkAsync(manager, new StaffIdentityRef("google", "sub-static"), new UserId("fed-static"))),
+            "Static team-federated role must block escalation.");
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.LinkAsync(manager, new StaffIdentityRef("google", "sub-direct"), new UserId("fed-direct"))),
+            "Direct team-to-role-id federated role must block escalation.");
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.LinkAsync(manager, new StaffIdentityRef("google", "sub-local-ws"), new UserId("fed-local-ws"))),
+            "Dynamic local-provider team-federated role must block escalation.");
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.LinkAsync(manager, new StaffIdentityRef("google", "sub-local-tenant"), new UserId("fed-local-tenant"))),
+            "Tenant-scoped team-federated role must block manager.");
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.LinkAsync(owner, new StaffIdentityRef("google", "sub-local-tenant"), new UserId("fed-local-tenant"))),
+            "Workspace owner cannot link an identity to a user with a tenant-scoped team-federated role.");
+
+        // Workspace owner holds all workspace-scoped permissions and can link workspace team-federated targets.
+        Assert.AreEqual("applied", Describe(await fixture.Service.LinkAsync(owner, new StaffIdentityRef("google", "sub-static"), new UserId("fed-static"))));
+        Assert.AreEqual("applied", Describe(await fixture.Service.LinkAsync(owner, new StaffIdentityRef("google", "sub-direct"), new UserId("fed-direct"))));
+        Assert.AreEqual("applied", Describe(await fixture.Service.LinkAsync(owner, new StaffIdentityRef("google", "sub-local-ws"), new UserId("fed-local-ws"))));
+        Assert.AreEqual("applied", Describe(await fixture.Service.LinkAsync(tenantOwner, new StaffIdentityRef("google", "sub-local-tenant"), new UserId("fed-local-tenant"))));
+
+        // Unlinking enforces the same team-federated anti-escalation check.
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UnlinkAsync(manager, new StaffIdentityRef("google", "sub-static"))));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UnlinkAsync(owner, new StaffIdentityRef("google", "sub-local-tenant"))));
+    }
+
+    [TestMethod]
+    public async Task BreakGlassAndStrippedFederatedStaffIdentityManageAreRefusedAgainstZeroGrantTargets()
+    {
+        using var fixture = await Fixture.CreateAsync(configureAccess: options =>
+        {
+            options.RoleFederation.Mode = RoleFederationMode.MergeWithLocalGrants;
+            options.RoleFederation.AllowAdministrativeRoles = false;
+            options.RoleFederation.StaticMappings["idp-owner"] = BuiltInRoles.Owner.Id;
+            options.RoleFederation.StaticMappings["idp-id-mgr"] = new RoleId("identity-manager");
+        });
+
+        using var scope = fixture.Provider.CreateScope();
+        var admin = scope.ServiceProvider.GetRequiredService<IAccessAdministrator>();
+        var grants = fixture.Provider.GetRequiredService<IAccessGrantStore>();
+        var now = fixture.Provider.GetRequiredService<TimeProvider>().GetUtcNow();
+
+        // 1. ActivateBreakGlassAsync must reject any role containing staff-identity:manage.
+        var onCallRole = new AccessRole(new RoleId("on-call-bg"), "On-call", [AccessPermissions.AccessBreakGlass]);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await fixture.Provider.GetRequiredService<IAccessRoleStore>().CreateAsync(fixture.Scope, onCallRole)).Value);
+        await fixture.GrantAsync(new UserId("on-call"), onCallRole);
+        var bgAttempt = await admin.ActivateBreakGlassAsync(new BreakGlassRequest(
+            fixture.User("on-call"),
+            new GrantId("bg-staff-id"),
+            new RoleId("identity-manager"),
+            new WorkspaceGrantScope(fixture.Scope.WorkspaceId),
+            TimeSpan.FromMinutes(30),
+            "Emergency staff identity link"));
+        Assert.AreEqual("refused:Invalid", Describe(bgAttempt), "Break-glass roles must not include staff-identity:manage.");
+
+        // 2. Even a directly-seeded break-glass grant with staff-identity:manage must be refused against a 0-grant target.
+        var bgGrant = new AccessGrant(
+            new GrantId("seeded-bg-staff"),
+            AccessPartition.From(fixture.Scope),
+            new UserId("bg-actor"),
+            new RoleId("identity-manager"),
+            new WorkspaceGrantScope(fixture.Scope.WorkspaceId),
+            GrantEffect.Allow,
+            validFrom: now.AddMinutes(-5),
+            validUntil: now.AddHours(1),
+            justification: "Seeded emergency break-glass grant",
+            kind: GrantKind.BreakGlass);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessGrant>>((await grants.CreateAsync(bgGrant)).Value);
+
+        var bgActor = fixture.User("bg-actor");
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.LinkAsync(bgActor, Google, new UserId("newbie"))),
+            "Break-glass staff-identity:manage must be refused even when target has 0 local grants.");
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.ListAsync(bgActor, new UserId("newbie"))));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.SetProfileAsync(bgActor, new StaffProfile(new UserId("newbie"), "X"), null)));
+
+        // Seed a link as owner, then verify break-glass actor cannot unlink even a 0-grant user.
+        Assert.AreEqual("applied", Describe(await fixture.Service.LinkAsync(fixture.User("owner"), Google, new UserId("newbie"))));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UnlinkAsync(bgActor, Google)));
+
+        // 3. Federated roles with AllowAdministrativeRoles = false must have staff-identity:manage stripped.
+        var fedOwner = new UserPrincipal(fixture.Scope, new UserId("fed-owner"), externalRoles: ["idp-owner"], identityProvider: "okta");
+        var fedManager = new UserPrincipal(fixture.Scope, new UserId("fed-mgr"), externalRoles: ["idp-id-mgr"], identityProvider: "okta");
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.LinkAsync(fedOwner, Entra, new UserId("newbie"))),
+            "Federated Owner must have staff-identity:manage stripped when AllowAdministrativeRoles is false.");
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.LinkAsync(fedManager, Entra, new UserId("newbie"))),
+            "Federated custom role must have staff-identity:manage stripped when AllowAdministrativeRoles is false.");
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UnlinkAsync(fedOwner, Google)));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UnlinkAsync(fedManager, Google)));
     }
 }

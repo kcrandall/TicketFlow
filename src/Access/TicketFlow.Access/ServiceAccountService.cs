@@ -580,20 +580,20 @@ public sealed class ServiceAccountService : IServiceAccountService
         var context = await engine.LoadAsync(actor, actor.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
         var workspaceTarget = new AccessResource(actor.Scope);
 
-        var manage = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, workspaceTarget, includeBreakGlass: false);
+        var manage = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, workspaceTarget, includeBreakGlass: false, conditionMode: ConditionEvaluationMode.ConservativeResources);
         if (manage.Allowed)
             return (null, context);
         if (manage.Denial == AccessDenialReason.ExplicitDeny)
             return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is explicitly denied administrative permission."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
 
-        var manageTenant = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: false, tenantAllowsOnly: true);
+        var manageTenant = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: false, tenantAllowsOnly: true, ConditionEvaluationMode.ConservativeResources);
         if (manageTenant.Allowed)
             return (null, context);
         if (manageTenant.Denial == AccessDenialReason.ExplicitDeny)
             return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is explicitly denied administrative permission."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
 
-        var viaBreakGlass = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, workspaceTarget, includeBreakGlass: true).Allowed
-            || AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: true, tenantAllowsOnly: true).Allowed;
+        var viaBreakGlass = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, workspaceTarget, includeBreakGlass: true, conditionMode: ConditionEvaluationMode.ConservativeResources).Allowed
+            || AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: true, tenantAllowsOnly: true, ConditionEvaluationMode.ConservativeResources).Allowed;
         if (viaBreakGlass)
             return (new TicketFailure(TicketFailureKind.Forbidden, ["Break-glass elevation cannot be used for service account administration."], Code: "break-glass-not-allowed"), context);
 
@@ -625,13 +625,13 @@ public sealed class ServiceAccountService : IServiceAccountService
         var targetResource = AccessEngine.Target(actor.Scope, targetGrantScope);
         context ??= await engine.LoadAsync(actor, actor.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
         var tenantOnly = targetGrantScope is TenantGrantScope;
-        var standard = AccessEngine.EvaluateSimple(context, requiredPermission, targetResource, includeBreakGlass: false, tenantAllowsOnly: tenantOnly);
+        var standard = AccessEngine.EvaluateSimple(context, requiredPermission, targetResource, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, ConditionEvaluationMode.ConservativeResources);
         if (standard.Allowed)
             return (null, context);
         if (standard.Denial == AccessDenialReason.ExplicitDeny)
             return (new TicketFailure(TicketFailureKind.Forbidden, [$"The actor is explicitly denied '{requiredPermission}' on the target scope."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
 
-        var withBreakGlass = AccessEngine.EvaluateSimple(context, requiredPermission, targetResource, includeBreakGlass: true, tenantAllowsOnly: tenantOnly);
+        var withBreakGlass = AccessEngine.EvaluateSimple(context, requiredPermission, targetResource, includeBreakGlass: true, tenantAllowsOnly: tenantOnly, ConditionEvaluationMode.ConservativeResources);
         if (withBreakGlass.Allowed)
             return (new TicketFailure(TicketFailureKind.Forbidden, ["Break-glass elevation cannot be used for service account administration."], Code: "break-glass-not-allowed"), context);
 
@@ -784,16 +784,16 @@ public sealed class ServiceAccountService : IServiceAccountService
     private static bool CanManageGrantTarget(AccessContext context, AccessGrant grant, TicketScope actorScope)
     {
         if (grant.Scope is TenantGrantScope)
-            return AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, new AccessResource(actorScope), includeBreakGlass: false, tenantAllowsOnly: true).Allowed;
+            return AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, new AccessResource(actorScope), includeBreakGlass: false, tenantAllowsOnly: true, ConditionEvaluationMode.ConservativeResources).Allowed;
 
         if (grant.Workspace == actorScope.WorkspaceId)
-            return AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, AccessEngine.Target(actorScope, grant.Scope), includeBreakGlass: false, tenantAllowsOnly: false).Allowed;
+            return AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, AccessEngine.Target(actorScope, grant.Scope), includeBreakGlass: false, tenantAllowsOnly: false, ConditionEvaluationMode.ConservativeResources).Allowed;
 
         // Cross-workspace non-tenant grant (only reachable on a tenant-scoped service account):
         // require tenant-scoped access:manage in addition to access:manage-tenant so an access:manage-tenant-only
         // principal cannot cascade-revoke non-tenant grants (including active break-glass grants).
-        return AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, new AccessResource(actorScope), includeBreakGlass: false, tenantAllowsOnly: true).Allowed
-            && AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, new AccessResource(actorScope), includeBreakGlass: false, tenantAllowsOnly: true).Allowed;
+        return AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, new AccessResource(actorScope), includeBreakGlass: false, tenantAllowsOnly: true, ConditionEvaluationMode.ConservativeResources).Allowed
+            && AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, new AccessResource(actorScope), includeBreakGlass: false, tenantAllowsOnly: true, ConditionEvaluationMode.ConservativeResources).Allowed;
     }
 
     private async Task<AccessRole?> ResolveGrantRoleAsync(
@@ -828,7 +828,7 @@ public sealed class ServiceAccountService : IServiceAccountService
             for (var i = 0; i < defs.Count; i++)
             {
                 var permission = defs[i].Permission;
-                if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, conservativeConditions: true).Allowed)
+                if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, ConditionEvaluationMode.ConservativeAll).Allowed)
                 {
                     allHeld = false;
                     if (missing is null)
@@ -840,7 +840,7 @@ public sealed class ServiceAccountService : IServiceAccountService
         }
 
         foreach (var permission in role.Permissions)
-            if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, conservativeConditions: true).Allowed)
+            if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, ConditionEvaluationMode.ConservativeAll).Allowed)
             {
                 allHeld = false;
                 if (missing is null)
@@ -855,7 +855,7 @@ public sealed class ServiceAccountService : IServiceAccountService
     {
         var defs = engine.Catalog.Definitions;
         for (var i = 0; i < defs.Count; i++)
-            if (!AccessEngine.EvaluateSimple(context, defs[i].Permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, conservativeConditions: true).Allowed)
+            if (!AccessEngine.EvaluateSimple(context, defs[i].Permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, ConditionEvaluationMode.ConservativeAll).Allowed)
                 return false;
         return true;
     }

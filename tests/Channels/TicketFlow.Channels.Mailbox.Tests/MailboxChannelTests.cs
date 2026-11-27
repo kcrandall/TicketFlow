@@ -375,6 +375,50 @@ public sealed class MailboxChannelTests
         Assert.IsNotNull(allowedAuto);
     }
 
+    [TestMethod]
+    public async Task DotAndDotDotAttachmentFileNamesAreMappedToSafeFallback()
+    {
+        var attachments = new InMemoryMailboxAttachmentStore();
+        var normalizer = new MailboxMimeNormalizer(attachments);
+        var config = new MailboxEndpointConfig(Scope, "imap-support", "imap.example.com");
+
+        var raw = Encoding.UTF8.GetBytes(
+            "From: ada@customer.example.com\r\n" +
+            "To: support@acme.example.com\r\n" +
+            "Message-ID: <dot-names@customer.example.com>\r\n" +
+            "Subject: Dot filenames\r\n" +
+            "MIME-Version: 1.0\r\n" +
+            "Content-Type: multipart/mixed; boundary=\"b-dots\"\r\n" +
+            "\r\n" +
+            "--b-dots\r\n" +
+            "Content-Type: text/plain\r\n\r\n" +
+            "See attached\r\n" +
+            "--b-dots\r\n" +
+            "Content-Type: application/octet-stream\r\n" +
+            "Content-Disposition: attachment; filename=\".\"\r\n\r\n" +
+            "DATA1\r\n" +
+            "--b-dots\r\n" +
+            "Content-Type: application/octet-stream\r\n" +
+            "Content-Disposition: attachment; filename=\"..\"\r\n\r\n" +
+            "DATA2\r\n" +
+            "--b-dots\r\n" +
+            "Content-Type: application/octet-stream\r\n" +
+            "Content-Disposition: attachment; filename=\"../../..\"\r\n\r\n" +
+            "DATA3\r\n" +
+            "--b-dots\r\n" +
+            "Content-Type: application/octet-stream\r\n" +
+            "Content-Disposition: attachment; filename=\"dir\\\\.\"\r\n\r\n" +
+            "DATA4\r\n" +
+            "--b-dots--\r\n");
+
+        var (_, message, skipReason) = await normalizer.NormalizeAsync(config, 1, 1, raw, Now);
+        Assert.IsNull(skipReason);
+        Assert.IsNotNull(message);
+        Assert.AreEqual(4, message.Attachments.Count);
+        foreach (var attachment in message.Attachments)
+            Assert.AreEqual("attachment", attachment.FileName);
+    }
+
     private sealed class CountingAttachmentStore : IMailboxAttachmentStore
     {
         private readonly InMemoryMailboxAttachmentStore inner = new();

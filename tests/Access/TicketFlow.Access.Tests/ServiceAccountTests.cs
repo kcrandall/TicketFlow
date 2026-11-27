@@ -664,6 +664,74 @@ public sealed partial class ServiceAccountTests
         Assert.IsNull(await fixture.Grants.GetAsync(fixture.Partition, bgGrantOtherWs.Id));
     }
 
+    [TestMethod]
+    public async Task PrimaryServiceAccountAdminGatesEvaluateResourceConditionsConservatively()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<IServiceAccountService>();
+
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        var existingSa = new ApiClientId("sa-cond-target");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(existingSa, fixture.Partition, fixture.Workspace, "Target SA"))).IsSuccess);
+        var teamScope = new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("other-team"));
+        await fixture.GrantAsync(existingSa, BuiltInRoles.Viewer, teamScope);
+
+        // Conditional Deny on AssigneeIsSelfCondition / TeamInPrincipalTeamsCondition must fail closed on base and scope admin gates.
+        foreach (var (name, condition) in new (string, AccessCondition)[]
+        {
+            ("sa-deny-assignee", new AssigneeIsSelfCondition()),
+            ("sa-deny-team", new TeamInPrincipalTeamsCondition()),
+        })
+        {
+            var actor = fixture.User(name, "ops");
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin);
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin, effect: GrantEffect.Deny, condition: condition);
+
+            var list = await service.ListServiceAccountsAsync(actor);
+            Assert.IsTrue(list.TryGetValue(out TicketFailure listFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, listFailure.Kind, name);
+
+            var create = await service.CreateServiceAccountAsync(actor, new ServiceAccount(new ApiClientId($"sa-new-{name}"), fixture.Partition, fixture.Workspace, "New SA"));
+            Assert.IsTrue(create.TryGetValue(out TicketFailure createFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, createFailure.Kind, name);
+
+            var delete = await service.DeleteServiceAccountAsync(actor, existingSa);
+            Assert.IsTrue(delete.TryGetValue(out TicketFailure deleteFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, deleteFailure.Kind, name);
+        }
+
+        // Conditional Deny on team grant target (CanManageGrantTarget) blocks cascade-revocation during DeleteServiceAccountAsync.
+        var teamCondDenyActor = fixture.User("sa-team-cond-deny", "ops");
+        await fixture.GrantAsync(teamCondDenyActor.UserId, BuiltInRoles.Admin);
+        var denyManageRole = await fixture.CustomRoleAsync("sa-deny-manage", AccessPermissions.AccessManage);
+        await fixture.GrantAsync(teamCondDenyActor.UserId, denyManageRole, teamScope, GrantEffect.Deny, condition: new TeamInPrincipalTeamsCondition());
+        var deleteWithTeamDeny = await service.DeleteServiceAccountAsync(teamCondDenyActor, existingSa);
+        Assert.IsTrue(deleteWithTeamDeny.TryGetValue(out TicketFailure teamDenyFailure));
+        Assert.AreEqual(TicketFailureKind.Forbidden, teamDenyFailure.Kind);
+
+        // Conditional Allow with Not(AssigneeIsSelfCondition) / Not(TeamInPrincipalTeamsCondition) must NOT authorize service account administration.
+        foreach (var (name, condition) in new (string, AccessCondition)[]
+        {
+            ("sa-allow-not-assignee", new NotCondition(new AssigneeIsSelfCondition())),
+            ("sa-allow-not-team", new NotCondition(new TeamInPrincipalTeamsCondition())),
+        })
+        {
+            var actor = fixture.User(name, "ops");
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin, condition: condition);
+
+            var list = await service.ListServiceAccountsAsync(actor);
+            Assert.IsTrue(list.TryGetValue(out TicketFailure listFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, listFailure.Kind, name);
+
+            var create = await service.CreateServiceAccountAsync(actor, new ServiceAccount(new ApiClientId($"sa-new-{name}"), fixture.Partition, fixture.Workspace, "New SA"));
+            Assert.IsTrue(create.TryGetValue(out TicketFailure createFailure), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, createFailure.Kind, name);
+        }
+    }
+
     private sealed class CancellingOnDeleteServiceAccountStore(IServiceAccountStore inner, CancellationTokenSource cts) : IServiceAccountStore
     {
         public ValueTask<StoredServiceAccount?> FindAsync(AccessPartition partition, ApiClientId clientId, CancellationToken cancellationToken = default) =>

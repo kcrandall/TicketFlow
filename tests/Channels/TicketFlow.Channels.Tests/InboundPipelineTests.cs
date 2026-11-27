@@ -200,4 +200,36 @@ public sealed class InboundPipelineTests
         Assert.AreNotEqual(first.Conversation, afterClose.Conversation);
         Assert.IsTrue(afterClose.StartedConversation);
     }
+
+    [TestMethod]
+    public async Task ReplayedExternalMessageIdDoesNotInjectOrEvictThreadReferences()
+    {
+        await using var host = await HostAsync(EmailChannel());
+        var inbox = new InboxId("email-inbox");
+        var first = Recorded(await host.Pipeline.ReceiveAsync(host.Worker, host.Email("<root@x>")));
+        var originalRefs = (await host.Threads.ListAsync(host.Scope, first.Conversation))
+            .Select(r => r.Reference.Reference)
+            .ToArray();
+        CollectionAssert.AreEqual(new[] { "root@x" }, originalRefs);
+
+        // Replay the same ExternalMessageId repeatedly with fabricated In-Reply-To and a full batch of fabricated References.
+        for (var round = 0; round < 20; round++)
+        {
+            var fabricatedRefs = Enumerable.Range(1, InboundChannelMessage.MaximumReferences)
+                .Select(i => $"<forged-{round}-{i}@evil.example>")
+                .ToArray();
+            var replayed = Recorded(await host.Pipeline.ReceiveAsync(host.Worker,
+                host.Email("<root@x>", from: "mallory@evil.example", inReplyTo: $"<forged-reply-{round}@evil.example>", references: fabricatedRefs)));
+            Assert.IsTrue(replayed.Replayed);
+            Assert.AreEqual(first.Conversation, replayed.Conversation);
+        }
+
+        var afterRefs = (await host.Threads.ListAsync(host.Scope, first.Conversation))
+            .Select(r => r.Reference.Reference)
+            .ToArray();
+        CollectionAssert.AreEqual(new[] { "root@x" }, afterRefs,
+            "Replayed ExternalMessageId must not insert untrusted References/In-Reply-To or evict existing references.");
+        Assert.IsNull(await host.Threads.FindConversationAsync(host.Scope, inbox, ["forged-reply-0@evil.example", "forged-0-1@evil.example"]));
+        Assert.AreEqual(first.Conversation, await host.Threads.FindConversationAsync(host.Scope, inbox, ["root@x"]));
+    }
 }

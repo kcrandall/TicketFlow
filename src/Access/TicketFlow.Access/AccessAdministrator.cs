@@ -441,13 +441,83 @@ public sealed class AccessAdministrator : IAccessAdministrator
         {
             var key = (permission, target, tenantOnly);
             if (!cache.TryGetValue(key, out var allowed))
-                cache[key] = allowed = AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, conservativeConditions: true).Allowed;
+                cache[key] = allowed = AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, ConditionEvaluationMode.ConservativeAll).Allowed;
             if (!allowed)
                 missing.Add(permission.Value);
             return;
         }
-        if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, conservativeConditions: true).Allowed)
+        if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly: tenantOnly, ConditionEvaluationMode.ConservativeAll).Allowed)
             missing.Add(permission.Value);
+    }
+
+    public async Task<AccessCheckResult> CheckCanConferTeamFederatedRolesAsync(
+        PrincipalRef actor,
+        UserId user,
+        IReadOnlyCollection<TeamId> teams,
+        CancellationToken cancellationToken = default)
+    {
+        RequireActor(actor);
+        if (user == default)
+            throw new ArgumentException("A user identifier is required.", nameof(user));
+        ArgumentNullException.ThrowIfNull(teams);
+        if (teams.Count == 0
+            || engine.Options.RoleFederation.Mode == RoleFederationMode.Disabled
+            || !engine.Options.RoleFederation.MapTeamsAsExternalRoles)
+            return AccessCheckPassed.Instance;
+        if (engine.Precheck(actor, AccessPermissions.AccessManage, actor.Scope) is { } reason)
+            return Refused(["The actor is not authorized."], reason);
+        var (serviceAccountDenial, serviceAccount) = await engine.CheckServiceAccountAsync(actor, actor.Scope, resource: null, cancellationToken).ConfigureAwait(false);
+        if (serviceAccountDenial is { } saReason)
+            return Refused(["The actor is not authorized."], saReason);
+        var targetPrincipal = new UserPrincipal(actor.Scope, user, teams);
+        var federated = await RoleFederationSupport.ResolveFederatedGrantsAsync(
+            targetPrincipal,
+            actor.Scope,
+            engine.Options.RoleFederation,
+            roleFederationMappings,
+            roles,
+            engine.Catalog,
+            existingCustomRoles: null,
+            cancellationToken).ConfigureAwait(false);
+        if (federated.Count == 0)
+            return AccessCheckPassed.Instance;
+        var context = await engine.LoadAsync(actor, actor.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
+        var missing = new SortedSet<string>(StringComparer.Ordinal);
+        Dictionary<(Permission, AccessResource, bool), bool>? decisionCache = federated.Count > 1 ? [] : null;
+        for (var i = 0; i < federated.Count; i++)
+        {
+            var resolved = federated[i];
+            var grant = resolved.Grant;
+            var target = AccessEngine.Target(actor.Scope, grant.Scope);
+            if (!InActorScope(actor, grant) || target.Scope != actor.Scope)
+                return Refused(["The grant is outside the actor's scope."], AccessDenialReason.ScopeMismatch);
+            if (serviceAccount is not null
+                && (!AccessEngine.ScopeContains(serviceAccount.Account.Scope, grant.Scope) || !serviceAccount.Account.AppliesTo(target)))
+                return Refused(["The grant is outside the service account's scope."], AccessDenialReason.ScopeMismatch);
+            var tenantOnly = grant.Scope is TenantGrantScope;
+            if (resolved.EffectivePermissions is { } effective)
+            {
+                foreach (var permission in effective)
+                    CheckPermission(permission, context, target, tenantOnly, missing, decisionCache);
+            }
+            else if (resolved.Role is { } role)
+            {
+                if (role.IncludesAllPermissions)
+                {
+                    var defs = engine.Catalog.Definitions;
+                    for (var j = 0; j < defs.Count; j++)
+                        CheckPermission(defs[j].Permission, context, target, tenantOnly, missing, decisionCache);
+                }
+                else
+                {
+                    foreach (var permission in role.Permissions)
+                        CheckPermission(permission, context, target, tenantOnly, missing, decisionCache);
+                }
+            }
+        }
+        return missing.Count == 0
+            ? AccessCheckPassed.Instance
+            : Refused([.. missing.Select(permission => $"The actor does not hold '{permission}' on the target.")], AccessDenialReason.NoMatchingGrant);
     }
 
     public async Task<AccessCheckResult> CheckCanRevokeAsync(PrincipalRef actor, IEnumerable<AccessGrant> grants, CancellationToken cancellationToken = default)
@@ -472,7 +542,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
                 return Refused(["The grant is outside the service account's scope."], AccessDenialReason.ScopeMismatch);
             var tenant = grant.Scope is TenantGrantScope;
             var permission = tenant ? AccessPermissions.AccessManageTenant : AccessPermissions.AccessManage;
-            var result = AccessEngine.EvaluateSimple(context, permission, AccessEngine.Target(actor.Scope, grant.Scope), includeBreakGlass: false, tenantAllowsOnly: tenant);
+            var result = AccessEngine.EvaluateSimple(context, permission, AccessEngine.Target(actor.Scope, grant.Scope), includeBreakGlass: false, tenantAllowsOnly: tenant, ConditionEvaluationMode.ConservativeResources);
             if (result.Denial is { } denial)
                 return Refused([$"Permission '{permission}' is required on the grant's target."], denial);
             if (grant.Effect == GrantEffect.Deny
@@ -573,7 +643,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         new(TicketFailureKind.Forbidden, errors);
 
     private static readonly Permission[] ManagementPermissions =
-        [AccessPermissions.AccessManage, AccessPermissions.AccessManageTenant, AccessPermissions.AccessBreakGlass];
+        [AccessPermissions.AccessManage, AccessPermissions.AccessManageTenant, AccessPermissions.AccessBreakGlass, AccessEngine.StaffIdentityManage];
 
     private sealed record Refusal(TicketFailureKind Reason, IReadOnlyList<string> Errors, AccessDenialReason? Denial = null, long? CurrentRevision = null, string? Code = null);
 
@@ -645,7 +715,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         if (serviceAccountDenial is { } saReason)
             return (new(TicketFailureKind.Forbidden, ["The actor is not authorized."], saReason), context);
         context ??= await engine.LoadAsync(actor, resource.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
-        var result = AccessEngine.EvaluateSimple(context, permission, resource, includeBreakGlass: false, tenantAllowsOnly);
+        var result = AccessEngine.EvaluateSimple(context, permission, resource, includeBreakGlass: false, tenantAllowsOnly, ConditionEvaluationMode.ConservativeResources);
         return (result.Denial is { } denial ? new(TicketFailureKind.Forbidden, ["The actor is not authorized."], denial) : null, context);
     }
 
@@ -659,7 +729,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
             if (checkedPerms is not null && !checkedPerms.Add(permission))
                 continue;
             checkedPerms ??= [permission];
-            if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly, conservativeConditions: true).Allowed)
+            if (!AccessEngine.EvaluateSimple(context, permission, target, includeBreakGlass: false, tenantAllowsOnly, ConditionEvaluationMode.ConservativeAll).Allowed)
                 (missing ??= []).Add(permission);
         }
         if (missing is null)

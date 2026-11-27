@@ -65,8 +65,8 @@ public sealed class SurveyService : ISurveyService
         if (existing is null)
             return NotFound;
         if (existing.Survey.Inbox != survey.Inbox
-            && await AuthorizeAsync(actor, SurveyPermissions.Manage, SurveyResources.Survey(actor.Scope, existing.Survey), cancellationToken).ConfigureAwait(false) is { } refusedOld)
-            return refusedOld;
+            && await AuthorizeAsync(actor, SurveyPermissions.Manage, SurveyResources.Survey(actor.Scope, existing.Survey), cancellationToken).ConfigureAwait(false) is not null)
+            return NotFound;
         if (existing.Revision != expectedRevision)
             return Conflict(existing.Revision);
         if (existing.Survey.Kind != survey.Kind)

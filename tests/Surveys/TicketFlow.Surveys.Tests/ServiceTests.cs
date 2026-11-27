@@ -24,14 +24,34 @@ public sealed class ServiceTests
         Assert.IsEmpty(Value(await fixture.Service.ListSurveysAsync(stranger)));
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.GetSurveyAsync(inboxManager, new SurveyId("workspace"))));
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UpdateSurveyAsync(inboxManager, SampleSurvey("inbox", inbox: "i9"), 1)), "Moving to an inbox the actor cannot manage.");
-        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UpdateSurveyAsync(inboxManager, SampleSurvey("workspace", SurveyKind.Nps, inbox: "i0"), 1)), "Moving from the workspace needs workspace manage.");
-        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.UpdateSurveyAsync(inboxManager, SampleSurvey("workspace", SurveyKind.Csat, inbox: "i0"), 99)), "Unauthorized source survey must return Forbidden before revision or kind checks.");
+        Assert.AreEqual("refused:NotFound", Describe(await fixture.Service.UpdateSurveyAsync(inboxManager, SampleSurvey("workspace", SurveyKind.Nps, inbox: "i0"), 1)), "Moving from the workspace returns opaque NotFound.");
+        Assert.AreEqual("refused:NotFound", Describe(await fixture.Service.UpdateSurveyAsync(inboxManager, SampleSurvey("workspace", SurveyKind.Csat, inbox: "i0"), 99)), "Unauthorized source survey must return opaque NotFound before revision or kind checks.");
         Assert.AreEqual("refused:Invalid", Describe(await fixture.Service.UpdateSurveyAsync(manager, SampleSurvey("inbox", SurveyKind.Nps, inbox: "i0"), 1)));
         Assert.AreEqual("refused:Conflict:1", Describe(await fixture.Service.UpdateSurveyAsync(manager, SampleSurvey("inbox", inbox: "i0", enabled: false), 5)));
         Value(await fixture.Service.UpdateSurveyAsync(inboxManager, SampleSurvey("inbox", inbox: "i0", enabled: false), 1));
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Service.DeleteSurveyAsync(inboxManager, new SurveyId("workspace"), 1)));
         Value(await fixture.Service.DeleteSurveyAsync(manager, new SurveyId("workspace"), 1));
         Assert.AreEqual("refused:NotFound", Describe(await fixture.Service.GetSurveyAsync(manager, new SurveyId("workspace"))));
+    }
+
+    [TestMethod]
+    public async Task UpdateSurveyReturnsOpaqueNotFoundAcrossInboxesAndWorkspace()
+    {
+        using var fixture = Create();
+        var manager = await fixture.ManagerAsync();
+        var inboxAManager = await fixture.UserWithAsync("inbox-a-manager", new InboxGrantScope(fixture.Scope.WorkspaceId, new InboxId("i0")), SurveyPermissions.Read, SurveyPermissions.Manage);
+
+        Value(await fixture.Service.CreateSurveyAsync(manager, SampleSurvey("survey-inbox-b", SurveyKind.Csat, inbox: "i1")));
+        Value(await fixture.Service.CreateSurveyAsync(manager, SampleSurvey("survey-workspace", SurveyKind.Nps)));
+
+        Assert.AreEqual("refused:NotFound", Describe(await fixture.Service.UpdateSurveyAsync(inboxAManager, SampleSurvey("survey-inbox-b", SurveyKind.Csat, inbox: "i0"), 1)),
+            "Updating a survey belonging to another inbox must return NotFound, not Forbidden.");
+        Assert.AreEqual("refused:NotFound", Describe(await fixture.Service.UpdateSurveyAsync(inboxAManager, SampleSurvey("survey-inbox-b", SurveyKind.Nps, inbox: "i0"), 99)),
+            "Unauthorized source inbox survey must return NotFound even with mismatched revision or kind.");
+        Assert.AreEqual("refused:NotFound", Describe(await fixture.Service.UpdateSurveyAsync(inboxAManager, SampleSurvey("survey-workspace", SurveyKind.Nps, inbox: "i0"), 1)),
+            "Updating a workspace-scoped survey must return NotFound, not Forbidden.");
+        Assert.AreEqual("refused:NotFound", Describe(await fixture.Service.UpdateSurveyAsync(inboxAManager, SampleSurvey("does-not-exist", SurveyKind.Csat, inbox: "i0"), 1)),
+            "Missing survey returns the exact same NotFound response.");
     }
 
     [TestMethod]

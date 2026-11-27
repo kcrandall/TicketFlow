@@ -125,6 +125,18 @@ public interface IAccessAdministrator
     Task<AccessCheckResult> CheckCanConferAsync(PrincipalRef actor, IEnumerable<GrantConferral> conferrals, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Read-only check (nothing is written or audited) that <paramref name="actor"/> could confer every team-federated role
+    /// resolved for <paramref name="user"/> and <paramref name="teams"/> under the configured role federation rules (standard grants
+    /// only, conservative conditions, tenant-scoped allows for tenant-scoped federated roles).
+    /// </summary>
+    Task<AccessCheckResult> CheckCanConferTeamFederatedRolesAsync(
+        PrincipalRef actor,
+        UserId user,
+        IReadOnlyCollection<TeamId> teams,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<AccessCheckResult>(AccessCheckPassed.Instance);
+
+    /// <summary>
     /// Read-only check (nothing is written or audited) that <paramref name="actor"/> holds the authority <see cref="RevokeGrantAsync"/>
     /// requires for every grant in <paramref name="grants"/>: <c>access:manage</c> on the grant's target, or
     /// <c>access:manage-tenant</c> from a tenant-scoped grant for tenant grants, from standard grants only. Use it before changes that

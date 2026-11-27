@@ -181,7 +181,8 @@ internal static class RoleFederationSupport
             var hasAdmin = role.IncludesAllPermissions
                 || role.Permissions.Contains(AccessPermissions.AccessManage)
                 || role.Permissions.Contains(AccessPermissions.AccessManageTenant)
-                || role.Permissions.Contains(AccessPermissions.AccessBreakGlass);
+                || role.Permissions.Contains(AccessPermissions.AccessBreakGlass)
+                || role.Permissions.Contains(AccessEngine.StaffIdentityManage);
             if (hasAdmin)
             {
                 stripped = [];

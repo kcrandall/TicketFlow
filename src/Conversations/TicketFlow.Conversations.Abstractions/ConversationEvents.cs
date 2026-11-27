@@ -101,6 +101,8 @@ public sealed record AttachmentRef
     {
         StorageRef = ConversationText.RequireText(storageRef, MaximumStorageRefLength, nameof(storageRef));
         FileName = ConversationText.RequireText(fileName, MaximumFileNameLength, nameof(fileName));
+        if (FileName.Trim() is "." or "..")
+            throw new ArgumentException("File names cannot be '.' or '..'.", nameof(fileName));
         MediaType = ConversationText.RequireText(mediaType, MaximumMediaTypeLength, nameof(mediaType));
         if (!MediaType.Contains('/'))
             throw new ArgumentException("Media types have the form type/subtype.", nameof(mediaType));

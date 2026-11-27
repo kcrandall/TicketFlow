@@ -103,29 +103,7 @@ public interface IAccessGrantStore
     /// (<c>ValidUntil is null || ValidUntil &gt; now</c>) in <paramref name="partition"/> and <paramref name="workspace"/>
     /// (across workspace, team and inbox scopes) references <paramref name="role"/>.
     /// </summary>
-    async Task<bool> HasLiveDenyForRoleAsync(AccessPartition partition, WorkspaceId workspace, RoleId role, DateTimeOffset now, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(partition);
-        if (workspace == default)
-            throw new ArgumentException("A workspace identifier is required.", nameof(workspace));
-        if (!role.IsInitialized)
-            throw new ArgumentException("A role identifier is required.", nameof(role));
-        var target = new WorkspaceGrantScope(workspace);
-        GrantId? after = null;
-        while (true)
-        {
-            var page = await ListForTargetAsync(partition, target, AccessLimits.MaximumTargetPage, after, cancellationToken).ConfigureAwait(false);
-            for (var i = 0; i < page.Count; i++)
-            {
-                var grant = page[i].Grant;
-                if (grant.Effect == GrantEffect.Deny && grant.Role == role && (grant.ValidUntil is not { } until || until > now))
-                    return true;
-            }
-            if (page.Count < AccessLimits.MaximumTargetPage)
-                return false;
-            after = page[^1].Grant.Id;
-        }
-    }
+    Task<bool> HasLiveDenyForRoleAsync(AccessPartition partition, WorkspaceId workspace, RoleId role, DateTimeOffset now, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

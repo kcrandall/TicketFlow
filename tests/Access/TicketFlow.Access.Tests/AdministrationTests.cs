@@ -469,4 +469,65 @@ public sealed class AdministrationTests
         Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(owner, denyCustom.Id, 1)));
         Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(owner, denyMissing.Id, 1)));
     }
+
+    [TestMethod]
+    public async Task PrimaryAdministrativeGatesEvaluateResourceConditionsConservatively()
+    {
+        var (fixture, owner, _, _) = await CreateAsync();
+        using var _ = fixture;
+        var now = fixture.Clock.GetUtcNow();
+        var viewerGrant = new AccessGrant(new GrantId("g-target"), fixture.Partition, new UserId("bob"), BuiltInRoles.Viewer.Id, fixture.Workspace);
+        await fixture.SeedAsync(viewerGrant);
+        var newRole = new AccessRole(new RoleId("probe-role"), "Probe", [AccessPermissions.ConversationRead]);
+        var newGrant = new AccessGrant(new GrantId("g-probe"), fixture.Partition, new UserId("charlie"), BuiltInRoles.Viewer.Id, fixture.Workspace);
+
+        // Conditional Deny on AssigneeIsSelfCondition / TeamInPrincipalTeamsCondition must fail closed on abstract admin targets.
+        foreach (var (name, condition) in new (string, AccessCondition)[]
+        {
+            ("deny-assignee", new AssigneeIsSelfCondition()),
+            ("deny-team", new TeamInPrincipalTeamsCondition()),
+        })
+        {
+            var actor = fixture.User(name, "ops");
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin);
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin, effect: GrantEffect.Deny, condition: condition);
+
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(actor, newRole)), name);
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(actor, newGrant)), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)(await fixture.Admin.ListRolesAsync(actor)).Value!).Kind, name);
+            Assert.IsInstanceOfType<TicketFailure>((await fixture.Admin.CheckCanRevokeAsync(actor, [viewerGrant])).Value, name);
+        }
+
+        // Conditional Allow with Not(AssigneeIsSelfCondition) / Not(TeamInPrincipalTeamsCondition) must NOT authorize abstract admin targets.
+        foreach (var (name, condition) in new (string, AccessCondition)[]
+        {
+            ("allow-not-assignee", new NotCondition(new AssigneeIsSelfCondition())),
+            ("allow-not-team", new NotCondition(new TeamInPrincipalTeamsCondition())),
+        })
+        {
+            var actor = fixture.User(name, "ops");
+            await fixture.GrantAsync(actor.UserId, BuiltInRoles.Admin, condition: condition);
+
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(actor, newRole)), name);
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(actor, newGrant)), name);
+            Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)(await fixture.Admin.ListRolesAsync(actor)).Value!).Kind, name);
+            Assert.IsInstanceOfType<TicketFailure>((await fixture.Admin.CheckCanRevokeAsync(actor, [viewerGrant])).Value, name);
+        }
+
+        // TimeWindowCondition on primary admin gates still evaluates live against the clock (while RequireHeld stays ConservativeAll).
+        var activeWindow = new TimeWindowCondition(
+            TimeOnly.FromTimeSpan(now.AddHours(-1).UtcDateTime.TimeOfDay),
+            TimeOnly.FromTimeSpan(now.AddHours(1).UtcDateTime.TimeOfDay));
+        var timedAdmin = fixture.User("timed-admin");
+        await fixture.GrantAsync(timedAdmin.UserId, BuiltInRoles.Admin, condition: activeWindow);
+        Assert.IsTrue((await fixture.Admin.ListRolesAsync(timedAdmin)).IsSuccess, "Active time window authorizes primary admin gate.");
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(timedAdmin, newRole)),
+            "Time-windowed permission cannot satisfy anti-escalation RequireHeld.");
+        await fixture.GrantAsync(timedAdmin.UserId, BuiltInRoles.Viewer);
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(timedAdmin, newRole)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(owner, newRole.Id, 1)));
+        fixture.Clock.Advance(TimeSpan.FromHours(2));
+        Assert.AreEqual(TicketFailureKind.Forbidden, ((TicketFailure)(await fixture.Admin.ListRolesAsync(timedAdmin)).Value!).Kind);
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(timedAdmin, newRole)));
+    }
 }

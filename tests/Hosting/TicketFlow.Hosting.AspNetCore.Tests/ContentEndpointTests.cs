@@ -127,6 +127,66 @@ public sealed class ContentEndpointTests
         Assert.AreEqual(12, body.GetProperty("usage").GetProperty("inputTokens").GetInt64());
     }
 
+    [TestMethod]
+    public async Task MalformedOverflowCursorsAndExtremeSurveyDurationsReturn422()
+    {
+        await using var host = await CreateAsync();
+        var owner = host.Client();
+        var anonymous = host.Client(user: null);
+
+        Assert.AreEqual(HttpStatusCode.Created, (await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/help-center/portals",
+            new { id = "help", slug = "help", name = "Help", defaultLocale = "en", visibility = "public" }))).StatusCode);
+        Assert.AreEqual(HttpStatusCode.Created, (await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/help-center/articles", new
+        {
+            id = "a1",
+            portalId = "help",
+            translations = new[] { new { locale = "en", title = "Guide", slug = "guide", body = "Body" } },
+        }))).StatusCode);
+
+        static string EncodeCursor(params string[] parts) =>
+            System.Buffers.Text.Base64Url.EncodeToString(JsonSerializer.SerializeToUtf8Bytes(parts));
+
+        // Overflow integer cursor on public articles endpoint -> 422 (never 500)
+        var publicOverflowCursor = EncodeCursor("99999999999999999999", "a1");
+        var publicArticles = await anonymous.GetAsync($"{Public}/portals/help/en/articles?cursor={Uri.EscapeDataString(publicOverflowCursor)}");
+        Assert.AreEqual(HttpStatusCode.UnprocessableEntity, publicArticles.StatusCode);
+        Assert.AreEqual("invalid", (await JsonAsync(publicArticles)).GetProperty("code").GetString());
+
+        // Overflow integer cursor on authenticated article revisions endpoint -> 422 (never 500)
+        var revisionsOverflowCursor = EncodeCursor("99999999999999999999");
+        var revisions = await owner.GetAsync($"{Api}/help-center/articles/a1/revisions?cursor={Uri.EscapeDataString(revisionsOverflowCursor)}");
+        Assert.AreEqual(HttpStatusCode.UnprocessableEntity, revisions.StatusCode);
+        Assert.AreEqual("invalid", (await JsonAsync(revisions)).GetProperty("code").GetString());
+
+        // Malformed survey responses cursor -> 422
+        var badSurveyCursor = EncodeCursor("not-a-timestamp", "not-a-guid");
+        var responses = await owner.GetAsync($"{Api}/surveys/responses?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&cursor={Uri.EscapeDataString(badSurveyCursor)}");
+        Assert.AreEqual(HttpStatusCode.UnprocessableEntity, responses.StatusCode);
+        Assert.AreEqual("invalid", (await JsonAsync(responses)).GetProperty("code").GetString());
+
+        // Extreme durations that would overflow TimeSpan.FromSeconds(long) -> 422 (never 500)
+        foreach (var policy in new object[]
+                 {
+                     new { delaySeconds = long.MaxValue, contactCooldownSeconds = 0L, invitationLifetimeSeconds = 86_400L },
+                     new { delaySeconds = long.MinValue, contactCooldownSeconds = 0L, invitationLifetimeSeconds = 86_400L },
+                     new { delaySeconds = 0L, contactCooldownSeconds = long.MaxValue, invitationLifetimeSeconds = 86_400L },
+                     new { delaySeconds = 0L, contactCooldownSeconds = 0L, invitationLifetimeSeconds = long.MaxValue },
+                 })
+        {
+            var resp = await owner.SendAsync(Request(HttpMethod.Post, $"{Api}/surveys", new
+            {
+                id = "overflow-survey",
+                name = "Overflow",
+                kind = "csat",
+                defaultLocale = "en",
+                questions = new[] { new { locale = "en", text = "How?" } },
+                policy,
+            }));
+            Assert.AreEqual(HttpStatusCode.UnprocessableEntity, resp.StatusCode);
+            Assert.AreEqual("invalid", (await JsonAsync(resp)).GetProperty("code").GetString());
+        }
+    }
+
     private sealed class FakeAssistService : IAssistService
     {
         public Task<AssistResult<AssistSummary>> SummarizeAsync(PrincipalRef actor, AssistSummaryRequest request, CancellationToken cancellationToken = default) =>

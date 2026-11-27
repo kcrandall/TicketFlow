@@ -84,6 +84,10 @@ public sealed class IdentityFlowVisitorTokenValidator : IVisitorTokenValidator, 
         validTypes = this.options.ValidTokenTypes.Count > 0 ? [.. this.options.ValidTokenTypes] : null;
         validIssuers = this.options.ValidIssuers.Count > 0 ? [.. this.options.ValidIssuers] : null;
         defaultAudiences = [.. this.options.Audiences];
+        if (this.options.Authority is not null)
+            ValidateEndpointUri(this.options.Authority, nameof(IdentityFlowVisitorTokenOptions.Authority), this.options.RequireHttpsMetadata, allowQuery: false);
+        if (this.options.MetadataAddress is not null)
+            ValidateEndpointUri(this.options.MetadataAddress, nameof(IdentityFlowVisitorTokenOptions.MetadataAddress), this.options.RequireHttpsMetadata, allowQuery: true);
         if (this.options.IssuerSigningKeys.Count > 0)
         {
             if (validIssuers is null)
@@ -94,7 +98,7 @@ public sealed class IdentityFlowVisitorTokenValidator : IVisitorTokenValidator, 
         {
             var metadata = this.options.MetadataAddress ?? (this.options.Authority is { } authority ? authority.TrimEnd('/') + "/.well-known/openid-configuration" : null)
                 ?? throw new InvalidOperationException("IdentityFlowVisitorTokenOptions requires an Authority, a MetadataAddress or static signing keys.");
-            backchannel = new HttpClient(this.options.BackchannelHandler ?? new HttpClientHandler(), disposeHandler: this.options.BackchannelHandler is null) { Timeout = TimeSpan.FromSeconds(30) };
+            backchannel = new HttpClient(this.options.BackchannelHandler ?? CreateDefaultBackchannelHandler(), disposeHandler: this.options.BackchannelHandler is null) { Timeout = TimeSpan.FromSeconds(30) };
             configuration = new ConfigurationManager<OpenIdConnectConfiguration>(metadata, new OpenIdConnectConfigurationRetriever(),
                 new HttpDocumentRetriever(backchannel) { RequireHttps = this.options.RequireHttpsMetadata })
             {
@@ -200,6 +204,29 @@ public sealed class IdentityFlowVisitorTokenValidator : IVisitorTokenValidator, 
             if (Interlocked.CompareExchange(ref lastForcedRefreshTicks, now, previous) == previous)
                 return true;
         }
+    }
+
+    internal static SocketsHttpHandler CreateDefaultBackchannelHandler() => new()
+    {
+        AllowAutoRedirect = false,
+        UseCookies = false,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+    };
+
+    private static void ValidateEndpointUri(string value, string optionName, bool requireHttps, bool allowQuery)
+    {
+        if (string.IsNullOrWhiteSpace(value) || !Uri.TryCreate(value, UriKind.Absolute, out var uri))
+            throw new InvalidOperationException($"IdentityFlowVisitorTokenOptions.{optionName} must be an absolute URI.");
+        var validScheme = requireHttps
+            ? string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            : string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase);
+        if (!validScheme)
+            throw new InvalidOperationException(requireHttps
+                ? $"IdentityFlowVisitorTokenOptions.{optionName} must use the https scheme when RequireHttpsMetadata is true."
+                : $"IdentityFlowVisitorTokenOptions.{optionName} must use the http or https scheme.");
+        if (uri.UserInfo.Length != 0 || uri.Fragment.Length != 0 || (!allowQuery && uri.Query.Length != 0))
+            throw new InvalidOperationException($"IdentityFlowVisitorTokenOptions.{optionName} must not contain user info, a fragment{(allowQuery ? "" : ", or a query")}.");
     }
 
     public void Dispose() => backchannel?.Dispose();

@@ -208,6 +208,42 @@ public sealed class ReviewFixTests
         Assert.AreEqual("Still broken", ((MessageEventContent)contents[messages[2].Sequence].Value!.Value.Value!).Body);
     }
 
+    [TestMethod]
+    public async Task ExtremeAndNegativeRetryAfterDelaysAreClampedWithoutOverflowOrStall()
+    {
+        var sink = new RetryAfterTestSink();
+        using var fixture = await EventsFixture.CreateAsync(configure: services => services.AddSingleton<IEventSink>(sink));
+        await fixture.StartAsync("c1");
+        await fixture.DispatchAsync();
+        var sub = new EventSubscription(new EventSubscriptionId("ra"), "RetryAfter", new EventSinkRef("retry-test", "t"),
+            EventSubscriptionFilter.Everything, new ApiClientId("hooks"));
+        EventsFixture.Value(await fixture.InScopeAsync(provider => Service(provider).CreateAsync(fixture.Owner, sub, EventStartAtEarliest.Instance)));
+        var store = fixture.Get<IEventSubscriptionStore>();
+
+        // TimeSpan.MaxValue would previously throw ArgumentOutOfRangeException on now + delay; must clamp to MaximumRetryAfter (1 hour).
+        sink.NextRetryAfter = TimeSpan.MaxValue;
+        Assert.AreEqual(1, (await fixture.DeliverAsync()).Retried);
+        var state = (await store.GetStateAsync(fixture.Scope, sub.Id))!;
+        Assert.AreEqual(fixture.Clock.GetUtcNow().AddHours(1), state.AvailableAt);
+
+        // Negative Retry-After must not shorten backoff or schedule in the past.
+        fixture.Clock.Advance(TimeSpan.FromHours(1));
+        sink.NextRetryAfter = TimeSpan.FromSeconds(-60);
+        Assert.AreEqual(1, (await fixture.DeliverAsync()).Retried);
+        state = (await store.GetStateAsync(fixture.Scope, sub.Id))!;
+        Assert.AreEqual(fixture.Clock.GetUtcNow().AddSeconds(20), state.AvailableAt);
+    }
+
+    private sealed class RetryAfterTestSink : IEventSink
+    {
+        public string Kind => "retry-test";
+        public int MaximumBatchSize => EventSubscription.MaximumBatchSize;
+        public TimeSpan? NextRetryAfter { get; set; }
+        public bool IsValidTarget(TicketScope scope, string target) => true;
+        public Task<EventSinkResult> DeliverAsync(EventDelivery delivery, CancellationToken cancellationToken = default) =>
+            Task.FromResult<EventSinkResult>(new EventSinkFailed("http-429", retryAfter: NextRetryAfter));
+    }
+
     private static T WrapCounting<T>(T target, out CountingProxy<T> counter) where T : class
     {
         var proxy = DispatchProxy.Create<T, CountingProxy<T>>();

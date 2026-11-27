@@ -369,8 +369,12 @@ public sealed class EventDeliveryWorker
         if (batch.Length == 0 && !string.Equals(failure.Code, EngineError, StringComparison.Ordinal) && attempts >= options.MaximumAttempts)
             return await subscriptions.SuspendAsync(scope, id, claim.Fence, failure.Code, cancellationToken).ConfigureAwait(false) ? (Outcome.Suspended, 0) : (Outcome.Lost, 0);
         var delay = Backoff(attempts);
+        var maxRetryAfter = options.MaximumRetryAfter > options.MaximumRetryDelay ? options.MaximumRetryAfter : options.MaximumRetryDelay;
         if (failure.RetryAfter is { } requested && requested > delay)
-            delay = requested;
+            delay = requested > maxRetryAfter ? maxRetryAfter : requested;
+        var maxRemaining = DateTimeOffset.MaxValue - now;
+        if (delay > maxRemaining)
+            delay = maxRemaining;
         return await subscriptions.FailAsync(scope, id, claim.Fence, attempts, now + delay, failure.Code, cancellationToken).ConfigureAwait(false) ? (Outcome.Retried, 0) : (Outcome.Lost, 0);
     }
 

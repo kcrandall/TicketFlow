@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Protocol;
+using TicketFlow.Access;
 using TicketFlow.Core;
 
 namespace TicketFlow.Mcp;
@@ -70,7 +71,7 @@ public sealed partial class TicketFlowToolContext
         return value is null ? null : new WorkspaceId(value);
     }
 
-    /// <summary>Resolves the caller for <paramref name="workspace"/>; <see langword="null"/> when unauthenticated or the scope does not match.</summary>
+    /// <summary>Resolves the caller for <paramref name="workspace"/>; <see langword="null"/> when unauthenticated, scope-mismatched, or backed by an inactive or out-of-scope service account.</summary>
     public async ValueTask<PrincipalRef?> ResolvePrincipalAsync(WorkspaceId workspace, CancellationToken cancellationToken)
     {
         var resolver = Services.GetService<ITicketFlowMcpPrincipalResolver>();
@@ -78,6 +79,10 @@ public sealed partial class TicketFlowToolContext
             return null;
         if (await resolver.ResolveAsync(new TicketFlowMcpCaller(User, Services), workspace, cancellationToken).ConfigureAwait(false) is not { } principal
             || principal.Scope.WorkspaceId != workspace)
+            return null;
+        if (!AccessPrincipalGuard.VerifyScopeClaims(User, principal.Scope))
+            return null;
+        if (!await AccessPrincipalGuard.IsServiceAccountActiveForScopeAsync(principal, principal.Scope, Services.GetService<IServiceAccountStore>(), cancellationToken).ConfigureAwait(false))
             return null;
         return principal;
     }

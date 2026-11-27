@@ -1,6 +1,8 @@
+using System.Security.Claims;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using TicketFlow.Access;
+using TicketFlow.Core;
 
 namespace TicketFlow.Mcp.Tests;
 
@@ -270,6 +272,79 @@ public sealed class SelfToolTests
 
         var activeRoles = Strings(me.GetProperty("roles"));
         CollectionAssert.AreEquivalent(new[] { "viewer" }, activeRoles, "Only active allow grants should appear in roles.");
+    }
+
+    [TestMethod]
+    public async Task CoreMcpEnforcesScopeClaimsAndServiceAccountStatusEvenWithCustomResolver()
+    {
+        await using var host = await McpTestHost.CreateAsync(options => options.ToolList = TicketFlowToolListMode.HideUnpermitted);
+        await using (var scope = host.Services.CreateAsyncScope())
+        {
+            var saStore = scope.ServiceProvider.GetRequiredService<IServiceAccountStore>();
+            var grants = scope.ServiceProvider.GetRequiredService<IAccessGrantStore>();
+            var partition = AccessPartition.From(host.Scope);
+
+            var activeId = new ApiClientId("sa-active");
+            await saStore.CreateAsync(new ServiceAccount(activeId, partition, new WorkspaceGrantScope(host.Scope.WorkspaceId), "Active SA"), "seed");
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-sa-active"), partition, activeId, BuiltInRoles.Agent.Id, new WorkspaceGrantScope(host.Scope.WorkspaceId)));
+
+            var disabledId = new ApiClientId("sa-disabled");
+            await saStore.CreateAsync(new ServiceAccount(disabledId, partition, new WorkspaceGrantScope(host.Scope.WorkspaceId), "Disabled SA"), "seed");
+            await saStore.SetEnabledAsync(partition, disabledId, isEnabled: false, actorPrincipalId: "seed", expectedVersion: 1);
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-sa-disabled"), partition, disabledId, BuiltInRoles.Owner.Id, new WorkspaceGrantScope(host.Scope.WorkspaceId)));
+
+            var otherWsId = new ApiClientId("sa-other-ws");
+            await saStore.CreateAsync(new ServiceAccount(otherWsId, partition, new WorkspaceGrantScope(new WorkspaceId("other-ws")), "Other WS SA"), "seed");
+            await grants.CreateAsync(new AccessGrant(new GrantId("g-sa-other-ws"), partition, otherWsId, BuiltInRoles.Owner.Id, TenantGrantScope.Instance));
+        }
+
+        // Active in-scope service account succeeds on whoami, tools, and HideUnpermitted tools/list.
+        var (activeErr, activeMe) = await host.CallAsync("whoami", user: null, apiClient: "sa-active");
+        Assert.IsFalse(activeErr, activeMe.GetRawText());
+        Assert.AreEqual("sa-active", activeMe.GetProperty("principal").GetProperty("id").GetString());
+        host.Caller.User = null;
+        host.Caller.ApiClient = "sa-active";
+        CollectionAssert.Contains((await host.Client.ListToolsAsync()).Select(t => t.Name).ToList(), "conversations_reply");
+
+        // Disabled and out-of-scope service accounts are rejected even with custom ResolvePrincipal (including on whoami and tools/list).
+        foreach (var rejectedClient in new[] { "sa-disabled", "sa-other-ws" })
+        {
+            var (whoErr, whoBody) = await host.CallAsync("whoami", user: null, apiClient: rejectedClient);
+            Assert.IsTrue(whoErr);
+            Assert.AreEqual("unauthenticated", McpTestHost.Code(whoBody));
+
+            var (listErr, listBody) = await host.CallAsync("conversations_list", user: null, apiClient: rejectedClient);
+            Assert.IsTrue(listErr);
+            Assert.AreEqual("unauthenticated", McpTestHost.Code(listBody));
+
+            host.Caller.User = null;
+            host.Caller.ApiClient = rejectedClient;
+            var visible = (await host.Client.ListToolsAsync()).Select(t => t.Name).ToList();
+            CollectionAssert.DoesNotContain(visible, "conversations_reply");
+            CollectionAssert.DoesNotContain(visible, "conversations_list");
+        }
+
+        // Scope-claim pinning: a ClaimsPrincipal pinned to another workspace or tenant cannot cross boundaries via TicketFlowToolContext.
+        host.Caller.User = "owner";
+        host.Caller.ApiClient = null;
+        var descriptor = TicketFlowToolCatalog.Find("whoami")!;
+        await using (var scope = host.Services.CreateAsyncScope())
+        {
+            var wrongWorkspaceUser = new ClaimsPrincipal(new ClaimsIdentity([new Claim("workspace_id", "other-ws")], "test"));
+            var wrongWorkspaceCtx = new TicketFlowToolContext(scope.ServiceProvider, wrongWorkspaceUser, descriptor);
+            Assert.IsNull(await wrongWorkspaceCtx.ResolvePrincipalAsync(host.Scope.WorkspaceId, CancellationToken.None));
+            var wrongWsResult = await wrongWorkspaceCtx.RunAsync(host.Scope.WorkspaceId.Value, _ => Task.FromResult<object>(new { ok = true }), CancellationToken.None);
+            Assert.IsTrue(wrongWsResult.IsError);
+            Assert.AreEqual("unauthenticated", McpTestHost.Code(wrongWsResult.StructuredContent!.Value));
+
+            var wrongTenantUser = new ClaimsPrincipal(new ClaimsIdentity([new Claim("tenant_id", "other-tenant")], "test"));
+            var wrongTenantCtx = new TicketFlowToolContext(scope.ServiceProvider, wrongTenantUser, descriptor);
+            Assert.IsNull(await wrongTenantCtx.ResolvePrincipalAsync(host.Scope.WorkspaceId, CancellationToken.None));
+
+            var matchingUser = new ClaimsPrincipal(new ClaimsIdentity([new Claim("tenant_id", host.Scope.TenantId), new Claim("workspace_id", host.Scope.WorkspaceId.Value)], "test"));
+            var matchingCtx = new TicketFlowToolContext(scope.ServiceProvider, matchingUser, descriptor);
+            Assert.IsNotNull(await matchingCtx.ResolvePrincipalAsync(host.Scope.WorkspaceId, CancellationToken.None));
+        }
     }
 
     private static List<string> Strings(JsonElement array) => [.. array.EnumerateArray().Select(item => item.GetString()!)];

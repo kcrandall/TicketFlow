@@ -8,7 +8,7 @@ namespace TicketFlow.Hosting.AspNetCore;
 /// <summary>
 /// The filter on every TicketFlow group: rejects oversized bodies (413), unresolved actors or scopes (400/401/404) and maps validation
 /// failures thrown by domain constructors and codecs (<see cref="ArgumentException"/>, <see cref="FormatException"/>,
-/// <see cref="JsonException"/>) to 422. Exception messages are returned only when TicketFlow code produced them (they never carry input
+/// <see cref="JsonException"/>, <see cref="OverflowException"/>) to 422. Exception messages are returned only when TicketFlow code produced them (they never carry input
 /// values); other messages are replaced with a generic text.
 /// </summary>
 internal sealed class TicketFlowEndpointFilter : IEndpointFilter
@@ -51,7 +51,7 @@ internal sealed class TicketFlowEndpointFilter : IEndpointFilter
                 {
                     return await next(context).ConfigureAwait(false);
                 }
-                catch (Exception error) when (error is ArgumentException or FormatException or JsonException && !http.RequestAborted.IsCancellationRequested)
+                catch (Exception error) when (error is ArgumentException or FormatException or JsonException or OverflowException && !http.RequestAborted.IsCancellationRequested)
                 {
                     return TicketFlowHttp.Problem(StatusCodes.Status422UnprocessableEntity, "invalid", [Message(error)]);
                 }
@@ -82,7 +82,7 @@ internal sealed class TicketFlowEndpointFilter : IEndpointFilter
         {
             return await next(context).ConfigureAwait(false);
         }
-        catch (Exception error) when (error is ArgumentException or FormatException or JsonException && !http.RequestAborted.IsCancellationRequested)
+        catch (Exception error) when (error is ArgumentException or FormatException or JsonException or OverflowException && !http.RequestAborted.IsCancellationRequested)
         {
             return TicketFlowHttp.Problem(StatusCodes.Status422UnprocessableEntity, "invalid", [Message(error)]);
         }

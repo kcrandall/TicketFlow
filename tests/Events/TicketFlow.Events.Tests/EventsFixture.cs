@@ -98,7 +98,7 @@ internal sealed class EventsFixture : IDisposable
     public ApiClientPrincipal SlaWorker => TestPrincipals.ApiClient(Scope, "sla-worker");
     public ApiClientPrincipal Forger => TestPrincipals.ApiClient(Scope, "forger");
 
-    public static async Task<EventsFixture> CreateAsync(Action<EventsOptions>? options = null)
+    public static async Task<EventsFixture> CreateAsync(Action<EventsOptions>? options = null, Action<IServiceCollection>? configure = null)
     {
         var clock = TestClock.Create(Start);
         var subscriber = new RecordingSubscriber();
@@ -109,6 +109,7 @@ internal sealed class EventsFixture : IDisposable
         services.AddSingleton<IEventSubscriber>(subscriber);
         services.AddSingleton<IEventSink>(new SplittingSink(subscriber));
         services.AddSingleton<ISurveyInvitationSender, NoSurveySender>();
+        configure?.Invoke(services);
         var createdStorage = StoreFactory is { } factory ? await factory(services.AddTicketFlow()) : null;
         services.AddTicketFlow()
             .AddAccessControl().AddInMemoryAccessStores()

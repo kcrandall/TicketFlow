@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using TicketFlow.Access;
 using TicketFlow.Core;
 
 namespace TicketFlow.Mcp;
@@ -80,7 +81,11 @@ internal static class TicketFlowToolListFilter
             return null;
         var workspace = new WorkspaceId(options.DefaultWorkspace);
         if (await resolver.ResolveAsync(new TicketFlowMcpCaller(user, services), workspace, cancellationToken).ConfigureAwait(false) is not { } principal
-            || principal is null || principal.Scope.WorkspaceId != workspace)
+            || principal.Scope.WorkspaceId != workspace)
+            return null;
+        if (!AccessPrincipalGuard.VerifyScopeClaims(user, principal.Scope))
+            return null;
+        if (!await AccessPrincipalGuard.IsServiceAccountActiveForScopeAsync(principal, principal.Scope, services.GetService<IServiceAccountStore>(), cancellationToken).ConfigureAwait(false))
             return null;
         if (permissions is null || permissions.Count == 0)
             return new Dictionary<string, bool?>(StringComparer.Ordinal);

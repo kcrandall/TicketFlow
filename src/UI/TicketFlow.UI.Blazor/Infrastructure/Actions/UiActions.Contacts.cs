@@ -9,8 +9,7 @@ public static partial class UiActions
     private static void RegisterContacts(Dictionary<string, UiActionHandler> handlers)
     {
         handlers["contact.create"] = CreateContactAsync;
-        handlers["contact.profile"] = context => EditContactAsync(context, "Profile saved",
-            new SetContactProfile(new ContactProfile(context.Text("name"), null, context.Text("locale"), context.Text("timezone"), context.Text("company"))));
+        handlers["contact.profile"] = UpdateContactProfileAsync;
         handlers["contact.block"] = context => EditContactAsync(context, string.Equals(context.Text("blocked"), "true", StringComparison.Ordinal) ? "Contact blocked" : "Contact unblocked",
             new SetContactBlocked(string.Equals(context.Text("blocked"), "true", StringComparison.Ordinal)));
         handlers["contact.labels.add"] = context => EditContactAsync(context, "Label added",
@@ -36,6 +35,23 @@ public static partial class UiActions
             identities.Add(new ContactIdentity(ContactIdentityAddress.Parse(ContactIdentityKind.Phone, phone), new IdentityClaimed("agent", now)));
         var draft = new ContactDraft(new ContactProfile(context.Require("name", "Name"), company: context.Text("company")), identities);
         return UiOutcomes.From(await contacts.CreateAsync(context.Actor, draft, context.Aborted), view => UiOutcome.Success("Contact created", $"contacts/{view.Id.Value}"));
+    }
+
+    private static async Task<UiActionResult> UpdateContactProfileAsync(UiActionContext context)
+    {
+        if (context.Session.Service<IContactService>() is not { } contacts)
+            return UiOutcome.NotFound();
+        var id = ContactFromPath(context);
+        var revision = context.RequireRevision();
+        return await contacts.GetAsync(context.Actor, id, context.Aborted) switch
+        {
+            TicketValue<ContactView> current => UiOutcomes.From(
+                await contacts.UpdateAsync(context.Actor, id, revision,
+                    [new SetContactProfile(new ContactProfile(context.Text("name"), current.Value.Profile.AvatarRef, context.Text("locale"), context.Text("timezone"), context.Text("company")))],
+                    context.Aborted),
+                _ => UiOutcome.Success("Profile saved")),
+            ContactRefused refused => UiOutcome.Refused(refused.Reason, refused.Errors, refused.CurrentRevision),
+        };
     }
 
     private static async Task<UiActionResult> EditContactAsync(UiActionContext context, string success, ContactEdit edit)

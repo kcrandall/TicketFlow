@@ -297,4 +297,64 @@ public sealed class AdministrationTests
         Assert.DoesNotContain(AccessPermissions.AccessManageTenant, bgHeld);
         Assert.DoesNotContain(AccessPermissions.AccessBreakGlass, bgHeld);
     }
+
+    [TestMethod]
+    public async Task RevokingOrUpdatingActiveDenyGrantRequiresHoldingDeniedPermissions()
+    {
+        var (fixture, owner, admin, _) = await CreateAsync();
+        using var _ = fixture;
+        var now = fixture.Clock.GetUtcNow();
+        var wsMgrRole = await fixture.CustomRoleAsync("ws-mgr", AccessPermissions.WorkspaceManage);
+        var bob = new UserId("bob");
+
+        // Active deny grants covering permissions admin does NOT hold (workspace:manage / missing role -> all catalog).
+        var denyOwner = new AccessGrant(new GrantId("deny-owner"), fixture.Partition, bob, BuiltInRoles.Owner.Id, fixture.Workspace, GrantEffect.Deny);
+        var denyCustom = new AccessGrant(new GrantId("deny-custom"), fixture.Partition, bob, wsMgrRole.Id, fixture.Workspace, GrantEffect.Deny);
+        var denyMissing = new AccessGrant(new GrantId("deny-missing"), fixture.Partition, bob, new RoleId("deleted-role"), fixture.Workspace, GrantEffect.Deny);
+        var denyExpired = new AccessGrant(new GrantId("deny-expired"), fixture.Partition, bob, BuiltInRoles.Owner.Id, fixture.Workspace, GrantEffect.Deny,
+            validFrom: now.AddDays(-2), validUntil: now.AddMinutes(-5));
+        var denyViewer = new AccessGrant(new GrantId("deny-viewer"), fixture.Partition, bob, BuiltInRoles.Viewer.Id, fixture.Workspace, GrantEffect.Deny);
+        var denyViewerBatch = new AccessGrant(new GrantId("deny-viewer-batch"), fixture.Partition, bob, BuiltInRoles.Viewer.Id, fixture.Workspace, GrantEffect.Deny);
+
+        foreach (var g in new[] { denyOwner, denyCustom, denyMissing, denyExpired, denyViewer, denyViewerBatch })
+            await fixture.SeedAsync(g);
+
+        // Direct revoke: admin cannot revoke active denies for roles containing unheld permissions or missing roles.
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(admin, denyOwner.Id, 1)));
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(admin, denyCustom.Id, 1)));
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(admin, denyMissing.Id, 1)));
+        Assert.IsNotNull(await fixture.Grants.GetAsync(fixture.Partition, denyOwner.Id));
+
+        // Direct revoke: admin CAN revoke expired deny grants and active deny grants whose permissions admin holds.
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(admin, denyExpired.Id, 1)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(admin, denyViewer.Id, 1)));
+
+        // Batch revoke: admin is refused on unheld active denies while allowed on held active deny in the same batch.
+        var batch = await fixture.Admin.RevokeGrantsAsync(admin, [(denyOwner.Id, 1L), (denyMissing.Id, 1L), (denyViewerBatch.Id, 1L)]);
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(batch[0]));
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(batch[1]));
+        Assert.AreEqual("applied", AccessFixture.Describe(batch[2]));
+        Assert.IsNotNull(await fixture.Grants.GetAsync(fixture.Partition, denyOwner.Id));
+        Assert.IsNull(await fixture.Grants.GetAsync(fixture.Partition, denyViewerBatch.Id));
+
+        // Self-deny: an admin who is explicitly denied a role's permissions cannot revoke their own active deny grant.
+        var selfDeny = new AccessGrant(new GrantId("self-deny"), fixture.Partition, admin.UserId, BuiltInRoles.Agent.Id, fixture.Workspace, GrantEffect.Deny);
+        await fixture.SeedAsync(selfDeny);
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(admin, selfDeny.Id, 1)));
+        Assert.IsNotNull(await fixture.Grants.GetAsync(fixture.Partition, selfDeny.Id));
+
+        // UpdateGrantAsync: admin cannot weaken an active deny grant by switching to Allow, shortening ValidUntil, narrowing scope, or changing its role.
+        var toAllow = new AccessGrant(denyOwner.Id, fixture.Partition, bob, BuiltInRoles.Viewer.Id, fixture.Workspace, GrantEffect.Allow);
+        var shortened = new AccessGrant(denyOwner.Id, fixture.Partition, bob, BuiltInRoles.Owner.Id, fixture.Workspace, GrantEffect.Deny, validUntil: now.AddSeconds(1));
+        var narrowedScope = new AccessGrant(denyOwner.Id, fixture.Partition, bob, BuiltInRoles.Owner.Id, new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("t1")), GrantEffect.Deny);
+        var weakerRole = new AccessGrant(denyOwner.Id, fixture.Partition, bob, BuiltInRoles.Viewer.Id, fixture.Workspace, GrantEffect.Deny);
+        foreach (var attempt in new[] { toAllow, shortened, narrowedScope, weakerRole })
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(admin, attempt, 1)));
+
+        // Tenant owner holds all permissions and CAN update and revoke all of these active deny grants.
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(owner, shortened, 1)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(owner, denyOwner.Id, 2)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(owner, denyCustom.Id, 1)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(owner, denyMissing.Id, 1)));
+    }
 }

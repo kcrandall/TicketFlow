@@ -12,4 +12,7 @@
     <ProjectReference Include="../../Hosting/TicketFlow.Realtime.SignalR/TicketFlow.Realtime.SignalR.csproj" />
     <ProjectReference Include="../../Channels/TicketFlow.Channels.LiveChat/TicketFlow.Channels.LiveChat.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="TicketFlow.Integrations.IdentityFlow.Tests" />
+  </ItemGroup>
 </Project>

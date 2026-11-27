@@ -96,10 +96,18 @@ internal static class HelpCenterEndpoints
             return Map(http, await service.DeleteArticleAsync(actor.Principal, new ArticleId(articleId), revision, http.RequestAborted), _ => TypedResults.NoContent());
         }).WithName("DeleteArticle").Produces(StatusCodes.Status204NoContent);
         group.MapGet("/help-center/articles/{articleId}/revisions", async (TicketFlowActor actor, string articleId, int? limit, string? cursor, [FromServices] IHelpCenterService service, HttpContext http) =>
-            Map(http, await service.ListRevisionsAsync(actor.Principal, new ArticleId(articleId), Math.Min(TicketFlowHttp.PageSize(limit), HelpCenterLimits.MaximumPageSize),
-                cursor is null ? null : int.Parse(TicketFlowHttp.DecodeCursor(cursor, 1)[0], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture), http.RequestAborted), page => TicketFlowHttp.Ok(http,
-                new PageResponse<ArticleRevisionResponse>([.. page.Items.Select(Dto)], page.HasMore ? TicketFlowHttp.EncodeCursor(page.Items[^1].Number.ToString(System.Globalization.CultureInfo.InvariantCulture)) : null))))
-            .WithName("ListArticleRevisions").Produces<PageResponse<ArticleRevisionResponse>>();
+        {
+            int? after = null;
+            if (cursor is not null)
+            {
+                if (!int.TryParse(TicketFlowHttp.DecodeCursor(cursor, 1)[0], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+                    throw new ArgumentException("The cursor is invalid.", nameof(cursor));
+                after = parsed;
+            }
+            return Map(http, await service.ListRevisionsAsync(actor.Principal, new ArticleId(articleId), Math.Min(TicketFlowHttp.PageSize(limit), HelpCenterLimits.MaximumPageSize),
+                after, http.RequestAborted), page => TicketFlowHttp.Ok(http,
+                new PageResponse<ArticleRevisionResponse>([.. page.Items.Select(Dto)], page.HasMore ? TicketFlowHttp.EncodeCursor(page.Items[^1].Number.ToString(System.Globalization.CultureInfo.InvariantCulture)) : null)));
+        }).WithName("ListArticleRevisions").Produces<PageResponse<ArticleRevisionResponse>>();
         group.MapGet("/help-center/articles/{articleId}/revisions/{number:int}", async (TicketFlowActor actor, string articleId, int number, [FromServices] IHelpCenterService service, HttpContext http) =>
             Map(http, await service.GetRevisionAsync(actor.Principal, new ArticleId(articleId), number, http.RequestAborted), revision => TicketFlowHttp.Ok(http, Dto(revision))))
             .WithName("GetArticleRevision").Produces<ArticleRevisionResponse>();

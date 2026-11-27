@@ -74,10 +74,14 @@ public sealed class SegmentOptions
     /// <summary>Request timeout (1 second to 2 minutes, default 15 seconds).</summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(15);
 
+    /// <summary>The longest <c>Retry-After</c> honored (default 1 hour, max 1 day).</summary>
+    public TimeSpan MaximumRetryAfter { get; set; } = TimeSpan.FromHours(1);
+
     internal void Validate()
     {
         if (!Enum.IsDefined(UserId) || MaximumPayloadBytes is < 1024 or > 1024 * 1024
             || Timeout < TimeSpan.FromSeconds(1) || Timeout > TimeSpan.FromMinutes(2)
+            || MaximumRetryAfter <= TimeSpan.Zero || MaximumRetryAfter > TimeSpan.FromDays(1)
             || Sources.Any(pair => !EventText.IsToken(pair.Key, 64) || pair.Value is null))
             throw new InvalidOperationException("Segment options are invalid.");
     }
@@ -98,13 +102,15 @@ public sealed class SegmentEventSink : IEventSink, IDisposable
 
     private readonly SegmentOptions options;
     private readonly HttpClient client;
+    private readonly TimeProvider time;
     private readonly Dictionary<string, (SegmentSource Source, Uri BatchUri, AuthenticationHeaderValue Auth)> sources;
 
-    public SegmentEventSink(IOptions<SegmentOptions> options, HttpMessageHandler? handler = null)
+    public SegmentEventSink(IOptions<SegmentOptions> options, HttpMessageHandler? handler = null, TimeProvider? time = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         this.options = options.Value;
         this.options.Validate();
+        this.time = time ?? TimeProvider.System;
         sources = new Dictionary<string, (SegmentSource, Uri, AuthenticationHeaderValue)>(this.options.Sources.Count, StringComparer.Ordinal);
         foreach (var pair in this.options.Sources)
             sources[pair.Key] = (pair.Value, new Uri(pair.Value.Host, "v1/batch"),
@@ -133,14 +139,14 @@ public sealed class SegmentEventSink : IEventSink, IDisposable
         request.Content.Headers.ContentType = JsonContentType;
         try
         {
-            using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             var status = (int)response.StatusCode;
             if (status is >= 200 and < 300)
                 return EventSinkDelivered.Instance;
             if (status == 413 && delivery.Events.Count > 1)
                 return EventSinkSplit.Instance;
             var code = "http-" + status.ToString(CultureInfo.InvariantCulture);
-            return status is 408 or 429 or >= 500 ? new EventSinkFailed(code, retryAfter: response.Headers.RetryAfter?.Delta) : new EventSinkFailed(code, permanent: true);
+            return status is 408 or 429 or >= 500 ? new EventSinkFailed(code, retryAfter: RetryAfter(response)) : new EventSinkFailed(code, permanent: true);
         }
         catch (HttpRequestException)
         {
@@ -150,6 +156,19 @@ public sealed class SegmentEventSink : IEventSink, IDisposable
         {
             return new EventSinkFailed("timeout");
         }
+    }
+
+    private TimeSpan? RetryAfter(HttpResponseMessage response)
+    {
+        var header = response.Headers.RetryAfter;
+        if (header is null)
+            return null;
+        TimeSpan? delay = header.Delta ?? (header.Date is { } date ? date - time.GetUtcNow() : null);
+        if (delay is not { } value)
+            return null;
+        if (value <= TimeSpan.Zero)
+            return TimeSpan.Zero;
+        return value > options.MaximumRetryAfter ? options.MaximumRetryAfter : value;
     }
 
     /// <summary>The Segment <c>/v1/batch</c> request body for <paramref name="delivery"/>.</summary>

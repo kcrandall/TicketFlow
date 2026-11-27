@@ -108,6 +108,63 @@ public sealed class VisitorTokenTests
         Assert.ThrowsExactly<InvalidOperationException>(() => new IdentityFlowVisitorTokenValidator(Microsoft.Extensions.Options.Options.Create(noIssuer)));
     }
 
+    [TestMethod]
+    public void DefaultBackchannelHandlerIsHardened()
+    {
+        using var handler = IdentityFlowVisitorTokenValidator.CreateDefaultBackchannelHandler();
+        Assert.IsFalse(handler.AllowAutoRedirect);
+        Assert.IsFalse(handler.UseCookies);
+        Assert.AreEqual(TimeSpan.FromMinutes(5), handler.PooledConnectionLifetime);
+    }
+
+    [TestMethod]
+    public void AuthorityAndMetadataAddressAreValidatedInConstructor()
+    {
+        foreach (var badAuthority in new[]
+                 {
+                     "",
+                     "   ",
+                     "/relative/path",
+                     "http://id.example.test",
+                     "https://user:pass@id.example.test",
+                     "https://id.example.test/#fragment",
+                     "https://id.example.test/?query=1",
+                 })
+        {
+            var opts = new IdentityFlowVisitorTokenOptions { Authority = badAuthority };
+            opts.Audiences.Add("widget");
+            Assert.ThrowsExactly<InvalidOperationException>(() => new IdentityFlowVisitorTokenValidator(Microsoft.Extensions.Options.Options.Create(opts)), badAuthority);
+        }
+
+        foreach (var badMetadata in new[]
+                 {
+                     "",
+                     "/relative/.well-known/openid-configuration",
+                     "http://id.example.test/.well-known/openid-configuration",
+                     "https://user:pass@id.example.test/.well-known/openid-configuration",
+                     "https://id.example.test/.well-known/openid-configuration#frag",
+                 })
+        {
+            var opts = new IdentityFlowVisitorTokenOptions { MetadataAddress = badMetadata };
+            opts.Audiences.Add("widget");
+            Assert.ThrowsExactly<InvalidOperationException>(() => new IdentityFlowVisitorTokenValidator(Microsoft.Extensions.Options.Options.Create(opts)), badMetadata);
+        }
+
+        // Non-HTTP(S) schemes are rejected even when RequireHttpsMetadata is false.
+        var fileScheme = new IdentityFlowVisitorTokenOptions { MetadataAddress = "file:///etc/passwd", RequireHttpsMetadata = false };
+        fileScheme.Audiences.Add("widget");
+        Assert.ThrowsExactly<InvalidOperationException>(() => new IdentityFlowVisitorTokenValidator(Microsoft.Extensions.Options.Options.Create(fileScheme)));
+
+        // HTTP is accepted when RequireHttpsMetadata is explicitly false, and query strings are allowed on MetadataAddress.
+        var devHttp = new IdentityFlowVisitorTokenOptions { Authority = "http://localhost:5000", RequireHttpsMetadata = false };
+        devHttp.Audiences.Add("widget");
+        using (new IdentityFlowVisitorTokenValidator(Microsoft.Extensions.Options.Options.Create(devHttp))) { }
+
+        var b2cMetadata = new IdentityFlowVisitorTokenOptions { MetadataAddress = "https://id.example.test/.well-known/openid-configuration?p=b2c" };
+        b2cMetadata.Audiences.Add("widget");
+        using (new IdentityFlowVisitorTokenValidator(Microsoft.Extensions.Options.Options.Create(b2cMetadata))) { }
+    }
+
     private static IdentityFlowVisitorTokenOptions Options(string audience)
     {
         var options = new IdentityFlowVisitorTokenOptions();

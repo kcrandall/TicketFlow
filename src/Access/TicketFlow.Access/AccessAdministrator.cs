@@ -145,6 +145,8 @@ public sealed class AccessAdministrator : IAccessAdministrator
                     refusal = fenced;
                 else if (existing.Grant.Kind == GrantKind.BreakGlass)
                     refusal = new(TicketFailureKind.Invalid, ["Break-glass grants cannot be modified; revoke them instead."]);
+                else
+                    refusal = await RequireHeldForLiveDenyAsync(actor, existing.Grant, context!, cancellationToken).ConfigureAwait(false);
             }
             else
                 refusal = Fence(null, expectedRevision);
@@ -175,7 +177,8 @@ public sealed class AccessAdministrator : IAccessAdministrator
                 else
                 {
                     change = GrantChange(AccessAuditKind.GrantRevoked, actor, existing.Grant);
-                    refusal = Fence(existing.Revision, expectedRevision);
+                    refusal = Fence(existing.Revision, expectedRevision)
+                        ?? await RequireHeldForLiveDenyAsync(actor, existing.Grant, context!, cancellationToken).ConfigureAwait(false);
                 }
             }
             else
@@ -203,6 +206,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         var results = new TicketResult<AccessChangeApplied<StoredAccessGrant>>[grants.Count];
         var toDelete = new List<(int Index, StoredAccessGrant Existing, Change Change)>(grants.Count);
         var (baseRefusal, context) = await AuthorizeAnyGrantManagementAsync(actor, context: null, cancellationToken).ConfigureAwait(false);
+        Dictionary<RoleId, AccessRole?>? customRoles = null;
 
         for (var i = 0; i < grants.Count; i++)
         {
@@ -221,7 +225,8 @@ public sealed class AccessAdministrator : IAccessAdministrator
                     else
                     {
                         change = GrantChange(AccessAuditKind.GrantRevoked, actor, existing.Grant);
-                        refusal = Fence(existing.Revision, expectedRevision);
+                        refusal = Fence(existing.Revision, expectedRevision)
+                            ?? await RequireHeldForLiveDenyAsync(actor, existing.Grant, context!, cancellationToken, customRoles ??= []).ConfigureAwait(false);
                     }
                 }
                 else
@@ -446,6 +451,7 @@ public sealed class AccessAdministrator : IAccessAdministrator
         if (serviceAccountDenial is { } saReason)
             return Refused(["The actor is not authorized."], saReason);
         var context = await engine.LoadAsync(actor, actor.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
+        Dictionary<RoleId, AccessRole?>? customRoles = null;
         for (var i = 0; i < items.Count; i++)
         {
             var grant = items[i];
@@ -458,6 +464,9 @@ public sealed class AccessAdministrator : IAccessAdministrator
             var result = AccessEngine.EvaluateSimple(context, permission, AccessEngine.Target(actor.Scope, grant.Scope), includeBreakGlass: false, tenantAllowsOnly: tenant);
             if (result.Denial is { } denial)
                 return Refused([$"Permission '{permission}' is required on the grant's target."], denial);
+            if (grant.Effect == GrantEffect.Deny
+                && await RequireHeldForLiveDenyAsync(actor, grant, context, cancellationToken, customRoles ??= []).ConfigureAwait(false) is { } denyRefusal)
+                return Refused(denyRefusal.Errors, denyRefusal.Denial ?? AccessDenialReason.NoMatchingGrant);
         }
         return AccessCheckPassed.Instance;
     }
@@ -649,6 +658,39 @@ public sealed class AccessAdministrator : IAccessAdministrator
         for (var i = 0; i < missing.Count; i++)
             errors[i] = $"The actor does not hold '{missing[i]}' on the target.";
         return new(TicketFailureKind.Forbidden, errors, AccessDenialReason.NoMatchingGrant);
+    }
+
+    /// <summary>
+    /// No escalation via lifting a deny: revoking or modifying a live <see cref="GrantEffect.Deny"/> grant requires the actor to hold every
+    /// denied permission on the grant's target from standard grants (falling back to all catalog permissions when the role is missing or
+    /// includes all permissions).
+    /// </summary>
+    private async Task<Refusal?> RequireHeldForLiveDenyAsync(
+        PrincipalRef actor,
+        AccessGrant grant,
+        AccessContext context,
+        CancellationToken cancellationToken,
+        Dictionary<RoleId, AccessRole?>? customRoleCache = null)
+    {
+        if (grant.Effect != GrantEffect.Deny || (grant.ValidUntil is { } until && until <= engine.Now))
+            return null;
+
+        var role = BuiltInRoles.Find(grant.Role);
+        if (role is null && grant.Scope is not TenantGrantScope)
+        {
+            if (customRoleCache is not null)
+            {
+                if (!customRoleCache.TryGetValue(grant.Role, out role))
+                    customRoleCache[grant.Role] = role = (await roles.GetAsync(actor.Scope, grant.Role, cancellationToken).ConfigureAwait(false))?.Role;
+            }
+            else
+                role = (await roles.GetAsync(actor.Scope, grant.Role, cancellationToken).ConfigureAwait(false))?.Role;
+        }
+
+        var deniedPermissions = role is null || role.IncludesAllPermissions
+            ? engine.Catalog.Definitions.Select(static definition => definition.Permission)
+            : role.Permissions;
+        return RequireHeld(context, deniedPermissions, AccessEngine.Target(actor.Scope, grant.Scope), grant.Scope is TenantGrantScope);
     }
 
     /// <summary>

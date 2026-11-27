@@ -34,7 +34,9 @@ internal static class PublicEndpoints
             if (cursor is not null)
             {
                 var parts = TicketFlowHttp.DecodeCursor(cursor, 2);
-                after = new PublishedArticleCursor(int.Parse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture), new ArticleId(parts[1]));
+                if (!int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var position))
+                    throw new ArgumentException("The cursor is invalid.", nameof(cursor));
+                after = new PublishedArticleCursor(position, new ArticleId(parts[1]));
             }
             var page = await reader.ListArticlesAsync(scope.Scope, new HelpCenterSlug(portal), new HelpCenterLocale(locale), collection is null ? null : new CollectionId(collection),
                 limit ?? 50, after, http.RequestAborted);

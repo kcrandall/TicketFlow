@@ -178,4 +178,32 @@ public sealed class ReviewRegressionTests
         Assert.HasCount(1, registrations);
         Assert.AreEqual("TicketFlow.Workspaces", typeof(WorkspacesTicketFlowBuilderExtensions).Namespace);
     }
+
+    [TestMethod]
+    public async Task RemovingMemberOrDeletingTeamWithUnheldDenyGrantIsRefused()
+    {
+        using var fixture = Create();
+        var owner = fixture.User("owner");
+        var admin = fixture.User("admin");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner);
+        await fixture.GrantAsync(admin.UserId, BuiltInRoles.Admin);
+
+        var restricted = new TeamId("restricted");
+        var conditioned = new TeamId("conditioned");
+        Value(await fixture.Teams.CreateAsync(admin, new Team(restricted, "Restricted", null, [new UserId("bob")])));
+        Value(await fixture.Teams.CreateAsync(admin, new Team(conditioned, "Conditioned", null, [new UserId("carl")])));
+        await fixture.GrantAsync(restricted, BuiltInRoles.Owner, effect: GrantEffect.Deny);
+        await fixture.GrantAsync(new UserId("carl"), BuiltInRoles.Owner, effect: GrantEffect.Deny, condition: new TeamInPrincipalTeamsCondition());
+
+        // Admin holds team:manage and access:manage, but not workspace:manage (covered by Owner deny).
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.RemoveMemberAsync(admin, restricted, new UserId("bob"), 1)));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.UpdateAsync(admin, new Team(restricted, "Restricted", null, []), 1)));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.DeleteAsync(admin, restricted, 1)));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.RemoveMemberAsync(admin, conditioned, new UserId("carl"), 1)));
+
+        // Workspace Owner holds all denied permissions and succeeds.
+        Assert.AreEqual(2L, Value(await fixture.Teams.RemoveMemberAsync(owner, restricted, new UserId("bob"), 1)).Revision);
+        Assert.AreEqual("ok", Describe(await fixture.Teams.DeleteAsync(owner, restricted, 2)));
+        Assert.AreEqual(2L, Value(await fixture.Teams.RemoveMemberAsync(owner, conditioned, new UserId("carl"), 1)).Revision);
+    }
 }

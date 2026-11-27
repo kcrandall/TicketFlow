@@ -153,4 +153,85 @@ public sealed class PostHogEventSinkTests
         using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true });
         Assert.AreEqual("posthog", provider.GetServices<IEventSink>().Single().Kind);
     }
+
+    [TestMethod]
+    public async Task RetryAfterSupportsDeltaAndHttpDateClampedAndDoesNotBufferResponseBody()
+    {
+        var created = Rendered(new ContactCreatedData(new ContactId("ada")), 1);
+        var clock = TestClock.Create(Now);
+
+        // Response body must not be buffered (HttpCompletionOption.ResponseHeadersRead).
+        var bodyRead = false;
+        using (var okSink = SinkWithResponder(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ThrowingReadContent(() => bodyRead = true) }, clock))
+        {
+            Assert.IsInstanceOfType<EventSinkDelivered>((await okSink.DeliverAsync(Delivery(created))).Value);
+            Assert.IsFalse(bodyRead, "Response body must not be buffered.");
+        }
+
+        // Huge Retry-After delta is clamped to MaximumRetryAfter (default 1 hour).
+        using (var hugeDelta = SinkWithResponder(_ =>
+               {
+                   var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests) { Content = new ThrowingReadContent(() => bodyRead = true) };
+                   response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromDays(365));
+                   return response;
+               }, clock))
+        {
+            var failed = (EventSinkFailed)(await hugeDelta.DeliverAsync(Delivery(created))).Value!;
+            Assert.AreEqual(TimeSpan.FromHours(1), failed.RetryAfter);
+            Assert.IsFalse(bodyRead);
+        }
+
+        // HTTP-date in the future is honored (and clamped when huge); past HTTP-date clamps to TimeSpan.Zero.
+        using (var futureDate = SinkWithResponder(_ =>
+               {
+                   var response = new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+                   response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(Now.AddMinutes(5));
+                   return response;
+               }, clock))
+            Assert.AreEqual(TimeSpan.FromMinutes(5), ((EventSinkFailed)(await futureDate.DeliverAsync(Delivery(created))).Value!).RetryAfter);
+
+        using (var hugeDate = SinkWithResponder(_ =>
+               {
+                   var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+                   response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(Now.AddDays(30));
+                   return response;
+               }, clock))
+            Assert.AreEqual(TimeSpan.FromHours(1), ((EventSinkFailed)(await hugeDate.DeliverAsync(Delivery(created))).Value!).RetryAfter);
+
+        using (var pastDate = SinkWithResponder(_ =>
+               {
+                   var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+                   response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(Now.AddMinutes(-10));
+                   return response;
+               }, clock))
+            Assert.IsNull(((EventSinkFailed)(await pastDate.DeliverAsync(Delivery(created))).Value!).RetryAfter);
+    }
+
+    private static PostHogEventSink SinkWithResponder(Func<HttpRequestMessage, HttpResponseMessage> respond, TimeProvider time)
+    {
+        var options = new PostHogOptions();
+        options.Projects["default"] = new PostHogProject(new Uri("https://eu.i.posthog.com/"), "phc_test_key", [new EventScopeRule(Scope.TenantId, workspaceId: Scope.WorkspaceId)]);
+        return new PostHogEventSink(Options.Create(options), new FunctionalHandler(respond), time);
+    }
+
+    private sealed class FunctionalHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(respond(request));
+    }
+
+    private sealed class ThrowingReadContent(Action onRead) : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            onRead();
+            throw new InvalidOperationException("Response body should not be read or buffered.");
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+    }
 }

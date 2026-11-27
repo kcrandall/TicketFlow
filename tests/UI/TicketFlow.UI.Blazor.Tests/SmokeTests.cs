@@ -7,6 +7,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using TicketFlow.Access;
 using TicketFlow.Assist;
+using TicketFlow.Contacts;
 using TicketFlow.Core;
 using TicketFlow.HelpCenter;
 using TicketFlow.SampleHost;
@@ -462,6 +463,50 @@ public sealed partial class SmokeTests
             Assert.AreEqual("English body", en.Body);
             Assert.AreEqual("Titre Francais Modifie", fr.Title);
             Assert.AreEqual("Nouveau contenu francais", fr.Body);
+        }
+    }
+
+    [TestMethod]
+    public async Task UpdatingContactProfilePreservesAvatarRef()
+    {
+        ContactId contactId;
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var settings = scope.ServiceProvider.GetRequiredService<SampleSettings>();
+            var contacts = scope.ServiceProvider.GetRequiredService<IContactService>();
+            var admin = new UserPrincipal(settings.Scope, new UserId("admin"));
+            var created = await contacts.CreateAsync(admin, new ContactDraft(
+                new ContactProfile("Ada Lovelace", avatarRef: "https://cdn.example.test/avatars/ada.png", locale: "en-US", timeZone: "UTC", company: "Analytical Engine")));
+            contactId = ((TicketValue<ContactView>)created.Value!).Value.Id;
+        }
+
+        var client = Client("admin");
+        var path = $"/support/contacts/{contactId.Value}";
+        var (token, cookie, revision) = await FormAsync(client, path);
+        var posted = await PostAsync(client, path, cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "contact.profile",
+            ["_return"] = path,
+            ["_revision"] = revision,
+            ["name"] = "Ada Byron",
+            ["company"] = "Babbage Labs",
+            ["locale"] = "en-GB",
+            ["timezone"] = "Europe/London",
+        });
+        Assert.AreEqual(HttpStatusCode.Redirect, posted.StatusCode);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var settings = scope.ServiceProvider.GetRequiredService<SampleSettings>();
+            var contacts = scope.ServiceProvider.GetRequiredService<IContactService>();
+            var admin = new UserPrincipal(settings.Scope, new UserId("admin"));
+            var updated = ((TicketValue<ContactView>)(await contacts.GetAsync(admin, contactId)).Value!).Value;
+            Assert.AreEqual("Ada Byron", updated.Profile.DisplayName);
+            Assert.AreEqual("Babbage Labs", updated.Profile.Company);
+            Assert.AreEqual("en-GB", updated.Profile.Locale);
+            Assert.AreEqual("Europe/London", updated.Profile.TimeZone);
+            Assert.AreEqual("https://cdn.example.test/avatars/ada.png", updated.Profile.AvatarRef, "Saving the profile form must preserve AvatarRef.");
         }
     }
 

@@ -46,6 +46,9 @@ public sealed class InsightFlowExportOptions
     /// <summary>HTTP timeout (1 second to 2 minutes, default 15 seconds).</summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(15);
 
+    /// <summary>The longest <c>Retry-After</c> honored (default 1 hour, max 1 day).</summary>
+    public TimeSpan MaximumRetryAfter { get; set; } = TimeSpan.FromHours(1);
+
     internal void Validate()
     {
         if (Endpoint is null || !Endpoint.IsAbsoluteUri || !string.Equals(Endpoint.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal) || Endpoint.UserInfo.Length != 0 || Endpoint.Query.Length != 0 || Endpoint.Fragment.Length != 0)
@@ -72,6 +75,8 @@ public sealed class InsightFlowExportOptions
             throw new InvalidOperationException("InitialLookback must be positive and at most 365 days.");
         if (Timeout < TimeSpan.FromSeconds(1) || Timeout > TimeSpan.FromMinutes(2))
             throw new InvalidOperationException("Timeout must be between 1 second and 2 minutes.");
+        if (MaximumRetryAfter <= TimeSpan.Zero || MaximumRetryAfter > TimeSpan.FromDays(1))
+            throw new InvalidOperationException("MaximumRetryAfter must be positive and at most 1 day.");
     }
 
     public override string ToString() => $"InsightFlowExportOptions {{ Endpoint = {Endpoint}, TenantId = {TenantId}, ProjectId = {ProjectId}, Environment = {Environment}, AppName = {AppName} }}";

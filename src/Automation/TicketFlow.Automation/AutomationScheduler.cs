@@ -96,7 +96,7 @@ public sealed class AutomationScheduler
             {
                 next = trigger.Schedule.NextAfter(claim.DueAt > now ? claim.DueAt : now);
             }
-            catch (TimeZoneNotFoundException)
+            catch (Exception error) when (error is TimeZoneNotFoundException or InvalidTimeZoneException)
             {
                 next = null;
             }

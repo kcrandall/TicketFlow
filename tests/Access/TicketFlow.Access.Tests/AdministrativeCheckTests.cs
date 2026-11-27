@@ -89,5 +89,15 @@ public sealed class AdministrativeCheckTests
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Admin.CheckCanRevokeAsync(owner, [teamDeny, tenantDeny])));
         var foreign = new AccessGrant(new GrantId("foreign"), fixture.Partition, new TeamId("x"), BuiltInRoles.Viewer.Id, new WorkspaceGrantScope(new WorkspaceId("elsewhere")));
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Admin.CheckCanRevokeAsync(owner, [foreign])));
+
+        // Live deny grants whose denied permissions the actor does not hold are refused; expired denies pass.
+        var ownerDeny = new AccessGrant(new GrantId("owner-deny"), fixture.Partition, new TeamId("contractors"), BuiltInRoles.Owner.Id, fixture.Workspace, GrantEffect.Deny);
+        var missingRoleDeny = new AccessGrant(new GrantId("missing-deny"), fixture.Partition, new TeamId("contractors"), new RoleId("deleted-role"), fixture.Workspace, GrantEffect.Deny);
+        var expiredOwnerDeny = new AccessGrant(new GrantId("expired-owner-deny"), fixture.Partition, new TeamId("contractors"), BuiltInRoles.Owner.Id, fixture.Workspace, GrantEffect.Deny,
+            validFrom: fixture.Clock.GetUtcNow().AddDays(-2), validUntil: fixture.Clock.GetUtcNow().AddDays(-1));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Admin.CheckCanRevokeAsync(admin, [ownerDeny])));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Admin.CheckCanRevokeAsync(admin, [missingRoleDeny])));
+        Assert.AreEqual("passed", Describe(await fixture.Admin.CheckCanRevokeAsync(admin, [expiredOwnerDeny])));
+        Assert.AreEqual("passed", Describe(await fixture.Admin.CheckCanRevokeAsync(owner, [ownerDeny])));
     }
 }

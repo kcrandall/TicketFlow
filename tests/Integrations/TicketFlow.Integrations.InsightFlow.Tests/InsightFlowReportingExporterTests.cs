@@ -160,4 +160,82 @@ public sealed class InsightFlowReportingExporterTests
         using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true });
         Assert.IsNotNull(provider.GetRequiredService<InsightFlowReportingExporter>());
     }
+
+    [TestMethod]
+    public async Task RetryAfterSupportsDeltaAndHttpDateClampedAndDoesNotBufferResponseBody()
+    {
+        var now = Start.AddHours(1);
+        var clock = TestClock.Create(now);
+        var store = new InMemoryReportingStore();
+        await SeedFactsAsync(store, 1);
+
+        var bodyRead = false;
+        using (var okExporter = new InsightFlowReportingExporter(store, new InMemoryInsightFlowExportCheckpointStore(), Options.Create(OptionsFor()), clock,
+                   new ScriptedHandler((_, _) => new HttpResponseMessage(HttpStatusCode.Accepted) { Content = new ThrowingReadContent(() => bodyRead = true) })))
+        {
+            var ok = await okExporter.ExportOnceAsync(FactScope);
+            Assert.AreEqual(1, ok.Exported);
+            Assert.IsFalse(bodyRead, "Response body must not be buffered.");
+        }
+
+        using (var hugeDelta = new InsightFlowReportingExporter(store, new InMemoryInsightFlowExportCheckpointStore(), Options.Create(OptionsFor()), clock,
+                   new ScriptedHandler((_, _) =>
+                   {
+                       var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests) { Content = new ThrowingReadContent(() => bodyRead = true) };
+                       response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromDays(365));
+                       return response;
+                   })))
+        {
+            var result = await hugeDelta.ExportOnceAsync(FactScope);
+            Assert.AreEqual("http-429", result.FailureCode);
+            Assert.AreEqual(TimeSpan.FromHours(1), result.RetryAfter);
+            Assert.IsFalse(bodyRead);
+        }
+
+        using (var futureDate = new InsightFlowReportingExporter(store, new InMemoryInsightFlowExportCheckpointStore(), Options.Create(OptionsFor()), clock,
+                   new ScriptedHandler((_, _) =>
+                   {
+                       var response = new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+                       response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(now.AddMinutes(4));
+                       return response;
+                   })))
+            Assert.AreEqual(TimeSpan.FromMinutes(4), (await futureDate.ExportOnceAsync(FactScope)).RetryAfter);
+
+        using (var pastDate = new InsightFlowReportingExporter(store, new InMemoryInsightFlowExportCheckpointStore(), Options.Create(OptionsFor()), clock,
+                   new ScriptedHandler((_, _) =>
+                   {
+                       var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+                       response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(now.AddMinutes(-2));
+                       return response;
+                   })))
+            Assert.AreEqual(TimeSpan.Zero, (await pastDate.ExportOnceAsync(FactScope)).RetryAfter);
+
+        using (var permanent = new InsightFlowReportingExporter(store, new InMemoryInsightFlowExportCheckpointStore(), Options.Create(OptionsFor()), clock,
+                   new ScriptedHandler((_, _) =>
+                   {
+                       var response = new HttpResponseMessage(HttpStatusCode.BadRequest);
+                       response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMinutes(5));
+                       return response;
+                   })))
+        {
+            var failed = await permanent.ExportOnceAsync(FactScope);
+            Assert.IsTrue(failed.PermanentFailure);
+            Assert.IsNull(failed.RetryAfter);
+        }
+    }
+
+    private sealed class ThrowingReadContent(Action onRead) : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            onRead();
+            throw new InvalidOperationException("Response body should not be read or buffered.");
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+    }
 }

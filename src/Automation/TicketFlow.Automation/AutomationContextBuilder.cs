@@ -187,17 +187,9 @@ public sealed class AutomationContextBuilder(IConversationService conversations,
         if (cache is not null && cache.Calendars.TryGetValue(scope, calendarId, out var cached))
             return cached;
         BusinessCalendarCalculator? calendar = null;
-        if (await calendars.GetAsync(scope, calendarId, cancellationToken).ConfigureAwait(false) is { } stored)
-        {
-            try
-            {
-                calendar = new BusinessCalendarCalculator(stored.Calendar);
-            }
-            catch (TimeZoneNotFoundException)
-            {
-                calendar = null;
-            }
-        }
+        if (await calendars.GetAsync(scope, calendarId, cancellationToken).ConfigureAwait(false) is { } stored
+            && WorkspaceTimeZones.TryResolve(stored.Calendar.TimeZoneId, out var zone))
+            calendar = new BusinessCalendarCalculator(stored.Calendar, zone);
         if (cache is not null)
             cache.Calendars[scope, calendarId] = calendar;
         return calendar;

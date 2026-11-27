@@ -99,7 +99,7 @@ public sealed class InsightFlowReportingExporter : IDisposable
 
         try
         {
-            using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             var status = (int)response.StatusCode;
             if (status is >= 200 and < 300)
                 return (1, null, false, null);
@@ -107,7 +107,7 @@ public sealed class InsightFlowReportingExporter : IDisposable
                 return await SendHalvesAsync(scope, facts, offset, count, cancellationToken).ConfigureAwait(false);
             var code = "http-" + status.ToString(CultureInfo.InvariantCulture);
             var permanent = status is not (408 or 429 or >= 500);
-            return (0, code, permanent, response.Headers.RetryAfter?.Delta);
+            return (0, code, permanent, permanent ? null : RetryAfter(response));
         }
         catch (HttpRequestException)
         {
@@ -117,6 +117,19 @@ public sealed class InsightFlowReportingExporter : IDisposable
         {
             return (0, "timeout", false, null);
         }
+    }
+
+    private TimeSpan? RetryAfter(HttpResponseMessage response)
+    {
+        var header = response.Headers.RetryAfter;
+        if (header is null)
+            return null;
+        TimeSpan? delay = header.Delta ?? (header.Date is { } date ? date - time.GetUtcNow() : null);
+        if (delay is not { } value)
+            return null;
+        if (value <= TimeSpan.Zero)
+            return TimeSpan.Zero;
+        return value > options.MaximumRetryAfter ? options.MaximumRetryAfter : value;
     }
 
     private async Task<(int Batches, string? FailureCode, bool Permanent, TimeSpan? RetryAfter)> SendHalvesAsync(TicketScope scope, IReadOnlyList<ReportFact> facts,

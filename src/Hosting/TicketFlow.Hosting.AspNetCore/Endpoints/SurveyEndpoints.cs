@@ -41,7 +41,10 @@ internal static class SurveyEndpoints
             if (cursor is not null)
             {
                 var parts = TicketFlowHttp.DecodeCursor(cursor, 2);
-                after = new SurveyResponseCursor(DateTimeOffset.Parse(parts[0], CultureInfo.InvariantCulture), new SurveyInvitationId(Guid.Parse(parts[1])));
+                if (!DateTimeOffset.TryParse(parts[0], CultureInfo.InvariantCulture, DateTimeStyles.None, out var respondedAt)
+                    || !Guid.TryParse(parts[1], out var invitation))
+                    throw new ArgumentException("The cursor is invalid.", nameof(cursor));
+                after = new SurveyResponseCursor(respondedAt, new SurveyInvitationId(invitation));
             }
             var query = new SurveyResponseQuery(from, to, survey is null ? null : new SurveyId(survey), limit ?? 50, after);
             return Map(http, await service.ListResponsesAsync(actor.Principal, query, http.RequestAborted), page => TicketFlowHttp.Ok(http, new PageResponse<SurveyAnswerResponse>(
@@ -66,12 +69,24 @@ internal static class SurveyEndpoints
     private static SurveyDefinition Survey(string id, SurveyRequest request)
     {
         ArgumentNullException.ThrowIfNull(request.Policy, nameof(request));
-        var policy = new SurveyTriggerPolicy(TimeSpan.FromSeconds(request.Policy.DelaySeconds), TimeSpan.FromSeconds(request.Policy.ContactCooldownSeconds),
-            TimeSpan.FromSeconds(request.Policy.InvitationLifetimeSeconds), TicketFlowHttp.Parse<SurveyTrigger>(request.Policy.Trigger, "trigger"));
+        var policy = new SurveyTriggerPolicy(
+            Seconds(request.Policy.DelaySeconds, TimeSpan.Zero, SurveyTriggerPolicy.MaximumDelay, "delaySeconds"),
+            Seconds(request.Policy.ContactCooldownSeconds, TimeSpan.Zero, SurveyTriggerPolicy.MaximumCooldown, "contactCooldownSeconds"),
+            Seconds(request.Policy.InvitationLifetimeSeconds, SurveyTriggerPolicy.MinimumLifetime, SurveyTriggerPolicy.MaximumLifetime, "invitationLifetimeSeconds"),
+            TicketFlowHttp.Parse<SurveyTrigger>(request.Policy.Trigger, "trigger"));
         return new SurveyDefinition(new SurveyId(id), request.Name, TicketFlowHttp.Parse<SurveyKind>(request.Kind, "kind"), new SurveyLocale(request.DefaultLocale),
             (request.Questions ?? throw new ArgumentException("Questions are required.", nameof(request)))
                 .Select(question => new SurveyQuestion(new SurveyLocale(question.Locale), question.Text, question.CommentPrompt)),
             policy, request.InboxId is null ? null : new InboxId(request.InboxId), request.Enabled);
+    }
+
+    private static TimeSpan Seconds(long value, TimeSpan minimum, TimeSpan maximum, string name)
+    {
+        var minSeconds = (long)minimum.TotalSeconds;
+        var maxSeconds = (long)maximum.TotalSeconds;
+        if (value < minSeconds || value > maxSeconds)
+            throw new ArgumentOutOfRangeException(name, $"'{name}' must be between {minSeconds} and {maxSeconds} seconds.");
+        return TimeSpan.FromSeconds(value);
     }
 
     private static SurveyDefinitionResponse Dto(StoredSurvey stored)

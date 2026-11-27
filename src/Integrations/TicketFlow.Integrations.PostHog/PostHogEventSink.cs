@@ -67,9 +67,13 @@ public sealed class PostHogOptions
     /// <summary>Request timeout (1 second to 2 minutes, default 15 seconds).</summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(15);
 
+    /// <summary>The longest <c>Retry-After</c> honored (default 1 hour, max 1 day).</summary>
+    public TimeSpan MaximumRetryAfter { get; set; } = TimeSpan.FromHours(1);
+
     internal void Validate()
     {
         if (!Enum.IsDefined(DistinctId) || string.IsNullOrWhiteSpace(GroupType) || GroupType.Length > 64 || Timeout < TimeSpan.FromSeconds(1) || Timeout > TimeSpan.FromMinutes(2)
+            || MaximumRetryAfter <= TimeSpan.Zero || MaximumRetryAfter > TimeSpan.FromDays(1)
             || Projects.Any(pair => !Events.EventText.IsToken(pair.Key, 64) || pair.Value is null))
             throw new InvalidOperationException("PostHog options are invalid.");
     }
@@ -91,13 +95,15 @@ public sealed class PostHogEventSink : Events.IEventSink, IDisposable
 
     private readonly PostHogOptions options;
     private readonly HttpClient client;
+    private readonly TimeProvider time;
     private readonly Dictionary<string, (PostHogProject Project, Uri BatchUri)> projects;
 
-    public PostHogEventSink(IOptions<PostHogOptions> options, HttpMessageHandler? handler = null)
+    public PostHogEventSink(IOptions<PostHogOptions> options, HttpMessageHandler? handler = null, TimeProvider? time = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         this.options = options.Value;
         this.options.Validate();
+        this.time = time ?? TimeProvider.System;
         projects = new Dictionary<string, (PostHogProject, Uri)>(this.options.Projects.Count, StringComparer.Ordinal);
         foreach (var pair in this.options.Projects)
             projects[pair.Key] = (pair.Value, new Uri(pair.Value.Host, "batch/"));
@@ -116,18 +122,18 @@ public sealed class PostHogEventSink : Events.IEventSink, IDisposable
         ArgumentNullException.ThrowIfNull(delivery);
         if (!projects.TryGetValue(delivery.Subscription.Subscription.Sink.Target, out var entry) || !EventScopeRule.Allows(entry.Project.AllowedScopes, delivery.Scope))
             return new Events.EventSinkFailed("project-missing", permanent: true);
-        using var content = new ByteArrayContent(Body(entry.Project, delivery));
-        content.Headers.ContentType = JsonContentType;
+        using var request = new HttpRequestMessage(HttpMethod.Post, entry.BatchUri) { Content = new ByteArrayContent(Body(entry.Project, delivery)) };
+        request.Content.Headers.ContentType = JsonContentType;
         try
         {
-            using var response = await client.PostAsync(entry.BatchUri, content, cancellationToken).ConfigureAwait(false);
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             var status = (int)response.StatusCode;
             if (status is >= 200 and < 300)
                 return Events.EventSinkDelivered.Instance;
             if (status == 413 && delivery.Events.Count > 1)
                 return Events.EventSinkSplit.Instance;
             var code = "http-" + status.ToString(CultureInfo.InvariantCulture);
-            return status is 408 or 429 or >= 500 ? new Events.EventSinkFailed(code, retryAfter: response.Headers.RetryAfter?.Delta) : new Events.EventSinkFailed(code, permanent: true);
+            return status is 408 or 429 or >= 500 ? new Events.EventSinkFailed(code, retryAfter: RetryAfter(response)) : new Events.EventSinkFailed(code, permanent: true);
         }
         catch (HttpRequestException)
         {
@@ -137,6 +143,19 @@ public sealed class PostHogEventSink : Events.IEventSink, IDisposable
         {
             return new Events.EventSinkFailed("timeout");
         }
+    }
+
+    private TimeSpan? RetryAfter(HttpResponseMessage response)
+    {
+        var header = response.Headers.RetryAfter;
+        if (header is null)
+            return null;
+        TimeSpan? delay = header.Delta ?? (header.Date is { } date ? date - time.GetUtcNow() : null);
+        if (delay is not { } value)
+            return null;
+        if (value <= TimeSpan.Zero)
+            return TimeSpan.Zero;
+        return value > options.MaximumRetryAfter ? options.MaximumRetryAfter : value;
     }
 
     /// <summary>The batch request body for <paramref name="delivery"/>.</summary>

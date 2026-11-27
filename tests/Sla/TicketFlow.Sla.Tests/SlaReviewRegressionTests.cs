@@ -128,4 +128,31 @@ public sealed class SlaReviewRegressionTests
         await fixture.DispatchAsync();
         Assert.AreEqual(1, (await fixture.SlaEventsAsync("c1")).Count);
     }
+
+    [TestMethod]
+    public async Task UnknownCalendarTimeZoneFallsBackToCalendarTimeWithoutThrowing()
+    {
+        using var fixture = await SlaFixture.CreateAsync(Friday);
+        var badCalendar = new BusinessCalendar(new BusinessCalendarId("bad-tz"), "Unknown TZ", "Invalid/Zone_Does_Not_Exist",
+            [new WeeklyBusinessHours(DayOfWeek.Monday, BusinessHours.From(9, 0, 17, 0))]);
+        Assert.IsInstanceOfType<StoreApplied<StoredBusinessCalendar>>((await fixture.Get<IBusinessCalendarStore>().CreateAsync(fixture.Scope, badCalendar)).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await fixture.Get<IInboxStore>().CreateAsync(fixture.Scope,
+            new Inbox(new InboxId("bad-tz-inbox"), "Bad TZ", new ChannelBinding(new ChannelKind("email"), "cfg-bad-tz"),
+                new BusinessCalendarId("bad-tz"), new SlaPolicyId("standard")))).Value);
+
+        await fixture.StartAsync("c-bad-tz", inbox: "bad-tz-inbox");
+        var dispatch = await fixture.DispatchAsync();
+        Assert.AreEqual(0, dispatch.Retried);
+        Assert.AreEqual(0, dispatch.DeadLettered);
+
+        var status = await fixture.InScopeAsync(services => services.GetRequiredService<ISlaService>().GetStatusAsync(fixture.Supervisor, new ConversationId("c-bad-tz")));
+        var view = ((TicketValue<SlaStatusView>)status.Value!).Value;
+        Assert.AreEqual(new SlaPolicyId("standard"), view.Policy);
+        Assert.AreEqual(Friday.AddHours(4), view.Clocks.Single(clock => clock.Metric == SlaMetric.FirstResponse).DueAt, "Falls back cleanly to calendar time.");
+
+        AdvanceTo(fixture, Friday.AddHours(3.5));
+        var listed = await fixture.InScopeAsync(services => services.GetRequiredService<ISlaService>().ListAsync(fixture.Supervisor, new SlaRiskQuery()));
+        var page = ((TicketValue<SlaRiskPage>)listed.Value!).Value;
+        Assert.IsTrue(page.Items.Any(item => item.Conversation == new ConversationId("c-bad-tz")));
+    }
 }

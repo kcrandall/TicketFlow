@@ -127,7 +127,18 @@ public sealed partial class LiveChatVisitorService : ILiveChatVisitorService
         return Refused<VisitorSessionGrant>(LiveChatRefusal.Rejected);
     }
 
-    public async Task<TicketResult<VisitorSessionContext, LiveChatRefused>> AuthenticateAsync(AccessPartition partition, string token, string? origin, CancellationToken cancellationToken = default)
+    public Task<TicketResult<VisitorSessionContext, LiveChatRefused>> AuthenticateAsync(AccessPartition partition, string token, string? origin, CancellationToken cancellationToken = default) =>
+        AuthenticateCoreAsync(partition, widgetKey: null, token, origin, cancellationToken);
+
+    public Task<TicketResult<VisitorSessionContext, LiveChatRefused>> AuthenticateForWidgetAsync(AccessPartition partition, string widgetKey, string token, string? origin, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        if (string.IsNullOrEmpty(widgetKey))
+            return Task.FromResult(Refused<VisitorSessionContext>(LiveChatRefusal.Unauthenticated));
+        return AuthenticateCoreAsync(partition, widgetKey, token, origin, cancellationToken);
+    }
+
+    private async Task<TicketResult<VisitorSessionContext, LiveChatRefused>> AuthenticateCoreAsync(AccessPartition partition, string? widgetKey, string token, string? origin, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(partition);
         if (VisitorSessionTokens.Parse(token) is not { } parsed)
@@ -138,10 +149,23 @@ public sealed partial class LiveChatVisitorService : ILiveChatVisitorService
         var verified = VisitorSessionTokens.Verify(stored?.Session ?? Placeholder, parsed.SecretHash, now);
         if (stored is null || !verified || !stored.Session.IsLive(now))
             return Refused<VisitorSessionContext>(LiveChatRefusal.Unauthenticated);
-        var widget = await widgets.GetAsync(stored.Scope, stored.Session.ConfigurationId, cancellationToken).ConfigureAwait(false);
-        if (widget is null)
-            return Refused<VisitorSessionContext>(LiveChatRefusal.Unauthenticated);
-        if (!OriginAllowed(widget.Widget, origin))
+        LiveChatWidget resolvedWidget;
+        if (widgetKey is not null)
+        {
+            if (await FindWidgetAsync(partition, widgetKey, cancellationToken).ConfigureAwait(false) is not { } found
+                || found.Widget.Scope != stored.Scope
+                || !string.Equals(found.Widget.Widget.ConfigurationId, stored.Session.ConfigurationId, StringComparison.Ordinal))
+                return Refused<VisitorSessionContext>(LiveChatRefusal.Unauthenticated);
+            resolvedWidget = found.Widget.Widget;
+        }
+        else
+        {
+            var widget = await widgets.GetAsync(stored.Scope, stored.Session.ConfigurationId, cancellationToken).ConfigureAwait(false);
+            if (widget is null)
+                return Refused<VisitorSessionContext>(LiveChatRefusal.Unauthenticated);
+            resolvedWidget = widget.Widget;
+        }
+        if (!OriginAllowed(resolvedWidget, origin))
             return Refused<VisitorSessionContext>(LiveChatRefusal.OriginNotAllowed);
         return Value(new VisitorSessionContext(stored, now - stored.Session.TokenIssuedAt >= options.TokenRotationInterval));
     }

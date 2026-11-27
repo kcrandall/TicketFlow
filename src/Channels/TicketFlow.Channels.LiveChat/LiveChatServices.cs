@@ -38,6 +38,9 @@ public interface ILiveChatVisitorService
     /// <summary>Authenticates a session token (constant-time hash comparison) and the Origin against the widget.</summary>
     Task<TicketResult<VisitorSessionContext, LiveChatRefused>> AuthenticateAsync(AccessPartition partition, string token, string? origin, CancellationToken cancellationToken = default);
 
+    /// <summary>Authenticates a session token (constant-time hash comparison), the Origin and that the session belongs to <paramref name="widgetKey"/>.</summary>
+    Task<TicketResult<VisitorSessionContext, LiveChatRefused>> AuthenticateForWidgetAsync(AccessPartition partition, string widgetKey, string token, string? origin, CancellationToken cancellationToken = default);
+
     Task<TicketResult<LiveChatWidgetState, LiveChatRefused>> GetSessionWidgetAsync(VisitorSessionContext context, CancellationToken cancellationToken = default);
 
     /// <summary>Issues a new token, extends the session and keeps the previous token valid for the grace window.</summary>

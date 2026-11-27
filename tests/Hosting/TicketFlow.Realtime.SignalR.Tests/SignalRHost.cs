@@ -41,7 +41,8 @@ internal sealed class SignalRHost : IAsyncDisposable
     public TestServer Server { get; }
     public TicketScope Scope { get; }
 
-    public static async Task<SignalRHost> CreateAsync(Action<TicketFlowSignalROptions>? configure = null, Action<Microsoft.AspNetCore.Http.HttpContext>? onRequest = null)
+    public static async Task<SignalRHost> CreateAsync(Action<TicketFlowSignalROptions>? configure = null, Action<Microsoft.AspNetCore.Http.HttpContext>? onRequest = null,
+        Action<IServiceCollection>? configureServices = null)
     {
         var scope = TestScopes.Create();
         var builder = WebApplication.CreateBuilder();
@@ -62,6 +63,7 @@ internal sealed class SignalRHost : IAsyncDisposable
                 configure?.Invoke(options);
             });
         builder.Services.AddSingleton<IAttachmentStore, InMemoryAttachmentStore>();
+        configureServices?.Invoke(builder.Services);
         var app = builder.Build();
         if (onRequest is not null)
             app.Use(async (context, next) =>

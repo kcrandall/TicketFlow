@@ -56,7 +56,12 @@ public sealed class ClaudeAssistOptions
             throw new InvalidOperationException("MaximumRetryAfter must be between zero and ten minutes.");
         if (AttemptTimeout <= TimeSpan.Zero || TotalTimeout < AttemptTimeout || TotalTimeout > TimeSpan.FromMinutes(30))
             throw new InvalidOperationException("Timeouts must be positive, the total at least one attempt and at most 30 minutes.");
-        if (BaseUrl is { IsAbsoluteUri: false })
-            throw new InvalidOperationException("BaseUrl must be absolute.");
+        if (BaseUrl is { } baseUrl
+            && (!baseUrl.IsAbsoluteUri
+                || !string.Equals(baseUrl.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal)
+                || baseUrl.UserInfo.Length != 0
+                || baseUrl.Query.Length != 0
+                || baseUrl.Fragment.Length != 0))
+            throw new InvalidOperationException("BaseUrl must be an absolute https URI without credentials, query or fragment.");
     }
 }

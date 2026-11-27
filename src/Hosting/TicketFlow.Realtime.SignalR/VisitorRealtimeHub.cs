@@ -52,7 +52,7 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         }
         else
         {
-            switch (await visitors.AuthenticateAsync(partition, token, origin, Context.ConnectionAborted).ConfigureAwait(false))
+            switch (await visitors.AuthenticateForWidgetAsync(partition, widgetKey, token, origin, Context.ConnectionAborted).ConfigureAwait(false))
             {
                 case TicketValue<VisitorSessionContext> authenticated:
                     session = authenticated.Value;
@@ -70,11 +70,26 @@ public sealed class VisitorRealtimeHub(IRealtimeSubscriptions subscriptions, ILi
         }
 
         subscriptions.Disconnect(Context.ConnectionId);
+        Context.Items.Remove(ContextKey);
         var subscriber = new VisitorSubscriber(session.Scope, session.Session.Session.Id);
-        if (subscriptions.Connect(new SignalRRealtimeConnection(Context.ConnectionId, subscriber, hub.Clients.Client(Context.ConnectionId), Context.Abort)).Value is not RealtimeConnected
-            || (await subscriptions.SubscribeAsync(Context.ConnectionId, new VisitorSessionTopic(session.Scope, session.Session.Session.Id), Context.ConnectionAborted).ConfigureAwait(false))
-                .Value is not RealtimeSubscribed)
+        if (subscriptions.Connect(new SignalRRealtimeConnection(Context.ConnectionId, subscriber, hub.Clients.Client(Context.ConnectionId), Context.Abort)).Value is not RealtimeConnected)
             return HubResult.Failure("limit-reached");
+        try
+        {
+            if ((await subscriptions.SubscribeAsync(Context.ConnectionId, new VisitorSessionTopic(session.Scope, session.Session.Session.Id), Context.ConnectionAborted).ConfigureAwait(false))
+                .Value is not RealtimeSubscribed)
+            {
+                subscriptions.Disconnect(Context.ConnectionId);
+                Context.Items.Remove(ContextKey);
+                return HubResult.Failure("limit-reached");
+            }
+        }
+        catch
+        {
+            subscriptions.Disconnect(Context.ConnectionId);
+            Context.Items.Remove(ContextKey);
+            throw;
+        }
         Context.Items[ContextKey] = session;
 
         var widgetTask = visitors.GetSessionWidgetAsync(session, Context.ConnectionAborted);

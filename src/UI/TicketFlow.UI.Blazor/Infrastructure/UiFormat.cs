@@ -114,10 +114,14 @@ public static class UiFormat
         _ => "radio-tower",
     };
 
+    private static readonly DateTime MinimumRangeDate = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime MaximumRangeDate = new(9998, 12, 31, 0, 0, 0, DateTimeKind.Utc);
+
     /// <summary>A report range from optional <c>yyyy-MM-dd</c> query values: default the last 14 days ending tomorrow (UTC midnight).</summary>
     public static (DateTimeOffset From, DateTimeOffset To) Range(string? from, string? to, DateTimeOffset now)
     {
-        var end = TryDate(to)?.AddDays(1) ?? new DateTimeOffset(now.UtcDateTime.Date.AddDays(1), TimeSpan.Zero);
+        var defaultEndDate = ClampDate(now.UtcDateTime.Date);
+        var end = (TryDate(to) ?? new DateTimeOffset(defaultEndDate, TimeSpan.Zero)).AddDays(1);
         var start = TryDate(from) ?? end.AddDays(-14);
         if (start >= end)
             start = end.AddDays(-1);
@@ -128,5 +132,8 @@ public static class UiFormat
 
     private static DateTimeOffset? TryDate(string? value) =>
         DateTime.TryParseExact(value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var date)
-            ? new DateTimeOffset(date, TimeSpan.Zero) : null;
+            ? new DateTimeOffset(ClampDate(date), TimeSpan.Zero) : null;
+
+    private static DateTime ClampDate(DateTime date) =>
+        date < MinimumRangeDate ? MinimumRangeDate : date > MaximumRangeDate ? MaximumRangeDate : date;
 }

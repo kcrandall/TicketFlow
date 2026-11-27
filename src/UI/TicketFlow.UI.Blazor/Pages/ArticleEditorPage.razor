@@ -7,7 +7,7 @@
 }
 else
 {
-    var translation = stored?.Record.Article.Translations.FirstOrDefault();
+    var translation = SelectedTranslation();
     <PageHeader Title="@(translation?.Title ?? "New article")" Description="@(stored is null ? "Write in Markdown. Articles start as drafts." : $"{stored.Record.State} · revision {stored.Revision}{(stored.Record.PublishedRevision is { } published ? $" · published revision {published}" : "")} · updated {UiFormat.Relative(stored.Record.UpdatedAt, Now)}")">
         <Actions>
             <BbButton Href="@Url("help-center")" Variant="ButtonVariant.Outline" Size="ButtonSize.Small"><LucideIcon Name="arrow-left" Size="14" />Articles</BbButton>
@@ -27,11 +27,23 @@ else
 
     <div class="tf-grid tf-grid--2" style="align-items:start">
         <div class="tf-card">
-            <div class="tf-card__header"><div><div class="tf-card__title">Editor</div><div class="tf-card__description">Markdown is rendered and sanitized server-side.</div></div></div>
+            <div class="tf-card__header">
+                <div><div class="tf-card__title">Editor</div><div class="tf-card__description">Markdown is rendered and sanitized server-side.</div></div>
+                @if (stored is not null && stored.Record.Article.Translations.Count > 1)
+                {
+                    <div class="tf-row" style="gap:6px">
+                        @foreach (var item in stored.Record.Article.Translations)
+                        {
+                            var active = translation is not null && item.Locale == translation.Locale;
+                            <a href="@Url($"help-center/articles/{Uri.EscapeDataString(stored.Id.Value)}?locale={Uri.EscapeDataString(item.Locale.Value)}")" class="@(active ? "tf-badge" : "tf-badge tf-badge--outline")">@item.Locale.Value</a>
+                        }
+                    </div>
+                }
+            </div>
             <div class="tf-card__content">
                 <TfForm Action="helpcenter.article.save" Revision="stored?.Revision" Class="tf-form" Id="tf-article-form">
                     <input type="hidden" name="portal" value="@(stored?.Record.Article.Portal.Value ?? Query("portal") ?? portals.FirstOrDefault()?.Portal.Id.Value)" />
-                    <input type="hidden" name="locale" value="@(translation?.Locale.Value ?? "en")" />
+                    <input type="hidden" name="locale" value="@(translation?.Locale.Value ?? RequestedLocale()?.Value ?? "en")" />
                     <div class="tf-field"><label class="tf-label" for="tf-a-title">Title</label><input id="tf-a-title" name="title" class="tf-input" required maxlength="256" value="@Session.FormValue("title", translation?.Title)" /></div>
                     <div class="tf-form-grid">
                         <div class="tf-field"><label class="tf-label" for="tf-a-slug">Slug</label><input id="tf-a-slug" name="slug" class="tf-input tf-mono" required maxlength="128" value="@Session.FormValue("slug", translation?.Slug.Value)" /></div>
@@ -140,7 +152,8 @@ else
         var portal = stored?.Record.Article.Portal ?? portals.FirstOrDefault(item => item.Portal.Id.Value == Query("portal"))?.Portal.Id ?? portals.FirstOrDefault()?.Portal.Id;
 
         var collectionsTask = portal is { } portalId ? service.ListCollectionsAsync(Actor, portalId, Aborted) : null;
-        var previewTask = stored is not null ? service.PreviewArticleAsync(Actor, stored.Id, stored.Record.Article.Translations[0].Locale, Aborted) : null;
+        var previewLocale = SelectedTranslation()?.Locale;
+        var previewTask = stored is not null && previewLocale is { } locale ? service.PreviewArticleAsync(Actor, stored.Id, locale, Aborted) : null;
         var feedbackTask = stored is not null ? service.GetFeedbackAsync(Actor, stored.Id, Aborted) : null;
         var revisionsTask = stored is not null ? service.ListRevisionsAsync(Actor, stored.Id, 5, null, Aborted) : null;
 
@@ -160,5 +173,17 @@ else
             feedback = counts.Value;
         if (revisionsTask is not null && await revisionsTask is TicketValue<HelpCenterPage<ArticleRevision>> history)
             revisions = [.. history.Value.Items];
+    }
+
+    private HelpCenterLocale? RequestedLocale() =>
+        Query("locale") is { } requested && HelpCenterLocale.TryParse(requested, out var parsed) ? parsed : null;
+
+    private ArticleTranslation? SelectedTranslation()
+    {
+        if (stored is null)
+            return null;
+        if (RequestedLocale() is { } requested && stored.Record.Article.Translation(requested) is { } matched)
+            return matched;
+        return stored.Record.Article.Translations.FirstOrDefault();
     }
 }

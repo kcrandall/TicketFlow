@@ -17,23 +17,29 @@ public closed record AutomationCondition
 {
     public const int MaximumDepth = 8;
     public const int MaximumNodes = 64;
+    public const int MaximumRegexConditions = 8;
     public const int MaximumValues = 64;
     public const int MaximumValueLength = 256;
 
-    private protected AutomationCondition(int depth, int nodeCount)
+    private protected AutomationCondition(int depth, int nodeCount, int regexCount = 0)
     {
         if (depth > MaximumDepth)
             throw new ArgumentException($"Conditions can be at most {MaximumDepth} levels deep.", nameof(depth));
         if (nodeCount > MaximumNodes)
             throw new ArgumentException($"Conditions can contain at most {MaximumNodes} nodes.", nameof(nodeCount));
+        if (regexCount > MaximumRegexConditions)
+            throw new ArgumentException($"Conditions can contain at most {MaximumRegexConditions} regular expression matches.", nameof(regexCount));
         Depth = depth;
         NodeCount = nodeCount;
+        RegexCount = regexCount;
     }
 
     /// <summary>Levels in this tree; a leaf has depth 1.</summary>
     public int Depth { get; }
 
     public int NodeCount { get; }
+
+    public int RegexCount { get; }
 
     private protected static IReadOnlyList<AutomationCondition> Operands(IEnumerable<AutomationCondition> items, string parameterName)
     {
@@ -54,6 +60,8 @@ public closed record AutomationCondition
     private protected static int DepthOf(IReadOnlyList<AutomationCondition> items) => items.Max(item => item.Depth) + 1;
 
     private protected static int NodesOf(IReadOnlyList<AutomationCondition> items) => items.Sum(item => item.NodeCount) + 1;
+
+    private protected static int RegexCountOf(IReadOnlyList<AutomationCondition> items) => items.Sum(item => item.RegexCount);
 
     private protected static IReadOnlyList<string> RequireValues(IEnumerable<string> values, int minimum, int maximum, string parameterName)
     {
@@ -81,7 +89,7 @@ public sealed record AllOfCondition : AutomationCondition
     }
 
     private AllOfCondition(IReadOnlyList<AutomationCondition> operands)
-        : base(DepthOf(operands), NodesOf(operands)) => Items = operands;
+        : base(DepthOf(operands), NodesOf(operands), RegexCountOf(operands)) => Items = operands;
 
     public IReadOnlyList<AutomationCondition> Items { get; }
 
@@ -99,7 +107,7 @@ public sealed record AnyOfCondition : AutomationCondition
     }
 
     private AnyOfCondition(IReadOnlyList<AutomationCondition> operands)
-        : base(DepthOf(operands), NodesOf(operands)) => Items = operands;
+        : base(DepthOf(operands), NodesOf(operands), RegexCountOf(operands)) => Items = operands;
 
     public IReadOnlyList<AutomationCondition> Items { get; }
 
@@ -112,7 +120,7 @@ public sealed record AnyOfCondition : AutomationCondition
 public sealed record NegatedCondition : AutomationCondition
 {
     public NegatedCondition(AutomationCondition operand)
-        : base((operand ?? throw new ArgumentNullException(nameof(operand))).Depth + 1, operand.NodeCount + 1) => Operand = operand;
+        : base((operand ?? throw new ArgumentNullException(nameof(operand))).Depth + 1, operand.NodeCount + 1, operand.RegexCount) => Operand = operand;
 
     public AutomationCondition Operand { get; }
 }
@@ -350,17 +358,17 @@ public enum MessageTextOperator
 /// <summary>
 /// Tests the triggering message's body (unknown when the trigger has no message). Only the first <see cref="MaximumInputLength"/>
 /// characters are examined. Regular expressions are at most <see cref="MaximumPatternLength"/> characters, culture-invariant, and
-/// run with a match timeout of 1-1000 ms (default 100 ms); a timeout makes the condition unknown.
+/// run with a match timeout of 1-250 ms (default 100 ms); a timeout makes the condition unknown.
 /// </summary>
 public sealed record MessageContentCondition : AutomationCondition
 {
     public const int MaximumPatternLength = 512;
     public const int MaximumInputLength = 16 * 1024;
     public static TimeSpan DefaultTimeout { get; } = TimeSpan.FromMilliseconds(100);
-    public static TimeSpan MaximumTimeout { get; } = TimeSpan.FromSeconds(1);
+    public static TimeSpan MaximumTimeout { get; } = TimeSpan.FromMilliseconds(250);
 
     public MessageContentCondition(MessageTextOperator op, string value, bool ignoreCase = true, TimeSpan? timeout = null)
-        : base(1, 1)
+        : base(1, 1, op == MessageTextOperator.Matches ? 1 : 0)
     {
         Operator = AutomationText.Defined(op, nameof(op));
         ArgumentNullException.ThrowIfNull(value);
@@ -370,12 +378,12 @@ public sealed record MessageContentCondition : AutomationCondition
         IgnoreCase = ignoreCase;
         Timeout = timeout ?? DefaultTimeout;
         if (Timeout < TimeSpan.FromMilliseconds(1) || Timeout > MaximumTimeout)
-            throw new ArgumentOutOfRangeException(nameof(timeout), "Regex timeouts are 1-1000 ms.");
+            throw new ArgumentOutOfRangeException(nameof(timeout), "Regex timeouts are 1-250 ms.");
         if (op == MessageTextOperator.Matches)
         {
             try
             {
-                Regex = new Regex(value, RegexOptions.Compiled | RegexOptions.CultureInvariant | (ignoreCase ? RegexOptions.IgnoreCase : RegexOptions.None), Timeout);
+                Regex = new Regex(value, RegexOptions.CultureInvariant | (ignoreCase ? RegexOptions.IgnoreCase : RegexOptions.None), Timeout);
             }
             catch (ArgumentException error)
             {
@@ -389,7 +397,7 @@ public sealed record MessageContentCondition : AutomationCondition
     public bool IgnoreCase { get; }
     public TimeSpan Timeout { get; }
 
-    /// <summary>The compiled expression for <see cref="MessageTextOperator.Matches"/>; otherwise <see langword="null"/>.</summary>
+    /// <summary>The expression for <see cref="MessageTextOperator.Matches"/>; otherwise <see langword="null"/>.</summary>
     public Regex? Regex { get; }
 
     public bool Equals(MessageContentCondition? other) =>

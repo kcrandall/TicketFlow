@@ -93,6 +93,18 @@ public sealed class AutomationModelTests
         Assert.ThrowsExactly<ArgumentException>(() => new MessageContentCondition(MessageTextOperator.Matches, "(unclosed"));
         Assert.ThrowsExactly<ArgumentException>(() => new MessageContentCondition(MessageTextOperator.Contains, new string('a', 513)));
         Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new MessageContentCondition(MessageTextOperator.Matches, "a", timeout: TimeSpan.FromSeconds(2)));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new MessageContentCondition(MessageTextOperator.Matches, "a", timeout: TimeSpan.FromMilliseconds(251)));
+        var regexCondition = new MessageContentCondition(MessageTextOperator.Matches, "refund", timeout: TimeSpan.FromMilliseconds(250));
+        Assert.IsFalse(regexCondition.Regex!.Options.HasFlag(System.Text.RegularExpressions.RegexOptions.Compiled), "Regexes must not emit dynamic IL.");
+        var maxRegexes = new AllOfCondition(Enumerable.Range(0, AutomationCondition.MaximumRegexConditions).Select(i => (AutomationCondition)new MessageContentCondition(MessageTextOperator.Matches, $"p{i}")));
+        Assert.AreEqual(AutomationCondition.MaximumRegexConditions, maxRegexes.RegexCount);
+        Assert.ThrowsExactly<ArgumentException>(() => new AllOfCondition(Enumerable.Range(0, AutomationCondition.MaximumRegexConditions + 1).Select(i => (AutomationCondition)new MessageContentCondition(MessageTextOperator.Matches, $"p{i}"))));
+        var manyContains = new AllOfCondition(Enumerable.Range(0, AutomationCondition.MaximumRegexConditions + 4).Select(i => (AutomationCondition)new MessageContentCondition(MessageTextOperator.Contains, $"p{i}")));
+        Assert.AreEqual(0, manyContains.RegexCount);
+        var tooManyRegexJson = """{"v":1,"name":"R","enabled":true,"priority":10,"stop":false,"auto":false,"trigger":{"t":"message-received"},"cond":{"op":"all","items":["""
+            + string.Join(",", Enumerable.Range(0, AutomationCondition.MaximumRegexConditions + 1).Select(i => $$"""{"op":"message","cmp":"matches","value":"p{{i}}","ci":true,"timeoutMs":100}"""))
+            + """]},"actions":[{"a":"set-priority","priority":"low"}]}""";
+        Assert.ThrowsExactly<FormatException>(() => AutomationCodec.DeserializeRule(new AutomationRuleId("r"), tooManyRegexJson));
         Assert.ThrowsExactly<ArgumentException>(() => new AutomationRule(new AutomationRuleId("r"), "R", MessageReceivedTrigger.Instance, null,
             Enumerable.Range(0, 17).Select(index => (AutomationAction)new AddLabelsAction(new LabelId($"l{index}")))));
         Assert.ThrowsExactly<ArgumentException>(() => new AutomationRule(new AutomationRuleId("r"), "R", MessageReceivedTrigger.Instance, null, [ExecuteSlaEscalationAction.Instance]));

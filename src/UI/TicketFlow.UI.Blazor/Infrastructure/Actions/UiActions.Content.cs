@@ -47,13 +47,37 @@ public static partial class UiActions
         var segments = context.Session.Path.Split('/');
         var existing = segments is ["help-center", "articles", var id] && !string.Equals(id, "new", global::System.StringComparison.Ordinal) ? Uri.UnescapeDataString(id) : null;
         var title = context.Require("title", "Title");
-        var translation = new ArticleTranslation(new HelpCenterLocale(context.Text("locale") ?? "en"), title, new HelpCenterSlug(context.Text("slug") ?? Slug(title)),
+        var locale = new HelpCenterLocale(context.Text("locale") ?? "en");
+        var translation = new ArticleTranslation(locale, title, new HelpCenterSlug(context.Text("slug") ?? Slug(title)),
             context.RequireRaw("body", "Body"), context.Text("excerpt"), context.Text("tags")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
-        var article = new Article(new ArticleId(existing ?? Slug(title) + "-" + NewId()[..4]), new PortalId(context.Require("portal", "Portal")), [translation],
-            context.Text("collection") is { } collection ? new CollectionId(collection) : null);
-        return existing is null
-            ? UiOutcomes.From(await service.CreateArticleAsync(context.Actor, article, context.Aborted), stored => UiOutcome.Success("Draft created", $"help-center/articles/{stored.Id.Value}"))
-            : UiOutcomes.From(await service.UpdateArticleAsync(context.Actor, article, context.RequireRevision(), context.Aborted), _ => UiOutcome.Success("Draft saved"));
+        var collection = context.Text("collection") is { } collectionId ? new CollectionId(collectionId) : (CollectionId?)null;
+        if (existing is null)
+        {
+            var created = new Article(new ArticleId(Slug(title) + "-" + NewId()[..4]), new PortalId(context.Require("portal", "Portal")), [translation], collection);
+            return UiOutcomes.From(await service.CreateArticleAsync(context.Actor, created, context.Aborted),
+                stored => UiOutcome.Success("Draft created", $"help-center/articles/{stored.Id.Value}"));
+        }
+        var articleId = new ArticleId(existing);
+        var current = await service.GetArticleAsync(context.Actor, articleId, context.Aborted);
+        if (current is not TicketValue<StoredArticle> found)
+            return UiOutcomes.From(current, _ => UiOutcome.Success("Draft saved"));
+        var existingArticle = found.Value.Record.Article;
+        var translations = new List<ArticleTranslation>(existingArticle.Translations.Count + 1);
+        var replaced = false;
+        foreach (var item in existingArticle.Translations)
+        {
+            if (item.Locale == locale)
+            {
+                translations.Add(translation);
+                replaced = true;
+            }
+            else
+                translations.Add(item);
+        }
+        if (!replaced)
+            translations.Add(translation);
+        var updated = new Article(articleId, existingArticle.Portal, translations, collection, existingArticle.Position);
+        return UiOutcomes.From(await service.UpdateArticleAsync(context.Actor, updated, context.RequireRevision(), context.Aborted), _ => UiOutcome.Success("Draft saved"));
     }
 
     private static async Task<UiActionResult> TransitionAsync(UiActionContext context, string success,

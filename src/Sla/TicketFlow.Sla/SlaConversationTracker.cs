@@ -226,7 +226,8 @@ public sealed class SlaConversationTracker : IConversationOutboxHandler
         if (cache is not null && cache.Calendars.TryGetValue(scope, id, out var cached))
             return cached;
         var clock = await calendars.GetAsync(scope, id, cancellationToken).ConfigureAwait(false) is { } calendar
-            ? SlaClockTime.Business(new BusinessCalendarCalculator(calendar.Calendar))
+            && WorkspaceTimeZones.TryResolve(calendar.Calendar.TimeZoneId, out var zone)
+            ? SlaClockTime.Business(new BusinessCalendarCalculator(calendar.Calendar, zone))
             : null;
         if (cache is not null)
             cache.Calendars[scope, id] = clock;

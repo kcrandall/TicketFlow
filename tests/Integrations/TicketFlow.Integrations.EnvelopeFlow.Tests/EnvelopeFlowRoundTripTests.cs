@@ -163,6 +163,39 @@ public sealed class EnvelopeFlowRoundTripTests
     }
 
     [TestMethod]
+    public async Task InboundNormalizationCapsAttachmentsAndSanitizesFields()
+    {
+        await using var fixture = await EnvelopeFlowFixture.CreateAsync();
+        var oversizedAttachments = Enumerable.Range(1, ConversationMessageLimits.MaximumAttachments + 8)
+            .Select(i => new InboundAttachment($"ref-{i}", i == 1 ? "text/plain; charset=utf-8" : "image/png; name=a", i == 1 ? "dir/my file.txt" : "file.png"))
+            .ToArray();
+        // 40,000 two-byte UTF-8 characters (80,000 bytes > 64 KiB) stays within EnvelopeFlow's char cap while exceeding TicketFlow's byte cap.
+        var oversizedBody = "Hello\u0000\u0007World\n" + new string('\u00E9', 40_000);
+        // 1,000 characters passes EnvelopeFlow's subject limit while exceeding TicketFlow's 998-char limit.
+        var longSubject = "Order " + new string('s', 994);
+
+        await fixture.Handler.HandleAsync(fixture.Message("mailgun", "acct", "<dirty@mail.example>", "ada@example.com", "support@acme.example",
+            text: oversizedBody, subject: longSubject, attachments: oversizedAttachments));
+
+        var conversation = await fixture.SingleConversationAsync("email-inbox");
+        var message = (await fixture.MessagesAsync(conversation)).Single();
+        Assert.AreEqual(ConversationMessageLimits.MaximumAttachments, message.Attachments.Count);
+        Assert.AreEqual("envelopeflow:mailgun:ref-1", message.Attachments[0].StorageRef);
+        Assert.AreEqual("my file.txt", message.Attachments[0].FileName);
+        Assert.AreEqual("text/plain", message.Attachments[0].MediaType);
+        Assert.AreEqual("image/png", message.Attachments[1].MediaType);
+        Assert.IsLessThanOrEqualTo(ConversationMessageLimits.MaximumBodyBytes, System.Text.Encoding.UTF8.GetByteCount(message.Body));
+        Assert.DoesNotContain('\u0000', message.Body);
+        Assert.DoesNotContain('\u0007', message.Body);
+        StringAssert.StartsWith(message.Body, "Hello  World\n", StringComparison.Ordinal);
+
+        await fixture.ReplyAsync(conversation, "Received");
+        await fixture.Host.DispatchAsync();
+        var reply = fixture.Email.Sent.Single();
+        Assert.IsLessThanOrEqualTo(InboundChannelMessage.MaximumSubjectLength, reply.Subject.Length);
+    }
+
+    [TestMethod]
     public async Task UnroutableEventsAreDropped()
     {
         await using var fixture = await EnvelopeFlowFixture.CreateAsync();

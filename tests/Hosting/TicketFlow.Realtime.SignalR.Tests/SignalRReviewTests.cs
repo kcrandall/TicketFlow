@@ -1,9 +1,12 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.SignalR.Client;
+using Microsoft.Extensions.DependencyInjection;
 using TicketFlow.Access;
+using TicketFlow.Channels;
 using TicketFlow.Channels.LiveChat;
 using TicketFlow.Core;
 using TicketFlow.Realtime;
+using TicketFlow.Workspaces;
 using static TicketFlow.Realtime.SignalR.Tests.SignalRHost;
 
 namespace TicketFlow.Realtime.SignalR.Tests;
@@ -161,6 +164,64 @@ public sealed class SignalRReviewTests
         await using var active = ConnectWithHeaders(h => h["X-Test-Client"] = "hub-sa-active");
         await active.StartAsync();
         Ok(await active.InvokeAsync<JsonElement>("Subscribe", "queue", "chat-inbox"));
+    }
+
+    [TestMethod]
+    public async Task VisitorConnectRejectsMismatchedWidgetKeyForExistingToken()
+    {
+        await using var host = await CreateAsync();
+        Assert.IsInstanceOfType<StoreApplied<StoredInbox>>((await host.Service<IInboxStore>().CreateAsync(host.Scope,
+            new Inbox(new InboxId("chat-inbox-b"), "Chat B", new ChannelBinding(new ChannelKind("livechat"), "cfg-chat-b")))).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredChannelEndpoint>>((await host.Service<IChannelEndpointStore>().CreateAsync(host.Scope,
+            new ChannelEndpoint(new ChannelKind("livechat"), "cfg-chat-b", new InboxId("chat-inbox-b"), "wk_other"))).Value);
+        Assert.IsInstanceOfType<StoreApplied<StoredLiveChatWidget>>((await host.Service<ILiveChatWidgetStore>().CreateAsync(host.Scope,
+            new LiveChatWidget("cfg-chat-b", new InboxId("chat-inbox-b"), [Origin]))).Value);
+
+        var tabA = host.Hub(VisitorPath);
+        await tabA.StartAsync();
+        var tokenA = Ok(await tabA.InvokeAsync<JsonElement>("Connect", WidgetKey, null)).GetProperty("token").GetString()!;
+
+        var tabB = host.Hub(VisitorPath);
+        await tabB.StartAsync();
+        Assert.AreEqual("unauthenticated", Error(await tabB.InvokeAsync<JsonElement>("Connect", "wk_other", tokenA)));
+        Assert.AreEqual("unauthenticated", Error(await tabB.InvokeAsync<JsonElement>("Connect", "wk_missing", tokenA)));
+        Assert.AreEqual("unauthenticated", Error(await tabB.InvokeAsync<JsonElement>("SendMessage", "c1", "hi", null)));
+        Ok(await tabB.InvokeAsync<JsonElement>("Connect", WidgetKey, tokenA));
+    }
+
+    [TestMethod]
+    public async Task VisitorConnectCleansUpRegistrationWhenSubscribeFails()
+    {
+        var tracker = new FailingSubscribeSubscriptions();
+        await using var host = await CreateAsync(configureServices: services => services.AddSingleton<IRealtimeSubscriptions>(tracker));
+        var visitor = host.Hub(VisitorPath);
+        await visitor.StartAsync();
+
+        Assert.AreEqual("limit-reached", Error(await visitor.InvokeAsync<JsonElement>("Connect", WidgetKey, null)));
+        Assert.IsEmpty(tracker.ActiveConnections, "Subscribe failure must disconnect the hub registration.");
+        Assert.AreEqual("unauthenticated", Error(await visitor.InvokeAsync<JsonElement>("SendMessage", "c1", "hi", null)));
+    }
+
+    private sealed class FailingSubscribeSubscriptions : IRealtimeSubscriptions
+    {
+        private readonly HashSet<string> active = new(StringComparer.Ordinal);
+
+        public IReadOnlyCollection<string> ActiveConnections => active;
+
+        public RealtimeConnectResult Connect(IRealtimeConnection connection)
+        {
+            active.Add(connection.Id);
+            return new RealtimeConnected(connection.Id);
+        }
+
+        public Task<RealtimeSubscribeResult> SubscribeAsync(string connectionId, RealtimeTopic topic, CancellationToken cancellationToken = default) =>
+            Task.FromResult<RealtimeSubscribeResult>(new RealtimeSubscriptionRefused(RealtimeRefusal.LimitReached));
+
+        public bool Unsubscribe(string connectionId, RealtimeTopic topic) => false;
+
+        public void Disconnect(string connectionId) => active.Remove(connectionId);
+
+        public IReadOnlyList<RealtimeTopic> Topics(string connectionId) => [];
     }
 
     private static async Task AssertClosedAsync(HubConnection connection)

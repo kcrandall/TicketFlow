@@ -8,6 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 using TicketFlow.Access;
 using TicketFlow.Assist;
 using TicketFlow.Core;
+using TicketFlow.HelpCenter;
 using TicketFlow.SampleHost;
 using TicketFlow.Workspaces;
 
@@ -402,6 +403,66 @@ public sealed partial class SmokeTests
         Assert.AreEqual(HttpStatusCode.OK, dryRun.StatusCode);
         Assert.IsTrue(dryRun.Headers.CacheControl?.NoStore, "dry run");
         StringAssert.Contains(await dryRun.Content.ReadAsStringAsync(), "Dry run complete", StringComparison.Ordinal);
+    }
+
+    [TestMethod]
+    public async Task SavingMultiLocaleArticlePreservesOtherTranslations()
+    {
+        var articleId = new ArticleId("multi-locale-test");
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var settings = scope.ServiceProvider.GetRequiredService<SampleSettings>();
+            var helpCenter = scope.ServiceProvider.GetRequiredService<IHelpCenterService>();
+            var admin = new UserPrincipal(settings.Scope, new UserId("admin"));
+            var portalId = new PortalId("multi-locale-portal");
+            var portal = new Portal(portalId, new HelpCenterSlug("multi-locale"), "Multi Locale", new HelpCenterLocale("en"),
+                [new HelpCenterLocale("en"), new HelpCenterLocale("fr")]);
+            Assert.IsInstanceOfType<TicketValue<StoredPortal>>((await helpCenter.CreatePortalAsync(admin, portal)).Value);
+            var seeded = new Article(articleId, portalId,
+            [
+                new ArticleTranslation(new HelpCenterLocale("en"), "English Title", new HelpCenterSlug("english-title"), "English body"),
+                new ArticleTranslation(new HelpCenterLocale("fr"), "Titre Francais", new HelpCenterSlug("titre-francais"), "Contenu francais"),
+            ], position: 3);
+            Assert.IsInstanceOfType<TicketValue<StoredArticle>>((await helpCenter.CreateArticleAsync(admin, seeded)).Value);
+        }
+
+        var client = Client("admin");
+        var frenchPath = $"/support/help-center/articles/{articleId.Value}?locale=fr";
+        var frenchGet = await client.GetAsync(frenchPath);
+        var frenchHtml = await frenchGet.Content.ReadAsStringAsync();
+        Assert.AreEqual(HttpStatusCode.OK, frenchGet.StatusCode);
+        StringAssert.Contains(frenchHtml, "Titre Francais", StringComparison.Ordinal);
+        StringAssert.Contains(frenchHtml, "name=\"locale\" value=\"fr\"", StringComparison.Ordinal);
+
+        var (token, cookie, revision) = await FormAsync(client, frenchPath);
+        var posted = await PostAsync(client, frenchPath, cookie, new Dictionary<string, string>
+        {
+            ["__RequestVerificationToken"] = token,
+            ["_action"] = "helpcenter.article.save",
+            ["_return"] = frenchPath,
+            ["_revision"] = revision,
+            ["locale"] = "fr",
+            ["title"] = "Titre Francais Modifie",
+            ["slug"] = "titre-francais",
+            ["body"] = "Nouveau contenu francais",
+        });
+        Assert.AreEqual(HttpStatusCode.Redirect, posted.StatusCode);
+
+        await using (var scope = app.Services.CreateAsyncScope())
+        {
+            var settings = scope.ServiceProvider.GetRequiredService<SampleSettings>();
+            var helpCenter = scope.ServiceProvider.GetRequiredService<IHelpCenterService>();
+            var admin = new UserPrincipal(settings.Scope, new UserId("admin"));
+            var stored = ((TicketValue<StoredArticle>)(await helpCenter.GetArticleAsync(admin, articleId)).Value!).Value;
+            Assert.AreEqual(2, stored.Record.Article.Translations.Count, "Both translations must be preserved.");
+            Assert.AreEqual(3, stored.Record.Article.Position);
+            var en = stored.Record.Article.Translation(new HelpCenterLocale("en"))!;
+            var fr = stored.Record.Article.Translation(new HelpCenterLocale("fr"))!;
+            Assert.AreEqual("English Title", en.Title);
+            Assert.AreEqual("English body", en.Body);
+            Assert.AreEqual("Titre Francais Modifie", fr.Title);
+            Assert.AreEqual("Nouveau contenu francais", fr.Body);
+        }
     }
 
     private static async Task<(string Token, string Cookie, string Revision)> FormAsync(HttpClient client, string path)

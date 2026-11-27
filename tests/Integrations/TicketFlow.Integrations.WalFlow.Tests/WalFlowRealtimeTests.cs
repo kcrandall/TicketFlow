@@ -113,6 +113,69 @@ public sealed partial class WalFlowRealtimeTests
     }
 
     [TestMethod]
+    public async Task WalFlowRealtimeSinkRetriesEntryAfterTransientPublishFailure()
+    {
+        var publisher = new FlakyPublisher(failCount: 1);
+        var sink = new WalFlowRealtimeSink(publisher, Options.Create(new WalFlowRealtimeOptions()));
+
+        var entryId = Guid.NewGuid();
+        var change = new ConversationChange(entryId, Scope, new ConversationId("c-retry"), new InboxId("email"), 1, ConversationChangeKind.Started,
+            [new ConversationEventSummary(1, ConversationEventKind.Message, new MessageId("m1"), MessageDirection.Incoming)], null, null, Now);
+        var row = new Dictionary<string, object?>
+        {
+            ["sequence"] = 1L,
+            ["entry_id"] = entryId.ToString("D"),
+            ["tenant_id"] = Scope.TenantId,
+            ["project_id"] = Scope.ProjectId,
+            ["environment_id"] = Scope.EnvironmentId,
+            ["app_id"] = Scope.AppId,
+            ["workspace_id"] = Scope.WorkspaceId.Value,
+            ["conversation_id"] = "c-retry",
+            ["inbox_id"] = "email",
+            ["format_version"] = 1,
+            ["kind"] = (short)ConversationChangeKind.Started,
+            ["revision"] = 1L,
+            ["payload"] = ConversationJsonCodec.SerializeChangePayload(change),
+            ["occurred_at"] = (Now.UtcTicks - DateTimeOffset.UnixEpoch.UtcTicks) / 10,
+        };
+        var debezium = new DebeziumPayload
+        {
+            Operation = "c",
+            After = row,
+            Source = new SourceInfo { Table = ConversationOutboxRowCodec.TableName, Schema = "public" },
+        };
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => sink.SendAsync(debezium));
+        Assert.AreEqual(0, publisher.Published.Count);
+
+        // Retry of the same entry_id succeeds because it was not marked seen before PublishAsync succeeded.
+        await sink.SendAsync(debezium);
+        Assert.AreEqual(2, publisher.Published.Count);
+
+        // Once published, subsequent redeliveries are deduplicated.
+        await sink.SendAsync(debezium);
+        Assert.AreEqual(2, publisher.Published.Count);
+    }
+
+    private sealed class FlakyPublisher(int failCount) : IRealtimePublisher
+    {
+        private int remainingFailures = failCount;
+
+        public List<RealtimePublication> Published { get; } = [];
+
+        public Task PublishAsync(RealtimePublication publication, CancellationToken cancellationToken = default)
+        {
+            if (remainingFailures > 0)
+            {
+                remainingFailures--;
+                throw new InvalidOperationException("Transient realtime publish failure.");
+            }
+            Published.Add(publication);
+            return Task.CompletedTask;
+        }
+    }
+
+    [TestMethod]
     public async Task CrossNodeRealtimeBusDeliversAcrossNodesWithoutSelfEcho()
     {
         var backplane = new InMemoryRealtimeBackplane();

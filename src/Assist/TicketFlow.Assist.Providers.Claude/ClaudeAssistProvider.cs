@@ -36,9 +36,16 @@ public sealed class ClaudeAssistProvider : IAssistChatProvider, IDisposable
         options.Validate();
         this.time = time ?? TimeProvider.System;
         this.configuration = configuration;
-        var primary = handler ?? new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5) };
+        var primary = handler ?? CreateDefaultHandler();
         http = new HttpClient(new ClaudeRetryHandler(options, this.time, primary), disposeHandler: true) { Timeout = Timeout.InfiniteTimeSpan };
     }
+
+    internal static SocketsHttpHandler CreateDefaultHandler() => new()
+    {
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+        AllowAutoRedirect = false,
+        UseCookies = false,
+    };
 
     public string Name => ClaudeAssistOptions.ProviderName;
 
@@ -191,12 +198,22 @@ internal sealed class ClaudeChatClient(ClaudeAssistProvider provider, string mod
     public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        using var total = new CancellationTokenSource(provider.Options.TotalTimeout, provider.Time);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, total.Token);
         IAsyncEnumerator<ChatResponseUpdate> enumerator;
         try
         {
-            enumerator = Inner().GetStreamingResponseAsync(messages, options, cancellationToken).GetAsyncEnumerator(cancellationToken);
+            enumerator = Inner().GetStreamingResponseAsync(messages, options, linked.Token).GetAsyncEnumerator(linked.Token);
         }
-        catch (Exception error) when (error is not (AssistProviderException or OperationCanceledException))
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException error)
+        {
+            throw new AssistProviderException(AssistProviderFailure.Timeout, true, innerException: error);
+        }
+        catch (Exception error) when (error is not AssistProviderException)
         {
             throw ClaudeAssistProvider.Map(error);
         }
@@ -211,7 +228,15 @@ internal sealed class ClaudeChatClient(ClaudeAssistProvider provider, string mod
                         yield break;
                     update = enumerator.Current;
                 }
-                catch (Exception error) when (error is not (AssistProviderException or OperationCanceledException))
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (OperationCanceledException error)
+                {
+                    throw new AssistProviderException(AssistProviderFailure.Timeout, true, innerException: error);
+                }
+                catch (Exception error) when (error is not AssistProviderException)
                 {
                     throw ClaudeAssistProvider.Map(error);
                 }

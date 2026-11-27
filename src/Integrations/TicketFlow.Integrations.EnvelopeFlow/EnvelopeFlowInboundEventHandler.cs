@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Text;
 using EnvelopeFlow.Inbound;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -160,17 +162,25 @@ public sealed partial class EnvelopeFlowInboundEventHandler : IInboundEventHandl
         var attachments = new List<AttachmentRef>();
         foreach (var attachment in inboundEvent.Attachments ?? [])
         {
-            var reference = $"envelopeflow:{inboundEvent.Provider}:{attachment.ProviderReference}";
-            if (reference.Length > AttachmentRef.MaximumStorageRefLength)
+            if (attachments.Count >= ConversationMessageLimits.MaximumAttachments)
+                break;
+            if (attachment is null)
                 continue;
-            var fileName = string.IsNullOrWhiteSpace(attachment.FileName) || attachment.FileName.Length > AttachmentRef.MaximumFileNameLength ? "attachment" : attachment.FileName;
-            var mediaType = attachment.ContentType is { Length: <= AttachmentRef.MaximumMediaTypeLength } type && type.Contains('/') && !type.Any(char.IsWhiteSpace)
-                ? type : "application/octet-stream";
+            var providerReference = SanitizeProviderReference(attachment.ProviderReference);
+            if (providerReference is null)
+                continue;
+            var reference = $"envelopeflow:{inboundEvent.Provider}:{providerReference}";
+            if (reference.Length > AttachmentRef.MaximumStorageRefLength || !ChannelText.IsClean(reference))
+                continue;
+            var fileName = SanitizeFileName(attachment.FileName);
+            var mediaType = SanitizeMediaType(attachment.ContentType);
             attachments.Add(new AttachmentRef(reference, fileName, mediaType, 0));
         }
+        var bodyText = inboundEvent.Text is null ? null : ChannelText.SanitizeBody(inboundEvent.Text, ConversationMessageLimits.MaximumBodyBytes);
+        var subject = SanitizeSingleLine(inboundEvent.Subject, InboundChannelMessage.MaximumSubjectLength);
         return new InboundChannelMessage(endpoint.Scope, kind, endpoint.Endpoint.ConfigurationId, inboundEvent.ProviderMessageId, sender, inboundEvent.ObservedAt,
-            bodyText: inboundEvent.Text, attachments: attachments, externalThreadId: thread, inReplyTo: inReplyTo,
-            subject: string.IsNullOrWhiteSpace(inboundEvent.Subject) ? null : inboundEvent.Subject);
+            bodyText: bodyText, attachments: attachments, externalThreadId: thread, inReplyTo: inReplyTo,
+            subject: subject);
     }
 
     private async Task ReceiptAsync(Core.PrincipalRef actor, StoredChannelEndpoint endpoint, ChannelKind kind, InboundEvent inboundEvent, CancellationToken cancellationToken)
@@ -234,5 +244,85 @@ public sealed partial class EnvelopeFlowInboundEventHandler : IInboundEventHandl
     {
         var index = value.LastIndexOf(':');
         return index < 0 ? value : value[(index + 1)..];
+    }
+
+    private static string? SanitizeSingleLine(string? raw, int maxChars)
+    {
+        if (string.IsNullOrWhiteSpace(raw) || maxChars <= 0)
+            return null;
+        var span = raw.AsSpan();
+        var builder = new StringBuilder(Math.Min(span.Length, maxChars));
+        Span<char> encoded = stackalloc char[2];
+        var pendingSpace = false;
+        var index = 0;
+        while (index < span.Length)
+        {
+            var status = Rune.DecodeFromUtf16(span[index..], out var rune, out var consumed);
+            index += Math.Max(consumed, 1);
+            if (status != OperationStatus.Done)
+                continue;
+            if (Rune.IsWhiteSpace(rune))
+            {
+                if (builder.Length > 0)
+                    pendingSpace = true;
+                continue;
+            }
+            if (rune.Value is < ' ' or (>= 0x7F and <= 0x9F))
+                continue;
+            var needed = rune.Utf16SequenceLength + (pendingSpace ? 1 : 0);
+            if (builder.Length + needed > maxChars)
+                break;
+            if (pendingSpace)
+            {
+                builder.Append(' ');
+                pendingSpace = false;
+            }
+            var written = rune.EncodeToUtf16(encoded);
+            builder.Append(encoded[..written]);
+        }
+        return builder.Length == 0 ? null : builder.ToString();
+    }
+
+    private static string? SanitizeProviderReference(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return null;
+        var span = raw.AsSpan();
+        var builder = new StringBuilder(Math.Min(span.Length, AttachmentRef.MaximumStorageRefLength));
+        Span<char> encoded = stackalloc char[2];
+        var index = 0;
+        while (index < span.Length)
+        {
+            var status = Rune.DecodeFromUtf16(span[index..], out var rune, out var consumed);
+            index += Math.Max(consumed, 1);
+            if (status != OperationStatus.Done || rune.Value is < ' ' or (>= 0x7F and <= 0x9F))
+                continue;
+            var written = rune.EncodeToUtf16(encoded);
+            builder.Append(encoded[..written]);
+        }
+        var result = builder.ToString().Trim();
+        return result.Length == 0 ? null : result;
+    }
+
+    private static string SanitizeFileName(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return "attachment";
+        var lastSlash = raw.LastIndexOfAny(['/', '\\']);
+        var segment = lastSlash >= 0 ? raw[(lastSlash + 1)..] : raw;
+        var sanitized = SanitizeSingleLine(segment, AttachmentRef.MaximumFileNameLength);
+        return sanitized is null or "." or ".." ? "attachment" : sanitized;
+    }
+
+    private static string SanitizeMediaType(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return "application/octet-stream";
+        var semicolon = raw.IndexOf(';');
+        var head = semicolon >= 0 ? raw[..semicolon] : raw;
+        var cleaned = SanitizeProviderReference(head);
+        if (cleaned is null || cleaned.Length > AttachmentRef.MaximumMediaTypeLength || !cleaned.Contains('/') || cleaned.Any(char.IsWhiteSpace) || !ChannelText.IsClean(cleaned))
+            return "application/octet-stream";
+        return cleaned.ToLowerInvariant();
     }
 }

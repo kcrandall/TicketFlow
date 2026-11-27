@@ -105,8 +105,9 @@ public sealed class SlaService : ISlaService
                 business = cached;
             else
             {
-                if (await calendars.GetAsync(scope, calendarId, cancellationToken).ConfigureAwait(false) is { } calendar)
-                    business = SlaClockTime.Business(new BusinessCalendarCalculator(calendar.Calendar));
+                if (await calendars.GetAsync(scope, calendarId, cancellationToken).ConfigureAwait(false) is { } calendar
+                    && WorkspaceTimeZones.TryResolve(calendar.Calendar.TimeZoneId, out var zone))
+                    business = SlaClockTime.Business(new BusinessCalendarCalculator(calendar.Calendar, zone));
                 if (calendarCache is not null)
                     calendarCache[calendarId] = business;
             }

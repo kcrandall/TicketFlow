@@ -229,7 +229,59 @@ public sealed class ClaudeProviderTests
     {
         Assert.ThrowsExactly<InvalidOperationException>(() => new ClaudeAssistProvider(new ClaudeAssistOptions { MaxRetries = 7 }, new FakeAnthropicHandler()));
         Assert.ThrowsExactly<InvalidOperationException>(() => new ClaudeAssistProvider(new ClaudeAssistOptions { AttemptTimeout = TimeSpan.FromMinutes(5), TotalTimeout = TimeSpan.FromMinutes(1) }, new FakeAnthropicHandler()));
+        Assert.ThrowsExactly<InvalidOperationException>(() => new ClaudeAssistProvider(new ClaudeAssistOptions { BaseUrl = new Uri("/relative", UriKind.Relative) }, new FakeAnthropicHandler()));
+        Assert.ThrowsExactly<InvalidOperationException>(() => new ClaudeAssistProvider(new ClaudeAssistOptions { BaseUrl = new Uri("http://api.example.com") }, new FakeAnthropicHandler()));
+        Assert.ThrowsExactly<InvalidOperationException>(() => new ClaudeAssistProvider(new ClaudeAssistOptions { BaseUrl = new Uri("https://user:pass@api.example.com") }, new FakeAnthropicHandler()));
+        Assert.ThrowsExactly<InvalidOperationException>(() => new ClaudeAssistProvider(new ClaudeAssistOptions { BaseUrl = new Uri("https://api.example.com?foo=bar") }, new FakeAnthropicHandler()));
+        Assert.ThrowsExactly<InvalidOperationException>(() => new ClaudeAssistProvider(new ClaudeAssistOptions { BaseUrl = new Uri("https://api.example.com#frag") }, new FakeAnthropicHandler()));
+        using var validBase = new ClaudeAssistProvider(new ClaudeAssistOptions { BaseUrl = new Uri("https://gateway.example.com/anthropic") }, new FakeAnthropicHandler());
+        Assert.AreEqual(ClaudeAssistOptions.ProviderName, validBase.Name);
         Assert.HasCount(3, ClaudeAssistProvider.DefaultModels);
         Assert.IsTrue(ClaudeAssistProvider.DefaultModels.All(model => string.Equals(model.Provider, ClaudeAssistOptions.ProviderName, StringComparison.Ordinal) && model.Capabilities.HasFlag(AssistModelCapabilities.PromptCaching)));
+    }
+
+    [TestMethod]
+    public void DefaultHttpHandlerDisablesRedirectsAndCookies()
+    {
+        using var handler = ClaudeAssistProvider.CreateDefaultHandler();
+        Assert.IsFalse(handler.AllowAutoRedirect, "Redirects must not forward x-api-key.");
+        Assert.IsFalse(handler.UseCookies);
+    }
+
+    [TestMethod]
+    public async Task StreamingEnforcesTotalTimeoutAndPreservesCallerCancellation()
+    {
+        var (provider, handler, _) = Create(options =>
+        {
+            options.MaxRetries = 0;
+            options.AttemptTimeout = TimeSpan.FromSeconds(10);
+            options.TotalTimeout = TimeSpan.FromSeconds(10);
+        }, fireThreshold: TimeSpan.FromSeconds(10));
+        handler.Hang();
+        var request = new AssistChatRequest(Haiku.Id, AssistFeature.Triage);
+        var chatOptions = provider.ApplyOptions(Haiku, request, new ChatOptions { MaxOutputTokens = 10 });
+        var timeoutError = await Assert.ThrowsExactlyAsync<AssistProviderException>(async () =>
+        {
+            await foreach (var _ in provider.CreateClient(Haiku).GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "x")], chatOptions))
+            {
+            }
+        });
+        Assert.AreEqual(AssistProviderFailure.Timeout, timeoutError.Failure);
+        Assert.IsTrue(timeoutError.Retryable);
+
+        var (cancellable, cancelHandler, _) = Create(options => options.MaxRetries = 0, fireThreshold: TimeSpan.Zero);
+        cancelHandler.Hang();
+        using var cancellation = new CancellationTokenSource();
+        var streamTask = Task.Run(async () =>
+        {
+            await foreach (var _ in cancellable.CreateClient(Haiku).GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "x")],
+                cancellable.ApplyOptions(Haiku, request, new ChatOptions { MaxOutputTokens = 10 }), cancellation.Token))
+            {
+            }
+        });
+        while (cancelHandler.Requests.Count == 0)
+            await Task.Yield();
+        await cancellation.CancelAsync();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => streamTask);
     }
 }

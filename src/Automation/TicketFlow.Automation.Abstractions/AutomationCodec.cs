@@ -46,8 +46,9 @@ public static class AutomationCodec
     {
         AutomationJson.RequireProperties(root, "v", "name", "enabled", "priority", "stop", "auto", "trigger", "cond", "actions");
         AutomationJson.RequireVersion(root, FormatVersion);
+        var regexCount = 0;
         return new AutomationRule(id, root.RequiredString("name"), ReadTrigger(root.GetProperty("trigger")),
-            root["cond"] is { } condition ? ReadCondition(condition, 1) : null, ReadActions(root.GetProperty("actions")),
+            root["cond"] is { } condition ? ReadCondition(condition, 1, ref regexCount) : null, ReadActions(root.GetProperty("actions")),
             root.RequiredInt("priority"), root.RequiredBool("enabled"), root.RequiredBool("stop"),
             root.RequiredBool("auto"));
     });
@@ -348,7 +349,7 @@ public static class AutomationCodec
         writer.WriteEndObject();
     }
 
-    private static AutomationCondition ReadCondition(JsonElement element, int depth)
+    private static AutomationCondition ReadCondition(JsonElement element, int depth, ref int regexCount)
     {
         if (depth > AutomationCondition.MaximumDepth)
             throw new FormatException("The condition is too deep.");
@@ -356,13 +357,13 @@ public static class AutomationCodec
         {
             case "all":
                 AutomationJson.RequireProperties(element, "op", "items");
-                return new AllOfCondition([.. element.RequiredArray("items").Take(AutomationCondition.MaximumNodes + 1).Select(item => ReadCondition(item, depth + 1))]);
+                return new AllOfCondition(ReadConditionItems(element.RequiredArray("items"), depth + 1, ref regexCount));
             case "any":
                 AutomationJson.RequireProperties(element, "op", "items");
-                return new AnyOfCondition([.. element.RequiredArray("items").Take(AutomationCondition.MaximumNodes + 1).Select(item => ReadCondition(item, depth + 1))]);
+                return new AnyOfCondition(ReadConditionItems(element.RequiredArray("items"), depth + 1, ref regexCount));
             case "not":
                 AutomationJson.RequireProperties(element, "op", "item");
-                return new NegatedCondition(ReadCondition(element.GetProperty("item"), depth + 1));
+                return new NegatedCondition(ReadCondition(element.GetProperty("item"), depth + 1, ref regexCount));
             case "status":
                 AutomationJson.RequireProperties(element, "op", "values");
                 return new StatusIsCondition(element.RequiredArray("values").Select(AutomationJson.Status));
@@ -391,7 +392,10 @@ public static class AutomationCodec
                     element.RequiredKebab<AttributeOperator>("cmp"), element.RequiredStrings("values"));
             case "message":
                 AutomationJson.RequireProperties(element, "op", "cmp", "value", "ci", "timeoutMs");
-                return new MessageContentCondition(element.RequiredKebab<MessageTextOperator>("cmp"), element.RequiredString("value"),
+                var messageOperator = element.RequiredKebab<MessageTextOperator>("cmp");
+                if (messageOperator == MessageTextOperator.Matches && ++regexCount > AutomationCondition.MaximumRegexConditions)
+                    throw new FormatException($"Conditions can contain at most {AutomationCondition.MaximumRegexConditions} regular expression matches.");
+                return new MessageContentCondition(messageOperator, element.RequiredString("value"),
                     element.RequiredBool("ci"), TimeSpan.FromMilliseconds(element.RequiredInt("timeoutMs")));
             case "business-hours":
                 AutomationJson.RequireProperties(element, "op", "open");
@@ -403,6 +407,18 @@ public static class AutomationCodec
             default:
                 throw new FormatException("Unknown condition operator.");
         }
+    }
+
+    private static List<AutomationCondition> ReadConditionItems(JsonElement.ArrayEnumerator items, int depth, ref int regexCount)
+    {
+        var result = new List<AutomationCondition>();
+        foreach (var item in items)
+        {
+            result.Add(ReadCondition(item, depth, ref regexCount));
+            if (result.Count > AutomationCondition.MaximumNodes)
+                break;
+        }
+        return result;
     }
 
     private static void WriteActions(Utf8JsonWriter writer, string name, IReadOnlyList<AutomationAction> actions)

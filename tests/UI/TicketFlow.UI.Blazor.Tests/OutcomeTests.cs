@@ -110,4 +110,28 @@ public sealed class OutcomeTests
         Assert.AreEqual("/support", UiUrls.SafeReturn("/support", "/support/\tx"));
         Assert.AreEqual("/support", UiUrls.SafeReturn("/support", "/support/\u007fx"));
     }
+
+    [TestMethod]
+    public void ReportRangeHandlesBoundaryDatesWithoutThrowing()
+    {
+        var now = new DateTimeOffset(2026, 5, 1, 12, 0, 0, TimeSpan.Zero);
+        foreach (var (from, to) in new (string?, string?)[]
+        {
+            (null, "9999-12-31"),
+            (null, "0001-01-01"),
+            ("0001-01-01", "9999-12-31"),
+            ("9999-12-31", "9999-12-31"),
+            ("0001-01-01", "0001-01-01"),
+            ("9999-12-31", null),
+        })
+        {
+            var (start, end) = UiFormat.Range(from, to, now);
+            Assert.IsTrue(start < end, $"from={from}, to={to}");
+            Assert.IsTrue(end - start <= TimeSpan.FromDays(366), $"from={from}, to={to}");
+        }
+        var (extremeStart, extremeEnd) = UiFormat.Range(null, null, DateTimeOffset.MaxValue);
+        Assert.IsTrue(extremeStart < extremeEnd);
+        var (minStart, minEnd) = UiFormat.Range(null, null, DateTimeOffset.MinValue);
+        Assert.IsTrue(minStart < minEnd);
+    }
 }

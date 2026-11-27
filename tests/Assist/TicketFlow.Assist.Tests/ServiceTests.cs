@@ -120,8 +120,20 @@ public sealed class ServiceTests
         fixture.Model.Reply("""{"text":"Meine Karte wurde doppelt belastet","source_locale":"en"}""");
         var translation = AssistFixture.Succeeded(await fixture.Assist.TranslateAsync(agent, new AssistTranslateRequest(AssistFixture.C1, new HelpCenterLocale("de"), message: message)));
         Assert.AreEqual(new HelpCenterLocale("en"), translation.Value.SourceLocale);
-        Assert.Contains("<text_to_translate>" + AssistFixture.CustomerMessage + "</text_to_translate>", fixture.Model.Requests.Last().Messages.Single().Text, StringComparison.Ordinal);
+        var translatePrompt = fixture.Model.Requests.Last().Messages.Single().Text;
+        Assert.Contains("<text_to_translate>" + AssistFixture.CustomerMessage + "</text_to_translate>", translatePrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain(AssistFixture.NoteText, translatePrompt, StringComparison.Ordinal, "single-message translation must not include internal notes");
+        Assert.DoesNotContain("<timeline", translatePrompt, StringComparison.Ordinal, "single-message translation must not include conversation timeline");
+        Assert.DoesNotContain("<conversation", translatePrompt, StringComparison.Ordinal, "single-message translation must not include conversation metadata");
         Assert.AreEqual("refused:NotFound", AssistFixture.Describe(await fixture.Assist.TranslateAsync(agent, new AssistTranslateRequest(AssistFixture.C1, new HelpCenterLocale("de"), message: new MessageId("nope")))));
+
+        var noteId = (await fixture.TimelineAsync()).Events.Select(view => view.Event.Event.Value).OfType<NoteEvent>().Single().Id;
+        fixture.Model.Reply("""{"text":"Intern: Kunde ist VIP","source_locale":"en"}""");
+        var noteTranslation = AssistFixture.Succeeded(await fixture.Assist.TranslateAsync(agent, new AssistTranslateRequest(AssistFixture.C1, new HelpCenterLocale("de"), message: noteId)));
+        Assert.AreEqual("Intern: Kunde ist VIP", noteTranslation.Value.Text);
+        var notePrompt = fixture.Model.Requests.Last().Messages.Single().Text;
+        Assert.Contains("<text_to_translate>" + AssistFixture.NoteText + "</text_to_translate>", notePrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain(AssistFixture.CustomerMessage, notePrompt, StringComparison.Ordinal, "translating a note must not leak other messages");
 
         fixture.Model.Reply("""{"text":"Hola","source_locale":""}""");
         var text = AssistFixture.Succeeded(await fixture.Assist.TranslateAsync(agent, new AssistTranslateRequest(AssistFixture.C1, new HelpCenterLocale("es"), text: "Hello"))).Value;

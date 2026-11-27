@@ -103,7 +103,7 @@ public sealed class AssistService : IAssistService
     {
         ArgumentNullException.ThrowIfNull(request);
         var hasMessage = request.Message is not null;
-        return await RunAsync(actor, request.Conversation, new AssistContextRequest(IncludeTimeline: hasMessage, IncludeContact: false, BuildSupportData: hasMessage), new Call<AssistTranslation>(
+        return await RunAsync(actor, request.Conversation, new AssistContextRequest(IncludeTimeline: hasMessage, IncludeContact: false, BuildSupportData: false), new Call<AssistTranslation>(
             AssistFeature.Translate, "translation", AssistPrompts.TranslateSchema, 16_000, AssistThinkingLevel.Low,
             _ => "Translate the text into the target locale \"" + request.TargetLocale.Value + "\".",
             context =>
@@ -117,7 +117,7 @@ public sealed class AssistService : IAssistService
                         _ => null,
                     }).LastOrDefault(body => body is not null);
                 return source is null ? null : "<text_to_translate>" + AssistContextBuilder.Escape(source) + "</text_to_translate>\n";
-            }, (root, _) => ParseTranslation(root, request.TargetLocale), SupportDataIncluded: hasMessage, CachedFormat: AssistPrompts.TranslateFormat), cancellationToken).ConfigureAwait(false);
+            }, (root, _) => ParseTranslation(root, request.TargetLocale), SupportDataIncluded: false, CachedFormat: AssistPrompts.TranslateFormat), cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<AssistResult<AssistToneRewrite>> RewriteToneAsync(PrincipalRef actor, AssistToneRewriteRequest request, CancellationToken cancellationToken = default)

@@ -51,7 +51,7 @@ public sealed partial class WalFlowRealtimeSink : ISink
             return;
         }
 
-        if (!TryMarkSeen(entry.Change.Id))
+        if (IsSeen(entry.Change.Id))
             return;
 
         var change = entry.Change;
@@ -61,6 +61,8 @@ public sealed partial class WalFlowRealtimeSink : ISink
         if (change.Kind != ConversationChangeKind.Deleted && conversations is not null
             && await conversations.GetAsync(change.Scope, change.Conversation, ct).ConfigureAwait(false) is { Conversation.Assignee: UserId assignee })
             await publisher.PublishAsync(new RealtimePublication(new AgentTopic(change.Scope, assignee), notification), ct).ConfigureAwait(false);
+
+        MarkSeen(entry.Change.Id);
     }
 
     public Task FlushAsync(CancellationToken ct = default) => Task.CompletedTask;
@@ -68,16 +70,21 @@ public sealed partial class WalFlowRealtimeSink : ISink
     [LoggerMessage(Level = LogLevel.Warning, Message = "Ignored malformed conversation outbox CDC row: {Error}")]
     private static partial void LogMalformedOutboxRow(ILogger logger, string? error);
 
-    private bool TryMarkSeen(Guid entryId)
+    private bool IsSeen(Guid entryId)
+    {
+        lock (dedupeGate)
+            return seen.Contains(entryId);
+    }
+
+    private void MarkSeen(Guid entryId)
     {
         lock (dedupeGate)
         {
             if (!seen.Add(entryId))
-                return false;
+                return;
             order.Enqueue(entryId);
             while (order.Count > options.DedupeWindowCapacity)
                 seen.Remove(order.Dequeue());
-            return true;
         }
     }
 }

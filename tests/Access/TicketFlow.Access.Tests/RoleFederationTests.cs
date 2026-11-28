@@ -761,4 +761,65 @@ public sealed class RoleFederationTests
         Assert.IsTrue(blockedUpsert.TryGetValue(out TicketFailure blockedFailure));
         Assert.AreEqual(TicketFailureKind.Forbidden, blockedFailure.Kind);
     }
+
+    [TestMethod]
+    public async Task BaseAdminEnforcesServiceAccountScopeContainment()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var federation = scope.ServiceProvider.GetRequiredService<IRoleFederationService>();
+        var saStore = scope.ServiceProvider.GetRequiredService<IServiceAccountStore>();
+
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        var existingId = new RoleFederationMappingId("m-existing");
+        Assert.IsTrue((await federation.UpsertMappingAsync(owner, existingId,
+            new RoleFederationMapping("okta", "viewers", BuiltInRoles.Viewer.Id, fixture.Partition, fixture.Workspace))).IsSuccess);
+
+        // 1. Team-scoped and inbox-scoped service accounts holding workspace Admin grants MUST NOT call ListMappingsAsync or GetRoleCatalogAsync.
+        var teamSaId = new ApiClientId("rf-sa-team");
+        var inboxSaId = new ApiClientId("rf-sa-inbox");
+        Assert.IsTrue((await saStore.CreateAsync(new ServiceAccount(teamSaId, fixture.Partition, new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("t1")), "Team SA"), "owner")).IsSuccess);
+        Assert.IsTrue((await saStore.CreateAsync(new ServiceAccount(inboxSaId, fixture.Partition, new InboxGrantScope(fixture.Scope.WorkspaceId, new InboxId("i1")), "Inbox SA"), "owner")).IsSuccess);
+        await fixture.GrantAsync(teamSaId, BuiltInRoles.Admin, fixture.Workspace);
+        await fixture.GrantAsync(inboxSaId, BuiltInRoles.Admin, fixture.Workspace);
+
+        foreach (var clientId in new[] { teamSaId, inboxSaId })
+        {
+            var actor = fixture.Client(clientId.Value);
+
+            var list = await federation.ListMappingsAsync(actor);
+            Assert.IsTrue(list.TryGetValue(out TicketFailure listFailure), clientId.Value);
+            Assert.AreEqual(TicketFailureKind.Forbidden, listFailure.Kind, clientId.Value);
+
+            var catalog = await federation.GetRoleCatalogAsync(actor);
+            Assert.IsTrue(catalog.TryGetValue(out TicketFailure catalogFailure), clientId.Value);
+            Assert.AreEqual(TicketFailureKind.Forbidden, catalogFailure.Kind, clientId.Value);
+        }
+
+        // 2. Workspace-scoped service account CANNOT use AccessManageTenant fallback.
+        var wsSaId = new ApiClientId("rf-sa-ws-tenant-fallback");
+        Assert.IsTrue((await saStore.CreateAsync(new ServiceAccount(wsSaId, fixture.Partition, fixture.Workspace, "WS SA"), "owner")).IsSuccess);
+        await fixture.GrantAsync(wsSaId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        var denyManageRole = await fixture.CustomRoleAsync("rf-deny-manage", AccessPermissions.AccessManage);
+        await fixture.GrantAsync(wsSaId, denyManageRole, fixture.Workspace, GrantEffect.Deny);
+
+        var wsSaActor = fixture.Client(wsSaId.Value);
+        Assert.IsTrue((await federation.ListMappingsAsync(wsSaActor)).TryGetValue(out TicketFailure wsListFail));
+        Assert.AreEqual(TicketFailureKind.Forbidden, wsListFail.Kind);
+        Assert.IsTrue((await federation.GetRoleCatalogAsync(wsSaActor)).TryGetValue(out TicketFailure wsCatalogFail));
+        Assert.AreEqual(TicketFailureKind.Forbidden, wsCatalogFail.Kind);
+        Assert.IsTrue((await federation.UpsertMappingAsync(wsSaActor, new RoleFederationMappingId("m-ws-esc"),
+            new RoleFederationMapping("okta", "esc", BuiltInRoles.Viewer.Id, fixture.Partition, TenantGrantScope.Instance))).TryGetValue(out TicketFailure wsUpsertTenantFail));
+        Assert.AreEqual(TicketFailureKind.Forbidden, wsUpsertTenantFail.Kind);
+
+        // 3. Workspace-scoped SA with AccessManage CAN list mappings and fetch role catalog for its workspace.
+        var wsAdminSaId = new ApiClientId("rf-sa-ws-admin");
+        Assert.IsTrue((await saStore.CreateAsync(new ServiceAccount(wsAdminSaId, fixture.Partition, fixture.Workspace, "WS Admin SA"), "owner")).IsSuccess);
+        await fixture.GrantAsync(wsAdminSaId, BuiltInRoles.Admin, fixture.Workspace);
+        var wsAdminActor = fixture.Client(wsAdminSaId.Value);
+        Assert.IsTrue((await federation.ListMappingsAsync(wsAdminActor)).IsSuccess);
+        Assert.IsTrue((await federation.GetRoleCatalogAsync(wsAdminActor)).IsSuccess);
+    }
 }

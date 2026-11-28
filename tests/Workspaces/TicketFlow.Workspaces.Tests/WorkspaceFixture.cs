@@ -48,13 +48,13 @@ internal sealed class WorkspaceFixture : IDisposable
     public AccessPartition Partition => AccessPartition.From(Scope);
     public WorkspaceGrantScope Workspace => new(Scope.WorkspaceId);
 
-    public static WorkspaceFixture Create()
+    public static WorkspaceFixture Create(Action<AccessControlOptions>? configureAccess = null)
     {
         var clock = TestClock.Create();
         var services = new ServiceCollection();
         services.AddSingleton<TimeProvider>(clock);
         services.AddTicketFlow()
-            .AddAccessControl()
+            .AddAccessControl(configureAccess)
             .AddInMemoryAccessStores()
             .AddWorkspaces()
             .AddInMemoryWorkspaceStores();

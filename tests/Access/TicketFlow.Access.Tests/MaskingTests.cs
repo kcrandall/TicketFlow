@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using TicketFlow.Core;
 
 namespace TicketFlow.Access.Tests;
@@ -146,5 +147,66 @@ public sealed class MaskingTests
 
         // Without break-glass the same reveal is refused, and an agent decision is not flagged.
         Assert.AreEqual("masked:attribute.ssn,contact.email,contact.phone", await fixture.DescribeAsync(fixture.User("agent"), AccessPermissions.ContactRead, contact));
+    }
+
+    [TestMethod]
+    public async Task TenantOnlyRevealPermissionEnforcesServiceAccountBoundsAndCrossWorkspaceDeny()
+    {
+        using var fixture = AccessFixture.Create();
+        var saStore = fixture.Provider.GetRequiredService<IServiceAccountStore>();
+        var secretField = new FieldPath("contact.tenant_secret");
+        await fixture.Policies.CreateAsync(fixture.Scope,
+            new AccessFieldPolicy(secretField, [AccessPermissions.ContactRead], [], AccessPermissions.AccessManageTenant));
+        var contact = Contact(fixture);
+
+        // 1. Workspace-scoped service account holding a TenantGrantScope Owner grant MUST NOT be allowed to reveal AccessManageTenant fields.
+        var wsSaId = new ApiClientId("sa-ws-reveal");
+        Assert.IsTrue((await saStore.CreateAsync(new ServiceAccount(wsSaId, fixture.Partition, fixture.Workspace, "WS SA"), "owner")).IsSuccess);
+        await fixture.GrantAsync(wsSaId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        var wsSa = fixture.Client(wsSaId.Value);
+
+        Assert.AreEqual("masked:contact.tenant_secret", await fixture.DescribeAsync(wsSa, AccessPermissions.ContactRead, contact));
+        var wsSaBatch = await fixture.Evaluator.LoadDecisionContextAsync(wsSa, fixture.Scope, [AccessPermissions.ContactRead]);
+        Assert.AreEqual("masked:contact.tenant_secret", AccessFixture.Describe(await wsSaBatch.DecideAsync(AccessPermissions.ContactRead, contact)));
+        var wsSaReveal = await fixture.Evaluator.RevealAsync(new RevealRequest(wsSa, contact, AccessPermissions.ContactRead, secretField));
+        Assert.IsTrue(wsSaReveal is RevealRefused { Reason: RevealRefusal.RevealDenied });
+
+        // 2. Tenant-scoped service account holding TenantGrantScope Owner CAN reveal AccessManageTenant fields.
+        var tenantSaId = new ApiClientId("sa-tenant-reveal");
+        Assert.IsTrue((await saStore.CreateAsync(new ServiceAccount(tenantSaId, fixture.Partition, TenantGrantScope.Instance, "Tenant SA"), "owner")).IsSuccess);
+        await fixture.GrantAsync(tenantSaId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        var tenantSa = fixture.Client(tenantSaId.Value);
+
+        Assert.AreEqual("masked:contact.tenant_secret+", await fixture.DescribeAsync(tenantSa, AccessPermissions.ContactRead, contact));
+        var tenantSaBatch = await fixture.Evaluator.LoadDecisionContextAsync(tenantSa, fixture.Scope, [AccessPermissions.ContactRead]);
+        Assert.AreEqual("masked:contact.tenant_secret+", AccessFixture.Describe(await tenantSaBatch.DecideAsync(AccessPermissions.ContactRead, contact)));
+        var tenantSaReveal = await fixture.Evaluator.RevealAsync(new RevealRequest(tenantSa, contact, AccessPermissions.ContactRead, secretField));
+        Assert.IsTrue(tenantSaReveal is RevealGranted);
+
+        // 3. Tenant admin with a cross-workspace Deny(AccessManageTenant) in wsB MUST NOT see Revealable=true or reveal in wsA.
+        var wsB = new WorkspaceId("ws-b");
+        var wsBScope = fixture.Partition.InWorkspace(wsB);
+        var denyTenantInWsB = new AccessRole(new RoleId("deny-manage-tenant"), "Deny Manage Tenant", [AccessPermissions.AccessManageTenant]);
+        Assert.IsInstanceOfType<StoreApplied<StoredAccessRole>>((await fixture.Roles.CreateAsync(wsBScope, denyTenantInWsB)).Value);
+
+        var blockedUser = fixture.User("tenant-denied-wsb");
+        await fixture.GrantAsync(blockedUser.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        await fixture.GrantAsync(blockedUser.UserId, denyTenantInWsB, new WorkspaceGrantScope(wsB), GrantEffect.Deny);
+
+        Assert.AreEqual("masked:contact.tenant_secret", await fixture.DescribeAsync(blockedUser, AccessPermissions.ContactRead, contact));
+        var blockedBatch = await fixture.Evaluator.LoadDecisionContextAsync(blockedUser, fixture.Scope, [AccessPermissions.ContactRead]);
+        Assert.AreEqual("masked:contact.tenant_secret", AccessFixture.Describe(await blockedBatch.DecideAsync(AccessPermissions.ContactRead, contact)));
+        var blockedReveal = await fixture.Evaluator.RevealAsync(new RevealRequest(blockedUser, contact, AccessPermissions.ContactRead, secretField));
+        Assert.IsTrue(blockedReveal is RevealRefused { Reason: RevealRefusal.RevealDenied });
+
+        // 4. Clean tenant owner (no cross-workspace deny) sees Revealable=true and CAN reveal.
+        var cleanOwner = fixture.User("tenant-clean");
+        await fixture.GrantAsync(cleanOwner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        Assert.AreEqual("masked:contact.tenant_secret+", await fixture.DescribeAsync(cleanOwner, AccessPermissions.ContactRead, contact));
+        var cleanBatch = await fixture.Evaluator.LoadDecisionContextAsync(cleanOwner, fixture.Scope, [AccessPermissions.ContactRead]);
+        Assert.AreEqual("masked:contact.tenant_secret+", AccessFixture.Describe(await cleanBatch.DecideAsync(AccessPermissions.ContactRead, contact)));
+        var cleanReveal = await fixture.Evaluator.RevealAsync(new RevealRequest(cleanOwner, contact, AccessPermissions.ContactRead, secretField));
+        Assert.IsTrue(cleanReveal is RevealGranted);
     }
 }

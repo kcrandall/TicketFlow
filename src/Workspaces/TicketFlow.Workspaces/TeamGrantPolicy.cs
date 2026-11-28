@@ -38,7 +38,7 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
         else
             await teamGrantsTask.ConfigureAwait(false);
         var teamGrants = await teamGrantsTask.ConfigureAwait(false);
-        if (addedGrantsTask is not null && await CheckAdditionsWithGrantsAsync(actor, team, teamGrants, await addedGrantsTask.ConfigureAwait(false), cancellationToken).ConfigureAwait(false) is { } escalation)
+        if (addedGrantsTask is not null && await CheckAdditionsWithGrantsAsync(actor, team, added, teamGrants, await addedGrantsTask.ConfigureAwait(false), cancellationToken).ConfigureAwait(false) is { } escalation)
             return escalation;
         if (removedGrantsTask is not null && await CheckRemovalsWithGrantsAsync(actor, teamGrants, await removedGrantsTask.ConfigureAwait(false), cancellationToken).ConfigureAwait(false) is { } lifted)
             return lifted;
@@ -52,10 +52,10 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
         var teamGrantsTask = TeamGrantsAsync(actor, team, cancellationToken);
         var addedGrantsTask = MemberGrantsAsync(actor, added, cancellationToken);
         await Task.WhenAll(teamGrantsTask, addedGrantsTask).ConfigureAwait(false);
-        return await CheckAdditionsWithGrantsAsync(actor, team, await teamGrantsTask.ConfigureAwait(false), await addedGrantsTask.ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        return await CheckAdditionsWithGrantsAsync(actor, team, added, await teamGrantsTask.ConfigureAwait(false), await addedGrantsTask.ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<TicketFailure?> CheckAdditionsWithGrantsAsync(PrincipalRef actor, TeamId team, IReadOnlyList<StoredAccessGrant> teamGrants, List<AccessGrant> memberGrants, CancellationToken cancellationToken)
+    private async Task<TicketFailure?> CheckAdditionsWithGrantsAsync(PrincipalRef actor, TeamId team, IReadOnlyCollection<UserId> added, IReadOnlyList<StoredAccessGrant> teamGrants, List<AccessGrant> memberGrants, CancellationToken cancellationToken)
     {
         var teamResource = new AccessResource(actor.Scope, team: team);
         var conferrals = new List<GrantConferral>(teamGrants.Count);
@@ -71,6 +71,12 @@ internal sealed class TeamGrantPolicy(IAccessAdministrator administrator, IAcces
         foreach (var batch in conferrals.Chunk(CheckBatch))
             if (Refuse(await administrator.CheckCanConferAsync(actor, batch, cancellationToken).ConfigureAwait(false)) is { } refused)
                 return refused;
+        foreach (var member in added)
+        {
+            if (Refuse(await administrator.CheckCanConferTeamFederatedRolesAsync(actor, member, [team], cancellationToken).ConfigureAwait(false)) is { } refused)
+                return refused;
+            break;
+        }
         return null;
     }
 

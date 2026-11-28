@@ -643,4 +643,74 @@ public sealed class AdministrationTests
         var blockedTenantGrant = new AccessGrant(new GrantId("g-t-blocked"), fixture.Partition, new UserId("bob"), BuiltInRoles.Viewer.Id, TenantGrantScope.Instance);
         Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateGrantAsync(blockedTenantAdmin, blockedTenantGrant)));
     }
+
+    [TestMethod]
+    public async Task RequiresTenantAllowOnlyEnforcedInDenyLiftingCustomRolesAndCrossWorkspaceDeny()
+    {
+        var (fixture, tenantOwner, _, _) = await CreateAsync();
+        using var _ = fixture;
+        var now = fixture.Clock.GetUtcNow();
+
+        var wsOwner = fixture.User("ws-only-owner");
+        await fixture.GrantAsync(wsOwner.UserId, BuiltInRoles.Owner, fixture.Workspace);
+
+        var wsB = new WorkspaceId("ws-b");
+        var tenantDeniedInWsB = fixture.User("tenant-denied-wsb");
+        await fixture.GrantAsync(tenantDeniedInWsB.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        await fixture.GrantAsync(tenantDeniedInWsB.UserId, BuiltInRoles.Owner, new WorkspaceGrantScope(wsB), GrantEffect.Deny);
+
+        // Seed a custom role containing AccessManageTenant, a plain custom role, and live workspace Deny grants.
+        var tenantMgrRole = await fixture.CustomRoleAsync("tenant-mgr-role", AccessPermissions.AccessManageTenant);
+        var plainRole = await fixture.CustomRoleAsync("plain-role", AccessPermissions.ConversationRead);
+        var bob = new UserId("bob");
+        var denyOwner = new AccessGrant(new GrantId("ws-deny-owner"), fixture.Partition, bob, BuiltInRoles.Owner.Id, fixture.Workspace, GrantEffect.Deny);
+        var denyTenantPerm = new AccessGrant(new GrantId("ws-deny-tenant-perm"), fixture.Partition, bob, tenantMgrRole.Id, fixture.Workspace, GrantEffect.Deny);
+        await fixture.SeedAsync(denyOwner);
+        await fixture.SeedAsync(denyTenantPerm);
+
+        // 1. Workspace-only Owner CANNOT lift live Deny(Owner) or Deny(AccessManageTenant) grants.
+        foreach (var denyGrant in new[] { denyOwner, denyTenantPerm })
+        {
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(wsOwner, denyGrant.Id, 1)), denyGrant.Id.Value);
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe((await fixture.Admin.RevokeGrantsAsync(wsOwner, [(denyGrant.Id, 1L), (new GrantId("g-none"), 1L)]))[0]), denyGrant.Id.Value);
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateGrantAsync(wsOwner,
+                new AccessGrant(denyGrant.Id, fixture.Partition, bob, BuiltInRoles.Viewer.Id, fixture.Workspace, GrantEffect.Deny, validUntil: now.AddMinutes(1)), 1)), denyGrant.Id.Value);
+            Assert.IsInstanceOfType<TicketFailure>((await fixture.Admin.CheckCanRevokeAsync(wsOwner, [denyGrant])).Value, denyGrant.Id.Value);
+        }
+
+        // 2. Workspace-only Owner CANNOT create, update (add or modify), or delete a custom role containing AccessManageTenant.
+        var newTenantRole = new AccessRole(new RoleId("new-tenant-role"), "New Tenant Role", [AccessPermissions.AccessManageTenant]);
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(wsOwner, newTenantRole)));
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(wsOwner,
+            new AccessRole(plainRole.Id, "Escalated", [AccessPermissions.ConversationRead, AccessPermissions.AccessManageTenant]), 1)));
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(wsOwner,
+            new AccessRole(tenantMgrRole.Id, "Renamed", [AccessPermissions.AccessManageTenant, AccessPermissions.ConversationRead]), 1)));
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(wsOwner, tenantMgrRole.Id, 1)));
+
+        // 3. Tenant Admin with foreign-workspace Deny(wsB, Owner) CANNOT pass RequireHeld for AccessManageTenant on ws1.
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(tenantDeniedInWsB, newTenantRole)));
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(tenantDeniedInWsB,
+            new AccessRole(plainRole.Id, "Escalated", [AccessPermissions.ConversationRead, AccessPermissions.AccessManageTenant]), 1)));
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(tenantDeniedInWsB,
+            new AccessRole(tenantMgrRole.Id, "Renamed", [AccessPermissions.AccessManageTenant, AccessPermissions.ConversationRead]), 1)));
+        Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(tenantDeniedInWsB, tenantMgrRole.Id, 1)));
+        foreach (var denyGrant in new[] { denyOwner, denyTenantPerm })
+        {
+            Assert.AreEqual("refused:Forbidden", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(tenantDeniedInWsB, denyGrant.Id, 1)), denyGrant.Id.Value);
+            Assert.IsInstanceOfType<TicketFailure>((await fixture.Admin.CheckCanRevokeAsync(tenantDeniedInWsB, [denyGrant])).Value, denyGrant.Id.Value);
+        }
+
+        // Foreign-workspace Deny(wsB, Owner) does NOT block non-tenant custom role changes in ws1.
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(tenantDeniedInWsB,
+            new AccessRole(plainRole.Id, "Plain Updated", [AccessPermissions.ConversationRead, AccessPermissions.NoteRead]), 1)));
+
+        // 4. Clean Tenant Owner succeeds on all of these operations.
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.CreateRoleAsync(tenantOwner, newTenantRole)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.UpdateRoleAsync(tenantOwner,
+            new AccessRole(newTenantRole.Id, "New Tenant Role v2", [AccessPermissions.AccessManageTenant, AccessPermissions.ConversationRead]), 1)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(tenantOwner, newTenantRole.Id, 2)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(tenantOwner, denyOwner.Id, 1)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.RevokeGrantAsync(tenantOwner, denyTenantPerm.Id, 1)));
+        Assert.AreEqual("applied", AccessFixture.Describe(await fixture.Admin.DeleteRoleAsync(tenantOwner, tenantMgrRole.Id, 1)));
+    }
 }

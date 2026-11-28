@@ -54,7 +54,7 @@ public sealed class AccessEvaluator : IAccessEvaluator
         var tenantAllowsOnly = AccessEngine.RequiresTenantAllowOnly(permission);
         var includeBreakGlass = !isAdmin;
         var conditionMode = isAdmin ? ConditionEvaluationMode.ConservativeResources : ConditionEvaluationMode.Live;
-        var (serviceAccountDenial, _) = tenantAllowsOnly
+        var (serviceAccountDenial, serviceAccount) = tenantAllowsOnly
             ? await engine.CheckServiceAccountForGrantScopeAsync(request.Principal, resource.Scope, TenantGrantScope.Instance, cancellationToken).ConfigureAwait(false)
             : await engine.CheckServiceAccountAsync(request.Principal, resource.Scope, resource, cancellationToken).ConfigureAwait(false);
         if (serviceAccountDenial is { } saReason)
@@ -69,7 +69,7 @@ public sealed class AccessEvaluator : IAccessEvaluator
         var result = AccessEngine.Evaluate(context, permission, resource, includeBreakGlass, tenantAllowsOnly, conditionMode);
         var decision = result.Denial is { } denial
             ? new AccessDenied(permission, denial)
-            : await MaskAsync(context, permission, resource, result, cancellationToken).ConfigureAwait(false);
+            : await MaskAsync(context, permission, resource, result, tenantAllowsOnly, serviceAccount, cancellationToken).ConfigureAwait(false);
         if (sensitive || UsedBreakGlass(decision))
             await RecordDecisionAsync(request, decision, context.Now, cancellationToken).ConfigureAwait(false);
         return decision;
@@ -118,6 +118,12 @@ public sealed class AccessEvaluator : IAccessEvaluator
                     return await RefuseAsync(request, RevealRefusal.NotRevealable, context.Now, cancellationToken).ConfigureAwait(false);
                 var revealIsAdmin = AccessEngine.IsAdministrativePermission(revealPermission);
                 var revealTenantOnly = AccessEngine.RequiresTenantAllowOnly(revealPermission);
+                if (revealTenantOnly && !readTenantOnly)
+                {
+                    var (revealSaDenial, _) = await engine.CheckServiceAccountForGrantScopeAsync(request.Principal, resource.Scope, TenantGrantScope.Instance, cancellationToken).ConfigureAwait(false);
+                    if (revealSaDenial is not null)
+                        return await RefuseAsync(request, RevealRefusal.RevealDenied, context.Now, cancellationToken).ConfigureAwait(false);
+                }
                 var revealContext = revealTenantOnly && !readTenantOnly
                     ? await engine.LoadAsync(request.Principal, resource.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false)
                     : context;
@@ -164,13 +170,51 @@ public sealed class AccessEvaluator : IAccessEvaluator
         return MaskOutcome.Masked;
     }
 
-    private async Task<AccessDecision> MaskAsync(AccessContext context, Permission permission, AccessResource resource, PointResult result, CancellationToken cancellationToken)
+    private async Task<AccessDecision> MaskAsync(
+        AccessContext context,
+        Permission permission,
+        AccessResource resource,
+        PointResult result,
+        bool contextForAdministration,
+        StoredServiceAccount? serviceAccount,
+        CancellationToken cancellationToken)
     {
         var stored = await policies.ListAsync(resource.Scope, cancellationToken).ConfigureAwait(false);
-        return stored.Count == 0 ? new AccessAllowed(permission, result.UsedBreakGlass) : Mask(context, permission, resource, result, stored);
+        if (stored.Count == 0)
+            return new AccessAllowed(permission, result.UsedBreakGlass);
+
+        var canRevealTenantScope = serviceAccount is null || AccessEngine.ScopeContains(serviceAccount.Account.Scope, TenantGrantScope.Instance);
+        var adminContext = contextForAdministration ? context : null;
+        if (adminContext is null && canRevealTenantScope && NeedsTenantRevealContext(stored, permission, result))
+            adminContext = await engine.LoadAsync(context.Principal, resource.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
+
+        return Mask(context, adminContext, canRevealTenantScope, permission, resource, result, stored);
     }
 
-    private AccessDecision Mask(AccessContext context, Permission permission, AccessResource resource, PointResult result, IReadOnlyList<StoredAccessFieldPolicy> stored)
+    private bool NeedsTenantRevealContext(IReadOnlyList<StoredAccessFieldPolicy> stored, Permission permission, PointResult result)
+    {
+        for (var i = 0; i < stored.Count; i++)
+        {
+            var policy = stored[i].Policy;
+            if (!policy.AppliesTo.Contains(permission))
+                continue;
+            if (policy.RevealPermission is { } revealPermission
+                && AccessEngine.RequiresTenantAllowOnly(revealPermission)
+                && engine.Catalog.Contains(revealPermission)
+                && Unmasking(policy, result) == MaskOutcome.Masked)
+                return true;
+        }
+        return false;
+    }
+
+    private AccessDecision Mask(
+        AccessContext context,
+        AccessContext? adminContext,
+        bool canRevealTenantScope,
+        Permission permission,
+        AccessResource resource,
+        PointResult result,
+        IReadOnlyList<StoredAccessFieldPolicy> stored)
     {
         var usedBreakGlass = result.UsedBreakGlass;
         List<MaskedField>? masked = null;
@@ -183,12 +227,19 @@ public sealed class AccessEvaluator : IAccessEvaluator
             var policy = stored[i].Policy;
             if (!policy.AppliesTo.Contains(permission))
                 continue;
-            EvaluatePolicy(context, resource, result, policy, ref usedBreakGlass, ref masked, ref cachedRevealPerm, ref cachedReveal, ref revealCache);
+            EvaluatePolicy(context, adminContext, canRevealTenantScope, resource, result, policy, ref usedBreakGlass, ref masked, ref cachedRevealPerm, ref cachedReveal, ref revealCache);
         }
         return masked is null ? new AccessAllowed(permission, usedBreakGlass) : new AccessMasked(permission, masked, usedBreakGlass);
     }
 
-    private AccessDecision MaskFiltered(AccessContext context, Permission permission, AccessResource resource, PointResult result, AccessFieldPolicy[] applicable)
+    private AccessDecision MaskFiltered(
+        AccessContext context,
+        AccessContext? adminContext,
+        bool canRevealTenantScope,
+        Permission permission,
+        AccessResource resource,
+        PointResult result,
+        AccessFieldPolicy[] applicable)
     {
         var usedBreakGlass = result.UsedBreakGlass;
         List<MaskedField>? masked = null;
@@ -197,12 +248,14 @@ public sealed class AccessEvaluator : IAccessEvaluator
         Dictionary<Permission, SimplePointResult>? revealCache = null;
 
         for (var i = 0; i < applicable.Length; i++)
-            EvaluatePolicy(context, resource, result, applicable[i], ref usedBreakGlass, ref masked, ref cachedRevealPerm, ref cachedReveal, ref revealCache);
+            EvaluatePolicy(context, adminContext, canRevealTenantScope, resource, result, applicable[i], ref usedBreakGlass, ref masked, ref cachedRevealPerm, ref cachedReveal, ref revealCache);
         return masked is null ? new AccessAllowed(permission, usedBreakGlass) : new AccessMasked(permission, masked, usedBreakGlass);
     }
 
     private void EvaluatePolicy(
         AccessContext context,
+        AccessContext? adminContext,
+        bool canRevealTenantScope,
         AccessResource resource,
         PointResult result,
         AccessFieldPolicy policy,
@@ -231,13 +284,16 @@ public sealed class AccessEvaluator : IAccessEvaluator
                     else
                     {
                         var revealIsAdmin = AccessEngine.IsAdministrativePermission(revealPermission);
-                        reveal = AccessEngine.EvaluateSimple(
-                            context,
-                            revealPermission,
-                            resource,
-                            !revealIsAdmin,
-                            AccessEngine.RequiresTenantAllowOnly(revealPermission),
-                            revealIsAdmin ? ConditionEvaluationMode.ConservativeResources : ConditionEvaluationMode.Live);
+                        var revealTenantOnly = AccessEngine.RequiresTenantAllowOnly(revealPermission);
+                        reveal = revealTenantOnly && !canRevealTenantScope
+                            ? SimplePointResult.Deny(AccessDenialReason.ScopeMismatch)
+                            : AccessEngine.EvaluateSimple(
+                                revealTenantOnly ? adminContext! : context,
+                                revealPermission,
+                                resource,
+                                !revealIsAdmin,
+                                revealTenantOnly,
+                                revealIsAdmin ? ConditionEvaluationMode.ConservativeResources : ConditionEvaluationMode.Live);
                         if (cachedRevealPerm is null)
                         {
                             cachedRevealPerm = revealPermission;
@@ -294,6 +350,7 @@ public sealed class AccessEvaluator : IAccessEvaluator
             var stored = await policiesTask.ConfigureAwait(false);
             if (stored.Count > 0)
             {
+                var needsTenantRevealContext = false;
                 foreach (var permission in loaded)
                 {
                     var entry = entries[permission];
@@ -304,11 +361,21 @@ public sealed class AccessEvaluator : IAccessEvaluator
                     {
                         var policy = stored[i].Policy;
                         if (policy.AppliesTo.Contains(permission))
+                        {
                             (matching ??= []).Add(policy);
+                            if (policy.RevealPermission is { } revealPermission
+                                && AccessEngine.RequiresTenantAllowOnly(revealPermission)
+                                && engine.Catalog.Contains(revealPermission))
+                                needsTenantRevealContext = true;
+                        }
                     }
                     if (matching is not null)
                         entries[permission] = entry with { Policies = [.. matching] };
                 }
+                if (needsTenantRevealContext
+                    && !anyTenantAllowsOnly
+                    && (serviceAccount is null || AccessEngine.ScopeContains(serviceAccount.Account.Scope, TenantGrantScope.Instance)))
+                    context = await engine.LoadAsync(principal, scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
             }
         }
         return new BatchContext(this, principal, scope, loaded, entries, context, serviceAccount, serviceAccountDenial);
@@ -349,7 +416,8 @@ public sealed class AccessEvaluator : IAccessEvaluator
             else
             {
                 var result = AccessEngine.Evaluate(context!, permission, resource, includeBreakGlass, tenantAllowsOnly, conditionMode);
-                decision = result.Denial is { } denial ? new AccessDenied(permission, denial) : owner.MaskFiltered(context!, permission, resource, result, entry.Policies);
+                var canRevealTenantScope = serviceAccount is null || AccessEngine.ScopeContains(serviceAccount.Account.Scope, TenantGrantScope.Instance);
+                decision = result.Denial is { } denial ? new AccessDenied(permission, denial) : owner.MaskFiltered(context!, context!, canRevealTenantScope, permission, resource, result, entry.Policies);
             }
             // Same audit semantics as AuthorizeAsync: sensitive permissions and every decision relying on break-glass are recorded
             // per resource; standard-grant decisions of non-sensitive permissions stay on the synchronous fast path.

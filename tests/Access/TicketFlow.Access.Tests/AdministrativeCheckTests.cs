@@ -98,6 +98,12 @@ public sealed class AdministrativeCheckTests
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Admin.CheckCanRevokeAsync(admin, [ownerDeny])));
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Admin.CheckCanRevokeAsync(admin, [missingRoleDeny])));
         Assert.AreEqual("passed", Describe(await fixture.Admin.CheckCanRevokeAsync(admin, [expiredOwnerDeny])));
-        Assert.AreEqual("passed", Describe(await fixture.Admin.CheckCanRevokeAsync(owner, [ownerDeny])));
+        // Workspace-scoped Owner does not hold access:manage-tenant (RequiresTenantAllowOnly), so it cannot lift Deny(Owner) or missing-role denies.
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Admin.CheckCanRevokeAsync(owner, [ownerDeny])));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Admin.CheckCanRevokeAsync(owner, [missingRoleDeny])));
+        var tenantOwner = fixture.User("tenant-owner");
+        await fixture.GrantAsync(tenantOwner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        Assert.AreEqual("passed", Describe(await fixture.Admin.CheckCanRevokeAsync(tenantOwner, [ownerDeny])));
+        Assert.AreEqual("passed", Describe(await fixture.Admin.CheckCanRevokeAsync(tenantOwner, [missingRoleDeny])));
     }
 }

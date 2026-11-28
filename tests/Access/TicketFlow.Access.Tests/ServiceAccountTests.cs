@@ -860,6 +860,77 @@ public sealed partial class ServiceAccountTests
         Assert.AreEqual(TicketFailureKind.Forbidden, blockedFailure.Kind);
     }
 
+    [TestMethod]
+    public async Task BaseAdminEnforcesServiceAccountScopeContainment()
+    {
+        using var fixture = AccessFixture.Create();
+        using var scope = fixture.Provider.CreateScope();
+        var service = scope.ServiceProvider.GetRequiredService<IServiceAccountService>();
+
+        var owner = fixture.User("owner");
+        await fixture.GrantAsync(owner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+
+        var targetSa = new ApiClientId("sa-target-ws");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(targetSa, fixture.Partition, fixture.Workspace, "Target WS SA"))).IsSuccess);
+        Assert.IsTrue((await service.IssueApiKeyAsync(owner, new ApiKeyCreateRequest(targetSa, "target-key"))).IsSuccess);
+
+        var tenantTargetSa = new ApiClientId("sa-target-tenant");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(tenantTargetSa, fixture.Partition, TenantGrantScope.Instance, "Target Tenant SA"))).IsSuccess);
+
+        // 1. Team-scoped and inbox-scoped service accounts holding workspace-level Admin/Owner grants MUST NOT pass workspace-wide base admin checks.
+        var teamSaId = new ApiClientId("sa-team-scoped");
+        var inboxSaId = new ApiClientId("sa-inbox-scoped");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(teamSaId, fixture.Partition, new TeamGrantScope(fixture.Scope.WorkspaceId, new TeamId("t1")), "Team SA"))).IsSuccess);
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(inboxSaId, fixture.Partition, new InboxGrantScope(fixture.Scope.WorkspaceId, new InboxId("i1")), "Inbox SA"))).IsSuccess);
+        await fixture.GrantAsync(teamSaId, BuiltInRoles.Admin, fixture.Workspace);
+        await fixture.GrantAsync(inboxSaId, BuiltInRoles.Admin, fixture.Workspace);
+
+        foreach (var clientId in new[] { teamSaId, inboxSaId })
+        {
+            var actor = fixture.Client(clientId.Value);
+
+            var list = await service.ListServiceAccountsAsync(actor);
+            Assert.IsTrue(list.TryGetValue(out TicketFailure listFailure), clientId.Value);
+            Assert.AreEqual(TicketFailureKind.Forbidden, listFailure.Kind, clientId.Value);
+
+            var get = await service.GetServiceAccountAsync(actor, targetSa);
+            Assert.IsTrue(get.TryGetValue(out TicketFailure getFailure), clientId.Value);
+            Assert.AreEqual(TicketFailureKind.Forbidden, getFailure.Kind, clientId.Value);
+
+            var keys = await service.ListApiKeysAsync(actor, targetSa);
+            Assert.IsTrue(keys.TryGetValue(out TicketFailure keysFailure), clientId.Value);
+            Assert.AreEqual(TicketFailureKind.Forbidden, keysFailure.Kind, clientId.Value);
+        }
+
+        // 2. Workspace-scoped service account CANNOT use AccessManageTenant fallback (nor manage tenant-scoped service accounts).
+        var wsSaId = new ApiClientId("sa-ws-tenant-fallback");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(wsSaId, fixture.Partition, fixture.Workspace, "WS SA"))).IsSuccess);
+        await fixture.GrantAsync(wsSaId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        var denyManageRole = await fixture.CustomRoleAsync("sa-deny-manage", AccessPermissions.AccessManage);
+        await fixture.GrantAsync(wsSaId, denyManageRole, fixture.Workspace, GrantEffect.Deny);
+
+        var wsSaActor = fixture.Client(wsSaId.Value);
+        Assert.IsTrue((await service.ListServiceAccountsAsync(wsSaActor)).TryGetValue(out TicketFailure wsListFail));
+        Assert.AreEqual(TicketFailureKind.Forbidden, wsListFail.Kind);
+        Assert.IsTrue((await service.GetServiceAccountAsync(wsSaActor, targetSa)).TryGetValue(out TicketFailure wsGetFail));
+        Assert.AreEqual(TicketFailureKind.Forbidden, wsGetFail.Kind);
+        Assert.IsTrue((await service.ListApiKeysAsync(wsSaActor, targetSa)).TryGetValue(out TicketFailure wsKeysFail));
+        Assert.AreEqual(TicketFailureKind.Forbidden, wsKeysFail.Kind);
+        Assert.IsTrue((await service.CreateServiceAccountAsync(wsSaActor, new ServiceAccount(new ApiClientId("sa-ws-esc"), fixture.Partition, TenantGrantScope.Instance, "Esc"))).TryGetValue(out TicketFailure wsCreateTenantFail));
+        Assert.AreEqual(TicketFailureKind.Forbidden, wsCreateTenantFail.Kind);
+
+        // 3. Workspace-scoped SA with AccessManage CAN read workspace SAs/keys (but still cannot create tenant-scoped SAs); tenant-scoped SA with Owner CAN do both.
+        var wsAdminSaId = new ApiClientId("sa-ws-admin");
+        Assert.IsTrue((await service.CreateServiceAccountAsync(owner, new ServiceAccount(wsAdminSaId, fixture.Partition, fixture.Workspace, "WS Admin SA"))).IsSuccess);
+        await fixture.GrantAsync(wsAdminSaId, BuiltInRoles.Admin, fixture.Workspace);
+        var wsAdminActor = fixture.Client(wsAdminSaId.Value);
+        Assert.IsTrue((await service.ListServiceAccountsAsync(wsAdminActor)).IsSuccess);
+        Assert.IsTrue((await service.GetServiceAccountAsync(wsAdminActor, targetSa)).IsSuccess);
+        Assert.IsTrue((await service.ListApiKeysAsync(wsAdminActor, targetSa)).IsSuccess);
+        Assert.IsTrue((await service.UpdateServiceAccountAsync(wsAdminActor, tenantTargetSa, "Tamper")).TryGetValue(out TicketFailure wsTamperTenant));
+        Assert.AreEqual(TicketFailureKind.NotFound, wsTamperTenant.Kind);
+    }
+
     private sealed class RacingApiKeyStore(IApiKeyStore inner, Func<Task> onAfterCreate) : IApiKeyStore
     {
         public ValueTask<StoredApiKey?> FindByIdAsync(AccessPartition partition, ApiKeyId keyId, CancellationToken cancellationToken = default) =>

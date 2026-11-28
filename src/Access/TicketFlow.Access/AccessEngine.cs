@@ -366,6 +366,7 @@ internal sealed class AccessEngine(
     {
         if (resource.Scope != context.Scope)
             return PointResult.Deny(AccessDenialReason.ScopeMismatch);
+        var effectiveTenantOnly = tenantAllowsOnly || RequiresTenantAllowOnly(permission);
         List<ResolvedGrant>? standard = null;
         List<ResolvedGrant>? breakGlass = null;
         var grants = context.Grants;
@@ -378,13 +379,13 @@ internal sealed class AccessEngine(
             switch (grant.Effect)
             {
                 case GrantEffect.Deny:
-                    if (!ScopeMatchesDeny(grant.Scope, resource, tenantAllowsOnly, conditionMode))
+                    if (!ScopeMatchesDeny(grant.Scope, resource, effectiveTenantOnly, conditionMode))
                         break;
                     if ((candidate.Role is null || candidate.Includes(permission)) && Evaluate(grant.Condition, context, resource, conditionMode) != false)
                         return PointResult.Deny(AccessDenialReason.ExplicitDeny);
                     break;
                 case GrantEffect.Allow:
-                    if (tenantAllowsOnly && grant.Scope is not TenantGrantScope)
+                    if (effectiveTenantOnly && grant.Scope is not TenantGrantScope)
                         break;
                     if (!ScopeMatches(grant.Scope, resource))
                         break;
@@ -414,6 +415,7 @@ internal sealed class AccessEngine(
     {
         if (resource.Scope != context.Scope)
             return SimplePointResult.Deny(AccessDenialReason.ScopeMismatch);
+        var effectiveTenantOnly = tenantAllowsOnly || RequiresTenantAllowOnly(permission);
         var hasStandard = false;
         var hasBreakGlass = false;
         var grants = context.Grants;
@@ -426,13 +428,13 @@ internal sealed class AccessEngine(
             switch (grant.Effect)
             {
                 case GrantEffect.Deny:
-                    if (!ScopeMatchesDeny(grant.Scope, resource, tenantAllowsOnly, conditionMode))
+                    if (!ScopeMatchesDeny(grant.Scope, resource, effectiveTenantOnly, conditionMode))
                         break;
                     if ((candidate.Role is null || candidate.Includes(permission)) && Evaluate(grant.Condition, context, resource, conditionMode) != false)
                         return SimplePointResult.Deny(AccessDenialReason.ExplicitDeny);
                     break;
                 case GrantEffect.Allow:
-                    if (tenantAllowsOnly && grant.Scope is not TenantGrantScope)
+                    if (effectiveTenantOnly && grant.Scope is not TenantGrantScope)
                         break;
                     if (!ScopeMatches(grant.Scope, resource))
                         break;

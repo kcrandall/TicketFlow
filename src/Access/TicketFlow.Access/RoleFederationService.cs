@@ -331,12 +331,12 @@ public sealed class RoleFederationService : IRoleFederationService
         if (engine.Precheck(actor, AccessPermissions.AccessManage, actor.Scope) is { } precheck)
             return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is not authorized."], Code: precheck.ToString()), null);
 
-        var (saDenial, _) = await engine.CheckServiceAccountAsync(actor, actor.Scope, resource: null, cancellationToken).ConfigureAwait(false);
+        var workspaceTarget = new AccessResource(actor.Scope);
+        var (saDenial, sa) = await engine.CheckServiceAccountAsync(actor, actor.Scope, workspaceTarget, cancellationToken).ConfigureAwait(false);
         if (saDenial is { } saReason)
             return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is not authorized."], Code: saReason.ToString()), null);
 
         var context = await engine.LoadAsync(actor, actor.Scope, cancellationToken, forAdministration: true).ConfigureAwait(false);
-        var workspaceTarget = new AccessResource(actor.Scope);
 
         var manage = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, workspaceTarget, includeBreakGlass: false, conditionMode: ConditionEvaluationMode.ConservativeResources);
         if (manage.Allowed)
@@ -344,14 +344,19 @@ public sealed class RoleFederationService : IRoleFederationService
         if (manage.Denial == AccessDenialReason.ExplicitDeny)
             return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is explicitly denied administrative permission."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
 
-        var manageTenant = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: false, tenantAllowsOnly: true, ConditionEvaluationMode.ConservativeResources);
-        if (manageTenant.Allowed)
-            return (null, context);
-        if (manageTenant.Denial == AccessDenialReason.ExplicitDeny)
-            return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is explicitly denied administrative permission."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
+        var canManageTenantScope = sa is null || AccessEngine.ScopeContains(sa.Account.Scope, TenantGrantScope.Instance);
+        if (canManageTenantScope)
+        {
+            var manageTenant = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: false, tenantAllowsOnly: true, ConditionEvaluationMode.ConservativeResources);
+            if (manageTenant.Allowed)
+                return (null, context);
+            if (manageTenant.Denial == AccessDenialReason.ExplicitDeny)
+                return (new TicketFailure(TicketFailureKind.Forbidden, ["The actor is explicitly denied administrative permission."], Code: nameof(AccessDenialReason.ExplicitDeny)), context);
+        }
 
         var viaBreakGlass = AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManage, workspaceTarget, includeBreakGlass: true, conditionMode: ConditionEvaluationMode.ConservativeResources).Allowed
-            || AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: true, tenantAllowsOnly: true, ConditionEvaluationMode.ConservativeResources).Allowed;
+            || (canManageTenantScope
+                && AccessEngine.EvaluateSimple(context, AccessPermissions.AccessManageTenant, workspaceTarget, includeBreakGlass: true, tenantAllowsOnly: true, ConditionEvaluationMode.ConservativeResources).Allowed);
         if (viaBreakGlass)
             return (new TicketFailure(TicketFailureKind.Forbidden, ["Break-glass elevation cannot be used for role federation administration."], Code: "break-glass-not-allowed"), context);
 

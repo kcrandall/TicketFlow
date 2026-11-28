@@ -201,10 +201,17 @@ public sealed class ReviewRegressionTests
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.DeleteAsync(admin, restricted, 1)));
         Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.RemoveMemberAsync(admin, conditioned, new UserId("carl"), 1)));
 
-        // Workspace Owner holds all denied permissions and succeeds.
-        Assert.AreEqual(2L, Value(await fixture.Teams.RemoveMemberAsync(owner, restricted, new UserId("bob"), 1)).Revision);
-        Assert.AreEqual("ok", Describe(await fixture.Teams.DeleteAsync(owner, restricted, 2)));
-        Assert.AreEqual(2L, Value(await fixture.Teams.RemoveMemberAsync(owner, conditioned, new UserId("carl"), 1)).Revision);
+        // Workspace-only Owner does not hold access:manage-tenant (RequiresTenantAllowOnly) and cannot lift Deny(Owner).
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.RemoveMemberAsync(owner, restricted, new UserId("bob"), 1)));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.DeleteAsync(owner, restricted, 1)));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.RemoveMemberAsync(owner, conditioned, new UserId("carl"), 1)));
+
+        // Tenant Owner holds all denied permissions (including access:manage-tenant) and succeeds.
+        var tenantOwner = fixture.User("tenant-owner");
+        await fixture.GrantAsync(tenantOwner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        Assert.AreEqual(2L, Value(await fixture.Teams.RemoveMemberAsync(tenantOwner, restricted, new UserId("bob"), 1)).Revision);
+        Assert.AreEqual("ok", Describe(await fixture.Teams.DeleteAsync(tenantOwner, restricted, 2)));
+        Assert.AreEqual(2L, Value(await fixture.Teams.RemoveMemberAsync(tenantOwner, conditioned, new UserId("carl"), 1)).Revision);
     }
 
     [TestMethod]
@@ -248,5 +255,61 @@ public sealed class ReviewRegressionTests
         // Unrestricted owner can remove admin from all of these teams.
         foreach (var teamId in new[] { teamAssignee, teamPrincipal, teamWindow, teamUserDeny })
             Assert.AreEqual(2L, Value(await fixture.Teams.RemoveMemberAsync(owner, teamId, admin.UserId, 1)).Revision, teamId.Value);
+    }
+
+    [TestMethod]
+    public async Task AddingMembersToTeamMappedToFederatedRoleEnforcesConferral()
+    {
+        using var fixture = Create(options =>
+        {
+            options.RoleFederation.Mode = RoleFederationMode.MergeWithLocalGrants;
+            options.RoleFederation.MapTeamsAsExternalRoles = true;
+            options.RoleFederation.AllowAdministrativeRoles = true;
+            options.RoleFederation.StaticMappings["elevated-admins"] = BuiltInRoles.Admin.Id;
+        });
+
+        var mappingStore = fixture.Provider.GetRequiredService<IRoleFederationMappingStore>();
+        Assert.IsTrue((await mappingStore.UpsertAsync(
+            new RoleFederationMappingId("team-tenant-owners"),
+            new RoleFederationMapping("local", "tenant-owners", BuiltInRoles.Owner.Id, fixture.Partition, TenantGrantScope.Instance),
+            isEnabled: true,
+            actorPrincipalId: "seed",
+            expectedVersion: 0)).IsSuccess);
+
+        var tenantOwner = fixture.User("tenant-owner");
+        var wsOwner = fixture.User("ws-owner");
+        var admin = fixture.User("admin");
+        var teamManager = fixture.User("team-manager");
+        await fixture.GrantAsync(tenantOwner.UserId, BuiltInRoles.Owner, TenantGrantScope.Instance);
+        await fixture.GrantAsync(wsOwner.UserId, BuiltInRoles.Owner);
+        await fixture.GrantAsync(admin.UserId, BuiltInRoles.Admin);
+        var teamMgrRole = await fixture.CustomRoleAsync("team-mgr-only", AccessPermissions.TeamManage, AccessPermissions.TeamRead);
+        await fixture.GrantAsync(teamManager.UserId, teamMgrRole);
+
+        var elevatedAdmins = new TeamId("elevated-admins");
+        var tenantOwners = new TeamId("tenant-owners");
+
+        // Low-privilege team manager CANNOT create the mapped team with initial members (self or another user).
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.CreateAsync(teamManager, new Team(elevatedAdmins, "Elevated Admins", null, [teamManager.UserId]))));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.CreateAsync(teamManager, new Team(elevatedAdmins, "Elevated Admins", null, [new UserId("bob")]))));
+
+        // Creating the teams without members succeeds, then adding members enforces team-federated role conferral.
+        Value(await fixture.Teams.CreateAsync(admin, new Team(elevatedAdmins, "Elevated Admins")));
+        Value(await fixture.Teams.CreateAsync(tenantOwner, new Team(tenantOwners, "Tenant Owners")));
+
+        // Low-privilege team manager CANNOT add themselves or another user via AddMemberAsync or UpdateAsync.
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.AddMemberAsync(teamManager, elevatedAdmins, teamManager.UserId, 1)));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.AddMemberAsync(teamManager, elevatedAdmins, new UserId("bob"), 1)));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.UpdateAsync(teamManager, new Team(elevatedAdmins, "Elevated Admins", null, [teamManager.UserId]), 1)));
+
+        // Admin holds all permissions of Admin and CAN add members to the statically mapped Admin team.
+        Assert.AreEqual(2L, Value(await fixture.Teams.AddMemberAsync(admin, elevatedAdmins, new UserId("bob"), 1)).Revision);
+
+        // Team mapped to TenantGrantScope Owner: teamManager, admin, AND workspace-only Owner are all refused; only Tenant Owner succeeds.
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.AddMemberAsync(teamManager, tenantOwners, teamManager.UserId, 1)));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.AddMemberAsync(admin, tenantOwners, new UserId("bob"), 1)));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.AddMemberAsync(wsOwner, tenantOwners, wsOwner.UserId, 1)));
+        Assert.AreEqual("refused:Forbidden", Describe(await fixture.Teams.UpdateAsync(wsOwner, new Team(tenantOwners, "Tenant Owners", null, [new UserId("bob")]), 1)));
+        Assert.AreEqual(2L, Value(await fixture.Teams.AddMemberAsync(tenantOwner, tenantOwners, new UserId("bob"), 1)).Revision);
     }
 }
